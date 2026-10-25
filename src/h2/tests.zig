@@ -4,6 +4,7 @@
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
+const c = @import("h2_c");
 
 const ns_per_ms = std.time.ns_per_ms;
 
@@ -663,6 +664,37 @@ test "https by name: the lookup runs, every address is tried, and the name is ve
     try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
     try harness.runUntilFinished(1);
     try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+}
+
+test "https: a partial TLS record waits for the socket instead of spinning" {
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .on_request = hold } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilPeerStreams(1);
+    try harness.runFor(20 * ns_per_ms);
+
+    // The peer's next record goes to memory, and only its first bytes reach
+    // the socket: the client reads them and needs the rest.
+    const connection = harness.peer.connections.items[0];
+    const ssl = connection.ssl.?;
+    const memory = c.BIO_new(c.BIO_s_mem()) orelse return error.OutOfMemory;
+    c.SSL_set0_wbio(ssl, memory);
+    var written: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 1), c.SSL_write_ex(ssl, "a whole record of plaintext", 27, &written));
+    var record: [128]u8 = undefined;
+    const record_len = c.BIO_read(memory, &record, record.len);
+    try std.testing.expect(record_len > 10);
+    try std.testing.expectEqual(@as(isize, 10), std.c.send(connection.socket, &record, 10, 0));
+    try harness.client.wait(100);
+    try harness.client.drive(&harness.receiver);
+
+    const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try harness.client.wait(200);
+    const waited = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
+    try std.testing.expect(waited >= 150 * ns_per_ms);
+    harness.client.cancel(&stream);
 }
 
 fn expectSetupFailure(config: Harness.Config, cause: h2.Cause) !void {

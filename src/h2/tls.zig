@@ -1,5 +1,5 @@
-//! TLS for h2 connections. Internal. One `SSL_CTX` per Client, built at
-//! init; each connection's `SSL` comes from it.
+//! TLS for h2 connections. Internal. One `SSL_CTX` per Client, built by its
+//! first `https://` endpoint; each connection's `SSL` comes from it.
 //!
 //! Verification is never off: there is no option or code path that sets
 //! SSL_VERIFY_NONE. The handshake verifies the chain against the trust
@@ -13,8 +13,10 @@ const builtin = @import("builtin");
 const c = @import("h2_c");
 const h2 = @import("h2.zig");
 
-/// Host CA bundles, probed in this order at Client init, at run time so a
-/// cross-built or relocated binary still finds the host's bundle.
+/// Host CA bundles, probed in this order when the context is built, at run
+/// time so a cross-built or relocated binary still finds the host's bundle.
+/// macOS reads /etc/ssl/cert.pem only until SecTrust lands, which Rui's
+/// platform contract requires before the client serves any provider.
 pub const system_bundles = [_][:0]const u8{
     "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Arch, Alpine
     "/etc/pki/tls/certs/ca-bundle.crt", // Fedora, RHEL
@@ -24,6 +26,11 @@ pub const system_bundles = [_][:0]const u8{
 };
 
 const alpn_h2 = "\x02h2";
+
+pub const HostKind = enum { dns_name, ip_literal };
+
+/// For a socket send that must not raise SIGPIPE.
+pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
 pub const Context = struct {
     ctx: *c.SSL_CTX,
@@ -57,7 +64,7 @@ pub const Context = struct {
 
     /// A client session on `fd`, verifying `host`: SNI and the name check
     /// for a DNS name, the IP check (and no SNI) for an IP literal.
-    pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, is_literal: bool) ?*c.SSL {
+    pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, kind: HostKind) ?*c.SSL {
         var host_z: [h2.max_host_bytes + 1]u8 = undefined;
         @memcpy(host_z[0..host.len], host);
         host_z[host.len] = 0;
@@ -66,7 +73,7 @@ pub const Context = struct {
             c.SSL_free(ssl);
             return null;
         }
-        const named = if (is_literal)
+        const named = if (kind == .ip_literal)
             c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1
         else
             c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and c.SSL_set1_host(ssl, &host_z) == 1;
@@ -126,29 +133,30 @@ pub fn handshake(ssl: *c.SSL) Progress {
     };
 }
 
-pub const Io = union(enum) {
+pub const Transfer = union(enum) {
     bytes: usize,
     want_read,
     want_write,
     closed,
 };
 
-pub fn read(ssl: *c.SSL, buffer: []u8) Io {
+pub fn read(ssl: *c.SSL, buffer: []u8) Transfer {
     c.ERR_clear_error();
     var count: usize = 0;
     if (c.SSL_read_ex(ssl, buffer.ptr, buffer.len, &count) == 1) return .{ .bytes = count };
-    return status(ssl, 0);
+    return status(ssl);
 }
 
-pub fn write(ssl: *c.SSL, bytes: []const u8) Io {
+pub fn write(ssl: *c.SSL, bytes: []const u8) Transfer {
     c.ERR_clear_error();
     var count: usize = 0;
     if (c.SSL_write_ex(ssl, bytes.ptr, bytes.len, &count) == 1) return .{ .bytes = count };
-    return status(ssl, 0);
+    return status(ssl);
 }
 
-fn status(ssl: *c.SSL, result: c_int) Io {
-    return switch (c.SSL_get_error(ssl, result)) {
+/// After a failed SSL_read_ex or SSL_write_ex, which return 0.
+fn status(ssl: *c.SSL) Transfer {
+    return switch (c.SSL_get_error(ssl, 0)) {
         c.SSL_ERROR_WANT_READ => .want_read,
         c.SSL_ERROR_WANT_WRITE => .want_write,
         else => .closed,
@@ -183,8 +191,6 @@ pub fn attachSocket(ssl: *c.SSL, method: *c.BIO_METHOD, fd: std.posix.fd_t) bool
 fn socketOf(bio: ?*c.BIO) std.posix.fd_t {
     return @intCast(@intFromPtr(c.BIO_get_data(bio)) - 1);
 }
-
-const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
 fn bioWrite(bio: ?*c.BIO, data: [*c]const u8, length: c_int) callconv(.c) c_int {
     c.BIO_clear_flags(bio, c.BIO_FLAGS_RWS | c.BIO_FLAGS_SHOULD_RETRY);

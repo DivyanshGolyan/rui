@@ -5,8 +5,13 @@
 //! The thread exists only while getaddrinfo runs, so an idle Client holds
 //! no thread. The job is shared by two references, the owner's and the
 //! thread's; whichever lets go last frees it. A finished lookup wakes the
-//! owner's `wait`, unless the owner abandoned it first (the connection
-//! timed out or closed), in which case the thread only frees the job.
+//! owner's `wait`, unless the owner abandoned it first (the Client closed),
+//! in which case the thread only frees the job.
+//!
+//! Bound: each origin keeps at most one lookup, shared by its setups and
+//! kept across a setup that timed out, so at most `max_endpoints` threads
+//! run per Client even while the resolver stalls. A thread may outlive
+//! `Client.deinit` until getaddrinfo returns, which nothing can interrupt.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Waker = @import("Waker.zig");

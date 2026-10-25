@@ -43,8 +43,8 @@ revents: i16,
 socket: std.posix.fd_t,
 /// For an https origin, from the TCP connect on.
 ssl: ?*c.SSL,
-/// The lookup of a DNS name, held until a connect succeeds.
-lookup: ?*Resolver,
+/// Counted among its origin's lookup users until a connect succeeds.
+uses_lookup: bool,
 /// The next address to try.
 address_index: u8,
 /// The handshake, or a read, waits for the socket to take bytes.
@@ -95,7 +95,7 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .revents = 0,
         .socket = -1,
         .ssl = null,
-        .lookup = null,
+        .uses_lookup = false,
         .address_index = 0,
         .tls_wants_write = false,
         .session = null,
@@ -124,10 +124,11 @@ pub fn settingUp(self: *const Connection) bool {
     };
 }
 
-/// OpenSSL holds bytes already read from the socket, which poll cannot see.
+/// OpenSSL holds decrypted bytes not yet read, which poll cannot see. A
+/// partial record does not count: it waits for the socket like any read.
 pub fn tlsPending(self: *const Connection) bool {
     const ssl = self.ssl orelse return false;
-    return self.session != null and c.SSL_has_pending(ssl) != 0;
+    return self.session != null and c.SSL_pending(ssl) > 0;
 }
 
 pub fn hasRoom(self: *const Connection) bool {
@@ -165,29 +166,47 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
     self.origin = origin_index;
     self.serial = serial;
     self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    if (Resolver.Address.literal(origin.host, origin.port) == null) {
-        self.state = .resolving;
-        self.lookup = Resolver.start(&engine.waker, origin.host, origin.port) orelse
-            return engine.setupFailed(self, .local_failure);
-        return;
-    }
-    self.connectNext();
+    if (origin.literal != null) return self.connectNext();
+    self.state = .resolving;
+    // Setups of one origin share its lookup; a finished one nobody uses is
+    // stale, so a new setup looks the name up again.
+    if (origin.lookup) |lookup| if (origin.lookup_users == 0 and lookup.result() != null) {
+        lookup.release();
+        origin.lookup = null;
+    };
+    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, origin.host, origin.port) orelse
+        return engine.setupFailed(self, .local_failure);
+    origin.lookup_users += 1;
+    self.uses_lookup = true;
 }
 
 /// resolving -> connecting, once the lookup finished.
 pub fn finishLookup(self: *Connection) void {
-    const addresses = self.lookup.?.result() orelse return;
+    const addresses = self.engine.origins[self.origin].lookup.?.result() orelse return;
     if (addresses.len == 0) return self.engine.setupFailed(self, .resolve_failed);
     self.connectNext();
 }
 
 fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
-    if (self.lookup) |lookup| {
-        const addresses = lookup.result().?;
-        return if (index < addresses.len) addresses[index] else null;
-    }
     const origin = &self.engine.origins[self.origin];
-    return if (index == 0) Resolver.Address.literal(origin.host, origin.port).? else null;
+    if (origin.literal) |literal| return if (index == 0) literal else null;
+    const addresses = origin.lookup.?.result().?;
+    return if (index < addresses.len) addresses[index] else null;
+}
+
+/// The last user of a finished lookup frees it. A running one stays with
+/// the origin for the next setup, so a stalled resolver never piles up
+/// threads: at most one lookup runs per origin.
+fn stopUsingLookup(self: *Connection) void {
+    if (!self.uses_lookup) return;
+    self.uses_lookup = false;
+    const origin = &self.engine.origins[self.origin];
+    origin.lookup_users -= 1;
+    const lookup = origin.lookup.?;
+    if (origin.lookup_users == 0 and lookup.result() != null) {
+        lookup.release();
+        origin.lookup = null;
+    }
 }
 
 /// Connects to the next address, after any earlier one failed. One attempt
@@ -242,12 +261,11 @@ pub fn finishConnect(self: *Connection) void {
 
 /// The addresses are done with; https goes on to its handshake.
 fn connected(self: *Connection) void {
-    if (self.lookup) |lookup| lookup.release();
-    self.lookup = null;
+    self.stopUsingLookup();
     const origin = &self.engine.origins[self.origin];
     if (origin.scheme == .http) return self.startSession();
     const context = &self.engine.tls_context.?;
-    self.ssl = context.newSession(self.socket, origin.host, Resolver.Address.literal(origin.host, origin.port) != null) orelse
+    self.ssl = context.newSession(self.socket, origin.host, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .handshaking;
     self.continueHandshake();
@@ -448,8 +466,6 @@ pub fn send(self: *Connection) void {
 
 const Transfer = union(enum) { bytes: usize, again, closed };
 
-const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
-
 /// One socket read, through TLS for https. Never zero bytes.
 fn readSome(self: *Connection, buffer: []u8) Transfer {
     if (self.ssl) |ssl| return switch (tls.read(ssl, buffer)) {
@@ -482,7 +498,7 @@ fn writeSome(self: *Connection, bytes: []const u8) Transfer {
         .closed => .closed,
     };
     while (true) {
-        const sent = std.c.send(self.socket, bytes.ptr, bytes.len, send_flags);
+        const sent = std.c.send(self.socket, bytes.ptr, bytes.len, tls.send_flags);
         if (sent >= 0) return .{ .bytes = @intCast(sent) };
         switch (std.posix.errno(sent)) {
             .AGAIN => return .again,
@@ -495,8 +511,8 @@ fn writeSome(self: *Connection, bytes: []const u8) Transfer {
 fn fail(self: *Connection, cause: policy.Cause) void {
     switch (self.state) {
         .free => {},
-        .resolving, .connecting, .handshaking, .awaiting_settings => self.engine.setupFailed(self, if (cause == .connection_lost) .connect_failed else cause),
         .ready, .draining => self.lose(cause),
+        else => self.engine.setupFailed(self, if (cause == .connection_lost) .connect_failed else cause),
     }
 }
 
@@ -525,19 +541,26 @@ pub fn lose(self: *Connection, cause: policy.Cause) void {
 pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     if (self.session) |session| {
         if (mode == .goaway and (self.state == .ready or self.state == .draining)) {
-            if (c.nghttp2_session_terminate_session(session, c.NGHTTP2_NO_ERROR) == 0) {
+            // GOAWAY may only follow whole frames, and a blocked TLS write
+            // must be retried with the same bytes, so a connection with
+            // bytes still unsent just closes.
+            if (self.unsent.len == 0 and c.nghttp2_session_terminate_session(session, c.NGHTTP2_NO_ERROR) == 0) {
                 var data: [*c]const u8 = undefined;
-                if (self.unsent.len > 0) _ = self.writeSome(self.unsent);
                 const packed_len = c.nghttp2_session_mem_send2(session, &data);
-                if (packed_len > 0) _ = self.writeSome(data[0..@intCast(packed_len)]);
+                const goaway_sent = packed_len > 0 and switch (self.writeSome(data[0..@intCast(packed_len)])) {
+                    .bytes => |count| count == packed_len,
+                    .again, .closed => false,
+                };
                 // close_notify, best effort and without waiting for the peer's.
-                if (self.ssl) |ssl| _ = c.SSL_shutdown(ssl);
+                if (goaway_sent) if (self.ssl) |ssl| {
+                    _ = c.SSL_shutdown(ssl);
+                };
             }
         }
         c.nghttp2_session_del(session);
     }
     if (self.ssl) |ssl| c.SSL_free(ssl);
-    if (self.lookup) |lookup| lookup.release();
+    self.stopUsingLookup();
     if (self.socket >= 0) _ = std.c.close(self.socket);
     self.releaseHead();
     self.head.fields.deinit(self.engine.allocator);

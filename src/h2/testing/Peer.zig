@@ -145,20 +145,12 @@ pub fn caPath(self: *const Peer) []const u8 {
 fn setUpTls(self: *Peer) !void {
     const ca_key = try generateKey();
     defer c.EVP_PKEY_free(ca_key);
-    const ca = try certificate(ca_key, null, ca_key, "h2 test CA", &.{
-        .{ c.NID_basic_constraints, "critical,CA:TRUE" },
-        .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
-        .{ c.NID_subject_key_identifier, "hash" },
-    });
+    const ca = try certificate(ca_key, null, ca_key, "h2 test CA", &ca_extensions);
     defer c.X509_free(ca);
     // An untrusted leaf has an issuer of the same name but another key.
     const issuer_key = if (self.options.untrusted_issuer) try generateKey() else ca_key;
     defer if (issuer_key != ca_key) c.EVP_PKEY_free(issuer_key);
-    const issuer = if (self.options.untrusted_issuer) try certificate(issuer_key, null, issuer_key, "h2 test CA", &.{
-        .{ c.NID_basic_constraints, "critical,CA:TRUE" },
-        .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
-        .{ c.NID_subject_key_identifier, "hash" },
-    }) else ca;
+    const issuer = if (self.options.untrusted_issuer) try certificate(issuer_key, null, issuer_key, "h2 test CA", &ca_extensions) else ca;
     defer if (issuer != ca) c.X509_free(issuer);
     const leaf_key = try generateKey();
     defer c.EVP_PKEY_free(leaf_key);
@@ -174,7 +166,7 @@ fn setUpTls(self: *Peer) !void {
     var tmp = std.testing.tmpDir(.{});
     errdefer tmp.cleanup();
     self.ca_path_len = (try std.fmt.bufPrint(&self.ca_path_buffer, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path})).len;
-    var path_z: [97]u8 = undefined;
+    var path_z: [@sizeOf(@TypeOf(self.ca_path_buffer)) + 1]u8 = undefined;
     @memcpy(path_z[0..self.ca_path_len], self.caPath());
     path_z[self.ca_path_len] = 0;
     const file = c.BIO_new_file(&path_z, "w") orelse return error.TlsSetupFailed;
@@ -189,6 +181,14 @@ fn setUpTls(self: *Peer) !void {
     self.bio_method = tls.newBioMethod() orelse return error.TlsSetupFailed;
 }
 
+const Extension = struct { c_int, [:0]const u8 };
+
+const ca_extensions = [_]Extension{
+    .{ c.NID_basic_constraints, "critical,CA:TRUE" },
+    .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
+    .{ c.NID_subject_key_identifier, "hash" },
+};
+
 fn generateKey() !*c.EVP_PKEY {
     const context = c.EVP_PKEY_CTX_new_from_name(null, "EC", null) orelse return error.TlsSetupFailed;
     defer c.EVP_PKEY_CTX_free(context);
@@ -201,7 +201,7 @@ fn generateKey() !*c.EVP_PKEY {
 var next_serial: i64 = 1;
 
 /// Self-signed when `issuer` is null.
-fn certificate(key: *c.EVP_PKEY, issuer: ?*c.X509, issuer_key: *c.EVP_PKEY, common_name: [:0]const u8, extensions: []const struct { c_int, [:0]const u8 }) !*c.X509 {
+fn certificate(key: *c.EVP_PKEY, issuer: ?*c.X509, issuer_key: *c.EVP_PKEY, common_name: [:0]const u8, extensions: []const Extension) !*c.X509 {
     const x509 = c.X509_new() orelse return error.TlsSetupFailed;
     errdefer c.X509_free(x509);
     next_serial += 1;
@@ -340,7 +340,7 @@ fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
         .want_read, .want_write => .again,
         .closed => .closed,
     };
-    const sent = std.c.send(connection.socket, bytes.ptr, bytes.len, if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0);
+    const sent = std.c.send(connection.socket, bytes.ptr, bytes.len, tls.send_flags);
     if (sent >= 0) return .{ .bytes = @intCast(sent) };
     if (std.posix.errno(sent) == .AGAIN) return .again;
     return .closed;

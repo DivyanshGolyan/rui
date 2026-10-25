@@ -16,6 +16,7 @@ const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
 const Waker = @import("Waker.zig");
+const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
 const Engine = @This();
 
@@ -68,6 +69,11 @@ pub const Origin = struct {
     /// connection is set up at a time.
     learned_max_streams: ?u32,
     pending: Record.Queue,
+    /// The address an IP-literal host names; null for a DNS name.
+    literal: ?Resolver.Address,
+    /// The one lookup of a DNS name, shared by the setups that use it.
+    lookup: ?*Resolver,
+    lookup_users: u32,
 };
 
 pub const Endpoint = struct {
@@ -156,6 +162,9 @@ pub fn deinit(self: *Engine) void {
     for (self.connections) |*connection| {
         if (connection.state != .free) connection.close(.goaway);
     }
+    for (self.origins[0..self.origin_count]) |origin| {
+        if (origin.lookup) |lookup| lookup.release();
+    }
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     self.allocator.destroy(self.scratch);
@@ -187,6 +196,9 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
             .port = parsed.port,
             .learned_max_streams = null,
             .pending = .{},
+            .literal = Resolver.Address.literal(parsed.host, parsed.port),
+            .lookup = null,
+            .lookup_users = 0,
         };
         self.origin_count += 1;
         break :blk self.origin_count - 1;
@@ -653,8 +665,8 @@ fn nextDeadline(self: *Engine) ?u64 {
     for (self.connections) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
-            .resolving, .connecting, .handshaking, .awaiting_settings => connection.setup_deadline_ns,
             .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
+            else => connection.setup_deadline_ns,
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }
