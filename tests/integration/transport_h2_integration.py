@@ -58,6 +58,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         # body, then withholds the rest until `release` is set.
         self.release = threading.Event() if held else None
         self.held_bytes = 0
+        self.held_prefix_bytes = 0  # Body bytes sent before the hold, all streams.
+        self.held_prefixes = {}  # The same, by request text.
         self.held = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
@@ -269,7 +271,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         if self.server.sse:
                             if self.server.observed_shape:
                                 answer = observed_shape_answer(text)
-                            elif self.server.after_progress and text == "stalled-0":
+                            elif self.server.after_progress and text == "held-0":
                                 # The interrupt target exceeds the 10-KiB prefix the peer sends.
                                 answer = "L" * 80_000 + text
                             else:
@@ -343,6 +345,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 ])
                                 if self.server.release is not None and not self.server.release.is_set():
                                     sent = min(self.server.held_bytes, len(payload) - 1)
+                                    with self.server.lock:
+                                        self.server.held_prefix_bytes += sent
+                                        self.server.held_prefixes[text] = sent
                                     outgoing_bodies[stream] = payload[:sent]
                                     held_bodies[stream] = payload[sent:]
                                     continue
@@ -750,35 +755,45 @@ def held_streams(root, endpoint, after_progress=False):
     sessions = []
     try:
         for index in range(100):
-            session = dispatch.configure(records, store, f"stalled-config-{index}", None, "gpt-6-sol")
+            session = dispatch.configure(records, store, f"held-config-{index}", None, "gpt-6-sol")
             sessions.append(session)
-            dispatch.message(records, store, f"stalled-message-{index}", session, f"stalled-{index}")
+            dispatch.message(records, store, f"held-message-{index}", session, f"held-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
         assert endpoint.held.wait(30), "peer did not hold every stream"
-        processing = dispatch.observe(store, "stalled-message-0")["processing"]
+        # Rui holds every stream and has written exactly the withheld prefixes.
+        held = dispatch.wait_for(
+            lambda: (value := dispatch.command("session", "inspect", "--store", store,
+                                               "--session", sessions[0])["execution"])
+            and int(value["scratch_used_bytes"]) == endpoint.held_prefix_bytes and value,
+            "every held prefix captured", timeout=30,
+        )
+        assert int(held["custody_occupied"]) == 100, held
+        # After progress, the interrupt target is mid-body: 10,000 bytes in.
+        assert endpoint.held_prefixes["held-0"] == (10_000 if after_progress else 0), endpoint.held_prefixes
+        processing = dispatch.observe(store, "held-message-0")["processing"]
         result_deadline = time.monotonic() + 45
         reply = dispatch.command(
-            "session", "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
-            "--key", "stalled-interrupt", "--session", sessions[0],
+            "session", "interrupt-model", "--store", store, "--record", records / "held-interrupt.json",
+            "--key", "held-interrupt", "--session", sessions[0],
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
-        diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15,
+        diagnostics.wait("effect_stop_requested", control_key="held-interrupt", timeout=15,
                          turn=processing["turn"], operation=processing["operation"], attempt=processing["attempt"])
         cancelled = dispatch.wait_for(
-            lambda: dispatch.observe(store, "stalled-message-0", deadline=result_deadline).get("result"),
+            lambda: dispatch.observe(store, "held-message-0", deadline=result_deadline).get("result"),
             "interrupted held stream", deadline=result_deadline,
         )
         assert cancelled["status"] == "cancelled", cancelled
-        dispatch.wait_for(lambda: endpoint.stream_ids.get("stalled-0") in endpoint.resets,
+        dispatch.wait_for(lambda: endpoint.stream_ids.get("held-0") in endpoint.resets,
                           "interrupted stream reset", deadline=result_deadline)
         assert not endpoint.release.is_set()
-        assert dispatch.observe(store, "stalled-message-1").get("result") is None
-        stalled_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
+        assert dispatch.observe(store, "held-message-1").get("result") is None
+        held_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
         held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
         endpoint.release.set()
         for index in range(1, 100):
-            key = f"stalled-message-{index}"
+            key = f"held-message-{index}"
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
                     store, key, deadline=result_deadline,
@@ -786,7 +801,7 @@ def held_streams(root, endpoint, after_progress=False):
                 f"held result {index}", deadline=result_deadline,
             )
             assert result["status"] == "completed", result
-            assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"stalled-{index}"]
+            assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"held-{index}"]
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", sessions[0], timeout=remaining)["execution"],
@@ -798,8 +813,8 @@ def held_streams(root, endpoint, after_progress=False):
         print(json.dumps({"case": "held_observed_shape" if endpoint.observed_shape else "held_streams",
                           "phase": phase, "live_streams": 100,
                           "connections": 1, "cancelled_before_release": True,
-                          "body_bytes_before_hold": endpoint.held_bytes,
-                          "held_host_rss_kib": stalled_rss_kib,
+                          "body_bytes_before_hold": endpoint.held_prefix_bytes,
+                          "held_host_rss_kib": held_rss_kib,
                           "completed_idle_host_rss_kib": idle_rss_kib,
                           "held_physical_peak_bytes": held_physical_peak,
                           "completed_idle_physical_peak_bytes": idle_physical_peak}), flush=True)
@@ -808,7 +823,7 @@ def held_streams(root, endpoint, after_progress=False):
         diagnostics.dispose_interrupt(lambda: {
             "case": "held_streams", "after_progress": after_progress,
             "provider_stream_count": len(endpoint.streams), "provider_connection_count": len(endpoint.connections),
-        }, controls=("stalled-interrupt",))
+        }, controls=("held-interrupt",))
 
 
 def write_failure_isolated(root, endpoint):

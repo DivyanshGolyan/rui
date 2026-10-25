@@ -167,7 +167,7 @@ pub fn parseRetryAfter(value: []const u8, now_seconds: i64) ?RetryAfter {
         _ = std.math.add(i64, now_ms, @intCast(delay_ms)) catch return null;
         return .{ .delay_ms = delay_ms };
     } else |_| {}
-    const due_seconds = parseHttpDate(value) orelse return null;
+    const due_seconds = parseHttpDate(value, now_seconds) orelse return null;
     return .{ .deadline_ms = std.math.mul(i64, due_seconds, 1000) catch return null };
 }
 
@@ -178,8 +178,9 @@ const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Ju
 /// Seconds since the epoch for an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
 /// GMT`), an RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`) or an asctime
 /// date (`Sun Nov  6 08:49:37 1994`). The weekday is checked against the
-/// date, as RFC 9110 lets a recipient do.
-pub fn parseHttpDate(value: []const u8) ?i64 {
+/// date, as RFC 9110 lets a recipient do. `now_seconds` places an RFC 850
+/// two-digit year.
+pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
     var day: u8 = undefined;
     var month: u4 = undefined;
     var year: u16 = undefined;
@@ -194,15 +195,13 @@ pub fn parseHttpDate(value: []const u8) ?i64 {
         year = digits(u16, value[12..16]) orelse return null;
         time = value[17..25];
     } else if (std.mem.indexOfScalar(u8, value, ',')) |comma| {
-        // RFC 850: two-digit years within 50 years of now are not knowable
-        // here, so they are read as 19xx when 50 or more, 20xx otherwise.
         weekday = indexOf(&long_day_names, value[0..comma]) orelse return null;
         const rest = value[comma + 1 ..];
         if (rest.len != 23 or rest[0] != ' ' or rest[3] != '-' or rest[7] != '-' or rest[10] != ' ' or !std.mem.endsWith(u8, rest, " GMT")) return null;
         day = digits(u8, rest[1..3]) orelse return null;
         month = monthOf(rest[4..7]) orelse return null;
         const short = digits(u16, rest[8..10]) orelse return null;
-        year = if (short >= 50) 1900 + short else 2000 + short;
+        year = rfc850Year(short, now_seconds);
         time = rest[11..19];
     } else if (value.len == 24) {
         // asctime.
@@ -219,15 +218,41 @@ pub fn parseHttpDate(value: []const u8) ?i64 {
     const second = digits(u8, time[6..8]) orelse return null;
     if (hour > 23 or minute > 59 or second > 60) return null;
     if (year < 1970 or day == 0 or day > daysInMonth(year, month)) return null;
-    var days: i64 = 0;
-    var y: u16 = 1970;
-    while (y < year) : (y += 1) days += @as(u16, if (isLeap(y)) 366 else 365);
+    var days: i64 = daysBeforeYear(year);
     var m: u4 = 1;
     while (m < month) : (m += 1) days += daysInMonth(year, m);
     days += day - 1;
     // 1970-01-01 was a Thursday.
     if (@as(usize, @intCast(@mod(days + 3, 7))) != weekday) return null;
     return days * 86_400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+}
+
+/// RFC 9110 section 5.6.7: a two-digit year more than 50 years in the
+/// future is the most recent past year with the same last two digits.
+fn rfc850Year(short: u16, now_seconds: i64) u16 {
+    const current = yearOf(@divFloor(@max(now_seconds, 0), 86_400));
+    const year = current / 100 * 100 + short;
+    return if (year > current + 50) year - 100 else year;
+}
+
+/// The year holding `days` since 1970-01-01. An estimate from the
+/// 365.2425-day mean year is off by at most one.
+fn yearOf(days: i64) u16 {
+    var year: u16 = @intCast(@min(1970 + @divFloor(days * 10_000, 3_652_425), 9998));
+    if (daysBeforeYear(year) > days) year -= 1;
+    if (daysBeforeYear(year + 1) <= days) year += 1;
+    return year;
+}
+
+/// Days from 1970-01-01 to January 1 of `year`.
+fn daysBeforeYear(year: u16) i64 {
+    return 365 * (@as(i64, year) - 1970) + leapYearsThrough(year - 1) - leapYearsThrough(1969);
+}
+
+/// Leap years in 1..=year, so a date costs no loop over the years.
+fn leapYearsThrough(year: u16) i64 {
+    const y: i64 = year;
+    return @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
 }
 
 fn isLeap(year: u16) bool {
@@ -308,6 +333,7 @@ test "HTTP status classes and their Retry-After constraints" {
     const cases = [_]struct { status: ?u16, expected: ?Disposition }{
         .{ .status = 200, .expected = .success },
         .{ .status = 299, .expected = .success },
+        .{ .status = 199, .expected = .permanent_http },
         .{ .status = 300, .expected = .permanent_http },
         .{ .status = 400, .expected = .permanent_http },
         .{ .status = 407, .expected = .permanent_http },
@@ -316,6 +342,7 @@ test "HTTP status classes and their Retry-After constraints" {
         .{ .status = 499, .expected = .permanent_http },
         .{ .status = 500, .expected = .temporary_http },
         .{ .status = 599, .expected = .temporary_http },
+        .{ .status = 100, .expected = .permanent_http },
         .{ .status = 99, .expected = null },
         .{ .status = 600, .expected = null },
         .{ .status = null, .expected = null },
@@ -357,11 +384,11 @@ test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
         "Sun, 06 Nov 1994 08:49:37 GMT",
         "Sunday, 06-Nov-94 08:49:37 GMT",
         "Sun Nov  6 08:49:37 1994",
-    }) |date| try std.testing.expectEqual(@as(?i64, 784_111_777), parseHttpDate(date));
-    try std.testing.expectEqual(@as(?i64, 0), parseHttpDate("Thu, 01 Jan 1970 00:00:00 GMT"));
-    try std.testing.expectEqual(@as(?i64, 951_782_400), parseHttpDate("Tue, 29 Feb 2000 00:00:00 GMT"));
-    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tuesday, 14-Nov-23 22:13:21 GMT"));
-    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tue Nov 14 22:13:21 2023"));
+    }) |date| try std.testing.expectEqual(@as(?i64, 784_111_777), parseHttpDate(date, 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 0), parseHttpDate("Thu, 01 Jan 1970 00:00:00 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 951_782_400), parseHttpDate("Tue, 29 Feb 2000 00:00:00 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tuesday, 14-Nov-23 22:13:21 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tue Nov 14 22:13:21 2023", 1_700_000_000));
     for ([_][]const u8{
         "Mon, 06 Nov 1994 08:49:37 GMT", // wrong weekday
         "Sun, 06 Nov 1994 08:49:37 UTC",
@@ -376,5 +403,13 @@ test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
         "Sundae, 06-Nov-94 08:49:37 GMT",
         "Sun Nov 6 08:49:37 1994",
         "",
-    }) |date| try std.testing.expectEqual(@as(?i64, null), parseHttpDate(date));
+    }) |date| try std.testing.expectEqual(@as(?i64, null), parseHttpDate(date, 1_700_000_000));
+}
+
+test "an RFC 850 two-digit year is at most 50 years ahead of now" {
+    // Now is 2026: 60 and 76 are ahead by at most 50 years, 77 is not.
+    const now = 1_790_000_000;
+    try std.testing.expectEqual(@as(?i64, 2_840_140_800), parseHttpDate("Thursday, 01-Jan-60 00:00:00 GMT", now));
+    try std.testing.expectEqual(@as(?i64, 3_345_062_400), parseHttpDate("Wednesday, 01-Jan-76 00:00:00 GMT", now));
+    try std.testing.expectEqual(@as(?i64, 220_924_800), parseHttpDate("Saturday, 01-Jan-77 00:00:00 GMT", now));
 }

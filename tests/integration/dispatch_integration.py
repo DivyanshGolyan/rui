@@ -2916,7 +2916,7 @@ def main(mode="all", correlation_case="all"):
         concurrent_thread.start()
         concurrent_store = state / "concurrent-failed-responses"
         concurrent_host = start_host(
-            # HTTP/1.1 opens one connection per 100 capacity: five in flight at once.
+            # Many streams in flight at once over shared h2c connections.
             concurrent_store, f"http://127.0.0.1:{concurrent_endpoint.server_port}/responses", active_capacity=500,
         )
         processes.append(concurrent_host)
@@ -5078,7 +5078,8 @@ def main(mode="all", correlation_case="all"):
             deadline=exact_deadline,
         )
         # The request itself fits exactly and reaches HTTP. Its charge retires
-        # once the body is sent, so the fixture response reuses that scratch.
+        # once its body is sent and the response has started, so the fixture
+        # response reuses that scratch.
         assert exact_result["result"]["code"] == "provider_http_422", exact_result
         wait_model_cleanup(
             exact_diagnostics, framing_exact_store, framing_exact_session,

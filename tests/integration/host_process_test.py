@@ -1461,7 +1461,7 @@ def prove_terminal_stop_budget():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import terminal_restoration_integration as terminal
 
-    for late_stage in (None, "release"):
+    for late_stage in (None, "read", "release"):
         clock = [100.0]
         reached = []
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as patches:
@@ -1479,16 +1479,21 @@ def prove_terminal_stop_budget():
                     "diagnostic-dropped-inspection\ndiagnostic-held-inspection\n" + json.dumps(held) + "\n")
                 return inspector
 
-            def observe(*args, **kwargs):
-                clock[0] += 6
+            def observe(store, key, **kwargs):
+                clock[0] += 2
                 return {"processing": {"turn": "1", "operation": "1", "attempt": "1"},
-                        "result": {"status": "cancelled"}}
+                        "result": {"status": "completed" if key == "capture-message" else "cancelled"}}
+
+            def read(*args, **kwargs):
+                reached.append("read")
+                clock[0] += 9 if late_stage == "read" else 1
+                return SimpleNamespace(returncode=0, stdout=b"exact capture answer", stderr=b"")
 
             def command(*args, **kwargs):
                 if args[1] == "interrupt-model":
                     return {"answer": {"status": "accepted"}}
                 reached.append("release")
-                clock[0] += 4 if late_stage == "release" else 1
+                clock[0] += 9 if late_stage == "release" else 1
                 return {"execution": {"dispatch_fenced": False,
                     "custody_occupied": "0", "scratch_used_bytes": "0"}}
 
@@ -1499,7 +1504,7 @@ def prove_terminal_stop_budget():
             for name, replacement in replacements.items():
                 patches.enter_context(patch.object(terminal, name, replacement))
             for name, replacement in {
-                "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object()])),
+                "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object(), object()])),
                 "configure": MagicMock(return_value="k7m2qx"), "message": MagicMock(),
                 "start_command": start_inspector, "observe": observe, "command": command,
             }.items():
@@ -1509,6 +1514,7 @@ def prove_terminal_stop_budget():
             patches.enter_context(patch.object(time, "monotonic", lambda: clock[0]))
             patches.enter_context(patch.object(time, "sleep", side_effect=AssertionError(
                 "terminal stop clock witness waited for unmodeled external work")))
+            patches.enter_context(patch.object(terminal.fixture.subprocess, "run", read))
             patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
             try:
                 terminal.stop_receipt_case(root, root / "unused.so")
@@ -1518,8 +1524,8 @@ def prove_terminal_stop_budget():
                 assert reached[-1] == late_stage, reached
             else:
                 assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
-                assert reached == ["release"], reached
-    print("Terminal stop caller clock: timely release accepted; late release rejected")
+                assert reached == ["read", "release", "release"], reached
+    print("Terminal stop caller clock: timely exact read and releases accepted; late read and release rejected")
 
 
 def prove_caller_disposal():

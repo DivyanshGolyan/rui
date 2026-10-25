@@ -572,13 +572,14 @@ class ObservationDeadlineTests(unittest.TestCase):
                         endpoint = SimpleNamespace(server_address=("localhost", 1), observed_shape=False,
                             ready=SimpleNamespace(wait=lambda timeout: True), connections=["connection"],
                             streams=[("connection", 1, "isolation-target", b""), ("connection", 3, "isolation-sibling", b"")],
-                            resets=[1], stream_ids={"isolation-target": 1, "stalled-0": 1}, answers={},
+                            resets=[1], stream_ids={"isolation-target": 1, "held-0": 1}, answers={},
                             held=SimpleNamespace(wait=lambda timeout: True),
+                            held_prefix_bytes=0, held_prefixes={"held-0": 0},
                             release=SimpleNamespace(set=lambda: None, is_set=lambda: False))
                         if name == "round_trip":
                             endpoint.answers = {f"h2-2-0-{i}": b"answer" for i in range(2)}
                         elif name in ("held_streams", "write_failure_isolated"):
-                            prefix = {"held_streams": "stalled", "write_failure_isolated": "isolated"}[name]
+                            prefix = {"held_streams": "held", "write_failure_isolated": "isolated"}[name]
                             endpoint.streams = [None] * population
                             endpoint.answers = {f"{prefix}-{i}": b"answer" for i in range(population)}
                             endpoint.answers["isolated-after"] = b"answer"
@@ -621,7 +622,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                         def command(resource, operation, *args, **kwargs):
                             if (resource, operation) == ("session", "inspect"):
                                 if "timeout" not in kwargs:
-                                    return {"execution": {**clean, "custody_occupied": "1"}}
+                                    return {"execution": {**clean, "custody_occupied": str(population) if name == "held_streams" else "1"}}
                                 if late == "release":
                                     clock[0] = start + budget + boundary
                                 return {"execution": clean}

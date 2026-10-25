@@ -307,7 +307,6 @@ pub fn executionMain(host: *Host) void {
     const model_preparation = &workspace[0].model_preparation;
     defer shutdownExecution(
         host,
-        reactor,
         slots,
         &bash_preparation,
         model_preparation,
@@ -331,9 +330,7 @@ pub fn executionMain(host: *Host) void {
             .wait => |kind| {
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
-                    // Connections without a Transfer only need their
-                    // timers and peer bytes served: the idle cadence.
-                    .transport => reactor.?.wait(if (slotsHaveTransport(slots)) 25 else 100) catch |err| {
+                    .transport => reactor.?.wait(transportWaitMs(slots)) catch |err| {
                         fenceDispatch(host, "transport wait", err);
                         break;
                     },
@@ -414,7 +411,6 @@ const NativeTurn = struct {
     pub fn reconcileControls(self: *NativeTurn) void {
         cancelSupersededTransfers(
             self.host,
-            self.reactor,
             self.slots,
             self.model_preparation,
         );
@@ -634,6 +630,21 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
     return slot;
 }
 
+/// Connections without a Transfer only need their timers and peer bytes
+/// served, at the idle cadence, unless Bash still needs its own.
+fn transportWaitMs(slots: []const ExecutionSlot) u32 {
+    return if (slotsHaveTransport(slots) or slotsHaveBash(slots)) 25 else 100;
+}
+
+test "an idle connection waits at the idle cadence only when no Bash runs" {
+    var slots = [_]ExecutionSlot{ .free, .free };
+    try std.testing.expectEqual(@as(u32, 100), transportWaitMs(&slots));
+    slots[1] = .{ .bash_preparing = undefined };
+    try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
+    slots[1] = .{ .provider = .{ .owner = .{} } };
+    try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
+}
+
 test "a completed Transfer finds its own slot and nothing else" {
     var slots = [_]ExecutionSlot{ .free, .{ .provider = .{ .owner = .{} } }, .{ .provider = .{ .owner = .{} } } };
     try std.testing.expectEqual(&slots[1], slotOfTransfer(&slots, &slots[1].provider.transfer).?);
@@ -649,7 +660,6 @@ test "a completed Transfer finds its own slot and nothing else" {
 
 fn cancelSupersededTransfers(
     host: *Host,
-    reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *model_adapter.Preparation,
 ) void {
@@ -694,9 +704,8 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             const owner = active.owner;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
-            // Nothing of a cancelled stream is outstanding, so its slot is
-            // free at once; its siblings and connection are untouched.
-            reactor.?.cancel(&active.transfer);
+            // deinit cancels the stream; nothing of it is outstanding after,
+            // so its slot is free at once and siblings are untouched.
             active.transfer.deinit();
             finishCustodyNow(host, slot, owner.token);
         },
@@ -1503,7 +1512,6 @@ fn launchPreparedRequest(
     } };
     const active = &slot.provider;
     const write_once = host.faults.response_write_once;
-    host.faults.response_write_once = false;
     active.transfer.start(reactor, request.*, binding, .{
         .fields = headers.fields(),
         .turn_state = turn_state,
@@ -1533,6 +1541,8 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot, token);
         return;
     };
+    // Spent only by a Transfer that started, so a failed start keeps it armed.
+    if (write_once) host.faults.response_write_once = false;
     if (host.faults.before_launch_delay_ms != 0) {
         traceOperation(host, "prepared_before_handoff", binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
@@ -1870,7 +1880,6 @@ fn advanceRetainedCleanup(
 
 fn shutdownExecution(
     host: *Host,
-    reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
@@ -1900,7 +1909,6 @@ fn shutdownExecution(
         // Shutdown discards transport evidence rather than invoking
         // ordinary model completion or saving a semantic failure.
         .provider => |*active| {
-            reactor.?.cancel(&active.transfer);
             active.transfer.deinit();
             finishCustodyNow(host, slot, active.owner.token);
         },
@@ -2545,7 +2553,6 @@ test "named scratch retry releases custody through the shutdown owner path" {
             var model_preparation: model_adapter.Preparation = undefined;
             shutdownExecution(
                 test_host,
-                null,
                 test_slots,
                 test_preparation,
                 &model_preparation,

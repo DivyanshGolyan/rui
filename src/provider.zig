@@ -84,7 +84,9 @@ pub const Faults = struct {
     /// The body is declared one byte longer than its file, so h2's read
     /// comes up short and the stream ends `.body_failed`.
     request_read: bool = false,
+    /// The capture file is never created, so the Transfer never starts.
     response_acquire: bool = false,
+    /// The capture's name is not unlinked; its owner retains it for cleanup.
     response_unlink: bool = false,
     /// The sink is the read-only alias, so the first write fails.
     response_write: bool = false,
@@ -114,13 +116,12 @@ pub const Reactor = struct {
     scratch_path: []const u8,
     budget: ScratchBudget,
 
-    /// In final storage: h2's Client is pointer-stable.
+    /// In final storage: h2's Client is pointer-stable. Host startup has
+    /// already run `checkLibraries` and `validateEndpoint`.
     pub fn init(self: *Reactor, allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         const interval_ns = std.math.mul(u64, @intCast(options.inactivity_seconds), std.time.ns_per_s) catch
             return error.InvalidTransportTimeout;
-        try h2.checkLibraries();
-        try validateEndpoint(options.endpoint);
         if (options.ca_file) |path| if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
             return error.InvalidProviderCaFile;
         self.* = .{
@@ -149,12 +150,6 @@ pub const Reactor = struct {
     /// Infallible, and no request byte exists before it returns.
     pub fn launch(self: *Reactor, transfer: *Transfer) void {
         self.client.launch(&transfer.stream);
-    }
-
-    /// The stream is reset or unlinked and nothing of it is outstanding when
-    /// this returns, so the caller may deinit the Transfer at once.
-    pub fn cancel(self: *Reactor, transfer: *Transfer) void {
-        self.client.cancel(&transfer.stream);
     }
 
     pub fn drive(self: *Reactor) !void {
@@ -473,8 +468,9 @@ pub const Transfer = struct {
         });
     }
 
-    /// Before launch, after `nextCompletion`, or after `Reactor.cancel`:
-    /// closes every file still held and releases both charges.
+    /// At any point after `start`. Cancels the stream if it is still live
+    /// (a reset for an open one, sent by the next drive), then closes every
+    /// file still held and releases both charges.
     pub fn deinit(self: *Transfer) void {
         const reactor = self.reactor;
         reactor.client.cancel(&self.stream);

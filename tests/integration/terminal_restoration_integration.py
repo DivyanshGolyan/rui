@@ -942,32 +942,38 @@ def check_forwarding(state, library):
 
 
 def stop_receipt_case(state, library):
-    """A required stop receipt survives real, unrelated optional stderr custody."""
+    """While real, unrelated optional stderr custody is held, one response
+    is captured exactly and a required stop receipt is delivered."""
     root = state / "stop-receipt"
     root.mkdir(mode=0o700)
     store = root / "store"
     arm, release, log = (root / name for name in ("arm", "release", "probe.log"))
+    answer = b"exact capture answer"
     provider_release = threading.Event()
-    # The peer holds its response, so the Transfer is in flight when stopped.
-    endpoint = fixture.SuccessEndpoint([
-        (fixture.ResponseSpec(b"unused", {}, gate_timeout=60), provider_release)])
+    stop_release = threading.Event()
+    # The second peer response is never released: that Transfer is stopped.
+    endpoint = fixture.SuccessEndpoint([], responses_by_input={
+        "hello": (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release),
+        "stop": (fixture.ResponseSpec(b"unused", {}, gate_timeout=60), stop_release)})
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     host = diagnostics = inspector = None
     try:
         host, _ = start_ready_process(fixture.host_arguments(store,
-            f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace"),
-            observations="interrupt", env={**os.environ,
+            f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace",
+            active_capacity=2), observations="interrupt", env={**os.environ,
             os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
             "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
-        session = fixture.configure(root, store, "stop-config", None, "gpt-6-sol")
+        session = fixture.configure(root, store, "capture-config", None, "gpt-6-sol")
+        stop_session = fixture.configure(root, store, "stop-config", None, "gpt-6-sol")
         # Admission uses the ordinary worker; complete it before that worker
-        # holds optional stderr. Only the provider stop must progress under hold.
-        fixture.message(root, store, "stop-message", session, "hello")
-        fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
+        # holds optional stderr. Only provider work must progress under hold.
+        fixture.message(root, store, "capture-message", session, "hello")
+        fixture.message(root, store, "stop-message", stop_session, "stop")
+        fixture.wait_for(lambda: len(endpoint.requests) == 2, "held provider requests", timeout=3)
         processing = fixture.observe(store, "stop-message")["processing"]
         arm.write_text(session)
         # A specific optional write may lose custody or output credit. Seek an
@@ -989,9 +995,11 @@ def stop_receipt_case(state, library):
         assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == session, held
+        # The answer streams in and is captured while stderr is held.
+        provider_release.set()
         reply = fixture.command(
             "session", "interrupt-model", "--store", store, "--record", root / "stop-interrupt.json",
-            "--key", "stop-interrupt", "--session", session,
+            "--key", "stop-interrupt", "--session", stop_session,
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
@@ -1004,10 +1012,14 @@ def stop_receipt_case(state, library):
         assert inspector.returncode == 0, (out, err)
         deadline = time.monotonic() + 10
         observation, saved_answer, _ = fixture.wait_for_result_release(
-            store, "stop-message", session, deadline)
-        assert observation["result"]["status"] == "cancelled", observation
-        assert saved_answer is None
-        print("native stop receipt: optional inspection drop tolerated within original deadline; stop receipt under actual stderr contention; cancelled with peer still holding and simultaneous zero custody/scratch", flush=True)
+            store, "capture-message", session, deadline)
+        assert observation["result"]["status"] == "completed", observation
+        assert saved_answer == answer
+        stopped, stopped_answer, _ = fixture.wait_for_result_release(
+            store, "stop-message", stop_session, deadline)
+        assert stopped["result"]["status"] == "cancelled", stopped
+        assert stopped_answer is None
+        print("native stop receipt: optional inspection drop tolerated within original deadline; exact answer captured and stop receipt delivered under actual stderr contention; peer-held stream cancelled; simultaneous zero custody/scratch", flush=True)
     finally:
         incoming_error = sys.exc_info()[1]
         if diagnostics is not None:
@@ -1028,7 +1040,7 @@ def stop_receipt_case(state, library):
                             lambda: {"case": "stop-receipt", "optional_released": release.exists()},
                             controls=("stop-interrupt",))
                             if diagnostics is not None else None,
-                        provider_release.set,
+                        provider_release.set, stop_release.set,
                         endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
             try:
                 dispose()

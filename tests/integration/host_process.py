@@ -535,7 +535,7 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
 
     def finish_request(self, request, client_address):
         if not isinstance(request, ssl.SSLSocket) and _opens_with_h2_preface(request):
-            with _h2_connection_count:
+            with _h2_connection_lock:
                 self.h2_connections += 1
             _H2Connection(self, request, client_address).serve()
         else:
@@ -543,7 +543,7 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
 
 
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-_h2_connection_count = threading.Lock()
+_h2_connection_lock = threading.Lock()
 
 
 def _opens_with_h2_preface(sock, timeout=5):
@@ -960,7 +960,16 @@ class HostDiagnostics:
         named control and nothing else."""
         incoming_error = sys.exc_info()[1]
         self.snapshot_failure(collect)
-        stop_process(self.process)
+        try:
+            stop_process(self.process)
+        except BaseException as error:
+            try:
+                print(f"Interrupt fixture cleanup failed: {error}", file=sys.stderr)
+            except Exception:
+                pass
+            if incoming_error is not None:
+                raise incoming_error from error
+            raise
         try:
             if incoming_error is None:
                 assert Counter(record.get("control_key") for record in self.matching("effect_stop_requested")) == Counter(controls), self.records

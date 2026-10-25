@@ -17,10 +17,6 @@ pub const supported = tag == .linux or tag == .macos;
 /// F_FULLFSYNC so a committed Store survives power loss.
 pub const full_fsync = tag == .macos;
 
-/// curl verifies TLS against the Keychain on Darwin, where no CA bundle path
-/// is conventional.
-pub const native_trust_store = tag == .macos;
-
 /// A directory on a read-only filesystem, which tests use as an ancestor that
 /// no privilege can write: Linux's sysfs and Darwin's sealed system volume.
 pub const read_only_directory = switch (tag) {
