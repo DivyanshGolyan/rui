@@ -475,21 +475,15 @@ type sqliteDiagnostic struct {
 	AtNS                      string  `json:"at_ns"`
 	Process                   string  `json:"process"`
 	Run                       string  `json:"run"`
-	Clock                     string  `json:"clock"`
 	Sequence                  string  `json:"sequence"`
-	TraceLost                 bool    `json:"trace_lost"`
 	Subject                   string  `json:"subject"`
-	ProcessMemoryScope        string  `json:"process_memory_scope"`
 	ProcessMemoryCurrentBytes *uint64 `json:"process_memory_current_bytes"`
 	ProcessMemoryHighwater    *uint64 `json:"process_memory_highwater_bytes"`
 	CacheUsedBytes            *uint64 `json:"cache_used_bytes"`
-	CacheUsedScope            string  `json:"cache_used_scope"`
 	CacheSpills               *uint64 `json:"cache_spills"`
-	CacheSpillsScope          string  `json:"cache_spills_scope"`
 	HardHeapLimitBytes        *uint64 `json:"hard_heap_limit_bytes"`
 	PageSizeBytes             *uint64 `json:"page_size_bytes"`
 	CacheSizeSetting          *int64  `json:"cache_size_setting"`
-	CacheSizeSettingScope     string  `json:"cache_size_setting_scope"`
 	CacheSpillThreshold       *int64  `json:"cache_spill_threshold"`
 	MmapSizeBytes             *uint64 `json:"mmap_size_bytes"`
 	Synchronous               *int64  `json:"synchronous"`
@@ -498,76 +492,43 @@ type sqliteDiagnostic struct {
 	JournalMode               *string `json:"journal_mode"`
 }
 
-func rejectDuplicateJSONKeys(encoded []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
-		return errors.New("diagnostic is not a JSON object")
-	}
-	seen := map[string]struct{}{}
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return errors.New("diagnostic key is not a string")
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("duplicate diagnostic field %q", key)
-		}
-		seen[key] = struct{}{}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return err
-		}
-	}
-	if _, err := decoder.Token(); err != nil {
-		return err
-	}
-	if token, err := decoder.Token(); err != io.EOF {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("unexpected trailing diagnostic token %v", token)
-	}
-	return nil
-}
-
-func sqliteDiagnosticRecords(report []byte) ([]sqliteDiagnostic, error) {
+// sqliteDiagnosticRecords decodes the sqlite_diagnostic records of the Host's
+// lossless observation channel; numeric fields arrive as decimal text.
+func sqliteDiagnosticRecords(records []map[string]any) ([]sqliteDiagnostic, error) {
 	result := []sqliteDiagnostic{}
-	scanner := bufio.NewScanner(bytes.NewReader(report))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		var envelope struct {
-			Phase string `json:"rui_test_phase"`
+	for _, record := range records {
+		if record["rui_test_phase"] != "sqlite_diagnostic" {
+			continue
 		}
-		if err := json.Unmarshal(line, &envelope); err != nil {
-			if bytes.Contains(line, []byte("sqlite_diagnostic")) {
-				return nil, fmt.Errorf("malformed SQLite diagnostic: %w", err)
+		fields := map[string]json.RawMessage{}
+		for name, value := range record {
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("SQLite diagnostic field %s is not text", name)
 			}
-			continue
+			switch name {
+			case "rui_test_phase", "at_ns", "process", "run", "sequence", "subject", "journal_mode":
+				fields[name], _ = json.Marshal(text)
+			default:
+				if _, err := strconv.ParseInt(text, 10, 64); err != nil {
+					return nil, fmt.Errorf("SQLite diagnostic field %s: %w", name, err)
+				}
+				fields[name] = json.RawMessage(text)
+			}
 		}
-		if envelope.Phase != "sqlite_diagnostic" {
-			continue
-		}
-		if err := rejectDuplicateJSONKeys(line); err != nil {
+		encoded, err := json.Marshal(fields)
+		if err != nil {
 			return nil, err
 		}
-		var record sqliteDiagnostic
-		decoder := json.NewDecoder(bytes.NewReader(line))
+		var diagnostic sqliteDiagnostic
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&record); err != nil {
+		if err := decoder.Decode(&diagnostic); err != nil {
 			return nil, fmt.Errorf("decode SQLite diagnostic: %w", err)
 		}
-		result = append(result, record)
+		result = append(result, diagnostic)
 	}
-	return result, scanner.Err()
+	return result, nil
 }
 
 func productionDiagnosticsStatus(records []sqliteDiagnostic) string {
@@ -613,7 +574,7 @@ func spillDiagnosticsValid(records []sqliteDiagnostic, session string, enabled, 
 		return false
 	}
 	for _, record := range records {
-		if record.Subject != session || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" {
+		if record.Subject != session {
 			return false
 		}
 	}
@@ -772,18 +733,18 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	endpoint.set(payload)
 	requestBefore := endpoint.count()
 	deadline := measurement.NewDeadline(4 * time.Minute)
-	extra := []string{"--test-phase-trace", "--test-sqlite-diagnostics", "--test-sqlite-cache-kib", "32"}
+	extra := []string{"--test-sqlite-diagnostics", "--test-sqlite-cache-kib", "32"}
 	if !enabled {
 		extra = append(extra, "--test-sqlite-cache-spill-off")
 	}
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "host-stderr.log"), deadline, extra...)
+	host, observations, err := measurement.StartHostWith(measurement.Launch{ObservationPlan: "sqlite"}, binary, store, endpoint.URL(), 1, filepath.Join(directory, "host-stderr.log"), deadline, extra...)
 	if err != nil {
 		return nil, err
 	}
 	hostNeedsStop := true
 	defer func() {
 		if hostNeedsStop {
-			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+			measurement.JoinCleanup(&resultError, func() error { return observations.Stop(host, measurement.TeardownAllowance) })
 		}
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
@@ -849,7 +810,11 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		}
 		final = &value
 	}
-	hostExit, stopError := host.StopWithExit(measurement.TeardownAllowance)
+	var hostExit measurement.HostExit
+	stopError := observations.StopWith(func() (err error) {
+		hostExit, err = host.StopWithExit(measurement.TeardownAllowance)
+		return err
+	}, measurement.TeardownAllowance)
 	hostNeedsStop = false
 	stderr, readStderrError := os.ReadFile(filepath.Join(directory, "host-stderr.log"))
 	offline, offlineError := readSpillFacts(deadline, store)
@@ -863,7 +828,11 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	if info, statError := os.Stat(filepath.Join(store, "rui.sqlite3")); statError == nil {
 		databaseSize = info.Size()
 	}
-	diagnostics, err := sqliteDiagnosticRecords(stderr)
+	records, err := observations.Records()
+	if err != nil {
+		return nil, err
+	}
+	diagnostics, err := sqliteDiagnosticRecords(records)
 	if err != nil {
 		return nil, err
 	}
@@ -1650,17 +1619,25 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		}
 		hostOptions = []string{"--provider-ca-file", fixture.providerCA}
 	}
+	var launch measurement.Launch
 	if diagnostics {
-		hostOptions = append(hostOptions, "--test-phase-trace", "--test-sqlite-diagnostics")
+		launch.ObservationPlan = "sqlite"
+		hostOptions = append(hostOptions, "--test-sqlite-diagnostics")
 	}
-	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), capacity, filepath.Join(directory, "host-stderr.log"), deadline, hostOptions...)
+	host, observations, err := measurement.StartHostWith(launch, binary, store, fixture.ProviderURL(), capacity, filepath.Join(directory, "host-stderr.log"), deadline, hostOptions...)
 	if err != nil {
 		return nil, err
+	}
+	stopHost := func() error {
+		if observations != nil {
+			return observations.Stop(host, measurement.TeardownAllowance)
+		}
+		return host.Stop(measurement.TeardownAllowance)
 	}
 	hostNeedsStop := true
 	defer func() {
 		if hostNeedsStop {
-			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+			measurement.JoinCleanup(&resultError, stopHost)
 		}
 	}()
 	if os.Getpid() == fixture.cmd.Process.Pid || host.Cmd.Process.Pid == fixture.cmd.Process.Pid || os.Getpid() == host.Cmd.Process.Pid {
@@ -1669,11 +1646,13 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	var sessions []string
 	var auditRequests []capacityAuditRequest
 	rounds, resultError = measurement.CollectCompletedRounds(roundCount, func(round int) (map[string]any, error) {
-		info, statError := os.Stat(filepath.Join(directory, "host-stderr.log"))
-		if statError != nil {
-			return nil, statError
+		var delivered []map[string]any
+		if diagnostics {
+			var err error
+			if delivered, err = observations.Records(); err != nil {
+				return nil, err
+			}
 		}
-		diagnosticOffset := info.Size()
 		if !sameSessions || round == 1 {
 			sessions = make([]string, capacity)
 		}
@@ -1690,20 +1669,14 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		}
 		if diagnostics {
 			row["retained_memory_composition"] = memoryComposition(host.Cmd.Process.Pid, filepath.Join(directory, fmt.Sprintf("round-%d", round)))
-			log, openError := os.Open(filepath.Join(directory, "host-stderr.log"))
-			if openError != nil {
-				return row, openError
+			if err := observations.Settle(deadline); err != nil {
+				return row, err
 			}
-			_, seekError := log.Seek(diagnosticOffset, io.SeekStart)
-			var report []byte
-			var readError error
-			if seekError == nil {
-				report, readError = io.ReadAll(log)
+			all, err := observations.Records()
+			if err != nil {
+				return row, err
 			}
-			if err := errors.Join(seekError, readError, log.Close()); err != nil {
-				return row, fmt.Errorf("read per-round SQLite diagnostics: %w", err)
-			}
-			records, parseError := sqliteDiagnosticRecords(report)
+			records, parseError := sqliteDiagnosticRecords(all[len(delivered):])
 			if parseError != nil {
 				return row, parseError
 			}
@@ -1716,7 +1689,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	})
 	result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
 	audits, err := offlineCapacityAudits(func() error {
-		err := host.Stop(measurement.TeardownAllowance)
+		err := stopHost()
 		if err == nil {
 			hostNeedsStop = false
 		}

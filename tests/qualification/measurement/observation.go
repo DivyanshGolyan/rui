@@ -31,6 +31,9 @@ var observationFields = [...]string{
 	"store_complete_at_ns", "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
 	"post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied", "written_bytes",
 	"http_version", "connection_id", "new_connections", "work_bytes", "work_items", "request_bytes",
+	"process_memory_current_bytes", "process_memory_highwater_bytes", "cache_used_bytes", "cache_spills",
+	"hard_heap_limit_bytes", "page_size_bytes", "cache_size_setting", "cache_spill_threshold", "mmap_size_bytes",
+	"synchronous", "temp_store", "busy_timeout_ms", "journal_mode",
 }
 
 // Observations is the Host's private test observation channel. Stderr phase
@@ -266,6 +269,21 @@ func (o *Observations) Phase(phase string) ([]map[string]any, error) {
 	return result, nil
 }
 
+// Settle waits until every publication the Host has begun is delivered, so
+// Records covers all work whose replies the caller has already received.
+func (o *Observations) Settle(deadline Deadline) error {
+	return WaitFor(deadline, time.Millisecond, "observation delivery", func() (bool, error) {
+		active, count := o.word(observationActiveOffset).Load(), o.word(observationCountOffset).Load()
+		o.mu.Lock()
+		delivered, err := uint64(len(o.records)), o.err
+		o.mu.Unlock()
+		if err == nil && count&1 != 0 {
+			err = errors.New("native observation loss invalidates evidence")
+		}
+		return active == 0 && count>>1 == delivered, err
+	})
+}
+
 // Wait returns the records of phase once at least count have arrived.
 func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[string]any, error) {
 	var records []map[string]any
@@ -281,6 +299,18 @@ func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[s
 // then requires the final state to account for every record: a loss or a
 // publication cut by the stop fails the evidence.
 func (o *Observations) Stop(host *Host, allowance time.Duration) error {
+	return o.StopWith(func() error { return host.Stop(allowance) }, allowance)
+}
+
+// StopWith is Stop with the caller's Host stop, such as one that keeps the
+// exit status.
+func (o *Observations) StopWith(stop func() error, allowance time.Duration) error {
+	o.mu.Lock()
+	stopped := o.shared == nil
+	o.mu.Unlock()
+	if stopped { // A retried stop after a failed one only retries the Host.
+		return stop()
+	}
 	defer func() {
 		o.mu.Lock()
 		defer o.mu.Unlock()
@@ -302,7 +332,7 @@ func (o *Observations) Stop(host *Host, allowance time.Duration) error {
 			break
 		}
 	}
-	stopErr := host.Stop(allowance)
+	stopErr := stop()
 	select {
 	case <-o.done:
 	case <-time.After(3 * time.Second):

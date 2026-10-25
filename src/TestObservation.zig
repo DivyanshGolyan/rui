@@ -8,7 +8,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes, execution };
+pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -58,6 +58,19 @@ const FieldId = enum(u8) {
     work_bytes = 28,
     work_items = 29,
     request_bytes = 30,
+    process_memory_current_bytes = 31,
+    process_memory_highwater_bytes = 32,
+    cache_used_bytes = 33,
+    cache_spills = 34,
+    hard_heap_limit_bytes = 35,
+    page_size_bytes = 36,
+    cache_size_setting = 37,
+    cache_spill_threshold = 38,
+    mmap_size_bytes = 39,
+    synchronous = 40,
+    temp_store = 41,
+    busy_timeout_ms = 42,
+    journal_mode = 43,
 };
 const Record = struct {
     rui_test_phase: []const u8,
@@ -91,6 +104,19 @@ const Record = struct {
     work_bytes: ?[]const u8 = null,
     work_items: ?[]const u8 = null,
     request_bytes: ?[]const u8 = null,
+    process_memory_current_bytes: ?i64 = null,
+    process_memory_highwater_bytes: ?i64 = null,
+    cache_used_bytes: ?i64 = null,
+    cache_spills: ?i64 = null,
+    hard_heap_limit_bytes: ?i64 = null,
+    page_size_bytes: ?i64 = null,
+    cache_size_setting: ?i64 = null,
+    cache_spill_threshold: ?i64 = null,
+    mmap_size_bytes: ?i64 = null,
+    synchronous: ?i64 = null,
+    temp_store: ?i64 = null,
+    busy_timeout_ms: ?i64 = null,
+    journal_mode: ?[]const u8 = null,
 };
 
 comptime {
@@ -175,6 +201,7 @@ pub const Publication = struct {
 };
 
 fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
+    if (self.plan == .sqlite) return std.mem.eql(u8, phase, "sqlite_diagnostic");
     if (self.plan == .execution) {
         // Every service boundary and every interval endpoint: gaps are derived
         // from the complete sequence, so no sampling.
@@ -388,6 +415,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
             .execution => "settlement_complete",
+            .sqlite => "sqlite_diagnostic",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for ([_]bool{ false, true }) |selected_kill| {
@@ -457,6 +485,7 @@ test "private owner observations seal admission without forgiving held or late p
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
             .execution => "settlement_complete",
+            .sqlite => "sqlite_diagnostic",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for (0..3) |kind| {

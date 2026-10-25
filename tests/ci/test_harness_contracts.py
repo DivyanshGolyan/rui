@@ -27,6 +27,10 @@ FIELDS = (
     "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
     "written_bytes", "http_version", "connection_id", "new_connections",
     "work_bytes", "work_items", "request_bytes",
+    "process_memory_current_bytes", "process_memory_highwater_bytes", "cache_used_bytes",
+    "cache_spills", "hard_heap_limit_bytes", "page_size_bytes", "cache_size_setting",
+    "cache_spill_threshold", "mmap_size_bytes", "synchronous", "temp_store", "busy_timeout_ms",
+    "journal_mode",
 )
 
 
@@ -76,6 +80,18 @@ class ObservationCodecTest(unittest.TestCase):
                      f"from session_list_release_proof import oracle_controls; oracle_controls({platform!r})"],
                     cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class QualificationEvidenceTest(unittest.TestCase):
+    def test_qualification_never_reads_stderr_phase_traces(self):
+        # Stderr traces drop records under contention; qualification reads the
+        # lossless observation channel (CODING_STANDARDS.md#evidence).
+        offenders = [
+            str(path.relative_to(ROOT))
+            for path in sorted((ROOT / "tests/qualification").rglob("*.go"))
+            if re.search(r"--test-phase-trace|trace_lost", path.read_text())
+        ]
+        self.assertEqual(offenders, [])
 
 
 class ImportSafetyTest(unittest.TestCase):
