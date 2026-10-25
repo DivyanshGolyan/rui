@@ -51,9 +51,6 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// Where a managed transfer delivers its Turn's routing value, with the
-    /// epoch selected at launch.
-    turn_state: ?model_adapter.TurnStates.Capture = null,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
     transfer: provider.Transfer = undefined,
@@ -305,7 +302,10 @@ pub fn executionMain(host: *Host) void {
         capture_writer.stop(thread);
     };
     var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
-        provider.Reactor.init(slots.len) catch |err| {
+        provider.Reactor.init(slots.len, .{
+            .names = model_adapter.observation_names,
+            .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+        }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         }
@@ -1569,11 +1569,11 @@ fn launchPreparedRequest(
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_state: ?model_adapter.TurnStates.Capture = null;
+    var turn_state: provider.TurnStateKey = .{};
     if (credential) |value| {
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
-        turn_state = .{ .states = &host.turn_states, .turn_id = binding.turn_id, .epoch = replay.epoch };
+        turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
             request.deinit(host.io, host.capture_writer.?.budget);
             fenceDispatch(host, "provider preparation", err);
@@ -1585,7 +1585,6 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
-        .turn_state = turn_state,
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
@@ -1593,8 +1592,8 @@ fn launchPreparedRequest(
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
-        .observation_names = &model_adapter.observation_names,
-        .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
+        .observation = &reactor.observation,
+        .turn_state = turn_state,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,

@@ -17,8 +17,8 @@ pub const TransportOptions = struct {
     ca_file: ?[]const u8 = null,
     // Borrowed until start returns; curl_slist owns copies through teardown.
     extra_headers: []const [:0]const u8 = &.{},
-    observation_names: *const ObservationNames = &.{},
-    turn_state: ?TurnStateSink = null,
+    observation: *const HeaderObservation = &.{},
+    turn_state: TurnStateKey = .{},
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
     response_acquire_fault: bool = false,
@@ -74,10 +74,12 @@ var foreign_completion_identity: u8 = 0;
 
 pub const Reactor = struct {
     multi: *c.CURLM,
+    /// What every Transfer of this Reactor observes in its headers.
+    observation: HeaderObservation,
 
     pub const Advance = enum { not_ready, progressed, resume_capture_failure };
 
-    pub fn init(capacity: usize) !Reactor {
+    pub fn init(capacity: usize, observation: HeaderObservation) !Reactor {
         const multi = c.curl_multi_init() orelse return error.TransportAllocationFailed;
         errdefer _ = c.curl_multi_cleanup(multi);
         const connections = capacity / 100 + @intFromBool(capacity % 100 != 0);
@@ -90,7 +92,7 @@ pub const Reactor = struct {
         {
             return error.TransportCapabilityMissing;
         }
-        return .{ .multi = multi };
+        return .{ .multi = multi, .observation = observation };
     }
 
     pub fn deinit(self: *Reactor) void {
@@ -506,12 +508,13 @@ pub const SealedResponse = struct {
 };
 
 const HeaderContext = struct {
-    names: *const ObservationNames = &.{},
+    observation: *const HeaderObservation = &.{},
     observed: Observed = .{},
-    /// Receives the first caller-named routing value of a successful header
-    /// block. A routing hint never fails the transfer: an unusable first value
-    /// is dropped, and later values are ignored.
-    turn_state: ?TurnStateSink = null,
+    /// Where the observation's sink files the first caller-named routing
+    /// value of a successful header block. A routing hint never fails the
+    /// transfer: an unusable first value is dropped, and later values are
+    /// ignored.
+    turn_state: TurnStateKey = .{},
     turn_state_seen: bool = false,
     successful_block: bool = false,
     retry_after_ms: ?u64 = null,
@@ -570,7 +573,20 @@ pub const max_turn_state_bytes = 4096;
 /// no copy. The value is borrowed for the call only.
 pub const TurnStateSink = struct {
     context: *anyopaque,
-    capture: *const fn (context: *anyopaque, value: []const u8) void,
+    capture: *const fn (context: *anyopaque, key: TurnStateKey, value: []const u8) void,
+};
+
+/// The one transfer-specific part of turn-state delivery: its Turn and the
+/// epoch selected at launch.
+pub const TurnStateKey = struct {
+    turn_id: u64 = 0,
+    epoch: u64 = 0,
+};
+
+/// One per Reactor, so a Transfer holds a pointer instead of copies.
+pub const HeaderObservation = struct {
+    names: ObservationNames = .{},
+    turn_state: ?TurnStateSink = null,
 };
 
 pub const Transfer = struct {
@@ -595,7 +611,6 @@ pub const Transfer = struct {
     inactivity: transport_policy.Inactivity,
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
-    binding: attempt.AttemptBinding,
     requires_h2: bool,
 
     pub fn start(
@@ -641,7 +656,7 @@ pub const Transfer = struct {
             .easy = easy,
             .headers = headers,
             .request = request,
-            .header_context = .{ .names = options.observation_names, .turn_state = options.turn_state },
+            .header_context = .{ .observation = options.observation, .turn_state = options.turn_state },
             .read_context = .{
                 .io = writer.io,
                 .file = request.file,
@@ -650,7 +665,6 @@ pub const Transfer = struct {
             },
             .response = response,
             .writer = writer,
-            .binding = binding,
             .requires_h2 = !std.mem.startsWith(u8, endpoint, "http://"),
             .completion_identity_fault = options.completion_identity_fault,
             .inactivity = .{ .limit_ns = inactivity_ns },
@@ -919,19 +933,20 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
         };
         return bytes;
     }
-    if (context.names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.turn_state)) {
+    const names = &context.observation.names;
+    if (names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, names.turn_state)) {
         if (!context.successful_block or context.turn_state_seen) return bytes;
         context.turn_state_seen = true;
         if (value.len == 0 or value.len > max_turn_state_bytes) return bytes;
         for (value) |byte| if (byte < 0x20 or byte > 0x7e) return bytes;
-        if (context.turn_state) |sink| sink.capture(sink.context, value);
+        if (context.observation.turn_state) |sink| sink.capture(sink.context, context.turn_state, value);
         return bytes;
     }
-    const observed: Observed.Name = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
+    const observed: Observed.Name = if (names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, names.request_id))
         .request_id
-    else if (context.names.model.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.model))
+    else if (names.model.len != 0 and std.ascii.eqlIgnoreCase(name, names.model))
         .model
-    else if (context.names.alternate_model.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.alternate_model))
+    else if (names.alternate_model.len != 0 and std.ascii.eqlIgnoreCase(name, names.alternate_model))
         .alternate_model
     else
         return bytes;
@@ -1052,11 +1067,11 @@ test "duplicate Retry-After headers retain both independent constraints" {
 }
 
 test "response observations use caller-selected names and reject contradictions" {
-    var context: HeaderContext = .{ .names = &.{
+    var context: HeaderContext = .{ .observation = &.{ .names = .{
         .request_id = "correlation",
         .model = "served-model",
         .alternate_model = "other-model",
-    } };
+    } } };
     defer context.observed.deinit();
     const ignored = "openai-model: unrelated\r\n";
     try std.testing.expectEqual(ignored.len, headerCallback(@constCast(ignored.ptr), 1, ignored.len, &context));
@@ -1074,8 +1089,8 @@ test "response observations use caller-selected names and reject contradictions"
 }
 
 test "response observations keep their real length and reject empty, invalid UTF-8 or oversized values" {
-    const names: ObservationNames = .{ .request_id = "correlation", .model = "served-model" };
-    var context: HeaderContext = .{ .names = &names };
+    const observation: HeaderObservation = .{ .names = .{ .request_id = "correlation", .model = "served-model" } };
+    var context: HeaderContext = .{ .observation = &observation };
     defer context.observed.deinit();
     const status = "HTTP/2 200\r\n";
     try std.testing.expectEqual(status.len, headerCallback(@constCast(status.ptr), 1, status.len, &context));
@@ -1090,7 +1105,7 @@ test "response observations keep their real length and reject empty, invalid UTF
     try std.testing.expectEqualStrings("", context.observed.get(.alternate_model));
     try std.testing.expect(!context.invalid);
     for ([_][]const u8{ "served-model: \r\n", "served-model: caf\xc3\r\n", "served-model: " ++ @as([protocol.max_model_bytes + 1]u8, @splat('m')) ++ "\r\n" }) |line| {
-        var rejected: HeaderContext = .{ .names = &names };
+        var rejected: HeaderContext = .{ .observation = &observation };
         defer rejected.observed.deinit();
         try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(line.ptr), 1, line.len, &rejected));
         try std.testing.expect(rejected.invalid);
@@ -1116,15 +1131,18 @@ test "turn state observation keeps only the first value of a successful response
     };
     for (cases) |case| {
         var record: TurnStateRecord = .{};
-        var context: HeaderContext = .{ .names = &.{ .turn_state = name }, .turn_state = record.sink() };
+        const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
+        var context: HeaderContext = .{ .observation = &observation, .turn_state = .{ .turn_id = 7, .epoch = 3 } };
         for (case.lines) |line| try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
         try std.testing.expectEqualStrings(case.expected, record.value.slice());
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
+        if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .turn_id = 7, .epoch = 3 }, record.key);
         try std.testing.expect(!context.invalid);
     }
     // Unnamed callers observe nothing.
     var record: TurnStateRecord = .{};
-    var unnamed: HeaderContext = .{ .turn_state = record.sink() };
+    const unnamed_observation: HeaderObservation = .{ .turn_state = record.sink() };
+    var unnamed: HeaderContext = .{ .observation = &unnamed_observation };
     for ([_][]const u8{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: value\r\n" }) |line|
         try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &unnamed));
     try std.testing.expectEqual(@as(usize, 0), record.captures);
@@ -1132,15 +1150,17 @@ test "turn state observation keeps only the first value of a successful response
 
 const TurnStateRecord = struct {
     value: protocol.Bounded(max_turn_state_bytes) = .{},
+    key: TurnStateKey = .{},
     captures: usize = 0,
 
     fn sink(self: *TurnStateRecord) TurnStateSink {
         return .{ .context = self, .capture = capture };
     }
 
-    fn capture(context: *anyopaque, value: []const u8) void {
+    fn capture(context: *anyopaque, key: TurnStateKey, value: []const u8) void {
         const self: *TurnStateRecord = @ptrCast(@alignCast(context));
         self.captures += 1;
+        self.key = key;
         self.value.set(value) catch unreachable;
     }
 };
@@ -1149,7 +1169,7 @@ test "idle reactor reports zero unprocessed completions without consuming messag
     try initialize();
     defer c.curl_global_cleanup();
     for ([_]usize{ 1, 100, 101, 1000 }) |capacity| {
-        var reactor = try Reactor.init(capacity);
+        var reactor = try Reactor.init(capacity, .{});
         defer reactor.deinit();
         try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
         try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
