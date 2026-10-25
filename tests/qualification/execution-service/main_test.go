@@ -97,24 +97,18 @@ func TestBashSSEPreservesValidArguments(t *testing.T) {
 }
 
 func event(phase string, at int, extra ...string) map[string]any {
-	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "clock": "awake_ns", "turn": "1", "operation": "1", "attempt": "1"}
+	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "turn": "1", "operation": "1", "attempt": "1"}
 	for i := 0; i < len(extra); i += 2 {
 		m[extra[i]] = extra[i+1]
 	}
 	return m
 }
 
-func encodeEvents(rows []map[string]any) []byte {
-	var b bytes.Buffer
+func encodeEvents(rows []map[string]any) []map[string]any {
 	for i, row := range rows {
 		row["sequence"] = fmt.Sprint(i + 1)
-		phase := row["rui_test_phase"]
-		delete(row, "rui_test_phase")
-		encoded, _ := json.Marshal(row)
-		fmt.Fprintf(&b, "{\"rui_test_phase\":%q,%s\n", phase, encoded[1:])
-		row["rui_test_phase"] = phase
 	}
-	return b.Bytes()
+	return rows
 }
 
 func TestCompleteMetricIntervals(t *testing.T) {
@@ -127,7 +121,7 @@ func TestCompleteMetricIntervals(t *testing.T) {
 		event("settlement_lock_requested", 280), event("settlement_complete", 360),
 		event("lifecycle_boundary", 400, "start_ns", "100", "wait_ns", "0"),
 	}
-	es, err := parseTraces(encodeEvents(rows))
+	es, err := parseObservations(encodeEvents(rows))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +182,7 @@ func TestParseRejectsIncompleteMeasurementIdentity(t *testing.T) {
 			t.Run(phase+"/"+field, func(t *testing.T) {
 				rows := completeV4Rows()
 				mutatePhase(rows, phase, func(row map[string]any) { delete(row, field) })
-				if _, err := parseTraces(encodeEvents(rows)); err == nil {
+				if _, err := parseObservations(encodeEvents(rows)); err == nil {
 					t.Fatalf("%s with missing %s accepted", phase, field)
 				}
 			})
@@ -196,7 +190,7 @@ func TestParseRejectsIncompleteMeasurementIdentity(t *testing.T) {
 		t.Run(phase+"/at_ns", func(t *testing.T) {
 			rows := completeV4Rows()
 			mutatePhase(rows, phase, func(row map[string]any) { delete(row, "at_ns") })
-			if _, err := parseTraces(encodeEvents(rows)); err == nil {
+			if _, err := parseObservations(encodeEvents(rows)); err == nil {
 				t.Fatalf("%s with missing at_ns accepted", phase)
 			}
 		})
@@ -204,7 +198,7 @@ func TestParseRejectsIncompleteMeasurementIdentity(t *testing.T) {
 	t.Run("lifecycle_boundary/at_ns", func(t *testing.T) {
 		rows := completeV4Rows()
 		delete(rows[0], "at_ns")
-		if _, err := parseTraces(encodeEvents(rows)); err == nil {
+		if _, err := parseObservations(encodeEvents(rows)); err == nil {
 			t.Fatal("lifecycle_boundary with missing at_ns accepted")
 		}
 	})
@@ -223,7 +217,7 @@ func TestDeriveRejectsMissingPreparationEvidence(t *testing.T) {
 		kept = append(kept, row)
 	}
 	rows = kept
-	es, err := parseTraces(encodeEvents(rows))
+	es, err := parseObservations(encodeEvents(rows))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +239,7 @@ func TestDeriveRejectsMissingPreparationEvidence(t *testing.T) {
 		event("lifecycle_boundary", 100, "start_ns", "10", "wait_ns", "0"),
 		event("lifecycle_boundary", 400, "start_ns", "100", "wait_ns", "0"),
 	}
-	es, err = parseTraces(encodeEvents(boundaries))
+	es, err = parseObservations(encodeEvents(boundaries))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +261,7 @@ func TestWriteEvidenceProducesReviewableSummaryAndLosslessRawArtifact(t *testing
 	}
 	rows := []map[string]any{{"status": "passed", "parameters": scenario{Name: "small"}, "metrics": value}}
 	report := map[string]any{
-		"format": "rui-execution-service-v4-go", "status": "passed", "cases": rows,
+		"format": "rui-execution-service-v5-go", "status": "passed", "cases": rows,
 		"provenance": map[string]any{"revision": "abc"}, "source_sha256": map[string]string{"source": "def"},
 		"limits": []string{"test limit"},
 	}

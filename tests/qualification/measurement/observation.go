@@ -30,7 +30,7 @@ var observationFields = [...]string{
 	"scratch_used_bytes", "command_key", "kind", "control_key", "store_queued_at_ns", "lock_acquired_at_ns",
 	"store_complete_at_ns", "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
 	"post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied", "written_bytes",
-	"http_version", "connection_id", "new_connections",
+	"http_version", "connection_id", "new_connections", "work_bytes", "work_items", "request_bytes",
 }
 
 // Observations is the Host's private test observation channel. Stderr phase
@@ -236,20 +236,29 @@ func (o *Observations) fail(err error) {
 	}
 }
 
-// Phase returns every delivered record of phase, failing once the Host has
-// recorded a loss.
-func (o *Observations) Phase(phase string) ([]map[string]any, error) {
-	loss := o.word(observationCountOffset).Load() & 1
+// Records returns every delivered record in sequence order, failing once the
+// Host has recorded a loss. It remains readable after Stop.
+func (o *Observations) Records() ([]map[string]any, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.err != nil {
 		return nil, o.err
 	}
-	if loss != 0 {
+	// After Stop the state is unmapped and its final loss already failed Stop.
+	if o.shared != nil && o.word(observationCountOffset).Load()&1 != 0 {
 		return nil, errors.New("native observation loss invalidates evidence")
 	}
+	return append([]map[string]any{}, o.records...), nil
+}
+
+// Phase returns every delivered record of phase.
+func (o *Observations) Phase(phase string) ([]map[string]any, error) {
+	records, err := o.Records()
+	if err != nil {
+		return nil, err
+	}
 	result := []map[string]any{}
-	for _, record := range o.records {
+	for _, record := range records {
 		if record["rui_test_phase"] == phase {
 			result = append(result, record)
 		}
@@ -272,7 +281,12 @@ func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[s
 // then requires the final state to account for every record: a loss or a
 // publication cut by the stop fails the evidence.
 func (o *Observations) Stop(host *Host, allowance time.Duration) error {
-	defer syscall.Munmap(o.shared)
+	defer func() {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		syscall.Munmap(o.shared)
+		o.shared = nil
+	}()
 	var drainErr error
 	o.word(observationActiveOffset).Or(observationSealed)
 	for drained := time.Now().Add(allowance / 2); ; time.Sleep(time.Millisecond) {
