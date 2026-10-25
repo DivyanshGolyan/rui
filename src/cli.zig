@@ -21,10 +21,12 @@ const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const product_defaults = @import("product_defaults.zig");
 
-// Zig otherwise reserves an alternate signal stack on every thread even when
-// the release build has no default crash handler to use it.
+// Zig otherwise reserves a 256 KiB alternate signal stack as static TLS, and
+// glibc zeroes every thread's TLS block, so each thread kept it resident.
+// The crash handler then runs on the faulting stack: every segfault still
+// reports, but a stack overflow ends without a trace.
 pub const std_options: std.Options = .{
-    .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
+    .signal_stack_size = null,
     .log_scope_levels = &.{.{ .scope = .vaxis, .level = .info }},
 };
 
