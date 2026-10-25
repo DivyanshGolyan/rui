@@ -336,7 +336,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "k7m2qx", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
+		return sqliteDiagnostic{Subject: "k7m2qx", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
 	if !spillDiagnosticsValid(valid, "k7m2qx", true, true) {
@@ -447,8 +447,11 @@ func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
-		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"k7m2qx","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":2,"journal_mode":"wal","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
-		records, err := sqliteDiagnosticRecords(encoded)
+		record := map[string]any{"rui_test_phase": "sqlite_diagnostic", "subject": "k7m2qx", "hard_heap_limit_bytes": "16777216", "cache_spills": "0", "cache_spill_threshold": "991", "synchronous": "2", "journal_mode": "wal", "process": "42", "run": "100", "sequence": "5"}
+		if value != "" { // An absent observation field is a null diagnostic value.
+			record["cache_size_setting"] = value
+		}
+		records, err := sqliteDiagnosticRecords([]map[string]any{{"rui_test_phase": "control_timing"}, record})
 		if err != nil || len(records) != 1 {
 			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
 		}
@@ -460,20 +463,20 @@ func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) 
 			t.Fatalf("cache size setting = %v, want %d", record.CacheSizeSetting, value)
 		}
 	}
-	missing := decode("null")
+	missing := decode("")
 	if spillDiagnosticsValid([]sqliteDiagnostic{missing}, "k7m2qx", true, false) {
 		t.Fatal("missing cache_size_setting qualified")
 	}
 }
 
-func TestSpillDiagnosticDecoderRejectsMalformedAndDuplicateFields(t *testing.T) {
-	malformed := []byte(`{"rui_test_phase":"sqlite_diagnostic"`)
-	if _, err := sqliteDiagnosticRecords(malformed); err == nil {
+func TestSpillDiagnosticDecoderRejectsMalformedAndUnknownFields(t *testing.T) {
+	malformed := map[string]any{"rui_test_phase": "sqlite_diagnostic", "cache_spills": "many"}
+	if _, err := sqliteDiagnosticRecords([]map[string]any{malformed}); err == nil {
 		t.Fatal("malformed diagnostic was accepted")
 	}
-	duplicate := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"k7m2qx","cache_spills":0,"cache_spills":1}`)
-	if _, err := sqliteDiagnosticRecords(duplicate); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("duplicate diagnostic error = %v", err)
+	unknown := map[string]any{"rui_test_phase": "sqlite_diagnostic", "work_bytes": "1"}
+	if _, err := sqliteDiagnosticRecords([]map[string]any{unknown}); err == nil {
+		t.Fatal("diagnostic with a foreign field was accepted")
 	}
 }
 

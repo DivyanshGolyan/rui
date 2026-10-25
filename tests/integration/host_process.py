@@ -122,6 +122,19 @@ OBSERVATION_FIELDS = {
     28: "work_bytes",
     29: "work_items",
     30: "request_bytes",
+    31: "process_memory_current_bytes",
+    32: "process_memory_highwater_bytes",
+    33: "cache_used_bytes",
+    34: "cache_spills",
+    35: "hard_heap_limit_bytes",
+    36: "page_size_bytes",
+    37: "cache_size_setting",
+    38: "cache_spill_threshold",
+    39: "mmap_size_bytes",
+    40: "synchronous",
+    41: "temp_store",
+    42: "busy_timeout_ms",
+    43: "journal_mode",
 }
 
 
