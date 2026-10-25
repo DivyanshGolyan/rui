@@ -295,6 +295,9 @@ class SuccessEndpoint(TestHTTPServer):
         self.responses = list(responses)
         self.responses_by_input = responses_by_input
         self.chunk_sizes = (1, 2, 5, 3, 7, 4, 1, 6) if chunk_sizes is None else chunk_sizes
+        # Default chunking fragments the first 64 KiB of each response; h2c
+        # makes every write a DATA frame, and Python frames cost ~15 us each.
+        self.fragmented_bytes = 64 * 1024 if chunk_sizes is None else None
         self.requests = []
         self.request_times = []
         self.lock = threading.Lock()
@@ -368,7 +371,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                     time.sleep(spec.chunk_delay)
                 else:
                     spec.pacing_end.wait(spec.chunk_delay)
-            size = offsets[index % len(offsets)]
+            fragmented = self.server.fragmented_bytes
+            size = offsets[index % len(offsets)] if fragmented is None or cursor < fragmented else 16 * 1024
             try:
                 self.wfile.write(payload[cursor : cursor + size])
                 self.wfile.flush()

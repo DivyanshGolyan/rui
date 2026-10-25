@@ -15,7 +15,7 @@ import threading
 import time
 
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
-from conversation_page_integration import host_resources, idle_resources
+from conversation_page_integration import host_resources, idle_resources, provider_connections
 from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
 from proposal_integration import digest
@@ -188,7 +188,8 @@ def main():
             assert history(store, stopped_end)[1] == stopped, "invalid cursors damaged healthy Store"
             wait_for(lambda: inspect_execution(store, SESSION)["custody_occupied"] == "0", "reader/effect release")
             if baseline is not None:
-                wait_for(lambda: host_resources(process.pid)[1] == baseline[1], "reader FD restoration")
+                wait_for(lambda: host_resources(process.pid)[1] == baseline[1] + provider_connections(process.pid, endpoint.server_port),
+                         "reader FD restoration")
             print("activity repeated-reader idle Linux RSS/FDs:", before_reads, host_resources(process.pid))
             print("activity retained-idle Linux RSS/FDs:", baseline, host_resources(process.pid))
             stop_process(process)

@@ -583,6 +583,9 @@ class _H2Connection:
 
     def __init__(self, server, sock, client_address):
         self.server, self.sock, self.client_address = server, sock, client_address
+        # Each frame is its own send. Without TCP_NODELAY, Nagle holds a frame
+        # until the client's delayed ACK, about 40 ms, so a large body crawls.
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.h2 = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False, header_encoding=None))
         self.cond = threading.Condition()
         self.streams = {}

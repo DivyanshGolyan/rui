@@ -67,6 +67,22 @@ def host_resources(pid):
     return rss, len(os.listdir(f"/proc/{pid}/fd"))
 
 
+def provider_connections(pid, port):
+    """The Host's open TCP sockets to the provider fixture on `port`. HTTP/2
+    keeps an idle connection for reuse, so it is not a reader's descriptor."""
+    inodes = {line.split()[9] for table in ("/proc/net/tcp", "/proc/net/tcp6") if pathlib.Path(table).exists()
+              for line in pathlib.Path(table).read_text().splitlines()[1:]
+              if int(line.split()[2].rsplit(":", 1)[1], 16) == port}
+    count = 0
+    for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:
+            continue  # Closed while listed.
+        count += target.startswith("socket:[") and target[8:-1] in inodes
+    return count
+
+
 def idle_resources(pid, path):
     # Response completion is not connection cleanup; wait for owned peer FDs.
     directory = pathlib.Path(f"/proc/{pid}/fd")
