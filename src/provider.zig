@@ -523,9 +523,10 @@ const Observed = struct {
         return self.bytes[span.start..][0..span.len];
     }
 
-    /// A repeated name must repeat its value.
+    /// A value is non-empty UTF-8 within its capacity, and a repeated name
+    /// must repeat its value.
     fn put(self: *Observed, name: Name, value: []const u8) error{ InvalidValue, OutOfMemory }!void {
-        if (value.len == 0 or value.len > capacity.get(name)) return error.InvalidValue;
+        if (value.len == 0 or value.len > capacity.get(name) or !std.unicode.utf8ValidateSlice(value)) return error.InvalidValue;
         if (self.spans.get(name).len != 0)
             return if (std.mem.eql(u8, self.get(name), value)) {} else error.InvalidValue;
         const start = self.bytes.len;
@@ -1050,7 +1051,7 @@ test "response observations use caller-selected names and reject contradictions"
     try std.testing.expect(context.invalid);
 }
 
-test "response observations keep their real length and reject empty or oversized values" {
+test "response observations keep their real length and reject empty, invalid UTF-8 or oversized values" {
     const names: ObservationNames = .{ .request_id = "correlation", .model = "served-model" };
     var context: HeaderContext = .{ .names = &names };
     defer context.observed.deinit();
@@ -1066,7 +1067,7 @@ test "response observations keep their real length and reject empty or oversized
     try std.testing.expectEqualStrings(&@as([256]u8, @splat('r')), context.observed.get(.request_id));
     try std.testing.expectEqualStrings("", context.observed.get(.alternate_model));
     try std.testing.expect(!context.invalid);
-    for ([_][]const u8{ "served-model: \r\n", "served-model: " ++ @as([protocol.max_model_bytes + 1]u8, @splat('m')) ++ "\r\n" }) |line| {
+    for ([_][]const u8{ "served-model: \r\n", "served-model: caf\xc3\r\n", "served-model: " ++ @as([protocol.max_model_bytes + 1]u8, @splat('m')) ++ "\r\n" }) |line| {
         var rejected: HeaderContext = .{ .names = &names };
         defer rejected.observed.deinit();
         try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(line.ptr), 1, line.len, &rejected));
