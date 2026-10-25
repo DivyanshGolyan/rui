@@ -51,6 +51,8 @@ const Harness = struct {
         connect_timeout_ns: u64 = 5 * std.time.ns_per_s,
         /// Overrides the peer's URL.
         url: ?[]const u8 = null,
+        /// Overrides trusting only the peer's CA file.
+        trust: ?h2.Trust = null,
     };
 
     fn create(config: Config) !*Harness {
@@ -65,7 +67,7 @@ const Harness = struct {
             .inactivity_ns = config.inactivity_ns,
             .connect_timeout_ns = config.connect_timeout_ns,
             .liveness = config.liveness,
-            .trust = if (config.peer.tls == .none) .system else .{ .ca_file = self.peer.caPath() },
+            .trust = config.trust orelse if (config.peer.tls == .none) .system else .{ .ca_file = self.peer.caPath() },
         });
         errdefer self.client.deinit();
         self.endpoint = try self.client.addEndpoint(config.url orelse self.peer.url());
@@ -792,6 +794,40 @@ test "https: a leaf from another issuer is untrusted, before any request byte" {
 test "https: a leaf for another name is untrusted" {
     try expectSetupFailure(.{ .peer = .{ .tls = .h2, .leaf_names = "DNS:other.example" } }, .untrusted_peer);
     try expectSetupFailure(.{ .peer = .{ .tls = .h2, .leaf_names = "DNS:localhost" } }, .untrusted_peer);
+}
+
+test "https: the system roots do not trust a private CA" {
+    try expectSetupFailure(.{ .peer = .{ .tls = .h2 }, .trust = .system }, .untrusted_peer);
+}
+
+// A manual check of system trust against a real server, which CI cannot
+// make: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2`.
+// Any HTTP status passes; it proves the peer was verified and spoke h2.
+test "https live: system trust verifies a public server" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const url = environ.get("RUI_H2_LIVE_URL") orelse return error.SkipZigTest;
+    var client: h2.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .{
+        .stream_capacity = 1,
+        .inactivity_ns = 30 * std.time.ns_per_s,
+        .connect_timeout_ns = 30 * std.time.ns_per_s,
+    });
+    defer client.deinit();
+    const endpoint = try client.addEndpoint(url);
+    var stream: h2.Stream = .idle;
+    var sink: [4096]u8 = undefined;
+    try client.prepare(&stream, bytesRequest(endpoint, "", &sink));
+    client.launch(&stream);
+    var receiver: Receiver = .{};
+    while (client.finishedCount() == 0) {
+        try client.drive(&receiver);
+        try client.wait(100);
+    }
+    const end = client.nextFinished().?.end().?;
+    std.debug.print("live: {s} -> {any}, status {?d}\n", .{ url, end, stream.status() });
+    try std.testing.expectEqual(h2.Cause.complete, end.cause);
+    stream.deinit();
 }
 
 test "https: a peer that does not choose h2 is refused" {

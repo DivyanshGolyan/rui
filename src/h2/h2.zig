@@ -12,9 +12,10 @@
 //! - one connection pool per origin, opening another connection only when
 //!   the peer's SETTINGS_MAX_CONCURRENT_STREAMS is full, and draining a
 //!   connection after GOAWAY;
-//! - TLS with ALPN `h2` only, verified against the host's CA bundle or one
-//!   CA file, and h2c by prior knowledge for loopback `http://`;
-//! - name lookup on a short-lived thread per connection setup;
+//! - TLS with ALPN `h2` only, verified by the system's trust (the host's CA
+//!   bundle on Linux, SecTrust on macOS) or against one CA file, and h2c
+//!   by prior knowledge for loopback `http://`;
+//! - name lookup, and SecTrust's evaluation, on short-lived threads;
 //! - request bodies read from the caller's file within the peer's window,
 //!   never copied into a buffer per request;
 //! - response bodies written from the one shared read buffer straight to
@@ -150,7 +151,8 @@ pub const Liveness = policy.Liveness;
 
 /// What verifies an `https://` peer. Verification is never off.
 pub const Trust = union(enum) {
-    /// The first readable bundle among the host's usual CA bundle paths.
+    /// Apple SecTrust on macOS; on Linux the first readable bundle among
+    /// the host's usual CA bundle paths.
     system,
     /// Only the certificates in this PEM file (`--provider-ca-file`).
     ca_file: []const u8,

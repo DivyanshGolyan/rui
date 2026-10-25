@@ -1,8 +1,8 @@
 //! One HTTP/2 connection: its socket and nghttp2 session. Internal.
 //!
-//!   free -> [resolving] -> connecting -> [handshaking] -> awaiting_settings
-//!        (DNS names)   (one address     (https)         (preface and our
-//!                       at a time)                       SETTINGS sent)
+//!   free -> [resolving] -> connecting -> [handshaking] -> [verifying] -> awaiting_settings
+//!        (DNS names)   (one address     (https)         (macOS system  (preface and our
+//!                       at a time)                       trust)         SETTINGS sent)
 //!   -> ready -> draining -> free
 //!      (streams  (GOAWAY seen:
 //!       submitted) no submits)
@@ -21,9 +21,10 @@ const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
+const sec_trust = @import("sec_trust.zig");
 const Connection = @This();
 
-pub const State = enum(u8) { free = 0, resolving, connecting, handshaking, awaiting_settings, ready, draining };
+pub const State = enum(u8) { free = 0, resolving, connecting, handshaking, verifying, awaiting_settings, ready, draining };
 
 engine: *Engine,
 index: u32,
@@ -53,6 +54,11 @@ uses_lookup: bool,
 address_index: u8,
 /// The handshake, or a read, waits for the socket to take bytes.
 tls_wants_write: bool,
+/// SecTrust's evaluation of the peer while `verifying`, kept past `close`
+/// until its thread returns: a slot runs at most one evaluation, so a
+/// stalled trustd holds at most one thread per table entry. Nothing off
+/// macOS.
+verification: if (sec_trust.enabled) ?*sec_trust.Job else void,
 session: ?*c.nghttp2_session,
 serial: u64,
 /// Streams submitted here that nghttp2 has not closed yet.
@@ -103,6 +109,7 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .uses_lookup = false,
         .address_index = 0,
         .tls_wants_write = false,
+        .verification = if (sec_trust.enabled) null else {},
         .session = null,
         .serial = 0,
         .streams = 0,
@@ -124,7 +131,7 @@ pub fn hasSession(self: *const Connection) bool {
 
 pub fn settingUp(self: *const Connection) bool {
     return switch (self.state) {
-        .resolving, .connecting, .handshaking, .awaiting_settings => true,
+        .resolving, .connecting, .handshaking, .verifying, .awaiting_settings => true,
         .free, .ready, .draining => false,
     };
 }
@@ -151,7 +158,8 @@ pub fn view(self: *const Connection) policy.ConnectionView {
 
 pub fn pollEvents(self: *const Connection) ?i16 {
     return switch (self.state) {
-        .free, .resolving => null,
+        // Nothing is read or written until SecTrust answers.
+        .free, .resolving, .verifying => null,
         .connecting => std.c.POLL.OUT,
         .handshaking => if (self.tls_wants_write) std.c.POLL.OUT else std.c.POLL.IN,
         .awaiting_settings, .ready, .draining => blk: {
@@ -187,15 +195,15 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
 
 /// resolving -> connecting, once the lookup finished.
 pub fn finishLookup(self: *Connection) void {
-    const addresses = self.engine.origins[self.origin].lookup.?.result() orelse return;
-    if (addresses.len == 0) return self.engine.setupFailed(self, .resolve_failed);
+    const lookup = self.engine.origins[self.origin].lookup.?.result() orelse return;
+    if (lookup.found().len == 0) return self.engine.setupFailed(self, .resolve_failed);
     self.connectNext();
 }
 
 fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
     const origin = &self.engine.origins[self.origin];
     if (origin.literal) |literal| return if (index == 0) literal else null;
-    const addresses = origin.lookup.?.result().?;
+    const addresses = origin.lookup.?.result().?.found();
     return if (index < addresses.len) addresses[index] else null;
 }
 
@@ -282,16 +290,39 @@ fn connected(self: *Connection) void {
     self.continueHandshake();
 }
 
-/// handshaking -> awaiting_settings once the peer is verified and chose h2.
+/// handshaking -> awaiting_settings once the peer is verified and chose
+/// h2, through verifying when SecTrust has the verdict.
 pub fn continueHandshake(self: *Connection) void {
     switch (tls.handshake(self.ssl.?)) {
         .done => {
             self.tls_wants_write = false;
+            if (sec_trust.enabled and self.engine.tls_context.?.deferred) return self.startVerification();
             self.startSession();
         },
         .want_read => self.tls_wants_write = false,
         .want_write => self.tls_wants_write = true,
         .failed => |cause| self.engine.setupFailed(self, cause),
+    }
+}
+
+fn startVerification(self: *Connection) void {
+    std.debug.assert(self.verification == null);
+    const host = self.engine.origins[self.origin].host;
+    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, host) orelse
+        return self.engine.setupFailed(self, .local_failure);
+    self.state = .verifying;
+}
+
+/// verifying -> awaiting_settings once SecTrust trusts the peer.
+pub fn finishVerification(self: *Connection) void {
+    if (!sec_trust.enabled) unreachable else {
+        const verdict = (self.verification.?.result() orelse return).verdict;
+        self.releaseVerification();
+        switch (verdict) {
+            .trusted => self.startSession(),
+            .untrusted => self.engine.setupFailed(self, .untrusted_peer),
+            .failed => self.engine.setupFailed(self, .local_failure),
+        }
     }
 }
 
@@ -595,7 +626,26 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     self.releaseHead();
     self.head.fields.deinit(self.engine.allocator);
     self.head.refs.deinit(self.engine.allocator);
+    const verification = self.verification;
     self.* = .free(self.engine, self.index);
+    self.verification = verification;
+}
+
+/// Free, with no evaluation still running from an earlier setup.
+pub fn available(self: *Connection) bool {
+    if (self.state != .free) return false;
+    if (sec_trust.enabled) if (self.verification) |verification| {
+        if (verification.result() == null) return false;
+        self.releaseVerification();
+    };
+    return true;
+}
+
+/// Lets go of any evaluation; a running one finishes on its own thread.
+pub fn releaseVerification(self: *Connection) void {
+    if (!sec_trust.enabled) return;
+    if (self.verification) |verification| verification.release();
+    self.verification = null;
 }
 
 fn releaseHead(self: *Connection) void {

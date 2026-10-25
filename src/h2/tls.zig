@@ -3,7 +3,9 @@
 //!
 //! Verification is never off: there is no option or code path that sets
 //! SSL_VERIFY_NONE. The handshake verifies the chain against the trust
-//! store and the host name or IP literal against the leaf.
+//! store and the host name or IP literal against the leaf, except for
+//! system trust on macOS, where Apple SecTrust verifies both after the
+//! handshake and before any application byte (`sec_trust.zig`).
 //!
 //! OpenSSL reaches the socket through a BIO of ours, so each send carries
 //! MSG_NOSIGNAL (SO_NOSIGPIPE on Darwin): a peer that went away is
@@ -12,17 +14,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("h2_c");
 const h2 = @import("h2.zig");
+const sec_trust = @import("sec_trust.zig");
 
-/// Host CA bundles, probed in this order when the context is built, at run
-/// time so a cross-built or relocated binary still finds the host's bundle.
-/// macOS reads /etc/ssl/cert.pem only until SecTrust lands, which Rui's
-/// platform contract requires before the client serves any provider.
+/// Linux host CA bundles, probed in this order when the context is built,
+/// at run time so a cross-built or relocated binary still finds the host's
+/// bundle.
 pub const system_bundles = [_][:0]const u8{
     "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Arch, Alpine
     "/etc/pki/tls/certs/ca-bundle.crt", // Fedora, RHEL
     "/etc/ssl/ca-bundle.pem", // openSUSE
     "/etc/pki/tls/cacert.pem", // OpenELEC
-    "/etc/ssl/cert.pem", // macOS, some minimal images
+    "/etc/ssl/cert.pem", // some minimal images
 };
 
 const alpn_h2 = "\x02h2";
@@ -35,6 +37,8 @@ pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL e
 pub const Context = struct {
     ctx: *c.SSL_CTX,
     bio_method: *c.BIO_METHOD,
+    /// Sessions are verified by SecTrust after their handshake.
+    deferred: bool,
 
     /// TLS 1.2 or later; ALPN `h2` only; no session cache, so every
     /// connection verifies the peer afresh; RELEASE_BUFFERS, so an idle
@@ -51,9 +55,11 @@ pub const Context = struct {
         _ = c.SSL_CTX_set_options(ctx, @as(u64, 1) << 14);
         // Inverted convention: 0 is success.
         if (c.SSL_CTX_set_alpn_protos(ctx, alpn_h2, alpn_h2.len) != 0) return error.OutOfMemory;
-        try loadTrust(ctx, trust);
         const bio_method = newBioMethod() orelse return error.OutOfMemory;
-        return .{ .ctx = ctx, .bio_method = bio_method };
+        errdefer c.BIO_meth_free(bio_method);
+        const deferred = sec_trust.enabled and trust == .system;
+        if (deferred) sec_trust.deferVerification(ctx) else try loadTrust(ctx, trust);
+        return .{ .ctx = ctx, .bio_method = bio_method, .deferred = deferred };
     }
 
     pub fn deinit(self: *Context) void {
@@ -73,10 +79,11 @@ pub const Context = struct {
             c.SSL_free(ssl);
             return null;
         }
+        // A deferred session's name is checked by SecTrust, not OpenSSL.
         const named = if (kind == .ip_literal)
-            c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1
+            self.deferred or c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1
         else
-            c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and c.SSL_set1_host(ssl, &host_z) == 1;
+            c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and (self.deferred or c.SSL_set1_host(ssl, &host_z) == 1);
         if (!named) {
             c.SSL_free(ssl);
             return null;

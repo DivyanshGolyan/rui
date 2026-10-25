@@ -1,29 +1,20 @@
-//! Name lookup for one connection setup: getaddrinfo on a short-lived
-//! thread of its own. Internal.
-//!
-//! A lookup owns nothing but this job: no socket, no session, no stream.
-//! The thread exists only while getaddrinfo runs, so an idle Client holds
-//! no thread. The job is shared by two references, the owner's and the
-//! thread's; whichever lets go last frees it. A finished lookup wakes the
-//! owner's `wait`, unless the owner abandoned it first (the Client closed),
-//! in which case the thread only frees the job.
+//! Name lookup for connection setups: getaddrinfo on a `job.Job` thread.
+//! Internal.
 //!
 //! Bound: each origin keeps at most one lookup, shared by its setups and
-//! kept across a setup that timed out, so at most `max_endpoints` threads
-//! run per Client even while the resolver stalls. A thread may outlive
-//! `Client.deinit` until getaddrinfo returns, which nothing can interrupt.
+//! kept across a setup that timed out, so at most `max_endpoints` lookup
+//! threads run per Client even while the resolver stalls.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Waker = @import("Waker.zig");
+const job = @import("job.zig");
 const Resolver = @This();
+
+pub const Job = job.Job(Resolver);
 
 /// Addresses tried per connection, in getaddrinfo's order.
 pub const max_addresses = 8;
 
-mutex: std.c.pthread_mutex_t,
-references: u8,
-state: enum(u8) { running, done, abandoned },
-waker: *Waker,
 port: u16,
 host: [h2.max_host_bytes + 1]u8,
 count: u8,
@@ -68,53 +59,20 @@ pub const Address = struct {
 
 /// Starts a lookup of `host` and returns the owner's reference, or null
 /// when no thread could be started.
-pub fn start(waker: *Waker, host: []const u8, port: u16) ?*Resolver {
+pub fn start(waker: *Waker, host: []const u8, port: u16) ?*Job {
     std.debug.assert(host.len <= h2.max_host_bytes);
-    // Freed by whichever thread lets go last, so not the Client's allocator.
-    const self = std.heap.c_allocator.create(Resolver) catch return null;
-    self.* = .{
-        .mutex = .{},
-        .references = 2,
-        .state = .running,
-        .waker = waker,
-        .port = port,
-        .host = undefined,
-        .count = 0,
-        .addresses = undefined,
-    };
-    @memcpy(self.host[0..host.len], host);
-    self.host[host.len] = 0;
-    // The libc default stack: glibc sizes it around static TLS, which a
-    // fixed small size would not. Only the pages getaddrinfo touches count.
-    var thread: std.c.pthread_t = undefined;
-    if (std.c.pthread_create(&thread, null, run, self) != .SUCCESS) {
-        std.heap.c_allocator.destroy(self);
-        return null;
-    }
-    _ = std.c.pthread_detach(thread);
-    return self;
+    var lookup: Resolver = .{ .port = port, .host = undefined, .count = 0, .addresses = undefined };
+    @memcpy(lookup.host[0..host.len], host);
+    lookup.host[host.len] = 0;
+    return Job.start(waker, lookup);
 }
 
-/// Owner thread: the addresses once the lookup finished, empty when it
-/// failed; null while it runs.
-pub fn result(self: *Resolver) ?[]const Address {
-    lock(self);
-    defer unlock(self);
-    return if (self.state == .done) self.addresses[0..self.count] else null;
+/// The addresses found; empty when the lookup failed.
+pub fn found(self: *const Resolver) []const Address {
+    return self.addresses[0..self.count];
 }
 
-/// Owner thread: lets go of the owner's reference. No wake follows.
-pub fn release(self: *Resolver) void {
-    lock(self);
-    if (self.state == .running) self.state = .abandoned;
-    self.references -= 1;
-    const last = self.references == 0;
-    unlock(self);
-    if (last) std.heap.c_allocator.destroy(self);
-}
-
-fn run(argument: ?*anyopaque) callconv(.c) ?*anyopaque {
-    const self: *Resolver = @ptrCast(@alignCast(argument.?));
+pub fn run(self: *Resolver) void {
     var port_text: [6]u8 = undefined;
     const service = std.fmt.bufPrintSentinel(&port_text, "{d}", .{self.port}, 0) catch unreachable;
     var hints = std.mem.zeroes(std.c.addrinfo);
@@ -124,36 +82,15 @@ fn run(argument: ?*anyopaque) callconv(.c) ?*anyopaque {
     var list: ?*std.c.addrinfo = null;
     const status = std.c.getaddrinfo(@ptrCast(&self.host), service, &hints, &list);
     defer if (list) |head| std.c.freeaddrinfo(head);
-
-    lock(self);
-    if (self.state == .running) {
-        if (status == @as(std.c.EAI, @fromBackingInt(@intCast(0)))) {
-            var next = list;
-            while (next) |entry| : (next = entry.next) {
-                if (self.count == max_addresses) break;
-                const addr = entry.addr orelse continue;
-                const address = Address.fromSockaddr(addr, entry.addrlen) orelse continue;
-                self.addresses[self.count] = address;
-                self.count += 1;
-            }
-        }
-        self.state = .done;
-        // Under the lock: the owner cannot have released, so its waker lives.
-        self.waker.wake();
+    if (status != @as(std.c.EAI, @fromBackingInt(@intCast(0)))) return;
+    var next = list;
+    while (next) |entry| : (next = entry.next) {
+        if (self.count == max_addresses) break;
+        const addr = entry.addr orelse continue;
+        const address = Address.fromSockaddr(addr, entry.addrlen) orelse continue;
+        self.addresses[self.count] = address;
+        self.count += 1;
     }
-    self.references -= 1;
-    const last = self.references == 0;
-    unlock(self);
-    if (last) std.heap.c_allocator.destroy(self);
-    return null;
-}
-
-fn lock(self: *Resolver) void {
-    std.debug.assert(std.c.pthread_mutex_lock(&self.mutex) == .SUCCESS);
-}
-
-fn unlock(self: *Resolver) void {
-    std.debug.assert(std.c.pthread_mutex_unlock(&self.mutex) == .SUCCESS);
 }
 
 test "a lookup of an IP literal returns it, and a released lookup frees itself" {
@@ -162,7 +99,7 @@ test "a lookup of an IP literal returns it, and a released lookup frees itself" 
     const lookup = start(&waker, "127.0.0.1", 443) orelse return error.SkipZigTest;
     var poll = [_]std.c.pollfd{.{ .fd = waker.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&poll, 1, 5000));
-    const addresses = lookup.result().?;
+    const addresses = lookup.result().?.found();
     try std.testing.expectEqual(@as(usize, 1), addresses.len);
     try std.testing.expectEqual(@as(c_uint, std.c.AF.INET), addresses[0].family);
     lookup.release();
