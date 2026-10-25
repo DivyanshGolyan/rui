@@ -189,6 +189,17 @@ pub fn build(b: *std.Build) void {
     });
     configureTerminalEditor(b, terminal_notice);
 
+    const signal_stack_probe = ci.run(b.addExecutable(.{
+        .name = "rui-signal-stack-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/signal_stack_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    }));
+    signal_stack_probe.has_side_effects = true;
+    test_step.dependOn(&signal_stack_probe.step);
+
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
@@ -542,6 +553,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileInput(ci.path(release));
     fast_integrations.step.dependOn(&run_evaluator_host.step);
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
+    fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(

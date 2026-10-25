@@ -19,6 +19,7 @@ const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
+const signal_stack = @import("signal_stack.zig");
 const ExecutionSlot = server_execution.ExecutionSlot;
 const executionMain = server_execution.executionMain;
 
@@ -402,7 +403,7 @@ const Intake = struct {
         errdefer self.stopWorkers();
         for (&self.workers, &self.threads) |*worker, *thread| {
             worker.* = .{ .owner = self };
-            thread.* = try std.Thread.spawn(.{ .stack_size = intake_worker_stack_bytes }, Worker.run, .{worker});
+            thread.* = try signal_stack.spawn(.{ .stack_size = intake_worker_stack_bytes }, Worker.run, .{worker});
             self.started += 1;
         }
     }
@@ -881,14 +882,16 @@ pub fn serve(
 
     var bash_environment = try bash.environment(io, allocator, home);
     defer bash_environment.deinit();
-    const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
-    defer allocator.free(custody_records);
+    // Zero bytes are an empty custody record and retention entry, so fresh
+    // pages need no initializing pass and an unused one never becomes resident.
+    const custody_records = try server_host.mapZeroed(execution.CustodyRecord, active_capacity);
+    defer server_host.unmapZeroed(custody_records);
     const retention_capacity = @min(
         default_retention_entry_capacity,
         limits.retention_entry_capacity orelse default_retention_entry_capacity,
     );
-    const retention_entries = try allocator.alloc(output_retention.Entry, retention_capacity);
-    defer allocator.free(retention_entries);
+    const retention_entries = try server_host.mapZeroed(output_retention.Entry, retention_capacity);
+    defer server_host.unmapZeroed(retention_entries);
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -938,7 +941,7 @@ pub fn serve(
     try intake.init(&host);
     defer intake.deinit();
     host.intake_wake = intake.wake[1];
-    const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
+    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
         // Stop admitting new connections before releasing any Host-owned
