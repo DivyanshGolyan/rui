@@ -91,7 +91,7 @@ def run(*, observed=False, intake=100):
         limit = required - 4 * (100 - intake) + (2 if observed else 0)
         host, _ = start_ready_process(
             limited(limit), observations="managed" if observed else None,
-            required_fields={"execution": "enabled", "curl": "8.22.0", "intake_capacity": str(intake),
+            required_fields={"execution": "enabled", "nghttp2": "1.70.0", "intake_capacity": str(intake),
                              "descriptor_requirement": str(limit), "descriptor_limit": str(limit)},
         )
         diagnostics = HostDiagnostics(host)
@@ -151,9 +151,9 @@ def run(*, observed=False, intake=100):
         assert endpoint.request_headers[2][b"originator"] == b"rui"
         if observed:
             assert len(observations) == 3, observations
-            assert [row["http_version"] for row in observations] == ["3", "3", "3"], observations
-            assert int(observations[0]["connection_id"]) >= 0 and len({row["connection_id"] for row in observations}) == 1, observations
+            # One connection opened by the first transfer, reused by the next two.
             assert [row["new_connections"] for row in observations] == ["1", "0", "0"], observations
+            assert [row["replays"] for row in observations] == ["0", "0", "0"], observations
         print(f"codex synthetic TLS/H2 production transfers passed: intake_capacity={intake}, descriptor_limit={limit}, native_receipts={observed}, ALPN h2, one connection, three streams, conditional FedRAMP header")
         complete = True
     finally:

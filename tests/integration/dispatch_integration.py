@@ -2144,7 +2144,7 @@ def main(mode="all", correlation_case="all"):
             processes.remove(disposition_host)
         stop_endpoint(disposition_endpoint, endpoints)
 
-        # A local read failure while curl owns the request is a Host fault,
+        # A local read failure while the client owns the request is a Host fault,
         # not provider evidence. Fence dispatch, retain uncertainty and avoid
         # a same-process retry.
         local_read_endpoint = SuccessEndpoint(
@@ -2191,89 +2191,6 @@ def main(mode="all", correlation_case="all"):
         database.close()
         assert len(local_read_endpoint.requests) <= 1
         stop_endpoint(local_read_endpoint, endpoints)
-
-        # Completion identity is recovered only after the fixed slot owner
-        # matches curl's native handle. Missing, foreign and mismatched private
-        # pointers fence safely; the reactor removes the owned handle once, and
-        # shutdown still closes its transfer scratch and releases custody.
-        identity_endpoint = SuccessEndpoint(
-            [
-                sse_answer(
-                    f"identity-{index}",
-                    f"identity-r-{index}",
-                    f"identity-m-{index}",
-                    "must not publish",
-                )[0]
-                for index in range(3)
-            ]
-        )
-        identity_thread = threading.Thread(
-            target=identity_endpoint.serve_forever, daemon=True
-        )
-        endpoints[identity_endpoint] = identity_thread
-        identity_thread.start()
-        for index, (fault, expected_error) in enumerate(
-            (
-                ("completion-private-missing", "MissingTransportCompletionIdentity"),
-                ("completion-private-foreign", "MismatchedTransportCompletionIdentity"),
-                ("completion-private-mismatch", "MismatchedTransportCompletionIdentity"),
-            )
-        ):
-            identity_store = state / f"{fault}-store"
-            identity_host = start_host(
-                identity_store,
-                f"http://127.0.0.1:{identity_endpoint.server_port}/responses",
-                "--fault",
-                fault,
-            )
-            processes.append(identity_host)
-            session = configure(
-                state,
-                identity_store,
-                f"{fault}-config",
-                None,
-                "gpt-6-sol",
-            )
-            message(
-                state,
-                identity_store,
-                f"{fault}-message",
-                session,
-                fault,
-            )
-            wait_for(
-                lambda process=identity_host: process.poll() is not None,
-                f"{fault} fenced shutdown",
-            )
-            assert identity_host.returncode == 1, identity_host.returncode
-            stderr = identity_host.stderr.read()
-            assert expected_error.encode() in stderr, stderr
-            stop_host(identity_host)
-            processes.remove(identity_host)
-            assert len(identity_endpoint.requests) == index + 1
-            database = sqlite3.connect(identity_store / "rui.sqlite3")
-            assert database.execute(
-                "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
-            ).fetchone() == (1, 1, None)
-            database.close()
-
-            offline = start_host(identity_store, None)
-            processes.append(offline)
-            observation = observe(identity_store, f"{fault}-message")
-            assert observation["queue"]["status"] == "processing", observation
-            assert observation["processing"]["attempt"] == "1", observation
-            assert "result" not in observation, observation
-            resources = command(
-                "session", "inspect",
-                "--store",
-                identity_store,
-                "--session",
-                session,
-            )["execution"]
-            assert resources["scratch_used_bytes"] == "0", resources
-            stop_host(offline)
-            processes.remove(offline)
-        stop_endpoint(identity_endpoint, endpoints)
 
         # A replacement Attempt reuses the exact historical view, including
         # private continuation, even after newer settings and input commit.
@@ -4137,7 +4054,7 @@ def main(mode="all", correlation_case="all"):
         stop_endpoint(stale_endpoint, endpoints)
 
         # The smallest age-indexed selector keeps no scan state. With one live
-        # transport and a second permitted H1 connection it still finds a due
+        # transport and a second permitted stream it still finds a due
         # Operation behind 100 older future retries within the light-discovery target.
         backlog_stall_release = threading.Event()
         backlog_retry_release = threading.Event()
@@ -4627,61 +4544,65 @@ def main(mode="all", correlation_case="all"):
         processes.remove(host)
         stop_endpoint(capacity_endpoint, endpoints)
 
-        # H1 loopback is still supported, but a capacity-two Host now has
-        # only one provider connection. The second admitted Attempt waits in
-        # curl, then drains after the first releases it rather than spinning
-        # or opening a second socket.
-        h1_release = threading.Event()
-        releases.append(h1_release.set)
-        h1_endpoint = SuccessEndpoint(
+        # A peer allowing one stream at a time gets one connection per
+        # stream: the second Attempt is sent on its own connection while the
+        # first is held, instead of waiting behind it.
+        mcs1_release = threading.Event()
+        releases.append(mcs1_release.set)
+        mcs1_endpoint = SuccessEndpoint(
             [],
             responses_by_input={
-                "first": (sse_answer("h1-first", "h1-first-r", "gpt-6-sol", "first answer")[0], h1_release),
-                "second": sse_answer("h1-second", "h1-second-r", "gpt-6-sol", "second answer")[0],
+                "first": (sse_answer("mcs1-first", "mcs1-first-r", "gpt-6-sol", "first answer")[0], mcs1_release),
+                "second": sse_answer("mcs1-second", "mcs1-second-r", "gpt-6-sol", "second answer")[0],
             },
         )
-        h1_thread = threading.Thread(target=h1_endpoint.serve_forever, daemon=True)
-        endpoints[h1_endpoint] = h1_thread
-        h1_thread.start()
-        h1_store = state / "h1-queued-store"
-        h1_host = start_host(
-            h1_store,
-            f"http://127.0.0.1:{h1_endpoint.server_port}/responses",
+        mcs1_endpoint.h2_max_concurrent_streams = 1
+        mcs1_thread = threading.Thread(target=mcs1_endpoint.serve_forever, daemon=True)
+        endpoints[mcs1_endpoint] = mcs1_thread
+        mcs1_thread.start()
+        mcs1_store = state / "mcs1-store"
+        mcs1_host = start_host(
+            mcs1_store,
+            f"http://127.0.0.1:{mcs1_endpoint.server_port}/responses",
             "--active-capacity",
             "2",
         )
-        processes.append(h1_host)
-        h1_first_session = configure(state, h1_store, "h1-config-first", None, "gpt-6-sol")
-        h1_second_session = configure(state, h1_store, "h1-config-second", None, "gpt-6-sol")
-        message(state, h1_store, "h1-message-first", h1_first_session, "first")
-        wait_for(lambda: len(h1_endpoint.requests) == 1, "first H1 request")
-        message(state, h1_store, "h1-message-second", h1_second_session, "second")
-        wait_for(
-            lambda: command("session", "inspect", "--store", h1_store, "--session", h1_second_session)["execution"]["custody_occupied"] == "2",
-            "second H1 Attempt queued under the connection bound",
-        )
-        assert len(h1_endpoint.requests) == 1, h1_endpoint.requests
-        h1_release.set()
-        wait_for(lambda: completed_observation(h1_store, "h1-message-second"), "queued H1 completion")
-        assert read_result(h1_store, "h1-message-first") == b"first answer"
-        assert read_result(h1_store, "h1-message-second") == b"second answer"
-        assert len(h1_endpoint.requests) == 2
-        stop_host(h1_host)
-        processes.remove(h1_host)
-        stop_endpoint(h1_endpoint, endpoints)
+        processes.append(mcs1_host)
+        mcs1_first_session = configure(state, mcs1_store, "mcs1-config-first", None, "gpt-6-sol")
+        mcs1_second_session = configure(state, mcs1_store, "mcs1-config-second", None, "gpt-6-sol")
+        message(state, mcs1_store, "mcs1-message-first", mcs1_first_session, "first")
+        wait_for(lambda: len(mcs1_endpoint.requests) == 1, "first request on its connection")
+        message(state, mcs1_store, "mcs1-message-second", mcs1_second_session, "second")
+        wait_for(lambda: completed_observation(mcs1_store, "mcs1-message-second"), "second request completing beside the held first")
+        assert mcs1_endpoint.h2_connections == 2, mcs1_endpoint.h2_connections
+        assert "result" not in observe(mcs1_store, "mcs1-message-first")
+        mcs1_release.set()
+        wait_for(lambda: completed_observation(mcs1_store, "mcs1-message-first"), "held first completion")
+        assert read_result(mcs1_store, "mcs1-message-first") == b"first answer"
+        assert read_result(mcs1_store, "mcs1-message-second") == b"second answer"
+        assert len(mcs1_endpoint.requests) == 2
+        stop_host(mcs1_host)
+        processes.remove(mcs1_host)
+        stop_endpoint(mcs1_endpoint, endpoints)
 
-        # A capacity-waiting easy has no curl progress callback. Its Attempt
-        # must still expire while the first H1 response makes steady progress.
+        # Inactivity is per stream: a sibling's steady progress on the same
+        # connection does not keep a silent stream alive.
         pacing_end = threading.Event()
         releases.append(pacing_end.set)
+        silent_release = threading.Event()
+        releases.append(silent_release.set)
         slow_response = ResponseSpec(
             b"x" * 2048, {}, 422, chunk_delay=0.015, pacing_end=pacing_end
         )
-        slow_endpoint = SuccessEndpoint([slow_response])
+        silent_response = ResponseSpec(b"unused", {}, gate_timeout=60)
+        slow_endpoint = SuccessEndpoint([], responses_by_input={
+            "first": slow_response,
+            "second": (silent_response, silent_release),
+        })
         slow_thread = threading.Thread(target=slow_endpoint.serve_forever, daemon=True)
         endpoints[slow_endpoint] = slow_thread
         slow_thread.start()
-        slow_store = state / "h1-queue-deadline-store"
+        slow_store = state / "silent-sibling-store"
         slow_host = start_host(
             slow_store,
             f"http://127.0.0.1:{slow_endpoint.server_port}/responses",
@@ -4693,29 +4614,27 @@ def main(mode="all", correlation_case="all"):
         slow_first_session = configure(state, slow_store, "slow-config-first", None, "gpt-6-sol")
         slow_second_session = configure(state, slow_store, "slow-config-second", None, "gpt-6-sol")
         message(state, slow_store, "slow-message-first", slow_first_session, "first")
-        wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
+        wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first response")
         message(state, slow_store, "slow-message-second", slow_second_session, "second")
-        wait_for(
-            lambda: command("session", "inspect", "--store", slow_store, "--session", slow_second_session)["execution"]["custody_occupied"] == "2",
-            "both H1 Attempts in custody",
-        )
+        wait_for(lambda: len(slow_endpoint.requests) == 2, "silent second request")
         wait_for(
             lambda: command("session", "inspect", "--store", slow_store, "--session", slow_second_session)["execution"]["custody_occupied"] == "1",
-            "queued H1 Attempt releases custody on expiry",
+            "silent Attempt releases custody on expiry",
         )
-        assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
+        assert slow_endpoint.h2_connections == 1, slow_endpoint.h2_connections
         assert slow_response.body_finished_at is None
-        assert slow_host.poll() is None, "Host exited during queued H1 expiry"
+        assert slow_host.poll() is None, "Host exited during the silent sibling's expiry"
         pacing_end.set()
         slow_failure = wait_for(
             lambda: (value := observe(slow_store, "slow-message-first")).get("result", {}).get("code")
             == "provider_http_422"
             and value,
-            "progressing H1 completion",
+            "progressing completion",
         )
         assert slow_failure["queue"]["status"] == "failed", slow_failure
         stop_host(slow_host)
         processes.remove(slow_host)
+        silent_release.set()
         with sqlite3.connect(slow_store / "rui.sqlite3") as database:
             retry = database.execute(
                 "SELECT attempt_ordinal,uncertain,retry_due_at_ms FROM model_operation "
@@ -5158,9 +5077,9 @@ def main(mode="all", correlation_case="all"):
             "exact-capacity result",
             deadline=exact_deadline,
         )
-        # The request itself fits exactly and reaches HTTP. Its held charge
-        # intentionally leaves no shared scratch for the fixture response.
-        assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
+        # The request itself fits exactly and reaches HTTP. Its charge retires
+        # once the body is sent, so the fixture response reuses that scratch.
+        assert exact_result["result"]["code"] == "provider_http_422", exact_result
         wait_model_cleanup(
             exact_diagnostics, framing_exact_store, framing_exact_session,
             exact_result, exact_deadline,
@@ -5207,7 +5126,7 @@ def main(mode="all", correlation_case="all"):
         assert_model_cleanup_census(limit_diagnostics, limited)
         processes.remove(host)
 
-        # URL authority is parsed before curl sees it. Userinfo that makes a
+        # URL authority is parsed before the client sees it. Userinfo that makes a
         # prefix look loopback is rejected at startup and reaches no server.
         endpoint.requests.clear()
         deceptive = subprocess.run(

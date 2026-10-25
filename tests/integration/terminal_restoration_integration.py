@@ -23,7 +23,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import model_fixture as fixture
 import human_cli_integration as human
-from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
+from host_process import HostDiagnostics, HostStartError, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
 
 
@@ -941,34 +941,34 @@ def check_forwarding(state, library):
         dispose_all(release.touch, lambda: stop_process(caller, timeout=5))
 
 
-def capture_receipt_case(state, library):
-    """Required writer entry survives real, unrelated optional stderr custody."""
-    root = state / "capture-receipt"
+def stop_receipt_case(state, library):
+    """A required stop receipt survives real, unrelated optional stderr custody."""
+    root = state / "stop-receipt"
     root.mkdir(mode=0o700)
     store = root / "store"
     arm, release, log = (root / name for name in ("arm", "release", "probe.log"))
-    answer = b"exact capture answer"
     provider_release = threading.Event()
+    # The peer holds its response, so the Transfer is in flight when stopped.
     endpoint = fixture.SuccessEndpoint([
-        (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release)])
+        (fixture.ResponseSpec(b"unused", {}, gate_timeout=60), provider_release)])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
-    gate = ReleaseGate(root / "capture-gate")
     host = diagnostics = inspector = None
     try:
         host, _ = start_ready_process(fixture.host_arguments(store,
-            f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace",
-            "--test-response-capture-gate-path", gate.path), env={**os.environ,
+            f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace"),
+            observations="interrupt", env={**os.environ,
             os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
             "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
-        session = fixture.configure(root, store, "capture-config", None, "gpt-6-sol")
+        session = fixture.configure(root, store, "stop-config", None, "gpt-6-sol")
         # Admission uses the ordinary worker; complete it before that worker
-        # holds optional stderr. Only provider capture must progress under hold.
-        fixture.message(root, store, "capture-message", session, "hello")
+        # holds optional stderr. Only the provider stop must progress under hold.
+        fixture.message(root, store, "stop-message", session, "hello")
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
+        processing = fixture.observe(store, "stop-message")["processing"]
         arm.write_text(session)
         # A specific optional write may lose custody or output credit. Seek an
         # actual hold without requiring delivery of any one inspection trace.
@@ -989,26 +989,29 @@ def capture_receipt_case(state, library):
         assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == session, held
-        provider_release.set()
-        event = diagnostics.wait("capture_write_gate_entered", timeout=15)[0]
+        reply = fixture.command(
+            "session", "interrupt-model", "--store", store, "--record", root / "stop-interrupt.json",
+            "--key", "stop-interrupt", "--session", session,
+            "--turn", processing["turn"], "--operation", processing["operation"],
+        )
+        assert reply["answer"]["status"] == "accepted", reply
+        event = diagnostics.wait("effect_stop_requested", control_key="stop-interrupt", timeout=15)[0]
         assert event["process"] == held[0]["process"] and event["run"] == held[0]["run"], (event, held)
-        assert event["written_bytes"] == "0" and gate.path.exists() and not release.exists(), event
-        assert b"capture_write_gate_entered" not in diagnostics.tail(), "optional output supplied required receipt"
+        assert not release.exists(), event
+        assert b"effect_stop_requested" not in diagnostics.tail(), "optional output supplied required receipt"
         release.touch()
         out, err = inspector.communicate(timeout=3)
         assert inspector.returncode == 0, (out, err)
-        gate.release()
         deadline = time.monotonic() + 10
         observation, saved_answer, _ = fixture.wait_for_result_release(
-            store, "capture-message", session, deadline)
-        assert observation["result"]["status"] == "completed", observation
-        assert saved_answer == answer
-        print("native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
+            store, "stop-message", session, deadline)
+        assert observation["result"]["status"] == "cancelled", observation
+        assert saved_answer is None
+        print("native stop receipt: optional inspection drop tolerated within original deadline; stop receipt under actual stderr contention; cancelled with peer still holding and simultaneous zero custody/scratch", flush=True)
     finally:
         incoming_error = sys.exc_info()[1]
         if diagnostics is not None:
-            diagnostics.snapshot_failure(lambda: {"case": "capture-receipt",
-                "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
+            diagnostics.snapshot_failure(lambda: {"case": "stop-receipt", "optional_released": release.exists()})
 
         def retire_inspector():
             if inspector is not None and inspector.poll() is None:
@@ -1020,22 +1023,24 @@ def capture_receipt_case(state, library):
                     raise  # Mandatory reap does not accept the timed-out caller.
 
         errors = []
-        for dispose in (provider_release.set, release.touch, retire_inspector,
-                        lambda: diagnostics.dispose_capture(gate, lambda: {"case": "capture-receipt",
-                            "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
-                            if diagnostics is not None else gate.release(),
+        for dispose in (release.touch, retire_inspector,
+                        lambda: diagnostics.dispose_interrupt(
+                            lambda: {"case": "stop-receipt", "optional_released": release.exists()},
+                            controls=("stop-interrupt",))
+                            if diagnostics is not None else None,
+                        provider_release.set,
                         endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
             try:
                 dispose()
             except BaseException as error:
                 errors.append(error)
         if thread.is_alive():
-            errors.append(AssertionError("Capture endpoint thread did not retire"))
+            errors.append(AssertionError("Stop endpoint thread did not retire"))
         if errors:
             if incoming_error is None:
                 raise errors[0]
             try:
-                incoming_error.add_note("Capture cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
+                incoming_error.add_note("Stop cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
             except BaseException:
                 pass  # Secondary reporting cannot replace the primary failure.
 
@@ -2526,7 +2531,7 @@ def host_diagnostic_cases(state, library):
             try:
                 result.append(start_ready_process(fixture.host_arguments(store,
                     f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace"),
-                    env=env, required_fields={"execution": "enabled", "curl": "8.22.0"}))
+                    env=env, required_fields={"execution": "enabled", "nghttp2": "1.70.0"}))
             except BaseException as error:
                 result.append(error)
 
@@ -2658,7 +2663,7 @@ def host_diagnostic_cases(state, library):
                 *(["--fault", fault] if fault != "success" else []),
                 *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention-host", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
                 observations="control" if credit == "diagnostic-contention-host" else None,
-                required_fields={"execution": "enabled", "curl": "8.22.0"})
+                required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
             session = fixture.configure(root, store, "config", None, "gpt-6-sol")
             if credit == "diagnostic-contention-host":
                 other_session = fixture.configure(root, store, "config-other", None, "gpt-6-sol")
@@ -3030,9 +3035,9 @@ def main(selected=None):
         if selected == "forwarding":
             completed = True
             return
-        if selected in (None, "capture-receipt"):
-            capture_receipt_case(state, library)
-        if selected == "capture-receipt":
+        if selected in (None, "stop-receipt"):
+            stop_receipt_case(state, library)
+        if selected == "stop-receipt":
             completed = True
             return
         if selected in (None, "host-diagnostics"):

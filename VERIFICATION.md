@@ -328,7 +328,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Gated race ordering: sealed holds, four incomplete terminal inputs, dispatch stall witness, queued H1 expiry, exhausted-recovery admission | `control_integration.py`, `human_cli_integration.py` `incomplete_input_case`, `dispatch_integration.py` | Exhausted recovery permits one real call before an opt-in nonblocking hold. The fixture requires its native receipt and owned empty FIFO before checking due/new launches, then releases recovery and checks drainage. A first-call full-drain mutant must fail the unresolved-sentinel assertion. Incomplete inputs run serially against one Host. Pasted typeahead before readiness must not approve an Action. The stall witness owns one inactivity failure; exhaustion and progressing cases own theirs |
+| Gated race ordering: sealed holds, four incomplete terminal inputs, dispatch stall witness, silent-sibling expiry, exhausted-recovery admission | `control_integration.py`, `human_cli_integration.py` `incomplete_input_case`, `dispatch_integration.py` | Exhausted recovery permits one real call before an opt-in nonblocking hold. The fixture requires its native receipt and owned empty FIFO before checking due/new launches, then releases recovery and checks drainage. A first-call full-drain mutant must fail the unresolved-sentinel assertion. Incomplete inputs run serially against one Host. Pasted typeahead before readiness must not approve an Action. The stall witness owns one inactivity failure; exhaustion and progressing cases own theirs |
 | First committed control wins; [hint grants no authority](ARCHITECTURE.md#live-control-notification) | `prove_pre_handoff_stop`, `prove_sealed_interruption_and_cleanup`, `'without a control hint'` | Not remote termination. Omitting only the superseded branch's `finishCustodyNow` must fail the zero-custody deadline; no automated mutation located |
 | Release within eight seconds | `HostDiagnostics.wait_model_cleanup`, `wait_for_execution_release`, `claim_inspection`, `host_process_test.py` | Not an idle-population census; no native macOS coverage |
 | Control case disposal | `stop_control_case`, `prove_control_disposal_oracle` | Incoming assertion stays primary; cleanup failure still fails |
@@ -397,7 +397,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | --- | --- | --- |
 | [Fixed custody population](ARCHITECTURE.md#capacity-ownership) | `'execution slots agree with custody across the complete population'`, `'no-work admission restores only its temporary custody reservation'` | Full scan, no free list; never a durable slot registry |
 | Attempt admission rollback | `dispatch-integration` | Sample custody after `releaseUnused` in the same owner turn; suppressing it must fail |
-| [Selection progress](ARCHITECTURE.md#capacity-and-selection-progress) and waits | `test-logic`, `'kind-specific admission'`, `'production turn preserves skipped continuation'`, `'receive advancement'`, `'receive scans without resume capacity'`, `'runnable discovery measures eligible ineligible and history populations independently'` | Not native transport or cross-platform qualification |
+| [Selection progress](ARCHITECTURE.md#capacity-and-selection-progress) and waits | `test-logic`, `'kind-specific admission'`, `'production turn preserves skipped continuation'`, `'runnable discovery measures eligible ineligible and history populations independently'` | Not native transport or cross-platform qualification |
 | Resumable model preparation | `test-logic -Dtest-filter='request encoding'`, `'request preparation'`, `dispatch-integration` | Service gaps are observational, not turn-ordering proof |
 | Discovery-hint replacement | none | Only when a replacement is introduced |
 
@@ -427,10 +427,10 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Shared H2 and bounded H1 | `transport-h2-integration` | Opt-in; needs Python `h2==4.3.0`, OpenSSL CLI. Not footprint |
+| Shared H2, peer-held streams and an isolated write failure | `transport-h2-integration` | Opt-in; needs Python `h2==4.3.0`, OpenSSL CLI. Not footprint |
 | Repeat-work footprint | `transport_h2_integration.py zig-out/bin/rui --observed-shape-churn` | macOS ReleaseSmall, opt-in; fails above 25,000,000 bytes. Not the Go repeat-work profile |
 | Original result and release deadlines: one deadline per population, forwarded through reads and global release | `transport_h2_integration_test.py`, `host_process_test.py` | A clean reply at or after the deadline fails. Held cleanup must refuse through the deadline |
-| Transfer finalization | `'Transfer finalization waits for real writer drainage and seals once'` | None |
+| Transfer finalization | `'HTTP error capture retires before execution custody'`, `'a completed Transfer finds its own slot and nothing else'` | None |
 
 ### Scratch and cleanup
 
@@ -478,7 +478,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Cleanup custody retires before publication | `'cleanup publication follows'` | Reversed retirement must fail. Not lease release |
 | Receipt versus publication retirement | `prove_intentional_crash_retirement`, `prove_observation_disposal` | Crash paths stay unsealed; ordinary teardown seals |
 | No-launch crash cut | `bash_integration.py` `prepared-before-handoff`, `prove_gate_broadcast` | Released gate must fail. Marker absence and publication retirement are not evidence |
-| Capture receipts | `prove_required_capture_receipts`, `transport_h2_integration.py` capture cases, `terminal_restoration_integration.py capture-receipt` | Single cases are partial |
+| Required stop receipts | `prove_required_receipts`, `transport_h2_integration.py` held cases, `terminal_restoration_integration.py stop-receipt` | Single cases are partial |
 | Descriptor witness and refusal | `descriptor-capacity-integration`, `prove_capacity_refusal_oracle` | `BrokenPipeError` is not refusal. FD snapshots cannot replace endpoints |
 | Readiness drains PTY and notification pipe | `host-launch-integration` (`check_action_ready`) | Keep withheld-credit tests distinct |
 | Failure retention: 16 roots, 128 files, 1 MiB/file, 16 MiB, 3 days | `tests/ci/test_failure_artifacts.py` | Cumulative. Failure keeps original error and teardown |

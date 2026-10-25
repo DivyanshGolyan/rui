@@ -6,6 +6,7 @@ const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const h2 = @import("h2");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -17,7 +18,7 @@ const PreparedRequest = provider.PreparedRequest;
 
 // The sole V1 model adapter owns Codex wire grammar, output interpretation,
 // and managed-route authentication. The Host owns only effect scheduling and
-// the provider transport owns only curl and sealed byte lifetimes.
+// the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
 pub const provider_label = @import("model_capability.zig").provider_label;
 pub const validModel = @import("model_capability.zig").validModel;
 pub const capability = @import("model_capability.zig").capability;
@@ -399,16 +400,14 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
 }
 
 pub const Headers = struct {
-    bearer: [codex_credentials.max_token_bytes + 32:0]u8 = undefined,
-    account: [codex_credentials.max_account_id_bytes + 32:0]u8 = undefined,
-    session: [48:0]u8 = undefined,
-    turn_state: [provider.max_turn_state_bytes + 32:0]u8 = undefined,
-    entries: [8][:0]const u8 = undefined,
+    bearer: [codex_credentials.max_token_bytes + 8]u8 = undefined,
+    session: [32]u8 = undefined,
+    entries: [8]h2.Field = undefined,
     length: usize = 0,
 
-    /// Initialize in final stack storage. The entries are borrowed only until
-    /// Transfer.start copies them into its owned curl header list. A nonempty
-    /// turn state comes from TurnStates.replay for this Attempt's Turn.
+    /// Initialize in final stack storage. The fields are borrowed only until
+    /// Transfer.start, whose stream copies them. A nonempty turn state comes
+    /// from TurnStates.replay for this Attempt's Turn, and is borrowed too.
     pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8, turn_state: []const u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
@@ -422,29 +421,33 @@ pub const Headers = struct {
             return error.InvalidCredentialHeader;
         for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
         for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
-        const bearer = try std.fmt.bufPrintSentinel(&self.bearer, "Authorization: Bearer {s}", .{access}, 0);
-        const account = try std.fmt.bufPrintSentinel(&self.account, "ChatGPT-Account-ID: {s}", .{account_id}, 0);
-        const session_id = std.fmt.bytesToHex(affinity, .lower);
-        const session = try std.fmt.bufPrintSentinel(&self.session, "session-id: {s}", .{&session_id}, 0);
-        self.entries[0..6].* = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "User-Agent: rui/" ++ @import("transport_options").revision };
+        const bearer = try std.fmt.bufPrint(&self.bearer, "Bearer {s}", .{access});
+        self.session = std.fmt.bytesToHex(affinity, .lower);
+        self.entries[0..6].* = .{
+            .{ .name = "accept", .value = "text/event-stream" },
+            .{ .name = "authorization", .value = bearer, .sensitive = true },
+            .{ .name = "chatgpt-account-id", .value = account_id, .sensitive = true },
+            .{ .name = "session-id", .value = &self.session },
+            .{ .name = "originator", .value = "rui" },
+            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision },
+        };
         self.length = 6;
         if (credential.record.fedramp) {
-            self.entries[self.length] = "X-OpenAI-Fedramp: true";
+            self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true" };
             self.length += 1;
         }
         if (turn_state.len != 0) {
-            self.entries[self.length] = try std.fmt.bufPrintSentinel(&self.turn_state, "x-codex-turn-state: {s}", .{turn_state}, 0);
+            self.entries[self.length] = .{ .name = "x-codex-turn-state", .value = turn_state };
             self.length += 1;
         }
     }
 
-    pub fn slice(self: *const Headers) []const [:0]const u8 {
+    pub fn fields(self: *const Headers) []const h2.Field {
         return self.entries[0..self.length];
     }
 
     pub fn deinit(self: *Headers) void {
         std.crypto.secureZero(u8, &self.bearer);
-        std.crypto.secureZero(u8, &self.account);
         self.* = undefined;
     }
 };
@@ -645,24 +648,27 @@ test "Codex headers carry turn state only when the Turn has one" {
             var headers: Headers = .{};
             defer headers.deinit();
             try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, @splat(0xab), turn_state);
-            const entries = headers.slice();
+            const entries = headers.fields();
             var found: ?[]const u8 = null;
             var fedramp_found = false;
             for (entries) |entry| {
-                if (std.ascii.startsWithIgnoreCase(entry, "x-codex-turn-state:")) {
+                // h2 sends names as given, and HTTP/2 requires them lowercase.
+                for (entry.name) |byte| try std.testing.expect(!std.ascii.isUpper(byte));
+                try std.testing.expectEqual(std.mem.eql(u8, entry.name, "authorization") or
+                    std.mem.eql(u8, entry.name, "chatgpt-account-id"), entry.sensitive);
+                if (std.mem.eql(u8, entry.name, "x-codex-turn-state")) {
                     try std.testing.expect(found == null);
-                    found = entry;
+                    found = entry.value;
                 }
-                if (std.mem.eql(u8, entry, "X-OpenAI-Fedramp: true")) fedramp_found = true;
+                if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
+                if (std.mem.eql(u8, entry.name, "authorization"))
+                    try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
+                if (std.mem.eql(u8, entry.name, "session-id"))
+                    try std.testing.expectEqualStrings("abababababababababababababababab", entry.value);
             }
             try std.testing.expectEqual(fedramp, fedramp_found);
             try std.testing.expectEqual(@as(usize, 6) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
-            if (turn_state.len == 0) {
-                try std.testing.expect(found == null);
-            } else {
-                try std.testing.expectEqualStrings("x-codex-turn-state: ", found.?[0..20]);
-                try std.testing.expectEqualStrings(turn_state, found.?[20..]);
-            }
+            try std.testing.expectEqualStrings(turn_state, found orelse "");
         }
     }
 }

@@ -35,15 +35,15 @@ def semantics(platform_name):
     # positive write sets it; a successful F_SETFL cannot clear write history.
     FILE_FLAG_HISTORY = 0x00010000 if DARWIN else 0
 
-    # Rui's pinned curl creates two wakeup objects per multi handle: one eventfd
-    # each on Linux, one pipe (two descriptors) each on Darwin. These mirror
-    # descriptor_capacity.zig independently.
-    TRANSPORT_WAKE_DESCRIPTORS = 4 if DARWIN else 2
-    # Lease(2), SQLite(4), listener(1) and the transport wake objects.
+    # Each h2 Client has one waker: an eventfd on Linux, a pipe (two
+    # descriptors) on Darwin. These mirror descriptor_capacity.zig
+    # independently.
+    TRANSPORT_WAKE_DESCRIPTORS = 2 if DARWIN else 1
+    # Lease(2), SQLite(4), listener(1) and the transport waker.
     HOST_FIXED_DESCRIPTORS = 2 + 4 + 1 + TRANSPORT_WAKE_DESCRIPTORS
-    # Credential parent and lock (2), curl's private wakeups, two connection
-    # sockets and two trust-loading handles.
-    AUTHENTICATION_DESCRIPTORS = 2 + TRANSPORT_WAKE_DESCRIPTORS + 2 + 2
+    # Credential parent and lock (2), the refresh Client's waker, one
+    # connection socket and two trust-loading handles.
+    AUTHENTICATION_DESCRIPTORS = 2 + TRANSPORT_WAKE_DESCRIPTORS + 1 + 2
 
     # Darwin's libmalloc may open one socket before Host ownership begins; it
     # counts as inherited beside stdio.

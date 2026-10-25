@@ -393,6 +393,13 @@ pub const Client = extern struct {
     pub fn finishedCount(self: *const Client) usize {
         return Engine.ofConst(self).finished_count;
     }
+
+    /// True while any connection exists, open or opening, even with no
+    /// stream left. Keep driving until it is false: a cancel's RST_STREAM,
+    /// PING answers and the idle close all go out only from `drive`.
+    pub fn hasConnections(self: *const Client) bool {
+        return Engine.ofConst(self).connections_len > 0;
+    }
 };
 
 // ----------------------------------------------------------------- exchange

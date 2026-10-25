@@ -453,7 +453,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
         observations=observations,
         stderr_pipe=stderr_pipe,
         required_fields=(
-            {"execution": "enabled", "curl": "8.22.0"}
+            {"execution": "enabled", "nghttp2": "1.70.0"}
             if endpoint is not None
             else {"execution": "unavailable"}
         ),

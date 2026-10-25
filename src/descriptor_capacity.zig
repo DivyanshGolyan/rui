@@ -49,13 +49,12 @@ pub fn calculate(
     const listener: usize = 1;
     var fixed_host = try add(store_lease, sqlite);
     fixed_host = try add(fixed_host, listener);
-    // Rui's pinned curl creates two wakeup objects for one multi handle. Linux
-    // implements each with one eventfd; macOS implements each with a pipe.
+    // The h2 Client's one waker: an eventfd on Linux, a pipe on macOS.
     const transport_wake: usize = if (!provider_configured)
         0
     else switch (os_tag) {
-        .linux => 2,
-        .macos => 4,
+        .linux => 1,
+        .macos => 2,
         else => return error.UnsupportedDescriptorPlatform,
     };
     fixed_host = try add(fixed_host, transport_wake);
@@ -72,7 +71,8 @@ pub fn calculate(
     const clients = try add(ordinary_clients, control_exchanges);
 
     // A model slot owns one request file, two response aliases, and at most
-    // two Happy Eyeballs transport sockets: five. A running Bash slot owns its
+    // one transport socket: four. h2 tries addresses one socket at a time and
+    // never holds more connections than streams. A running Bash slot owns its
     // two capture files, two parent pipe ends and optional stdin file: five. Only
     // one serial preparation/spawn/cleanup transition exists. Its budgeted
     // excess of five covers Bash spawn, including both stdin aliases and two child pipe
@@ -86,14 +86,14 @@ pub fn calculate(
 
     // The Host-wide authentication worker may refresh while the execution
     // owner spawns Bash at its descriptor peak. Its credential parent and lock
-    // (2) overlap curl's private wakeups (2 eventfds on Linux, 2 pipes on
-    // macOS), two connection sockets and up to two trust-loading handles.
+    // (2) overlap its private h2 Client's waker (an eventfd on Linux, a pipe
+    // on macOS), one connection socket and up to two trust-loading handles.
     // Publishing the replacement instead holds at most two additional files.
     const authentication: usize = if (!authentication_configured or active_capacity == 0)
         0
     else switch (os_tag) {
-        .linux => 8,
-        .macos => 10,
+        .linux => 6,
+        .macos => 7,
         else => return error.UnsupportedDescriptorPlatform,
     };
 
@@ -126,7 +126,7 @@ fn executionPopulation(active_capacity: usize) !ExecutionPopulation {
         .bash_spawn = 0,
         .maximum = 0,
     };
-    const model_slot = try add(1, try add(2, 2));
+    const model_slot = try add(1, try add(2, 1));
     const bash_slot = try add(2, 3);
     const occupied_slot = @max(model_slot, bash_slot);
     const other_slots = try multiply(active_capacity - 1, occupied_slot);
@@ -169,25 +169,25 @@ fn multiply(left: usize, right: usize) !usize {
 test "requirement uses simultaneous owner populations rather than summing exclusive maxima" {
     const linux = try calculate(3, 2, 10, 2, true, false, .linux);
     try std.testing.expectEqual(@as(usize, 3), linux.inherited);
-    try std.testing.expectEqual(@as(usize, 9), linux.fixed_host);
+    try std.testing.expectEqual(@as(usize, 8), linux.fixed_host);
     try std.testing.expectEqual(@as(usize, 42), linux.clients);
     try std.testing.expectEqual(@as(usize, 15), linux.execution);
     try std.testing.expectEqual(@as(usize, 0), linux.authentication);
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
-    try std.testing.expectEqual(@as(usize, 71), linux.total);
+    try std.testing.expectEqual(@as(usize, 70), linux.total);
 
     const managed = try calculate(3, 2, 10, 2, true, true, .linux);
-    try std.testing.expectEqual(@as(usize, 8), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 79), managed.total);
+    try std.testing.expectEqual(@as(usize, 6), managed.authentication);
+    try std.testing.expectEqual(@as(usize, 76), managed.total);
 
     const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
     try std.testing.expectEqual(@as(usize, 69), without_transport.total);
 
     const macos = try calculate(3, 2, 10, 2, true, true, .macos);
-    try std.testing.expectEqual(@as(usize, 11), macos.fixed_host);
-    try std.testing.expectEqual(@as(usize, 10), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 83), macos.total);
+    try std.testing.expectEqual(@as(usize, 9), macos.fixed_host);
+    try std.testing.expectEqual(@as(usize, 7), macos.authentication);
+    try std.testing.expectEqual(@as(usize, 78), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
@@ -199,7 +199,7 @@ test "zero execution capacity has no unreachable preparation or spawn population
 
 test "execution population compares exclusive steady and shared transition overlaps" {
     const population = try executionPopulation(2);
-    try std.testing.expectEqual(@as(usize, 10), population.model_full);
+    try std.testing.expectEqual(@as(usize, 8), population.model_full);
     try std.testing.expectEqual(@as(usize, 10), population.bash_full);
     try std.testing.expectEqual(@as(usize, 8), population.model_preparation);
     try std.testing.expectEqual(@as(usize, 11), population.bash_preparation);

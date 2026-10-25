@@ -108,7 +108,8 @@ def finish(stream, body):
 
 
 def mixed_effect_drain(provider_first):
-    """A held provider capture cannot postpone another owner's retirement."""
+    """A peer-held provider stream cannot postpone the Host's stop or another
+    owner's retirement."""
     order = "provider-before-Bash" if provider_first else "Bash-before-provider"
     with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root, contextlib.ExitStack() as handles:
         state = canonical_fixture_root(root)
@@ -132,17 +133,16 @@ def mixed_effect_drain(provider_first):
             ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None, "description": "Write Host stop lifecycle events"}))
         ])
         large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
-        endpoint = fixture.SuccessEndpoint([], responses_by_input={"bash": proposal, "provider": large})
+        provider_release = threading.Event()
+        endpoint = fixture.SuccessEndpoint([], responses_by_input={
+            "bash": proposal, "provider": (fixture.ResponseSpec(large, {}, gate_timeout=60), provider_release)})
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
-        gate = ReleaseGate(state / "capture-gate")
         host = None
         diagnostics = None
         try:
             host = fixture.start_host(
                 store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                "--test-response-capture-gate-path", gate.path,
-                "--test-response-capture-gate-min-written-bytes", "4096",
                 "--test-phase-trace", active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
             )
             diagnostics = HostDiagnostics(host)
@@ -159,8 +159,7 @@ def mixed_effect_drain(provider_first):
 
             def hold_provider():
                 fixture.message(state, store, "message-provider", provider_session, "provider")
-                diagnostics.wait("capture_write_gate_entered")
-                assert gate.fd is not None
+                fixture.wait_for(lambda: len(endpoint.requests) == 2, "peer-held provider request")
 
             if provider_first:
                 hold_provider()
@@ -172,22 +171,15 @@ def mixed_effect_drain(provider_first):
             occupied = fixture.command("session", "inspect", "--store", store, "--session", bash_session)["execution"]
             assert int(occupied["custody_occupied"]) == 2, occupied
             assert actor("stop", store, instance(store)) == "acknowledged"
-            fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held capture")
-            assert status(store) == "owned_unavailable"
-            assert host.poll() is None, "held capture must retain the Host and Store lease"
+            fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held provider")
 
-            # This is the regression assertion, before the capture gate opens.
-            # Both admission orders must retire and release Bash independently.
+            # Both admission orders must retire Bash, and stop cancels the
+            # provider stream while its peer still holds the response.
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
-                             f"{order}: Bash TERM before provider capture release", timeout=2)
+                             f"{order}: Bash TERM with provider held", timeout=2)
             diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
-            assert gate.fd is not None and host.poll() is None
-            assert status(store) == "owned_unavailable"
-            contender = subprocess.run([RUI, "host", "serve", "--store", store, "--active-capacity", "1"],
-                                       capture_output=True, timeout=10)
-            assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
-            gate.release()
             assert host.wait(timeout=10) == 1, host.returncode
+            assert not provider_release.is_set(), "the peer released the provider before Host exit"
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
             model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]
@@ -202,28 +194,15 @@ def mixed_effect_drain(provider_first):
             assert bash_fixture.rows(store, "SELECT session_ref,attempt_ordinal,resolution_code FROM model_operation ORDER BY session_ref") == sorted([
                 (bash_session, 1, "tool_proposals"), (provider_session, 1, None),
             ])
-            print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; lease held, scratch=0")
+            print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup; Host exited with the peer still holding, scratch=0")
         finally:
             incoming_error = sys.exc_info()[1]
             if diagnostics is not None:
                 diagnostics.snapshot_failure(lambda: {"case": "mixed_effect_drain", "order": order,
-                    "capture_gate_exists": gate.path.exists(), "capture_held": gate.fd is not None})
+                    "provider_released": provider_release.is_set()})
             errors = []
-            for release in (gate.release,):
-                try:
-                    release()
-                except BaseException as error:
-                    errors.append(error)
-            if host is not None:
-                if host.poll() is None:
-                    # On the red path, let the original owner drain once the
-                    # fixture's capture gate opens; kill only if it cannot.
-                    try:
-                        host.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        pass  # Shared disposal still owns mandatory kill/reap.
             for dispose in (lambda: stop_process(host) if host is not None else None,
-                            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+                            provider_release.set, endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
                 try:
                     dispose()
                 except BaseException as error:

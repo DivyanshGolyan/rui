@@ -2,7 +2,7 @@
 //!
 //! Builds request bodies and interprets response statuses and bodies for the
 //! pinned device-code flow and refresh, and builds the login and refresh
-//! records those exchanges produce. Callers own curl, the clock and the
+//! records those exchanges produce. Callers own the transport, the clock and the
 //! polling loop; selection and admission live in `codex_credential_policy.zig`.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");

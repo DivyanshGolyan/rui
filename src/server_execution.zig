@@ -236,7 +236,6 @@ const lifecycle_trace_interval_ms = 100;
 const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     bash_window: [bash.copy_window_bytes]u8,
-    capture_buffers: provider.CaptureWriter.Buffers,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
 };
@@ -279,44 +278,36 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
-    var capture_writer = provider.CaptureWriter{
-        .io = host.io,
-        .budget = host.retention.sharedBudget().narrowed(
-            if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
-        ),
-        .buffers = &workspace[0].capture_buffers,
-        .test_gate_path = host.faults.response_capture_gate_path,
-        .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
-        .test_observation = host.test_observation,
-    };
-    const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
-        signal_stack.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
-            fenceDispatch(host, "capture writer initialization", err);
-            return;
-        }
-    else
-        null;
-    if (capture_thread != null) host.capture_writer = &capture_writer;
-    defer if (capture_thread) |thread| {
-        host.capture_writer = null;
-        capture_writer.stop(thread);
-    };
-    var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
-        provider.Reactor.init(slots.len, .{
-            .names = model_adapter.observation_names,
-            .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+    const budget = host.retention.sharedBudget().narrowed(
+        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
+    );
+    var reactor_storage: provider.Reactor = undefined;
+    const reactor: ?*provider.Reactor = if (host.provider_endpoint) |endpoint| reactor: {
+        reactor_storage.init(host.allocator, host.io, .{
+            .endpoint = endpoint,
+            .ca_file = host.provider_ca_file,
+            .capacity = slots.len,
+            .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
+            .observation = .{
+                .names = model_adapter.observation_names,
+                .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+            },
+            .scratch_path = host.lease.paths.scratch.slice(),
+            .budget = budget,
         }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
-        }
-    else
-        null;
-    defer if (reactor) |*active| active.deinit();
+        };
+        break :reactor &reactor_storage;
+    } else null;
+    defer if (reactor) |active| active.deinit();
+    if (reactor != null) host.scratch_budget = budget;
+    defer host.scratch_budget = null;
     var bash_preparation: ?bash.Preparation = null;
     const model_preparation = &workspace[0].model_preparation;
     defer shutdownExecution(
         host,
-        if (reactor) |*active| active else null,
+        reactor,
         slots,
         &bash_preparation,
         model_preparation,
@@ -324,13 +315,11 @@ pub fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
-    var next_receive_slot: usize = 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var native = NativeTurn{
             .host = host,
-            .reactor = if (reactor) |*active| active else null,
+            .reactor = reactor,
             .slots = slots,
-            .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
             .model_preparation = model_preparation,
             .bash_window = &workspace[0].bash_window,
@@ -342,7 +331,9 @@ pub fn executionMain(host: *Host) void {
             .wait => |kind| {
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
-                    .transport => reactor.?.wait(25) catch |err| {
+                    // Connections without a Transfer only need their
+                    // timers and peer bytes served: the idle cadence.
+                    .transport => reactor.?.wait(if (slotsHaveTransport(slots)) 25 else 100) catch |err| {
                         fenceDispatch(host, "transport wait", err);
                         break;
                     },
@@ -376,7 +367,6 @@ const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
-    next_receive_slot: *usize,
     bash_preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
     bash_window: []u8,
@@ -468,7 +458,9 @@ const NativeTurn = struct {
     }
 
     pub fn hasTransport(self: *const NativeTurn) bool {
-        return slotsHaveTransport(self.slots);
+        if (slotsHaveTransport(self.slots)) return true;
+        const reactor = self.reactor orelse return false;
+        return reactor.hasConnections();
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
@@ -577,7 +569,7 @@ const NativeTurn = struct {
     }
 
     pub fn driveTransport(self: *NativeTurn) error{Fence}!void {
-        self.reactor.?.drive(0) catch |err| {
+        self.reactor.?.drive() catch |err| {
             fenceDispatch(self.host, "transport reactor", err);
             self.fenced = true;
             return error.Fence;
@@ -586,7 +578,7 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.next_receive_slot);
+        return callServiceOneCompletion(self.host, self.reactor, self.slots);
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -615,118 +607,44 @@ const callAdvanceRetainedCleanup = advanceRetainedCleanup;
 const slotsHaveTransport = hasTransport;
 const slotsHaveBash = hasBash;
 
-fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
+/// One finished transfer per call, found by address: a Transfer lives
+/// inside exactly one slot.
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
     const active_reactor = reactor orelse return false;
-    for (slots) |*slot| switch (slot.*) {
-        .provider => if (advanceModelFinalization(host, slot, host.faults.response_seal)) return true,
-        else => {},
-    };
-    const active_transfers = ActiveSlots{ .slots = slots };
-    const completed = active_reactor.nextCompletion(.{
-        .context = &active_transfers,
-        .find_fn = findActiveTransfer,
-    }) catch |err| {
+    const completion = active_reactor.nextCompletion(host.faults.response_seal) catch |err| {
         fenceDispatch(host, "transport completion", err);
         return false;
+    } orelse return false;
+    const slot = slotOfTransfer(slots, completion.transfer) orelse {
+        fenceDispatch(host, "transport completion", error.UnknownTransportCompletion);
+        return false;
     };
-    if (completed) return true;
-    return advanceOneTransfer(host, active_reactor, slots, next_receive_slot);
-}
-
-fn advanceOneTransfer(host: *Host, reactor: anytype, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
-    // This thread is the sole producer. Freeze readiness for the scan so a
-    // worker drain cannot let a later slot bypass an earlier paused one.
-    const resume_allowed = host.capture_writer.?.hasRoom();
-    for (0..slots.len) |offset| {
-        const index = (next_receive_slot.* + offset) % slots.len;
-        const slot = &slots[index];
-        switch (slot.*) {
-            .provider => |*active| {
-                const progress = reactor.advance(&active.transfer, resume_allowed, &host.faults.response_write_on_resume) catch |err| {
-                    fenceDispatch(host, "transport advance", err);
-                    return false;
-                };
-                switch (progress) {
-                    .progressed, .resume_capture_failure => {
-                        next_receive_slot.* = (index + 1) % slots.len;
-                        if (progress == .resume_capture_failure)
-                            traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
-                        return true;
-                    },
-                    .not_ready => {},
-                }
-            },
-            else => {},
-        }
-    }
-    return false;
-}
-
-test "receive advancement serves paused siblings across recurring queue pressure" {
-    const RecordingReactor = struct {
-        slots: []ExecutionSlot,
-        writer: *provider.CaptureWriter,
-        selected: ?usize = null,
-        drain_during_scan: bool = false,
-
-        fn advance(self: *@This(), transfer: *provider.Transfer, resume_allowed: bool, _: *bool) error{}!provider.Reactor.Advance {
-            // A worker may release space just after a paused candidate was
-            // examined. That must not let a later candidate bypass it.
-            if (self.drain_during_scan) {
-                self.writer.count = 0;
-                self.drain_during_scan = false;
-            }
-            if (!resume_allowed) return .not_ready;
-            for (self.slots, 0..) |*slot, index| {
-                if (slot.* == .provider and &slot.provider.transfer == transfer) {
-                    self.selected = index;
-                    self.writer.count = 16;
-                    return .progressed;
-                }
-            }
-            unreachable;
-        }
-    };
-    var buffers: provider.CaptureWriter.Buffers = undefined;
-    var writer = provider.CaptureWriter{ .io = std.testing.io, .budget = undefined, .buffers = &buffers };
-    var host: Host = undefined;
-    host.capture_writer = &writer;
-    host.faults = .{};
-    var slots = [_]ExecutionSlot{ .{ .provider = .{ .owner = .{} } }, .free, .{ .provider = .{ .owner = .{} } } };
-    var reactor = RecordingReactor{ .slots = &slots, .writer = &writer };
-    var next: usize = 0;
-    for ([_]usize{ 0, 2, 0, 2 }) |expected| {
-        writer.count = 0;
-        try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
-        try std.testing.expectEqual(expected, reactor.selected.?);
-    }
-    next = 2;
-    reactor.selected = null;
-    reactor.drain_during_scan = true;
-    try std.testing.expectEqual(false, advanceOneTransfer(&host, &reactor, &slots, &next));
-    try std.testing.expectEqual(@as(?usize, null), reactor.selected);
-    try std.testing.expectEqual(@as(usize, 2), next);
-    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
-    try std.testing.expectEqual(@as(usize, 2), reactor.selected.?);
-    slots[2] = .free;
-    writer.count = 0;
-    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
-    try std.testing.expectEqual(@as(usize, 0), reactor.selected.?);
-    try std.testing.expect(!advanceOneTransfer(&host, &reactor, &.{}, &next));
-}
-
-fn advanceModelFinalization(host: *Host, slot: *ExecutionSlot, fail_seal: bool) bool {
-    const active = &slot.provider;
-    switch (active.transfer.advanceFinalization(fail_seal)) {
-        .pending => return false,
-        .discarded => {
-            const token = active.owner.token;
-            active.transfer.deinit();
-            finishCustodyNow(host, slot, token);
-        },
-        .ready => |finished| completeTransfer(host, slot, finished),
-    }
+    completeTransfer(host, slot, completion);
     return true;
+}
+
+/// O(1). Null for an address outside `slots` or a slot whose Transfer it
+/// is not: a programmer error, never peer input.
+fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*ExecutionSlot {
+    const base = @intFromPtr(slots.ptr);
+    const address = @intFromPtr(transfer);
+    if (address < base or address >= base + slots.len * @sizeOf(ExecutionSlot)) return null;
+    const slot = &slots[(address - base) / @sizeOf(ExecutionSlot)];
+    if (slot.* != .provider or &slot.provider.transfer != transfer) return null;
+    return slot;
+}
+
+test "a completed Transfer finds its own slot and nothing else" {
+    var slots = [_]ExecutionSlot{ .free, .{ .provider = .{ .owner = .{} } }, .{ .provider = .{ .owner = .{} } } };
+    try std.testing.expectEqual(&slots[1], slotOfTransfer(&slots, &slots[1].provider.transfer).?);
+    try std.testing.expectEqual(&slots[2], slotOfTransfer(&slots, &slots[2].provider.transfer).?);
+    // Outside the array, on either side.
+    try std.testing.expect(slotOfTransfer(slots[0..1], &slots[1].provider.transfer) == null);
+    try std.testing.expect(slotOfTransfer(slots[2..], &slots[1].provider.transfer) == null);
+    // A slot no longer holding a provider transfer.
+    const stale = &slots[2].provider.transfer;
+    slots[2] = .free;
+    try std.testing.expect(slotOfTransfer(&slots, stale) == null);
 }
 
 fn cancelSupersededTransfers(
@@ -769,7 +687,6 @@ fn cancelSupersededTransfers(
             }
         },
         .provider => |*active| {
-            if (active.transfer.isDiscarded()) continue;
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
                 fenceDispatch(host, "control reconciliation", err);
                 return;
@@ -777,8 +694,11 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             const owner = active.owner;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
-            reactor.?.discard(&active.transfer);
-            _ = advanceModelFinalization(host, slot, false);
+            // Nothing of a cancelled stream is outstanding, so its slot is
+            // free at once; its siblings and connection are untouched.
+            reactor.?.cancel(&active.transfer);
+            active.transfer.deinit();
+            finishCustodyNow(host, slot, owner.token);
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
@@ -1272,20 +1192,6 @@ fn settleActionFailure(
     };
 }
 
-fn findActiveTransfer(
-    context: *const anyopaque,
-    handle: provider.TransportHandleIdentity,
-) ?*provider.Transfer {
-    const active: *const ActiveSlots = @ptrCast(@alignCast(context));
-    for (active.slots) |*slot| {
-        switch (slot.*) {
-            .provider => |*value| if (value.transfer.matchesHandle(handle)) return &value.transfer,
-            else => {},
-        }
-    }
-    return null;
-}
-
 fn admitNewAttempt(
     host: *Host,
     slot: *ExecutionSlot,
@@ -1355,7 +1261,7 @@ fn beginAdmittedAttempt(
         host.io,
         view,
         host.lease.paths.scratch.slice(),
-        host.capture_writer.?.budget,
+        host.scratch_budget.?,
         .{
             .managed_route = host.authentication != null,
             .first_step = host.faults.request_first_step,
@@ -1439,7 +1345,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                active.request.deinit(host.io, host.capture_writer.?.budget);
+                active.request.deinit(host.io, host.scratch_budget.?);
                 finishCustodyNow(host, slot, active.owner.token);
             } else {
                 active.requested = true;
@@ -1516,7 +1422,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
     switch (decision) {
         .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
         .abandon, .settle_authentication_failure => {
-            request.deinit(host.io, host.capture_writer.?.budget);
+            request.deinit(host.io, host.scratch_budget.?);
             if (decision == .settle_authentication_failure)
                 settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(host, slot, owner.token);
@@ -1563,13 +1469,13 @@ fn launchPreparedRequest(
     const token = owner.token;
     const binding = owner.binding;
     if (!host.launchAllowed()) {
-        request.deinit(host.io, host.capture_writer.?.budget);
+        request.deinit(host.io, host.scratch_budget.?);
         finishCustodyNow(host, slot, token);
         return;
     }
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
-        request.deinit(host.io, host.capture_writer.?.budget);
+        request.deinit(host.io, host.scratch_budget.?);
         settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
         finishCustodyNow(host, slot, token);
         return;
@@ -1582,33 +1488,33 @@ fn launchPreparedRequest(
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
-            request.deinit(host.io, host.capture_writer.?.budget);
+            request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
             return;
         };
     }
-    // Transfer.start gives curl pointers into the Transfer, so construct it in
-    // its final slot and keep that union arm active through removal and deinit.
+    // h2 holds the Transfer's stream from launch, so construct it in its
+    // final slot and keep that union arm active through completion and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
     const active = &slot.provider;
-    active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
-        .ca_file = host.provider_ca_file,
-        .extra_headers = headers.slice(),
-        .observation = &reactor.observation,
+    const write_once = host.faults.response_write_once;
+    host.faults.response_write_once = false;
+    active.transfer.start(reactor, request.*, binding, .{
+        .fields = headers.fields(),
         .turn_state = turn_state,
-        .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
-        .request_read_fault = host.faults.request_read,
-        .response_acquire_fault = host.faults.response_acquire,
-        .response_unlink_fault = host.faults.response_unlink,
-        .response_write_fault = host.faults.response_write,
-        .completion_identity_fault = host.faults.completion_identity_fault,
-    }, host.capture_writer.?, host.lease.paths.scratch.slice(), &retained_response) catch |err| {
-        request.deinit(host.io, host.capture_writer.?.budget);
+        .faults = .{
+            .request_read = host.faults.request_read,
+            .response_acquire = host.faults.response_acquire,
+            .response_unlink = host.faults.response_unlink,
+            .response_write = host.faults.response_write or write_once,
+        },
+    }, &retained_response) catch |err| {
+        request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
             host.custody.detach(token) catch unreachable;
             slot.* = .{ .named_scratch = .{
@@ -1647,7 +1553,7 @@ fn launchPreparedRequest(
             }
 
             fn launch(context: anytype) !void {
-                try context.reactor.add(context.transfer);
+                context.reactor.launch(context.transfer);
             }
         }.handoff,
     ) catch |err| {
@@ -1690,11 +1596,10 @@ fn completeTransfer(
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
         var trace: protocol.ResponseBuffer = .{};
-        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"http_version\":{d},\"connection_id\":{d},\"new_connections\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\",\"alpn\":\"unavailable\"}}", .{
+        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
             owner.binding.operation_id,
-            observation.http_version,
-            observation.connection_id,
             observation.new_connections,
+            observation.replays,
             if (correlation.len != 0) "true" else "false",
             digest,
         }) catch unreachable;
@@ -1763,9 +1668,9 @@ fn completeTransfer(
                     answered.fail(code, disposition);
                 }
             } else {
-                // The writer has drained, so the unsealed capture holds every
+                // Writes are synchronous, so the unsealed capture holds every
                 // byte accepted before the transfer or capture failed.
-                const response = &active.transfer.response;
+                const response = active.transfer.partialResponse();
                 if (response.length != 0) retainFailedResponse(host, .{
                     .file = response.file,
                     .length = response.length,
@@ -1971,8 +1876,7 @@ fn shutdownExecution(
     model_preparation: *model_adapter.Preparation,
 ) void {
     // Initiate every effect's shutdown before waiting for any retirement.
-    // Discarded transfers retain their pointer-stable capture storage until
-    // the writer drains; that wait must not delay Bash signals or cleanup.
+    // A cancelled transfer has nothing outstanding, so it retires at once.
     for (slots) |*slot| switch (slot.*) {
         .free => {},
         .model_preparing => |active| {
@@ -1980,7 +1884,7 @@ fn shutdownExecution(
             finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
-            active.request.deinit(host.io, host.capture_writer.?.budget);
+            active.request.deinit(host.io, host.scratch_budget.?);
             finishCustodyNow(host, slot, active.owner.token);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
@@ -1993,21 +1897,18 @@ fn shutdownExecution(
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
-        .provider => |*active| reactor.?.discard(&active.transfer),
+        // Shutdown discards transport evidence rather than invoking
+        // ordinary model completion or saving a semantic failure.
+        .provider => |*active| {
+            reactor.?.cancel(&active.transfer);
+            active.transfer.deinit();
+            finishCustodyNow(host, slot, active.owner.token);
+        },
     };
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
-        var made_progress = false;
-        for (slots) |*slot| switch (slot.*) {
-            .provider => {
-                // Shutdown discards transport evidence rather than invoking
-                // ordinary model completion or saving a semantic failure.
-                if (advanceModelFinalization(host, slot, false)) made_progress = true;
-            },
-            else => {},
-        };
-        made_progress = advanceBash(host, slots, &bash_window) or made_progress;
+        var made_progress = advanceBash(host, slots, &bash_window);
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
         made_progress = advanceRetainedCleanup(host, slots, now, &retained_cleanup_at) or made_progress;
         if (!made_progress) _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
@@ -2218,8 +2119,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         const input = try tmp.dir.openFile(io, "request", .{});
         try tmp.dir.deleteFile(io, "request");
         host.scratch_used.store(4, .release);
-        var writer = provider.CaptureWriter{ .io = io, .budget = .{ .used = &host.scratch_used, .limit = 4 }, .buffers = undefined };
-        host.capture_writer = &writer;
+        host.scratch_budget = .{ .used = &host.scratch_used, .limit = 4 };
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
             .cancelled = true,
@@ -2231,7 +2131,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
                 .session_affinity = @splat(0),
             },
         } };
-        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, writer.budget);
+        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, host.scratch_budget.?);
         var reactor: provider.Reactor = undefined;
         worker.state = .requested;
         try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
@@ -2287,8 +2187,6 @@ test "HTTP error capture retires before execution custody" {
             return std.testing.io.vtable.now(userdata, clock);
         }
     };
-    try provider.initialize();
-    defer provider.deinitialize();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -2330,24 +2228,31 @@ test "HTTP error capture retires before execution custody" {
         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
-        var buffers: provider.CaptureWriter.Buffers = undefined;
-        var writer = provider.CaptureWriter{ .io = io, .budget = budget, .buffers = &buffers };
+        // Prepared, never launched: no socket exists for this endpoint.
+        var reactor: provider.Reactor = undefined;
+        try reactor.init(std.testing.allocator, io, .{
+            .endpoint = "http://127.0.0.1:1/responses",
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = root,
+            .budget = budget,
+        });
+        defer reactor.deinit();
         var retained: ?named_scratch.Owner = null;
-        try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
+        try slot.provider.transfer.start(&reactor, .{
             .file = request_file,
             .length = 2,
             .charged = 2,
             .structured_output = false,
             .session_affinity = @splat(0),
-        }, binding, .{}, &writer, root, &retained);
+        }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
         const response = &slot.provider.transfer.response;
         try response.file.writeStreamingAll(io, body);
         try std.testing.expect(budget.charge(body.len));
         response.charged = body.len;
-        response.length = body.len;
-        try response.seal(io, false);
+        try response.seal(io, false, body.len);
         Boundary.response_fd = response.file.handle;
         if (kind == 1) {
             // A short sealed read is a real classifier error, not malformed
@@ -2356,6 +2261,7 @@ test "HTTP error capture retires before execution custody" {
             try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
         }
         completeTransfer(&host, &slot, .{
+            .transfer = &slot.provider.transfer,
             .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } },
             .queued_after = 0,
         });
@@ -3404,8 +3310,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
         const reader = try tmp.dir.openFile(std.testing.io, "sealed", .{});
         try tmp.dir.deleteFile(std.testing.io, "sealed");
         host.scratch_used.store(2, .release);
-        var capture_writer = provider.CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &host.scratch_used, .limit = 2 }, .buffers = undefined };
-        host.capture_writer = &capture_writer;
+        host.scratch_budget = .{ .used = &host.scratch_used, .limit = 2 };
         var request = provider.PreparedRequest{
             .file = reader,
             .length = 2,

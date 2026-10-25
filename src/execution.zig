@@ -77,7 +77,6 @@ pub fn transferDecision(
             .temporary_connection => .{ .named = "provider_transport_failure" },
             .permanent_transport => .{ .named = "provider_transport_permanent" },
             .unsupported_http_version => .{ .named = "provider_http2_required" },
-            .authentication_failure => .{ .named = "provider_authentication_failed" },
             .tls_verification_failure => .{ .named = "provider_tls_verification_failed" },
             .invalid_headers => .{ .named = "invalid_provider_headers" },
         },
@@ -89,8 +88,7 @@ pub fn transferDecision(
 }
 
 /// Only the model endpoint's own HTTP 401 answer may spend an Operation's
-/// one forced credential refresh. Transport authentication failures and
-/// every other status settle as they are.
+/// one forced credential refresh. Every other status settles as it is.
 pub fn rejectsCredential(failure: TransferFailure) bool {
     return failure.answered and failure.code == .http and failure.code.http == 401;
 }
@@ -103,7 +101,6 @@ test "only an answered model 401 can claim a forced credential refresh" {
     }.outcome;
     try std.testing.expect(rejectsCredential(transferDecision(finished(.permanent_http, 401), .ordinary).fail));
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.permanent_http, 403), .ordinary).fail));
-    try std.testing.expect(!rejectsCredential(transferDecision(finished(.authentication_failure, 0), .ordinary).fail));
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.permanent_http, 401), .{ .unreadable = error.TestUnreadable }).fail));
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.temporary_http, 503), .ordinary).fail));
 }
@@ -157,7 +154,6 @@ test "transfer decisions exhaust transport dispositions and error response prece
         .{ .disposition = .temporary_http, .status = 503, .code = "provider_temporary_http_503", .answered = true, .temporary = true },
         .{ .disposition = .temporary_connection, .code = "provider_transport_failure", .temporary = true },
         .{ .disposition = .permanent_transport, .code = "provider_transport_permanent" },
-        .{ .disposition = .authentication_failure, .code = "provider_authentication_failed" },
         .{ .disposition = .tls_verification_failure, .code = "provider_tls_verification_failed" },
         .{ .disposition = .invalid_headers, .code = "invalid_provider_headers" },
         .{ .disposition = .unsupported_http_version, .code = "provider_http2_required" },

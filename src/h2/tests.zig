@@ -337,6 +337,27 @@ test "cancel resets one stream and keeps its connection and siblings" {
     second.deinit();
 }
 
+test "a connection outlives its last stream's cancel, which only drive sends" {
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    try std.testing.expect(!harness.client.hasConnections());
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "1", &sink));
+    try harness.runUntilPeerStreams(1);
+    harness.client.cancel(&stream);
+    // No stream is left, but the reset is still unsent.
+    try std.testing.expect(harness.client.hasConnections());
+    try std.testing.expectEqual(@as(u32, 0), harness.peer.seen.rst_received);
+    try harness.runUntil({}, struct {
+        fn done(h: *Harness, _: void) bool {
+            return h.peer.seen.rst_received == 1;
+        }
+    }.done);
+    try std.testing.expect(harness.client.hasConnections());
+    stream.deinit();
+}
+
 test "small DATA frames decoded from one read reach the sink in one write" {
     const Chunked = struct {
         const body: [200]u8 = blk: {

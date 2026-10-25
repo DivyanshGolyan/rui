@@ -78,11 +78,11 @@ def main():
     prove_peer_disconnects()
     prove_peer_census()
     prove_one_reply()
-    prove_terminal_capture_budget()
+    prove_terminal_stop_budget()
     prove_renderer_comparison_retention()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
-    prove_required_capture_receipts()
+    prove_required_receipts()
     prove_caller_disposal()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
@@ -123,12 +123,12 @@ def main():
     assert "readiness exceeded 16 KiB" in str(stdout_error)
     assert len(str(stdout_error)) <= error_text_limit
     process, fields = start_ready_process(
-        child("print('ready execution=enabled curl=8.22.0'); time.sleep(10)"),
+        child("print('ready execution=enabled nghttp2=1.70.0'); time.sleep(10)"),
         timeout=1,
-        required_fields={"execution": "enabled", "curl": "8.22.0"},
+        required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
     )
     try:
-        assert fields == {"execution": "enabled", "curl": "8.22.0"}
+        assert fields == {"execution": "enabled", "nghttp2": "1.70.0"}
         assert process.poll() is None
     finally:
         stop_process(process)
@@ -588,14 +588,14 @@ def observation_state(process, state, *, run=37, active=0, version=1):
     return mapping
 
 
-def prove_required_capture_receipts():
+def prove_required_receipts():
     import host_process
     # Optional output cannot manufacture native authority, even when complete.
-    receipt = b'{"rui_test_phase":"capture_write_gate_entered","written_bytes":12345}\n'
+    receipt = b'{"rui_test_phase":"effect_stop_requested","control_key":"interrupt"}\n'
     process = SimpleNamespace(pid=os.getpid(), stderr=io.BytesIO(receipt), poll=lambda: 0)
     diagnostics = HostDiagnostics(process)
     diagnostics.thread.join(timeout=1)
-    for phase in ("capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested",
+    for phase in ("effect_stop_requested",
                   "action_attempt_admitted", "action_result_ready", "action_result_committed",
                   "preparation_completed", "prepared_before_handoff", "codex_transfer",
                   "cleanup_started", "cleanup_completed", "cleanup_release_observed",
@@ -608,7 +608,7 @@ def prove_required_capture_receipts():
             except AssertionError as error:
                 assert "native observation authority" in str(error), error
             else:
-                raise AssertionError("optional stderr supplied required capture evidence")
+                raise AssertionError("optional stderr supplied required native evidence")
     diagnostics.close()
     # Complete optional records and wrong native plans must both fail at the
     # authority boundary, for positive waits and negative/exact censuses.
@@ -620,6 +620,7 @@ def prove_required_capture_receipts():
         "bash_leader_observed_with_open_pipes": ("bash_pipes",),
         "control_store_complete": ("bash_pipes",),
         "exhausted_retry_recovery_held": ("dispatch",),
+        "effect_stop_requested": ("interrupt",),
     }
     for phase, plans in required.items():
         record = {"rui_test_phase": phase}
@@ -645,7 +646,7 @@ def prove_required_capture_receipts():
     with tempfile.TemporaryDirectory() as directory:
         root = pathlib.Path(directory)
         args = child("raise AssertionError('invalid setup launched a child')") + [
-            '--store', str(root / 'store'), '--test-response-capture-gate-path', str(root / 'gate')]
+            '--store', str(root / 'store'), '--test-retry-recovery-gate-path', str(root / 'gate')]
         for options, expected in (({'observations': 'list'}, 'selecting native plan'),
                                   ({'env': {'RUI_FAILURE_ARTIFACTS': str(root / 'retained')}}, 'survive fixture-root deletion')):
             try:
@@ -661,21 +662,16 @@ state = mmap.mmap(int(arg('--test-observation-state-fd')), 40)
 case = arg('--case')
 count = 2 if case == 'duplicate' else 1
 state[:] = struct.pack('<QQQQQ', 1, os.getpid(), 37, count * 2 + int(case == 'lost'), 0)
-phase = ('cleanup_started' if case == 'missing' else 'exhausted_retry_recovery_held'
-         if '--test-retry-recovery-gate-path' in sys.argv else 'capture_write_gate_entered')
-fields = ((0, phase), (1, '1234567'), (24, '12345'))
+phase = 'cleanup_started' if case == 'missing' else 'exhausted_retry_recovery_held'
+fields = ((0, phase), (1, '1234567'), (11, '12345'))
 body = b''.join(struct.pack('<BH', index, len(value)) + value.encode() for index, value in fields)
 for sequence in range(1, count + 1):
     os.write(int(arg('--test-observation-fd')), struct.pack('<HBBQQQ', 28 + len(body), 1, int(case == 'lost'), sequence, 37, os.getpid()) + body)
-print('ready execution=enabled curl=8.22.0', flush=True)
+print('ready execution=enabled nghttp2=1.70.0', flush=True)
 time.sleep(30)
 '''
-    for option, phase, plan, case in (
-            (option, phase, plan, case)
-            for option, phase, plan in (
-                ('--test-response-capture-gate-path', 'capture_write_gate_entered', 'capture'),
-                ('--test-retry-recovery-gate-path', 'exhausted_retry_recovery_held', 'dispatch'))
-            for case in ('received', 'missing', 'duplicate', 'lost')):
+    option, phase, plan = '--test-retry-recovery-gate-path', 'exhausted_retry_recovery_held', 'dispatch'
+    for case in ('received', 'missing', 'duplicate', 'lost'):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             gate = ReleaseGate(root / 'gate')
@@ -690,17 +686,13 @@ time.sleep(30)
             try:
                 try:
                     records = diagnostics.wait(phase, timeout=.02)
-                    assert records[0]['written_bytes'] == '12345', records
+                    assert records[0]['control_key'] == '12345', records
                     if case == 'duplicate':
                         diagnostics.wait(phase, count=2, timeout=.02)
-                    if plan != 'capture':
-                        assert len(diagnostics.matching(phase)) == 1, diagnostics.records
+                    assert len(diagnostics.matching(phase)) == 1, diagnostics.records
                 finally:
-                    if plan == 'capture':
-                        diagnostics.dispose_capture(gate, lambda: {'case': case, 'capture_released': gate.fd is None})
-                    else:
-                        diagnostics.snapshot_failure(lambda: {'case': case, 'capture_released': gate.fd is None})
-                        dispose_all(gate.release, lambda: stop_process(process))
+                    diagnostics.snapshot_failure(lambda: {'case': case, 'gate_released': gate.fd is None})
+                    dispose_all(gate.release, lambda: stop_process(process))
             except AssertionError as error:
                 assert case != 'received', error
                 if case == 'missing':
@@ -718,10 +710,9 @@ time.sleep(30)
             retained = list(destination.rglob(f'observation-failure-{pid}.json'))
             assert len(retained) == 1, retained
             facts = json.loads(retained[0].read_bytes())
-            duplicate_after_reap = case == 'duplicate' and plan == 'capture'
-            assert facts['fixture'] == {'case': case, 'capture_released': duplicate_after_reap}, facts
+            assert facts['fixture'] == {'case': case, 'gate_released': False}, facts
             assert facts['final_error'] == 'AssertionError', facts
-            assert (facts['returncode'] is None) == (not duplicate_after_reap), facts
+            assert facts['returncode'] is None, facts
             assert facts['post_reap_state'][0:3] == [1, pid, 37], facts
             assert not list(destination.rglob('rui.sqlite3'))
     class NoteFailure(AssertionError):
@@ -1465,12 +1456,12 @@ def prove_renderer_comparison_retention():
     print("Renderer comparison retention: exact redraw/exit operands and timing survive root deletion; evidence faults preserve assertion and disposal")
 
 
-def prove_terminal_capture_budget():
-    """Drive the actual capture caller; only external work uses a virtual clock."""
+def prove_terminal_stop_budget():
+    """Drive the actual stop caller; only external work uses a virtual clock."""
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import terminal_restoration_integration as terminal
 
-    for late_stage in (None, "read", "release"):
+    for late_stage in (None, "release"):
         clock = [100.0]
         reached = []
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as patches:
@@ -1480,27 +1471,22 @@ def prove_terminal_capture_budget():
             inspector.communicate.return_value = (b"", b"")
             inspector.poll.return_value = 0
             diagnostics = MagicMock()
-            diagnostics.wait.return_value = [{**held, "written_bytes": "0"}]
+            diagnostics.wait.return_value = [{**held, "control_key": "stop-interrupt"}]
             diagnostics.tail.return_value = b""
-            gate = MagicMock()
-            gate.path = root / "gate"
-            gate.path.touch()
 
             def start_inspector(*args):
-                (root / "capture-receipt" / "probe.log").write_text(
+                (root / "stop-receipt" / "probe.log").write_text(
                     "diagnostic-dropped-inspection\ndiagnostic-held-inspection\n" + json.dumps(held) + "\n")
                 return inspector
 
             def observe(*args, **kwargs):
                 clock[0] += 6
-                return {"result": {"status": "completed"}}
+                return {"processing": {"turn": "1", "operation": "1", "attempt": "1"},
+                        "result": {"status": "cancelled"}}
 
-            def read(*args, **kwargs):
-                reached.append("read")
-                clock[0] += 5 if late_stage == "read" else 1
-                return SimpleNamespace(returncode=0, stdout=b"exact capture answer", stderr=b"")
-
-            def inspect(*args, **kwargs):
+            def command(*args, **kwargs):
+                if args[1] == "interrupt-model":
+                    return {"answer": {"status": "accepted"}}
                 reached.append("release")
                 clock[0] += 4 if late_stage == "release" else 1
                 return {"execution": {"dispatch_fenced": False,
@@ -1509,33 +1495,31 @@ def prove_terminal_capture_budget():
             replacements = {
                 "start_ready_process": lambda *args, **kwargs: (SimpleNamespace(pid=123), None),
                 "HostDiagnostics": lambda *args: diagnostics,
-                "ReleaseGate": lambda *args: gate,
             }
             for name, replacement in replacements.items():
                 patches.enter_context(patch.object(terminal, name, replacement))
             for name, replacement in {
                 "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object()])),
                 "configure": MagicMock(return_value="k7m2qx"), "message": MagicMock(),
-                "start_command": start_inspector, "observe": observe, "command": inspect,
+                "start_command": start_inspector, "observe": observe, "command": command,
             }.items():
                 patches.enter_context(patch.object(terminal.fixture, name, replacement))
             patches.enter_context(patch.object(terminal.threading, "Thread", MagicMock()))
             terminal.threading.Thread.return_value.is_alive.return_value = False
             patches.enter_context(patch.object(time, "monotonic", lambda: clock[0]))
             patches.enter_context(patch.object(time, "sleep", side_effect=AssertionError(
-                "terminal capture clock witness waited for unmodeled external work")))
-            patches.enter_context(patch.object(terminal.fixture.subprocess, "run", read))
+                "terminal stop clock witness waited for unmodeled external work")))
             patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
             try:
-                terminal.capture_receipt_case(root, root / "unused.so")
+                terminal.stop_receipt_case(root, root / "unused.so")
             except AssertionError as error:
                 assert late_stage is not None, error
                 assert "exceeded original deadline" in str(error), error
                 assert reached[-1] == late_stage, reached
             else:
                 assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
-                assert reached == ["read", "release"], reached
-    print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
+                assert reached == ["release"], reached
+    print("Terminal stop caller clock: timely release accepted; late release rejected")
 
 
 def prove_caller_disposal():

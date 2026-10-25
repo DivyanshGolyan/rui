@@ -167,8 +167,6 @@ const serve_test = &[_]Option{
     hiddenValue("test-observation-plan"),
     hiddenValue("test-transition"),
     hiddenValue("test-transition-gate-path"),
-    hiddenValue("test-response-capture-gate-path"),
-    hiddenValue("test-response-capture-gate-min-written-bytes"),
     hiddenValue("test-bash-observed-exit-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),
     hiddenValue("test-control-gate-keys"),

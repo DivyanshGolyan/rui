@@ -12,7 +12,7 @@ Those checks document a maintenance burden. They do not prove a cancellation rac
 
 The first layer separates transfer failure decisions and provider interpretation from effects:
 
-- `provider.zig` owns curl, callback storage, capture drainage, sealed response lifetime, and transport observations.
+- `provider.zig` owns the HTTP/2 Client, response capture and sealing, sealed response lifetime, and transport observations.
 - `model_adapter.zig` owns Codex interpretation. Its closed result contains validated output or rejection facts. `invalid_output` and `context_overflow` do not decide whether a Turn ends.
 - `execution.zig` classifies transfer failure facts without I/O. It distinguishes answered HTTP failure, unanswered local capture failure, and canonical request-source corruption.
 - `server.zig` claims terminal delivery, invokes Store settlement, fences dispatch, and disposes resources. Store owns retry allowance and Turn scheduling.
@@ -50,17 +50,17 @@ Every edge has one record transition owner:
 | Launch | Check generation and the complete typed binding, consume launch authority once, then enter the existing Store handoff and Host launch gate in that order. |
 | Terminal delivery | Claim once while applicable. Store rechecks control supersession inside settlement. A failed save fences dispatch, not cleanup. |
 | Cancel or shutdown before launch | Suppress launch and dispose preparation or the returned authentication request through its current owner. |
-| Provider cancellation | Detach from curl, retain the transfer in final storage until the capture writer drains, then dispose it. No ordinary shutdown settlement is added. |
+| Provider cancellation | Cancel the stream, which leaves nothing of it outstanding, then dispose the transfer at once. No ordinary shutdown settlement is added. |
 | Semantic completion with resources held | Close terminal-delivery authority while retaining the payload, capacity, scratch charge, and cleanup obligation. |
 | Cleanup fails | Keep the same record and actionable resources. Existing low-frequency retry remains responsible for progress. |
 | Cleanup succeeds | Retire the payload and release the record once, before publishing `cleanup_completed`. |
 | Stale or foreign token | Reject without changing the current record or consuming its launch or delivery authority. |
 
-Bash delivery closure does not establish process reap, original-group absence, pipe retirement, or scratch reclamation. Its existing lifecycle owner establishes those facts independently. Model semantic completion likewise does not establish capture drainage or retained-file removal. Immediate retirement still needs a complete transition even when no delayed payload remains.
+Bash delivery closure does not establish process reap, original-group absence, pipe retirement, or scratch reclamation. Its existing lifecycle owner establishes those facts independently. Model semantic completion likewise does not establish retained-file removal. Immediate retirement still needs a complete transition even when no delayed payload remains.
 
-Curl receives addresses inside `Transfer.start`. The record array must never move or resize. Its provider union arm remains active until curl removal and capture drainage permit deinitialization. A transition must not copy a live transfer to a temporary or initialize it before installing its final union arm.
+The HTTP/2 Client holds the Transfer's stream by address from `Transfer.start`. The record array must never move or resize. Its provider union arm remains active until the stream is collected or cancelled. A transition must not copy a live transfer to a temporary or initialize it before installing its final union arm.
 
-The Store lease outlives execution drainage and intake drainage. Infrastructure shutdown requests every effect's retirement before waiting for any one provider or retained file. A blocked capture cannot delay a sibling Bash stop request.
+The Store lease outlives execution drainage and intake drainage. Infrastructure shutdown requests every effect's retirement before waiting for any one provider or retained file. A peer-held provider stream cannot delay a sibling Bash stop request.
 
 ## Qualification follows the edges
 
@@ -72,7 +72,7 @@ Each new owner-boundary regression needs a targeted mutation that fails at the i
 
 The maintained [selector](../tests/ci/select_tests.py) sets the minimum gates. The final assembled candidate also needs exact-head hosted Linux and macOS checks and both installed-release upgrade jobs. Local compilation, skipped native assertions, prior-head acceptance, and a same-family review do not establish readiness. Cross-family review must use capacity independent of the renderer allocation.
 
-Record layout measurements must report `@sizeOf` for the old custody record plus slot and the proposed complete record, multiplied by configured Active Capacity. Distinguish that fixed storage from payload allocations, curl and TLS storage, capture-writer storage, and process physical footprint. No memory improvement is claimed before measurement.
+Record layout measurements must report `@sizeOf` for the old custody record plus slot and the proposed complete record, multiplied by configured Active Capacity. Distinguish that fixed storage from payload allocations, HTTP/2 and TLS storage, and process physical footprint. No memory improvement is claimed before measurement.
 
 ## Integration and limits
 
