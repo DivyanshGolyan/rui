@@ -79,8 +79,11 @@ jobs:
               p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS)
                                            | {'check', 'admission-debug-integration'})
               p['retry'] = False
+          elif os.environ['EVENT_NAME'] == 'pull_request' and p['mac_required']:
+              # Platform code can differ on Mac; Linux green does not predict it.
+              p['native_targets'] = p['native_targets'] or ['check']
           else:
-              # PRs and landings are Linux-only, even for strict paths. Mac runs after main.
+              # Other PRs and landings are Linux-only, even for strict paths. Mac runs after main.
               p['native_targets'] = []
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:

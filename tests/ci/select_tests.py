@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from platform_boundary import mac_specific
 from strict_paths import strict
 
 
@@ -271,6 +272,10 @@ def select(paths, phase, available):
             checks.discard("check")
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS
+    # Linux predicts Mac except where code may differ by platform.
+    mac_required = phase == "review" and any(mac_specific(path) for path in paths)
+    if mac_required:
+        reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
     if phase == "development":
         # Development does not replace final boundary/native acceptance.
         targets = {"test-logic"} if targets else set()
@@ -286,6 +291,7 @@ def select(paths, phase, available):
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
+            "mac_required": mac_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,

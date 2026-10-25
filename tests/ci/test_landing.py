@@ -480,6 +480,10 @@ class LandingTest(unittest.TestCase):
                             self.assertEqual(outputs['native'], 'true')
                             self.assertEqual(outputs['retry'], 'false')
                             self.assertTrue(json.loads(outputs['macos_matrix'])['include'])
+                        elif event == 'pull_request' and selection['mac_required']:
+                            # test_platform_boundary owns which PR paths run Mac.
+                            self.assertEqual(json.loads(outputs['targets']), selection['targets'])
+                            self.assertEqual(json.loads(outputs['native_targets']), selection['native_targets'])
                         else:
                             self.assertEqual(json.loads(outputs['targets']), selection['targets'])
                             self.assertEqual(json.loads(outputs['native_targets']), [])
