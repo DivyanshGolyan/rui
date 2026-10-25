@@ -175,6 +175,18 @@ const FileSource = struct {
         return byte;
     }
 
+    /// Borrowed bytes ahead, empty only at the end; valid until the next read.
+    pub fn buffered(self: *FileSource) ![]const u8 {
+        if (self.position == self.end) return &.{};
+        return self.window.bytesAt(self.position, self.end);
+    }
+
+    /// Consume `count` bytes that `buffered` returned.
+    fn skip(self: *FileSource, count: usize) void {
+        std.debug.assert(count <= self.end - self.position);
+        self.position += count;
+    }
+
     fn expectEnd(self: *FileSource) !void {
         try self.space();
         if (try self.peek() != null) return error.TrailingJson;
@@ -192,6 +204,12 @@ const FileSource = struct {
         if (try self.take() != expected) return error.UnexpectedJsonDelimiter;
     }
 };
+
+comptime {
+    // parseString finds the plain-run path through @hasDecl, which cannot see
+    // a private `buffered`; without this the path would silently disappear.
+    std.debug.assert(@hasDecl(FileSource, "buffered"));
+}
 
 const Utf8Validator = struct {
     bytes: [4]u8 = undefined,
@@ -227,12 +245,12 @@ const Decoded = struct {
         self.length = try std.math.add(u64, self.length, bytes.len);
         if (self.hash) |hash| hash.update(bytes);
         if (self.bounded) |destination| {
-            if (self.overflow or destination.len + bytes.len > destination.bytes.len) {
-                self.overflow = true;
-            } else {
-                @memcpy(destination.bytes[destination.len .. destination.len + bytes.len], bytes);
-                destination.len += bytes.len;
-            }
+            if (self.overflow) return;
+            // Keep the prefix that fits, however the bytes arrive.
+            const kept = @min(bytes.len, destination.bytes.len - destination.len);
+            @memcpy(destination.bytes[destination.len..][0..kept], bytes[0..kept]);
+            destination.len += kept;
+            self.overflow = kept < bytes.len;
         }
     }
 };
@@ -251,6 +269,14 @@ fn isWhitespace(scalar: u21) bool {
     };
 }
 
+/// Length of the leading bytes that need no escape, UTF-8 or end check.
+fn plainStringLength(bytes: []const u8) usize {
+    for (bytes, 0..) |byte, index| {
+        if (byte == '"' or byte == '\\' or byte < 0x20 or byte >= 0x80) return index;
+    }
+    return bytes.len;
+}
+
 fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
     try source.space();
     if (try source.take() != '"') return error.ExpectedJsonString;
@@ -259,6 +285,26 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
     var decoded_length: u64 = 0;
     var non_whitespace = false;
     while (true) {
+        // A source holding its bytes in memory hands over plain ASCII runs
+        // whole, so they are hashed and copied together, not byte by byte.
+        if (comptime @hasDecl(@TypeOf(source.*), "buffered")) {
+            if (validator.used == 0) {
+                const bytes = try source.buffered();
+                const plain = bytes[0..plainStringLength(bytes)];
+                if (plain.len != 0) {
+                    if (!non_whitespace) for (plain) |byte| {
+                        if (!isWhitespace(byte)) {
+                            non_whitespace = true;
+                            break;
+                        }
+                    };
+                    if (decoded) |consumer| try consumer.emit(plain);
+                    decoded_length = try std.math.add(u64, decoded_length, plain.len);
+                    source.skip(plain.len);
+                    continue;
+                }
+            }
+        }
         const byte = try source.take();
         if (byte == '"') {
             try validator.finish();
@@ -1817,11 +1863,16 @@ pub fn validate(
         // reads and decoded data writes use fixed windows, never line buffers.
         const line_start = source.offset();
         var head: [16]u8 = undefined;
-        while (try source.peek()) |byte| {
-            if (byte == '\r' or byte == '\n') break;
+        while (true) {
+            const bytes = try source.buffered();
+            const length = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
             const index = source.offset() - line_start;
-            if (index < head.len) head[@intCast(index)] = byte;
-            _ = try source.take();
+            if (index < head.len) {
+                const kept = @min(length, head.len - @as(usize, @intCast(index)));
+                @memcpy(head[@intCast(index)..][0..kept], bytes[0..kept]);
+            }
+            source.skip(length);
+            if (length < bytes.len or bytes.len == 0) break;
         }
         const line_end = source.offset();
         const ending = try source.peek();
@@ -2767,6 +2818,82 @@ test "provider field collection traverses large open values once for all lookups
     // on lookup, including an unknown value larger than the file window.
     const kind = try fields.required("type");
     try std.testing.expectEqualStrings("\"message\"", input[@intCast(kind.start)..][0..@intCast(kind.length)]);
+}
+
+test "plain runs stop at the first byte that needs a string check, at any position" {
+    var bytes: [70]u8 = @splat('a');
+    try std.testing.expectEqual(bytes.len, plainStringLength(&bytes));
+    for (0..bytes.len) |position| {
+        for ([_]u8{ '"', '\\', 0x00, 0x1f, 0x80, 0xc3, 0xff }) |special| {
+            bytes[position] = special;
+            try std.testing.expectEqual(position, plainStringLength(&bytes));
+            try std.testing.expectEqual(position, plainStringLength(bytes[0 .. position + 1]));
+            bytes[position] = 'a';
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), plainStringLength(""));
+}
+
+test "plain runs parse exactly like byte-at-a-time parsing" {
+    // Lacks `buffered`, so parseString takes every byte through peek/take.
+    const ByteSource = struct {
+        bytes: []const u8,
+        position: u64 = 0,
+        fn offset(self: *const @This()) u64 {
+            return self.position;
+        }
+        fn peek(self: *@This()) !?u8 {
+            return if (self.position == self.bytes.len) null else self.bytes[@intCast(self.position)];
+        }
+        pub fn take(self: *@This()) !u8 {
+            const byte = try self.peek() orelse return error.UnexpectedJsonEnd;
+            self.position += 1;
+            return byte;
+        }
+        fn space(self: *@This()) !void {
+            while (try self.peek()) |byte| switch (byte) {
+                ' ', '\t', '\r', '\n' => _ = try self.take(),
+                else => return,
+            };
+        }
+    };
+    const cases = [_][]const u8{
+        "\"\"",
+        "\"   \"",
+        "\" \\n tok\"",
+        "\"plain ascii text\"",
+        "\"caf\xc3\xa9 \\u00e9 \\ud83d\\ude00 end\"",
+        "\"\xe2\x80\x83 \xe3\x80\x80x\"",
+        "\"" ++ @as([5000]u8, @splat('a')) ++ "\\\"b\"",
+        "\"" ++ @as([300]u8, @splat('k')) ++ "\"",
+        "\"" ++ @as([250]u8, @splat('k')) ++ "\xc3\xa9 \\n" ++ @as([10]u8, @splat('k')) ++ "\"",
+        "\"bad \xff\"",
+        "\"control \x01\"",
+        "\"open",
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        var object = try testingObject(&tmp, case);
+        defer object.file.close(std.testing.io);
+        var runs = try FileSource.init(&object, .{ .start = 0, .length = case.len });
+        var runs_hash = protocol.contentHasher();
+        var runs_prefix: protocol.Bounded(max_evidence_bytes) = .{};
+        var runs_decoded = Decoded{ .hash = &runs_hash, .bounded = &runs_prefix };
+        const by_runs = parseString(&runs, &runs_decoded);
+        var bytes = ByteSource{ .bytes = case };
+        var bytes_hash = protocol.contentHasher();
+        var bytes_prefix: protocol.Bounded(max_evidence_bytes) = .{};
+        var bytes_decoded = Decoded{ .hash = &bytes_hash, .bounded = &bytes_prefix };
+        const by_bytes = parseString(&bytes, &bytes_decoded);
+        if (by_bytes) |expected| {
+            const actual = try by_runs;
+            try std.testing.expectEqual(expected, actual);
+            try std.testing.expectEqual(bytes_hash.finalResult(), runs_hash.finalResult());
+            try std.testing.expectEqualStrings(bytes_prefix.slice(), runs_prefix.slice());
+            try std.testing.expectEqual(bytes_decoded.overflow, runs_decoded.overflow);
+        } else |err| try std.testing.expectError(err, by_runs);
+    }
 }
 
 test "a decoded event is parsed from the bytes just written, never read back" {
