@@ -1596,7 +1596,7 @@ fn launchPreparedRequest(
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
-        .observation_names = model_adapter.observation_names,
+        .observation_names = &model_adapter.observation_names,
         .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,

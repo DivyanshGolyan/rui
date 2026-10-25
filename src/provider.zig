@@ -17,7 +17,7 @@ pub const TransportOptions = struct {
     ca_file: ?[]const u8 = null,
     // Borrowed until start returns; curl_slist owns copies through teardown.
     extra_headers: []const [:0]const u8 = &.{},
-    observation_names: ObservationNames = .{},
+    observation_names: *const ObservationNames = &.{},
     turn_state: ?TurnStateSink = null,
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
@@ -490,10 +490,8 @@ pub const ResponseCapture = struct {
 };
 
 const HeaderContext = struct {
-    names: ObservationNames = .{},
-    request_id: protocol.Bounded(256) = .{},
-    model: protocol.Bounded(protocol.max_model_bytes) = .{},
-    alternate_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    names: *const ObservationNames = &.{},
+    observed: Observed = .{},
     /// Receives the first caller-named routing value of a successful header
     /// block. A routing hint never fails the transfer: an unusable first value
     /// is dropped, and later values are ignored.
@@ -503,6 +501,43 @@ const HeaderContext = struct {
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
     invalid: bool = false,
+};
+
+/// The caller-named response values, each at its real length, back to back
+/// in one buffer the Transfer owns. A transfer whose headers have not
+/// arrived owns none. Like curl's own buffers, it comes from malloc.
+const Observed = struct {
+    const Name = enum { request_id, model, alternate_model };
+    const capacity = std.EnumArray(Name, usize).init(.{
+        .request_id = 256,
+        .model = protocol.max_model_bytes,
+        .alternate_model = protocol.max_model_bytes,
+    });
+    const Span = struct { start: u16 = 0, len: u16 = 0 };
+
+    bytes: []u8 = &.{},
+    spans: std.EnumArray(Name, Span) = .initFill(.{}),
+
+    fn get(self: *const Observed, name: Name) []const u8 {
+        const span = self.spans.get(name);
+        return self.bytes[span.start..][0..span.len];
+    }
+
+    /// A repeated name must repeat its value.
+    fn put(self: *Observed, name: Name, value: []const u8) error{ InvalidValue, OutOfMemory }!void {
+        if (value.len == 0 or value.len > capacity.get(name)) return error.InvalidValue;
+        if (self.spans.get(name).len != 0)
+            return if (std.mem.eql(u8, self.get(name), value)) {} else error.InvalidValue;
+        const start = self.bytes.len;
+        self.bytes = try std.heap.c_allocator.realloc(self.bytes, start + value.len);
+        @memcpy(self.bytes[start..], value);
+        self.spans.set(name, .{ .start = @intCast(start), .len = @intCast(value.len) });
+    }
+
+    fn deinit(self: *Observed) void {
+        std.heap.c_allocator.free(self.bytes);
+        self.* = undefined;
+    }
 };
 
 pub const ObservationNames = struct {
@@ -731,6 +766,7 @@ pub const Transfer = struct {
         std.debug.assert(self.writer.drained(&self.response));
         c.curl_easy_cleanup(self.easy);
         freeHeaders(self.headers);
+        self.header_context.observed.deinit();
         self.request.deinit();
         if (self.response_owned) self.response.deinit();
         self.* = undefined;
@@ -744,7 +780,7 @@ pub const Transfer = struct {
     }
 
     pub fn requestId(self: *const Transfer) []const u8 {
-        return self.header_context.request_id.slice();
+        return self.header_context.observed.get(.request_id);
     }
 
     /// Payload-free curl observations for a completed managed transfer.
@@ -758,11 +794,11 @@ pub const Transfer = struct {
     }
 
     pub fn observedModel(self: *const Transfer) []const u8 {
-        return self.header_context.model.slice();
+        return self.header_context.observed.get(.model);
     }
 
     pub fn observedAlternateModel(self: *const Transfer) []const u8 {
-        return self.header_context.alternate_model.slice();
+        return self.header_context.observed.get(.alternate_model);
     }
 
     pub fn identity(self: *const Transfer) TransferIdentity {
@@ -868,20 +904,17 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
         if (context.turn_state) |sink| sink.capture(sink.context, value);
         return bytes;
     }
-    const destination = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
-        &context.request_id
+    const observed: Observed.Name = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
+        .request_id
     else if (context.names.model.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.model))
-        &context.model
+        .model
     else if (context.names.alternate_model.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.alternate_model))
-        &context.alternate_model
+        .alternate_model
     else
         return bytes;
-    if (value.len == 0 or (destination.len != 0 and !destination.eql(value))) {
-        context.invalid = true;
-        return 0;
-    }
-    destination.set(value) catch {
-        context.invalid = true;
+    // Exhausted memory fails the transfer as curl's own allocation failure does.
+    context.observed.put(observed, value) catch |err| {
+        if (err == error.InvalidValue) context.invalid = true;
         return 0;
     };
     return bytes;
@@ -996,11 +1029,12 @@ test "duplicate Retry-After headers retain both independent constraints" {
 }
 
 test "response observations use caller-selected names and reject contradictions" {
-    var context: HeaderContext = .{ .names = .{
+    var context: HeaderContext = .{ .names = &.{
         .request_id = "correlation",
         .model = "served-model",
         .alternate_model = "other-model",
     } };
+    defer context.observed.deinit();
     const ignored = "openai-model: unrelated\r\n";
     try std.testing.expectEqual(ignored.len, headerCallback(@constCast(ignored.ptr), 1, ignored.len, &context));
     const first = "Served-Model: alpha\r\n";
@@ -1008,12 +1042,37 @@ test "response observations use caller-selected names and reject contradictions"
     const correlation = "correlation: ref-1\r\n";
     for ([_][]const u8{ first, second, correlation }) |line|
         try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
-    try std.testing.expectEqualStrings("alpha", context.model.slice());
-    try std.testing.expectEqualStrings("beta", context.alternate_model.slice());
-    try std.testing.expectEqualStrings("ref-1", context.request_id.slice());
+    try std.testing.expectEqualStrings("alpha", context.observed.get(.model));
+    try std.testing.expectEqualStrings("beta", context.observed.get(.alternate_model));
+    try std.testing.expectEqualStrings("ref-1", context.observed.get(.request_id));
     const contradictory = "served-model: gamma\r\n";
     try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(contradictory.ptr), 1, contradictory.len, &context));
     try std.testing.expect(context.invalid);
+}
+
+test "response observations keep their real length and reject empty or oversized values" {
+    const names: ObservationNames = .{ .request_id = "correlation", .model = "served-model" };
+    var context: HeaderContext = .{ .names = &names };
+    defer context.observed.deinit();
+    const status = "HTTP/2 200\r\n";
+    try std.testing.expectEqual(status.len, headerCallback(@constCast(status.ptr), 1, status.len, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.observed.bytes.len);
+    const model = "served-model: m\r\n";
+    const correlation = "correlation: " ++ @as([256]u8, @splat('r')) ++ "\r\n";
+    for ([_][]const u8{ model, correlation, model }) |line|
+        try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
+    try std.testing.expectEqual(@as(usize, 257), context.observed.bytes.len);
+    try std.testing.expectEqualStrings("m", context.observed.get(.model));
+    try std.testing.expectEqualStrings(&@as([256]u8, @splat('r')), context.observed.get(.request_id));
+    try std.testing.expectEqualStrings("", context.observed.get(.alternate_model));
+    try std.testing.expect(!context.invalid);
+    for ([_][]const u8{ "served-model: \r\n", "served-model: " ++ @as([protocol.max_model_bytes + 1]u8, @splat('m')) ++ "\r\n" }) |line| {
+        var rejected: HeaderContext = .{ .names = &names };
+        defer rejected.observed.deinit();
+        try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(line.ptr), 1, line.len, &rejected));
+        try std.testing.expect(rejected.invalid);
+        try std.testing.expectEqual(@as(usize, 0), rejected.observed.bytes.len);
+    }
 }
 
 test "turn state observation keeps only the first value of a successful response" {
@@ -1034,7 +1093,7 @@ test "turn state observation keeps only the first value of a successful response
     };
     for (cases) |case| {
         var record: TurnStateRecord = .{};
-        var context: HeaderContext = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
+        var context: HeaderContext = .{ .names = &.{ .turn_state = name }, .turn_state = record.sink() };
         for (case.lines) |line| try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
         try std.testing.expectEqualStrings(case.expected, record.value.slice());
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
