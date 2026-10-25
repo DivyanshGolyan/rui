@@ -430,6 +430,67 @@ test "an inactive stream ends and is reset" {
     stream.deinit();
 }
 
+fn sleepMs(ms: c_int) void {
+    _ = std.c.poll(&[_]std.c.pollfd{}, 0, ms);
+}
+
+test "an overdue pending stream ends before it is sent, even with room on a warm connection" {
+    const harness = try Harness.create(.{ .inactivity_ns = 100 * ns_per_ms });
+    defer harness.destroy();
+    var warm: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    try harness.launch(&warm, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&warm));
+
+    var late: h2.Stream = .idle;
+    try harness.launch(&late, bytesRequest(harness.endpoint, "x", &sink));
+    sleepMs(150);
+    try harness.client.drive(&harness.receiver);
+    try std.testing.expectEqual(h2.End{ .cause = .inactive, .request_sent = false }, try harness.collect(&late));
+    try harness.runFor(20 * ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), harness.peer.streams.items.len);
+}
+
+test "a read cap defers expiry only for streams on that connection" {
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold }, .inactivity_ns = 100 * ns_per_ms });
+    defer harness.destroy();
+    const quiet = try Peer.start(std.testing.allocator, .{ .on_request = hold });
+    defer quiet.stop();
+    const quiet_endpoint = try harness.client.addEndpoint(quiet.url());
+
+    // Five streams' windows hold more than one drive's read allowance.
+    var busy: [5]h2.Stream = @splat(.idle);
+    var sinks: [5][32 * 1024]u8 = undefined;
+    for (&busy, &sinks) |*stream, *sink| try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
+    var silent: h2.Stream = .idle;
+    var silent_sink: [8]u8 = undefined;
+    try harness.launch(&silent, bytesRequest(quiet_endpoint, "x", &silent_sink));
+    const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    while (harness.peer.streams.items.len < 5 or quiet.streams.items.len < 1) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds - start > 5 * std.time.ns_per_s) return error.Timeout;
+        try harness.step();
+        try quiet.pump();
+    }
+
+    sleepMs(150);
+    var response: [32 * 1024]u8 = undefined;
+    @memset(&response, 'r');
+    for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, &response);
+    try harness.peer.pump();
+    try harness.client.drive(&harness.receiver);
+    // The silent stream's connection was drained, so it expires; the busy
+    // connection stopped at its allowance, so none of its streams do.
+    try std.testing.expectEqual(@as(usize, 1), harness.client.finishedCount());
+    try std.testing.expectEqual(h2.End{ .cause = .inactive, .request_sent = true }, try harness.collect(&silent));
+
+    try harness.runUntilFinished(5);
+    while (harness.client.nextFinished()) |stream| {
+        try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, stream.end().?);
+        try std.testing.expectEqual(@as(u64, response.len), stream.responseLength());
+    }
+}
+
 test "a quiet connection is pinged, and one that never answers is dead" {
     const liveness: h2.Liveness = .{ .ping_after_quiet_ns = 50 * ns_per_ms, .ping_timeout_ns = 100 * ns_per_ms };
     {

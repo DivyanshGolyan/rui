@@ -357,11 +357,11 @@ pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
 
     try self.pollReadiness();
     self.advanceSetups();
-    const capped = self.readAll();
+    self.readAll();
+    self.expireInactive();
     self.submitPending();
     self.sendAll();
     self.checkLiveness();
-    if (!capped) self.expireInactive();
 }
 
 /// poll(0) over every socket, so each step below acts only on ready ones.
@@ -426,14 +426,13 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
     while (origin.pending.head) |record| self.endStream(record, cause);
 }
 
-/// Returns whether any connection stopped at its read allowance.
-fn readAll(self: *Engine) bool {
-    var capped = false;
+/// Marks each connection that stopped at its read allowance.
+fn readAll(self: *Engine) void {
     for (self.connections) |*connection| {
+        connection.read_capped = false;
         if (!connection.hasSession() or connection.revents == 0) continue;
-        if (connection.receive() == .capped) capped = true;
+        if (connection.receive() == .capped) connection.read_capped = true;
     }
-    return capped;
 }
 
 fn submitPending(self: *Engine) void {
@@ -522,11 +521,20 @@ fn livenessFacts(self: *Engine, connection: *const Connection, time: u64) policy
     };
 }
 
+/// Before submitting, so an overdue pending stream never sends a byte. An
+/// open stream on a connection that stopped at its read allowance waits:
+/// its bytes may be unread.
 fn expireInactive(self: *Engine) void {
     const time = self.now();
-    while (self.timers.head) |record| {
+    var next = self.timers.head;
+    while (next) |record| {
         if (time -| record.last_activity_ns < self.options.inactivity_ns) break;
-        if (record.state == .open) self.connectionOf(record).detach(record);
+        next = record.next;
+        if (record.state == .open) {
+            const connection = self.connectionOf(record);
+            if (connection.read_capped) continue;
+            connection.detach(record);
+        }
         self.endStream(record, .inactive);
     }
 }

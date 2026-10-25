@@ -50,7 +50,8 @@ pub const stream_window_bytes: u31 = 16 * 1024;
 /// Every socket read lands in the Client's one buffer and is decoded there.
 pub const read_buffer_bytes = 16 * 1024;
 /// The most bytes one `drive` reads from one connection before moving on.
-/// A drive that hit it skips inactivity expiry, since bytes may be waiting.
+/// Streams on a connection that hit it skip that drive's inactivity
+/// expiry, since their bytes may be waiting.
 pub const read_allowance_bytes = 64 * 1024;
 
 /// The linked nghttp2 and OpenSSL must be exactly the pinned versions. Its

@@ -28,6 +28,8 @@ origin: u8,
 carried_any: bool,
 /// Inbound bytes arrived; the first ones tell an HTTP/1 answer apart.
 received_any: bool,
+/// This drive's read stopped at the allowance with bytes maybe unread.
+read_capped: bool,
 /// The session ended through a protocol error on either side.
 protocol_failure: bool,
 /// Index into the Engine's poll array for the current pass, 0 for none.
@@ -74,6 +76,7 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .origin = 0,
         .carried_any = false,
         .received_any = false,
+        .read_capped = false,
         .protocol_failure = false,
         .poll_slot = 0,
         .revents = 0,
