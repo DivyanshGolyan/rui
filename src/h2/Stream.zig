@@ -27,8 +27,8 @@ next: ?*Record,
 /// this plus the Client's inactivity interval.
 last_activity_ns: u64,
 /// The owned request field block (see `FieldBlock`), exact length. nghttp2
-/// references it without copying, so it is the only copy of any credential
-/// outside the caller. Held while a replay is possible, then zeroed and
+/// references it without copying, so outside the caller it holds the only
+/// copy of a credential that was not borrowed. Held while a replay is possible, then zeroed and
 /// freed at the first response frame.
 fields: ?[*]u8,
 fields_len: u32,
@@ -105,12 +105,15 @@ pub fn facts(self: *const Record) policy.StreamFacts {
 }
 
 /// The owned request field block: for each field a flags byte, a u16 name
-/// length and a u32 value length (little endian), then name and value.
+/// length and a u32 value length (little endian), then the name and value,
+/// or for a borrowed field their two addresses.
 pub const FieldBlock = struct {
     pub const header_bytes = 7;
     pub const sensitive: u8 = 1;
+    pub const borrowed: u8 = 2;
+    const address_bytes = @sizeOf(usize);
 
-    pub const Entry = struct { name: []const u8, value: []const u8, sensitive: bool };
+    pub const Entry = h2.Field;
 
     pub const Iterator = struct {
         bytes: []const u8,
@@ -120,20 +123,41 @@ pub const FieldBlock = struct {
             const flags = self.bytes[0];
             const name_len = std.mem.readInt(u16, self.bytes[1..3], .little);
             const value_len = std.mem.readInt(u32, self.bytes[3..7], .little);
-            const name = self.bytes[header_bytes..][0..name_len];
-            const value = self.bytes[header_bytes + name_len ..][0..value_len];
-            self.bytes = self.bytes[header_bytes + name_len + value_len ..];
-            return .{ .name = name, .value = value, .sensitive = flags & sensitive != 0 };
+            const rest = self.bytes[header_bytes..];
+            var entry: Entry = .{ .name = undefined, .value = undefined, .sensitive = flags & sensitive != 0, .borrowed = flags & borrowed != 0 };
+            if (entry.borrowed) {
+                entry.name = address(rest[0..address_bytes])[0..name_len];
+                entry.value = address(rest[address_bytes..][0..address_bytes])[0..value_len];
+            } else {
+                entry.name = rest[0..name_len];
+                entry.value = rest[name_len..][0..value_len];
+            }
+            self.bytes = self.bytes[entryBytes(entry)..];
+            return entry;
+        }
+
+        fn address(bytes: *const [address_bytes]u8) [*]const u8 {
+            return @ptrFromInt(std.mem.readInt(usize, bytes, .little));
         }
     };
 
+    pub fn entryBytes(entry: Entry) usize {
+        return header_bytes + if (entry.borrowed) 2 * address_bytes else entry.name.len + entry.value.len;
+    }
+
     pub fn put(buffer: []u8, entry: Entry) usize {
-        buffer[0] = if (entry.sensitive) sensitive else 0;
+        buffer[0] = (if (entry.sensitive) sensitive else 0) | (if (entry.borrowed) borrowed else 0);
         std.mem.writeInt(u16, buffer[1..3], @intCast(entry.name.len), .little);
         std.mem.writeInt(u32, buffer[3..7], @intCast(entry.value.len), .little);
-        @memcpy(buffer[header_bytes..][0..entry.name.len], entry.name);
-        @memcpy(buffer[header_bytes + entry.name.len ..][0..entry.value.len], entry.value);
-        return header_bytes + entry.name.len + entry.value.len;
+        const rest = buffer[header_bytes..];
+        if (entry.borrowed) {
+            std.mem.writeInt(usize, rest[0..address_bytes], @intFromPtr(entry.name.ptr), .little);
+            std.mem.writeInt(usize, rest[address_bytes..][0..address_bytes], @intFromPtr(entry.value.ptr), .little);
+        } else {
+            @memcpy(rest[0..entry.name.len], entry.name);
+            @memcpy(rest[entry.name.len..][0..entry.value.len], entry.value);
+        }
+        return entryBytes(entry);
     }
 };
 
@@ -305,5 +329,23 @@ test "the field block round-trips names, values and sensitivity" {
     const second = entries.next().?;
     try std.testing.expectEqualStrings("accept", second.name);
     try std.testing.expect(!second.sensitive);
+    try std.testing.expectEqual(@as(?FieldBlock.Entry, null), entries.next());
+}
+
+test "a borrowed field keeps only its addresses in the block" {
+    const value: []const u8 = "Bearer " ++ @as([1200]u8, @splat('t'));
+    var buffer: [128]u8 = undefined;
+    var len = FieldBlock.put(&buffer, .{ .name = "authorization", .value = value, .sensitive = true, .borrowed = true });
+    try std.testing.expectEqual(FieldBlock.header_bytes + 2 * @sizeOf(usize), len);
+    len += FieldBlock.put(buffer[len..], .{ .name = "session-id", .value = "abc", .sensitive = false });
+    var entries: FieldBlock.Iterator = .{ .bytes = buffer[0..len] };
+    const first = entries.next().?;
+    try std.testing.expectEqual(value.ptr, first.value.ptr);
+    try std.testing.expectEqual(value.len, first.value.len);
+    try std.testing.expectEqualStrings("authorization", first.name);
+    try std.testing.expect(first.sensitive and first.borrowed);
+    const second = entries.next().?;
+    try std.testing.expectEqualStrings("abc", second.value);
+    try std.testing.expect(!second.borrowed);
     try std.testing.expectEqual(@as(?FieldBlock.Entry, null), entries.next());
 }

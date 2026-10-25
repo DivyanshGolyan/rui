@@ -709,7 +709,8 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
 }
 
 /// The server's first response frame proves it processed the request, so
-/// no resend can follow: the field block (credentials) goes now.
+/// no resend can follow: the field block, and any credential copied into
+/// it, goes now.
 fn responseStarted(self: *Connection, record: *Record) void {
     if (record.flags.response_started) return;
     record.flags.response_started = true;

@@ -169,6 +169,38 @@ test "a request and its response round trip" {
     stream.deinit();
 }
 
+test "a borrowed field is sent from the caller's bytes and a copied one from prepare's copy" {
+    const harness = try Harness.create(.{});
+    defer harness.destroy();
+    var borrowed_stream: h2.Stream = .idle;
+    var copied_stream: h2.Stream = .idle;
+    var sinks: [2][64]u8 = undefined;
+    var shared = "Bearer first".*;
+    var own = "Bearer first".*;
+    try harness.launch(&borrowed_stream, .{
+        .endpoint = harness.endpoint,
+        .fields = &.{.{ .name = "authorization", .value = &shared, .sensitive = true, .borrowed = true }},
+        .body = .{ .bytes = "x" },
+        .sink = .{ .buffer = &sinks[0] },
+    });
+    try harness.launch(&copied_stream, .{
+        .endpoint = harness.endpoint,
+        .fields = &.{.{ .name = "authorization", .value = &own, .sensitive = true }},
+        .body = .{ .bytes = "x" },
+        .sink = .{ .buffer = &sinks[1] },
+    });
+    // Nothing is sent before a drive, so the peer sees the bytes as they
+    // are now: the borrowed value's, and the copy prepare made of the other.
+    shared = "Bearer later".*;
+    own = "Bearer later".*;
+    try harness.runUntilFinished(2);
+    for (0..2) |_| try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, harness.client.nextFinished().?.end().?);
+    try std.testing.expectEqualStrings("Bearer later", harness.peer.streams.items[0].authorization.items);
+    try std.testing.expectEqualStrings("Bearer first", harness.peer.streams.items[1].authorization.items);
+    borrowed_stream.deinit();
+    copied_stream.deinit();
+}
+
 test "request bodies come from a file and responses go to one" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -276,11 +308,18 @@ test "REFUSED_STREAM is sent again at most four times" {
     defer harness.destroy();
     var stream: h2.Stream = .idle;
     var sink: [8]u8 = undefined;
-    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    // Each resend carries the borrowed field again, from the caller's bytes.
+    try harness.launch(&stream, .{
+        .endpoint = harness.endpoint,
+        .fields = &.{.{ .name = "authorization", .value = "Bearer shared", .sensitive = true, .borrowed = true }},
+        .body = .{ .bytes = "x" },
+        .sink = .{ .buffer = &sink },
+    });
     try harness.runUntilFinished(1);
     try std.testing.expectEqual(h2.End{ .cause = .refused, .request_sent = true }, try harness.collect(&stream));
     try std.testing.expectEqual(@as(u8, 4), stream.replays());
     try std.testing.expectEqual(@as(usize, 5), harness.peer.streams.items.len);
+    for (harness.peer.streams.items) |seen| try std.testing.expectEqualStrings("Bearer shared", seen.authorization.items);
     try std.testing.expectEqual(@as(u32, 1), harness.peer.seen.connections);
     stream.deinit();
 }

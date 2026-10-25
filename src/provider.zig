@@ -108,6 +108,90 @@ pub const ProtocolObservation = struct {
     replays: u8,
 };
 
+/// One copy of each credential's request fields, however many Transfers
+/// present it. h2 borrows the copy (see `h2.Field.borrowed`), so a stream
+/// holds two addresses for it instead of the bytes. A Transfer holds one use
+/// from `start` until its first response head, when h2 is done with its
+/// fields, or `deinit`; the last release wipes and frees the copy, so a
+/// credential stays in memory no longer than a per-stream copy did.
+pub const SharedCredential = struct {
+    next: ?*SharedCredential,
+    users: u32,
+    authorization_len: u32,
+    account_id_len: u32,
+
+    const scheme = "Bearer ";
+
+    /// The `authorization` value. Like `accountId`, borrowed until the
+    /// caller's use is released, and invalid once the last one is.
+    pub fn authorization(self: *SharedCredential) []const u8 {
+        return self.bytes()[0..self.authorization_len];
+    }
+
+    pub fn accountId(self: *SharedCredential) []const u8 {
+        return self.bytes()[self.authorization_len..];
+    }
+
+    fn bytes(self: *SharedCredential) []u8 {
+        return self.allocation()[@sizeOf(SharedCredential)..];
+    }
+
+    fn allocation(self: *SharedCredential) []align(@alignOf(SharedCredential)) u8 {
+        const base: [*]align(@alignOf(SharedCredential)) u8 = @ptrCast(self);
+        return base[0 .. @sizeOf(SharedCredential) + self.authorization_len + self.account_id_len];
+    }
+};
+
+/// At most one copy per distinct token and account in use, so a handful at
+/// most (a refresh overlaps the old token's last Transfers); each lookup is
+/// a scan of that short list.
+pub const Credentials = struct {
+    allocator: std.mem.Allocator,
+    head: ?*SharedCredential = null,
+
+    /// A use of the copy of these bytes, made now if none is live.
+    pub fn share(self: *Credentials, access_token: []const u8, account_id: []const u8) error{OutOfMemory}!*SharedCredential {
+        const scheme = SharedCredential.scheme;
+        var node = self.head;
+        while (node) |shared| : (node = shared.next) {
+            const authorization = shared.authorization();
+            if (authorization.len == scheme.len + access_token.len and
+                std.mem.eql(u8, authorization[scheme.len..], access_token) and
+                std.mem.eql(u8, shared.accountId(), account_id))
+            {
+                shared.users += 1;
+                return shared;
+            }
+        }
+        const authorization_len = scheme.len + access_token.len;
+        const memory = try self.allocator.alignedAlloc(u8, .of(SharedCredential), @sizeOf(SharedCredential) + authorization_len + account_id.len);
+        const shared: *SharedCredential = @ptrCast(memory.ptr);
+        shared.* = .{
+            .next = self.head,
+            .users = 1,
+            .authorization_len = @intCast(authorization_len),
+            .account_id_len = @intCast(account_id.len),
+        };
+        const destination = shared.bytes();
+        @memcpy(destination[0..scheme.len], scheme);
+        @memcpy(destination[scheme.len..authorization_len], access_token);
+        @memcpy(destination[authorization_len..], account_id);
+        self.head = shared;
+        return shared;
+    }
+
+    pub fn release(self: *Credentials, shared: *SharedCredential) void {
+        shared.users -= 1;
+        if (shared.users != 0) return;
+        var link = &self.head;
+        while (link.* != shared) link = &link.*.?.next;
+        link.* = shared.next;
+        const memory = shared.allocation();
+        std.crypto.secureZero(u8, memory);
+        self.allocator.free(memory);
+    }
+};
+
 pub const Reactor = struct {
     client: h2.Client,
     endpoint: h2.Endpoint,
@@ -115,6 +199,7 @@ pub const Reactor = struct {
     observation: HeaderObservation,
     scratch_path: []const u8,
     budget: ScratchBudget,
+    credentials: Credentials,
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -131,6 +216,7 @@ pub const Reactor = struct {
             .observation = options.observation,
             .scratch_path = options.scratch_path,
             .budget = options.budget,
+            .credentials = .{ .allocator = allocator },
         };
         try self.client.init(allocator, io, .{
             .stream_capacity = std.math.cast(u32, options.capacity) orelse return error.TransportCapacityTooLarge,
@@ -143,6 +229,7 @@ pub const Reactor = struct {
     }
 
     pub fn deinit(self: *Reactor) void {
+        std.debug.assert(self.credentials.head == null);
         self.client.deinit();
         self.* = undefined;
     }
@@ -194,6 +281,7 @@ pub const Reactor = struct {
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         switch (event) {
             .head => |head| {
+                transfer.releaseCredential();
                 transfer.headers.block(head.kind, head.status);
                 const now_seconds = std.Io.Clock.real.now(self.io).toSeconds();
                 for (head.fields) |field| {
@@ -412,11 +500,17 @@ pub const Transfer = struct {
     response: ResponseCapture,
     response_owned: bool = true,
     headers: HeaderContext,
+    credential: ?*SharedCredential,
 
     pub const StartOptions = struct {
-        /// Lowercase names; borrowed until `start` returns, since h2 copies
-        /// them.
+        /// Lowercase names. Borrowed until `start` returns, since h2 copies
+        /// them, except a borrowed field, which must be a literal or bytes
+        /// of `credential`.
         fields: []const h2.Field = &.{},
+        /// A use of the Reactor's `credentials`, which the Transfer releases:
+        /// at its first response head, in `deinit`, or in `start` when it
+        /// fails.
+        credential: ?*SharedCredential = null,
         turn_state: TurnStateKey = .{},
         faults: Faults = .{},
     };
@@ -433,9 +527,10 @@ pub const Transfer = struct {
         options: StartOptions,
         retained_response: *?named_scratch.Owner,
     ) !void {
+        errdefer if (options.credential) |shared| reactor.credentials.release(shared);
         if (options.fields.len + 1 > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
-        fields[0] = .{ .name = "content-type", .value = "application/json" };
+        fields[0] = .{ .name = "content-type", .value = "application/json", .borrowed = true };
         @memcpy(fields[1..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
             reactor.io,
@@ -452,6 +547,7 @@ pub const Transfer = struct {
             .request = request,
             .response = response,
             .headers = .{ .observation = &reactor.observation, .turn_state = options.turn_state },
+            .credential = options.credential,
         };
         errdefer {
             self.response.deinit(reactor.io, reactor.budget);
@@ -478,7 +574,15 @@ pub const Transfer = struct {
         self.retireRequest();
         self.headers.observed.deinit();
         if (self.response_owned) self.response.deinit(reactor.io, reactor.budget);
+        // After the cancel, so h2 no longer holds the borrowed bytes.
+        self.releaseCredential();
         self.* = undefined;
+    }
+
+    fn releaseCredential(self: *Transfer) void {
+        const shared = self.credential orelse return;
+        self.credential = null;
+        self.reactor.credentials.release(shared);
     }
 
     /// h2 will not read the request again: close it and release its charge
@@ -593,6 +697,62 @@ test "idle reactor reports zero finished transfers and no completion" {
     try reactor.drive();
     try std.testing.expectEqual(@as(usize, 0), reactor.finishedCount());
     try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
+}
+
+test "Transfers presenting one credential share one copy, freed with the last use" {
+    // The testing allocator fails the test on a leak or a double free.
+    var credentials: Credentials = .{ .allocator = std.testing.allocator };
+    const first = try credentials.share("token-a", "account");
+    const second = try credentials.share("token-a", "account");
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqualStrings("Bearer token-a", first.authorization());
+    try std.testing.expectEqualStrings("account", first.accountId());
+    // A refreshed token, or another account, is a separate copy.
+    const refreshed = try credentials.share("token-b", "account");
+    const other = try credentials.share("token-a", "other");
+    try std.testing.expect(refreshed != first and other != first and other != refreshed);
+    try std.testing.expectEqualStrings("Bearer token-b", refreshed.authorization());
+    credentials.release(first);
+    try std.testing.expectEqual(first, try credentials.share("token-a", "account"));
+    credentials.release(first);
+    credentials.release(refreshed);
+    credentials.release(second);
+    credentials.release(other);
+    try std.testing.expectEqual(@as(?*SharedCredential, null), credentials.head);
+}
+
+test "a Transfer's credential use ends at its first response head, once" {
+    var reactor: Reactor = undefined;
+    reactor.io = std.testing.io;
+    reactor.observation = .{};
+    reactor.credentials = .{ .allocator = std.testing.allocator };
+    var transfer: Transfer = undefined;
+    transfer.reactor = &reactor;
+    transfer.headers = .{ .observation = &reactor.observation };
+    transfer.credential = try reactor.credentials.share("token", "account");
+    // A sibling Transfer still presenting the same credential.
+    const sibling = try reactor.credentials.share("token", "account");
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } }));
+    try std.testing.expectEqual(@as(?*SharedCredential, null), transfer.credential);
+    try std.testing.expectEqual(@as(u32, 1), sibling.users);
+    _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &.{} } });
+    transfer.releaseCredential();
+    try std.testing.expectEqual(@as(u32, 1), sibling.users);
+    reactor.credentials.release(sibling);
+    try std.testing.expectEqual(@as(?*SharedCredential, null), reactor.credentials.head);
+}
+
+test "a Transfer that fails to start releases its credential use" {
+    var reactor: Reactor = undefined;
+    reactor.credentials = .{ .allocator = std.testing.allocator };
+    var transfer: Transfer = undefined;
+    var retained: ?named_scratch.Owner = null;
+    const too_many: [h2.max_fields]h2.Field = @splat(.{ .name = "x-field", .value = "" });
+    try std.testing.expectError(error.TooManyProviderHeaders, transfer.start(&reactor, undefined, undefined, .{
+        .fields = &too_many,
+        .credential = try reactor.credentials.share("token", "account"),
+    }, &retained));
+    try std.testing.expectEqual(@as(?*SharedCredential, null), reactor.credentials.head);
 }
 
 test "scratch reservation is bounded and releases exact charge" {
