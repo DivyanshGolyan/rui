@@ -801,13 +801,13 @@ test "https: the system roots do not trust a private CA" {
     try expectSetupFailure(.{ .peer = .{ .tls = .h2 }, .trust = .system }, .untrusted_peer);
 }
 
-// A manual check of system trust against a real server, which CI cannot
-// make: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2`.
-// Any HTTP status passes; it proves the peer was verified and spoke h2.
-test "https live: system trust verifies a public server" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const url = environ.get("RUI_H2_LIVE_URL") orelse return error.SkipZigTest;
+// Manual checks of system trust against real servers, which CI cannot
+// make (its egress re-signs every certificate). Run on each platform:
+// `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2`
+// `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2`
+
+/// One request to `url` under system trust, until its stream ends.
+fn liveEnd(url: []const u8) !h2.End {
     var client: h2.Client = undefined;
     try client.init(std.testing.allocator, std.testing.io, .{
         .stream_capacity = 1,
@@ -817,6 +817,7 @@ test "https live: system trust verifies a public server" {
     defer client.deinit();
     const endpoint = try client.addEndpoint(url);
     var stream: h2.Stream = .idle;
+    defer stream.deinit();
     var sink: [4096]u8 = undefined;
     try client.prepare(&stream, bytesRequest(endpoint, "", &sink));
     client.launch(&stream);
@@ -827,8 +828,34 @@ test "https live: system trust verifies a public server" {
     }
     const end = client.nextFinished().?.end().?;
     std.debug.print("live: {s} -> {any}, status {?d}\n", .{ url, end, stream.status() });
-    try std.testing.expectEqual(h2.Cause.complete, end.cause);
-    stream.deinit();
+    return end;
+}
+
+// Any HTTP status passes; it proves the peer was verified and spoke h2.
+test "https live: system trust verifies a public server" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const url = environ.get("RUI_H2_LIVE_URL") orelse return error.SkipZigTest;
+    try std.testing.expectEqual(h2.Cause.complete, (try liveEnd(url)).cause);
+}
+
+// badssl.com's broken certificates, and an IP literal its certificate
+// does not name (badssl.com's address), each refused before any request
+// byte. 1.1.1.1's certificate names that IP, so it must verify.
+test "https live: system trust refuses broken certificates and unnamed IPs" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    _ = environ.get("RUI_H2_LIVE_NEGATIVE") orelse return error.SkipZigTest;
+    for ([_][]const u8{
+        "https://wrong.host.badssl.com/",
+        "https://expired.badssl.com/",
+        "https://self-signed.badssl.com/",
+        "https://untrusted-root.badssl.com/",
+        "https://104.154.89.105/",
+    }) |url| {
+        try std.testing.expectEqual(h2.End{ .cause = .untrusted_peer, .request_sent = false }, try liveEnd(url));
+    }
+    try std.testing.expectEqual(h2.Cause.complete, (try liveEnd("https://1.1.1.1/")).cause);
 }
 
 test "https: a peer that does not choose h2 is refused" {
