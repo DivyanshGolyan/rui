@@ -478,22 +478,16 @@ pub const TurnStates = struct {
         used: u64 = 0,
     };
 
-    /// One launched transfer's capture authority: its Turn and launch epoch.
-    /// The transfer's header callback delivers its value straight here.
-    pub const Capture = struct {
-        states: *TurnStates,
-        turn_id: u64,
-        epoch: u64,
+    /// Every managed transfer's header callback delivers its value straight
+    /// here, keyed by the Turn and the epoch its launch selected.
+    pub fn sink(self: *TurnStates) provider.TurnStateSink {
+        return .{ .context = self, .capture = observe };
+    }
 
-        pub fn sink(self: *Capture) provider.TurnStateSink {
-            return .{ .context = self, .capture = observe };
-        }
-
-        fn observe(context: *anyopaque, value: []const u8) void {
-            const self: *Capture = @ptrCast(@alignCast(context));
-            self.states.capture(self.turn_id, self.epoch, value);
-        }
-    };
+    fn observe(context: *anyopaque, key: provider.TurnStateKey, value: []const u8) void {
+        const self: *TurnStates = @ptrCast(@alignCast(context));
+        self.capture(key.turn_id, key.epoch, value);
+    }
 
     pub fn owner(record: *const codex_credentials.Record) Owner {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -1218,11 +1212,9 @@ pub const Preparation = struct {
         self.view.close();
         self.writer.file.close(self.writer.io);
         const request = PreparedRequest{
-            .io = self.writer.io,
             .file = self.readonly,
             .length = self.writer.offset,
             .charged = self.writer.charged,
-            .budget = self.writer.budget,
             .structured_output = self.settings.?.output_schema != null,
             .session_affinity = self.settings.?.session_affinity,
         };
@@ -1440,7 +1432,7 @@ test "real preparation consumes the configured allowance across multiple advance
             .prepared => |*request| {
                 try std.testing.expect(advances > 1);
                 try std.testing.expect(request.length > 0);
-                request.deinit();
+                request.deinit(std.testing.io, preparation.writer.budget);
                 return;
             },
             .failed => |err| return err,
@@ -1672,13 +1664,13 @@ fn drainPreparation(
     step_bound: usize,
 ) !DrainedRequest {
     var request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
-    defer request.deinit();
+    defer request.deinit(std.testing.io, preparation.writer.budget);
     const length: usize = @intCast(request.length);
     const bytes = try std.testing.allocator.alloc(u8, length);
     errdefer std.testing.allocator.free(bytes);
-    const actual = try request.file.readPositionalAll(request.io, bytes, 0);
+    const actual = try request.file.readPositionalAll(std.testing.io, bytes, 0);
     try std.testing.expectEqual(length, actual);
-    try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    try std.testing.expectEqual(request.length, try request.file.length(std.testing.io));
     const digest = protocol.contentDigest(bytes);
     return .{ .bytes = bytes, .length = request.length, .digest = digest };
 }
@@ -1713,7 +1705,7 @@ fn drainLivePreparation(
             },
             .prepared => |*request| {
                 var transferred = false;
-                errdefer if (!transferred) request.deinit();
+                errdefer if (!transferred) request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(steps <= step_bound);
                 const stats = preparation.advanceStats();
                 try std.testing.expect(stats.work_bytes <= byte_allowance);
@@ -1752,7 +1744,7 @@ fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: u
             // offset regression cannot leak the descriptor. The preparation
             // is inactive after sealing, so callers must not cancel it.
             .prepared => |*request| {
-                request.deinit();
+                request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(false);
                 unreachable;
             },
@@ -2374,12 +2366,12 @@ test "request preparation emits catalog or explicit effort through sealed custod
             defer if (preparation.active) preparation.cancel();
             var sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
-            defer if (owned) sealed.deinit();
+            defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
             var buffer: [8192]u8 = undefined;
-            const count = try sealed.file.readPositionalAll(sealed.io, &buffer, 0);
+            const count = try sealed.file.readPositionalAll(std.testing.io, &buffer, 0);
             const bytes = buffer[0..count];
             try std.testing.expectEqual(sealed.length, count);
-            try std.testing.expectEqual(sealed.length, try sealed.file.length(sealed.io));
+            try std.testing.expectEqual(sealed.length, try sealed.file.length(std.testing.io));
             try std.testing.expectEqual(sealed.length, used.load(.acquire));
             const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
             defer parsed.deinit();
@@ -2396,7 +2388,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             try std.testing.expectEqual(std.mem.eql(u8, case.model, "gpt-5.5"), request.get("parallel_tool_calls").?.bool);
             try std.testing.expectEqualStrings("keep this exact input", request.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
             try std.testing.expectEqual(@as(usize, purpose), std.mem.count(u8, bytes, "compaction_trigger"));
-            sealed.deinit();
+            sealed.deinit(std.testing.io, preparation.writer.budget);
             owned = false;
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
             try std.testing.expect(retained == null);
@@ -2591,7 +2583,7 @@ test "request preparation cancellation and failure release ownership" {
             switch (progress) {
                 .pending => {},
                 .prepared => |*request| {
-                    request.deinit();
+                    request.deinit(std.testing.io, preparation.writer.budget);
                     break;
                 },
                 .failed => |err| {
@@ -2667,7 +2659,7 @@ test "request preparation completed request is fenced by later stop before hando
     var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
     var released = false;
     defer {
-        if (!released) request.deinit();
+        if (!released) request.deinit(std.testing.io, preparation.writer.budget);
     }
     try std.testing.expect(request.length > 0);
     // Sealing transfers the writer reservation to the request recipient: the
@@ -2675,7 +2667,7 @@ test "request preparation completed request is fenced by later stop before hando
     // successful seal charges exactly the sealed bytes.
     try std.testing.expectEqual(request.length, request.charged);
     try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
-    const readable = try request.file.length(request.io);
+    const readable = try request.file.length(std.testing.io);
     try std.testing.expectEqual(request.length, readable);
 
     // A sealed request is not dispatch permission: a stop accepted after
@@ -2692,11 +2684,11 @@ test "request preparation completed request is fenced by later stop before hando
     var calls: usize = 0;
     try std.testing.expectError(error.SupersededByControl, setup.storage.withDispatchHandoff(binding, &calls, Launcher.run));
     try std.testing.expectEqual(@as(usize, 0), calls);
-    try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    try std.testing.expectEqual(request.length, try request.file.length(std.testing.io));
     // The refused handoff releases nothing: the live request stays readable
     // and charged until its recipient releases it.
     try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
-    request.deinit();
+    request.deinit(std.testing.io, preparation.writer.budget);
     released = true;
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
@@ -2731,7 +2723,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
                 // The probe owns this terminal result with no fallible
                 // step before release, so a single scope holds cleanup.
                 .prepared => |*sealed| {
-                    sealed.deinit();
+                    sealed.deinit(std.testing.io, probe.writer.budget);
                     break :blk count;
                 },
                 .failed => |err| return err,
@@ -2839,7 +2831,7 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         defer if (preparation.active) preparation.cancel();
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             var unexpected = request;
-            unexpected.deinit();
+            unexpected.deinit(std.testing.io, preparation.writer.budget);
             return error.ExpectedContinuationUnavailable;
         } else |err| {
             try std.testing.expectEqual(case.failure, err);
@@ -2911,7 +2903,7 @@ test "request preparation resumes large private replay validation before emissio
                     break;
                 },
                 .prepared => |*request| {
-                    defer request.deinit();
+                    defer request.deinit(std.testing.io, preparation.writer.budget);
                     try std.testing.expect(supported);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
@@ -2971,7 +2963,7 @@ test "request preparation authenticates the historical requested model binding" 
         try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
         defer if (prep.active) prep.cancel();
         var request = try drainLivePreparation(&prep, 1, 1, 32768);
-        defer request.deinit();
+        defer request.deinit(std.testing.io, prep.writer.budget);
     }
     try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
     var prep: Preparation = undefined;
@@ -2979,7 +2971,7 @@ test "request preparation authenticates the historical requested model binding" 
     defer if (prep.active) prep.cancel();
     if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
         var unexpected = prepared;
-        unexpected.deinit();
+        unexpected.deinit(std.testing.io, prep.writer.budget);
         return error.ExpectedContinuationUnavailable;
     } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
     prep.cancel();
@@ -3190,7 +3182,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
             try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
             defer if (prep.active) prep.cancel();
             var request = try drainLivePreparation(&prep, 1, 1, 32768);
-            defer request.deinit();
+            defer request.deinit(std.testing.io, prep.writer.budget);
         }
         try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
         var prep: Preparation = undefined;
@@ -3198,7 +3190,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         defer if (prep.active) prep.cancel();
         if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
             var unexpected = prepared;
-            unexpected.deinit();
+            unexpected.deinit(std.testing.io, prep.writer.budget);
             return error.ExpectedContinuationUnavailable;
         } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
         prep.cancel();

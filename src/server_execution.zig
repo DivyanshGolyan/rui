@@ -51,9 +51,6 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// Where a managed transfer delivers its Turn's routing value, with the
-    /// epoch selected at launch.
-    turn_state: ?model_adapter.TurnStates.Capture = null,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
     transfer: provider.Transfer = undefined,
@@ -284,6 +281,9 @@ pub fn executionMain(host: *Host) void {
     }
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
+        .budget = host.retention.sharedBudget().narrowed(
+            if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
+        ),
         .buffers = &workspace[0].capture_buffers,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
@@ -302,7 +302,10 @@ pub fn executionMain(host: *Host) void {
         capture_writer.stop(thread);
     };
     var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
-        provider.Reactor.init(slots.len) catch |err| {
+        provider.Reactor.init(slots.len, .{
+            .names = model_adapter.observation_names,
+            .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+        }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         }
@@ -685,7 +688,7 @@ test "receive advancement serves paused siblings across recurring queue pressure
         }
     };
     var buffers: provider.CaptureWriter.Buffers = undefined;
-    var writer = provider.CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = provider.CaptureWriter{ .io = std.testing.io, .budget = undefined, .buffers = &buffers };
     var host: Host = undefined;
     host.capture_writer = &writer;
     host.faults = .{};
@@ -836,12 +839,22 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     return false;
 }
 
+/// The Host's Bash io, scratch directory and scratch view. Bash captures sit
+/// in execution slots, so they keep none of it.
+fn bashScratch(host: *Host) bash.Scratch {
+    return .{
+        .io = host.io,
+        .path = host.lease.paths.scratch.slice(),
+        .budget = host.retention.sharedBudget().narrowed(host.limits.bash_scratch_limit_bytes),
+    };
+}
+
 fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
             const was_running = active.execution.lifecycle.process == .running;
-            const service = active.execution.service(window);
+            const service = active.execution.service(bashScratch(host), window);
             if (was_running and active.execution.lifecycle.process != .running) {
                 host.store.revokeActionSender(active.binding) catch |err| {
                     _ = failBash(host, active, "Bash sender retirement", err);
@@ -910,19 +923,16 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    const bash_budget = host.retention.sharedBudget().narrowed(host.limits.bash_scratch_limit_bytes);
     const started = bash.startPreparation(
-        host.io,
+        bashScratch(host),
         host.allocator,
         arguments,
         input.arguments.length,
         input.session,
         host.lease.paths.store.slice(),
         input.workspace,
-        host.lease.paths.scratch.slice(),
         host.bash_path,
         input.timeout_ms,
-        bash_budget,
         action_binding.action_id,
         action_binding.attempt_ordinal,
         .{
@@ -1016,7 +1026,7 @@ fn finishBashPreparationFailure(
     } else if (!canonical_failure) {
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
     }
-    failure.cleanup.cleanup() catch |cleanup_err| {
+    failure.cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
@@ -1035,7 +1045,7 @@ fn discardBashResources(
     resources: bash.PreparedCleanup,
 ) void {
     var cleanup = resources;
-    cleanup.cleanup() catch |err| {
+    cleanup.cleanup(bashScratch(host)) catch |err| {
         retainBashPreparedCleanup(host, slot, token, cleanup, err);
         return;
     };
@@ -1113,7 +1123,7 @@ fn stopSupersededBash(
             var cleanup = preparation.*.?.cancel();
             preparation.* = null;
             settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
-            cleanup.cleanup() catch |cleanup_err| {
+            cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
                 retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
                 continue;
             };
@@ -1154,7 +1164,7 @@ fn completeBash(host: *Host, active: *BashSlot) void {
         _ = failBash(host, active, "Bash output reservation", err);
         return;
     };
-    const outcome = active.execution.outcome(include_paths) catch |err| {
+    const outcome = active.execution.outcome(bashScratch(host), include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
         _ = failBash(host, active, "Bash outcome materialization", err);
         return;
@@ -1212,7 +1222,7 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
         if (!active.delivery.closed.reclaim_failed)
             traceAction(host, "cleanup_release_observed", active.binding);
     }
-    active.execution.reclaim(host.retention) catch |err| {
+    active.execution.reclaim(bashScratch(host), host.retention) catch |err| {
         const first_failure = !active.delivery.closed.reclaim_failed;
         active.delivery.closed.reclaim_failed = true;
         active.delivery.closed.reclaim_at = now.addDuration(.{
@@ -1340,15 +1350,12 @@ fn beginAdmittedAttempt(
         finishCustodyNow(host, slot, token);
         return .admitted;
     };
-    const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
-    );
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
         view,
         host.lease.paths.scratch.slice(),
-        request_budget,
+        host.capture_writer.?.budget,
         .{
             .managed_route = host.authentication != null,
             .first_step = host.faults.request_first_step,
@@ -1432,7 +1439,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                active.request.deinit();
+                active.request.deinit(host.io, host.capture_writer.?.budget);
                 finishCustodyNow(host, slot, active.owner.token);
             } else {
                 active.requested = true;
@@ -1509,7 +1516,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
     switch (decision) {
         .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
         .abandon, .settle_authentication_failure => {
-            request.deinit();
+            request.deinit(host.io, host.capture_writer.?.budget);
             if (decision == .settle_authentication_failure)
                 settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(host, slot, owner.token);
@@ -1556,29 +1563,26 @@ fn launchPreparedRequest(
     const token = owner.token;
     const binding = owner.binding;
     if (!host.launchAllowed()) {
-        request.deinit();
+        request.deinit(host.io, host.capture_writer.?.budget);
         finishCustodyNow(host, slot, token);
         return;
     }
-    const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
-    );
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
-        request.deinit();
+        request.deinit(host.io, host.capture_writer.?.budget);
         settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
         finishCustodyNow(host, slot, token);
         return;
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_state: ?model_adapter.TurnStates.Capture = null;
+    var turn_state: provider.TurnStateKey = .{};
     if (credential) |value| {
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
-        turn_state = .{ .states = &host.turn_states, .turn_id = binding.turn_id, .epoch = replay.epoch };
+        turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
-            request.deinit();
+            request.deinit(host.io, host.capture_writer.?.budget);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
             return;
@@ -1588,7 +1592,6 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
-        .turn_state = turn_state,
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
@@ -1596,16 +1599,16 @@ fn launchPreparedRequest(
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
-        .observation_names = &model_adapter.observation_names,
-        .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
+        .observation = &reactor.observation,
+        .turn_state = turn_state,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
         .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
         .completion_identity_fault = host.faults.completion_identity_fault,
-    }, host.capture_writer.?, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
-        request.deinit();
+    }, host.capture_writer.?, host.lease.paths.scratch.slice(), &retained_response) catch |err| {
+        request.deinit(host.io, host.capture_writer.?.budget);
         if (retained_response) |retained| {
             host.custody.detach(token) catch unreachable;
             slot.* = .{ .named_scratch = .{
@@ -1698,7 +1701,7 @@ fn completeTransfer(
         writeTestTrace(host, &trace, &publication);
     }
     var error_response: execution.ErrorResponse = .ordinary;
-    var answered_response: ?provider.ResponseCapture = null;
+    var answered_response: ?provider.SealedResponse = null;
     var http_status: ?u16 = null;
     switch (completion.outcome) {
         .transport_finished => |evidence| {
@@ -1944,7 +1947,7 @@ fn advanceRetainedCleanup(
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash_prepared_cleanup => |*retained| {
-            retained.cleanup.cleanup() catch continue;
+            retained.cleanup.cleanup(bashScratch(host)) catch continue;
             host.custody.cleanupComplete(retained.token) catch unreachable;
             slot.* = .free;
             made_progress = true;
@@ -1977,7 +1980,7 @@ fn shutdownExecution(
             finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
-            active.request.deinit();
+            active.request.deinit(host.io, host.capture_writer.?.budget);
             finishCustodyNow(host, slot, active.owner.token);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
@@ -2215,20 +2218,20 @@ test "authentication handoff borrows the sole credential lease and releases it o
         const input = try tmp.dir.openFile(io, "request", .{});
         try tmp.dir.deleteFile(io, "request");
         host.scratch_used.store(4, .release);
+        var writer = provider.CaptureWriter{ .io = io, .budget = .{ .used = &host.scratch_used, .limit = 4 }, .buffers = undefined };
+        host.capture_writer = &writer;
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
             .cancelled = true,
             .request = .{
-                .io = io,
                 .file = input,
                 .length = 4,
                 .charged = 4,
-                .budget = .{ .used = &host.scratch_used, .limit = 4 },
                 .structured_output = false,
                 .session_affinity = @splat(0),
             },
         } };
-        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit();
+        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, writer.budget);
         var reactor: provider.Reactor = undefined;
         worker.state = .requested;
         try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
@@ -2328,17 +2331,15 @@ test "HTTP error capture retires before execution custody" {
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
         var buffers: provider.CaptureWriter.Buffers = undefined;
-        var writer = provider.CaptureWriter{ .io = io, .buffers = &buffers };
+        var writer = provider.CaptureWriter{ .io = io, .budget = budget, .buffers = &buffers };
         var retained: ?named_scratch.Owner = null;
         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
-            .io = io,
             .file = request_file,
             .length = 2,
             .charged = 2,
-            .budget = budget,
             .structured_output = false,
             .session_affinity = @splat(0),
-        }, binding, .{}, &writer, root, budget, &retained);
+        }, binding, .{}, &writer, root, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
         const response = &slot.provider.transfer.response;
@@ -2346,7 +2347,7 @@ test "HTTP error capture retires before execution custody" {
         try std.testing.expect(budget.charge(body.len));
         response.charged = body.len;
         response.length = body.len;
-        try response.seal(false);
+        try response.seal(io, false);
         Boundary.response_fd = response.file.handle;
         if (kind == 1) {
             // A short sealed read is a real classifier error, not malformed
@@ -2463,20 +2464,28 @@ test "cleanup publication follows complete execution retirement" {
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     host.retention = &retention;
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    host.lease = &lease;
+    // This Host's io observes owner facts at each clock read, so the Bash
+    // calls this test drives directly read the plain test clock.
+    var scratch = bashScratch(&host);
+    scratch.io = std.testing.io;
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");
-    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, session, root, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
+    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, 2, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
             var failure = initial;
-            try failure.cleanup.cleanup();
+            try failure.cleanup.cleanup(scratch);
             return failure.cause;
         },
     };
     var preparation_owned = true;
     defer if (preparation_owned) {
         var cleanup = preparation.cancel();
-        cleanup.cleanup() catch unreachable;
+        cleanup.cleanup(scratch) catch unreachable;
     };
     var prepared = while (true) {
         switch (preparation.advance()) {
@@ -2488,7 +2497,7 @@ test "cleanup publication follows complete execution retirement" {
             .failed => |initial| {
                 preparation_owned = false;
                 var failure = initial;
-                try failure.cleanup.cleanup();
+                try failure.cleanup.cleanup(scratch);
                 return failure.cause;
             },
         }
@@ -2517,19 +2526,19 @@ test "cleanup publication follows complete execution retirement" {
         });
         while (!slot.bash.execution.retired()) {
             std.debug.assert(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < cleanup_deadline.raw.nanoseconds);
-            _ = slot.bash.execution.service(&window);
+            _ = slot.bash.execution.service(scratch, &window);
             std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
         }
-        slot.bash.execution.reclaim(&retention) catch unreachable;
+        slot.bash.execution.reclaim(scratch, &retention) catch unreachable;
     };
     while (!slot.bash.execution.retired()) {
         try std.testing.expect(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < deadline.raw.nanoseconds);
-        const progress = slot.bash.execution.service(&window);
+        const progress = slot.bash.execution.service(scratch, &window);
         try std.testing.expect(progress.fault == null);
         if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try slot.bash.execution.checkRetired();
-    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(false)).code);
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(scratch, false)).code);
     // One captured stdout byte remains owned.
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
@@ -3136,19 +3145,17 @@ test "preparing slots belong to their live preparations" {
 
     // Bash correspondence uses only the facts its preparation owns.
     var bash_preparation = bash.Preparation{
-        .io = std.testing.io,
+        .scratch = .{ .io = std.testing.io, .path = root, .budget = undefined },
         .allocator = std.testing.allocator,
         .session = .{},
         .store_selector = root,
         .workspace = .{},
-        .scratch_path = root,
         .bash_path = default_bash_path,
         .timeout_ms = 1,
         .action_id = 7,
         .attempt_ordinal = 1,
         .faults = .{},
         .source = undefined,
-        .cleanup = .{ .scratch_path = root },
     };
     var bash_matched = [_]ExecutionSlot{
         .{ .bash_preparing = .{ .token = retoken, .binding = .{
@@ -3397,12 +3404,12 @@ test "Host fences dispose a sealed request before native transfer construction" 
         const reader = try tmp.dir.openFile(std.testing.io, "sealed", .{});
         try tmp.dir.deleteFile(std.testing.io, "sealed");
         host.scratch_used.store(2, .release);
+        var capture_writer = provider.CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &host.scratch_used, .limit = 2 }, .buffers = undefined };
+        host.capture_writer = &capture_writer;
         var request = provider.PreparedRequest{
-            .io = std.testing.io,
             .file = reader,
             .length = 2,
             .charged = 2,
-            .budget = .{ .used = &host.scratch_used, .limit = 2 },
             .structured_output = false,
             .session_affinity = @splat(0),
         };
@@ -3454,27 +3461,26 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             var name: protocol.Bounded(96) = .{};
             try name.set("suppressed-bash");
             host.scratch_used.store(7, .release);
+            var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 7 }, &.{});
+            host.retention = &retention;
             if (fail_cleanup) {
                 const gate = try tmp.dir.createFile(std.testing.io, bash.fault_gate_name, .{});
                 gate.close(std.testing.io);
             }
             var prepared = bash.Prepared{
-                .io = std.testing.io,
+                .scratch = bashScratch(&host),
                 .allocator = std.testing.allocator,
                 .session = .{},
                 .store_selector = "",
                 .workspace = .{},
-                .scratch_path = root,
                 .bash_path = undefined, // Native construction must not run.
                 .timeout_ms = 1,
                 .faults = .{},
                 .command = try std.testing.allocator.dupeSentinel(u8, "exit 0", 0),
                 .stdout_capture = .{
-                    .io = std.testing.io,
                     .file = file,
                     .name = name,
                     .charged = 7,
-                    .budget = .{ .used = &host.scratch_used, .limit = 7 },
                     .cleanup_fault = if (fail_cleanup) .gated else .none,
                 },
                 .stderr_capture = null,
