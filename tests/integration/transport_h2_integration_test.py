@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import codex_h2_integration as codex_h2
+import os_semantics
 import transport_h2_integration as transport
 
 
@@ -272,7 +273,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                         stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                         stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
                         stack.enter_context(patch.dict(codex_h2.os.environ))
-                        stack.enter_context(patch.object(codex_h2.sys, "platform", platform))
+                        stack.enter_context(os_semantics.simulate(platform))
                         stack.enter_context(patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]))
                         stack.enter_context(patch.object(codex_h2.tempfile, "mkdtemp", return_value=str(root)))
                         stack.enter_context(patch.object(codex_h2.ssl, "SSLContext"))
@@ -302,7 +303,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                     "rui: descriptor capacity insufficient: active_capacity=1 "
                     f"required={required} soft_limit=78 inherited={inherited} "
                     "fixed_host=11 clients=403 execution=10 authentication=10 self_wake=2\n"))
-                with patch.object(codex_h2.sys, "platform", "darwin"):
+                with os_semantics.simulate("darwin"):
                     self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 78), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
@@ -313,7 +314,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                               ("inherited=4", "inherited=5"), ("soft_limit=79", "soft_limit=78")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
-                with patch.object(codex_h2.sys, "platform", "darwin"):
+                with os_semantics.simulate("darwin"):
                     with self.assertRaises(AssertionError):
                         codex_h2.assert_managed_descriptor_rejection(rejected, 79)
 

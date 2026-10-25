@@ -15,6 +15,7 @@ import threading
 import time
 
 from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process
+import os_semantics
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -203,7 +204,7 @@ def protected_saturation(root):
         began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
         discovery_released(diagnostics, began_ns)
-        baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
+        baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         began = time.monotonic()
         for index in range(10):
             began_ns = time.monotonic_ns()
@@ -285,7 +286,7 @@ def hostile_discovery(root):
         began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
         discovery_released(diagnostics, began_ns)
-        baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
+        baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 128}}),
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
                                 "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
@@ -445,9 +446,8 @@ def main():
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
-            if sys.platform == "linux" and os.geteuid() != 0:
-                # Linux enforces socket mode bits for unprivileged callers;
-                # root may bypass this denial with CAP_DAC_OVERRIDE.
+            if os_semantics.SOCKET_MODE_ENFORCED and os.geteuid() != 0:
+                # Root may bypass this denial with CAP_DAC_OVERRIDE.
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
@@ -567,7 +567,7 @@ def main():
             first, fields = start(store, 3, "--codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
-            if sys.platform == "linux":
+            if os_semantics.PROC_FS:
                 # Readiness precedes execution-thread initialization. Its first
                 # boundary proves reactor wake descriptors have been created.
                 diagnostics.wait("lifecycle_boundary")

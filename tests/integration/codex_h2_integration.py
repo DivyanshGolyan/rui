@@ -17,6 +17,7 @@ import codex_integration as codex
 import model_fixture as fixture
 import transport_h2_integration as h2_fixture
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+import os_semantics
 
 
 def assert_managed_descriptor_rejection(rejected, limit):
@@ -26,9 +27,9 @@ def assert_managed_descriptor_rejection(rejected, limit):
     # As in descriptor_capacity_integration, macOS libmalloc can open one
     # inherited socket. Validate every Host-owned population independently.
     inherited = fields["inherited"]
-    assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
-    fixed_host = 11 if sys.platform == "darwin" else 9
-    authentication = 10 if sys.platform == "darwin" else 8
+    assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
+    fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
+    authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
     # 100 ordinary exchanges at four descriptors, two controls and discovery.
     required = inherited + fixed_host + 403 + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
@@ -65,7 +66,9 @@ def run(*, observed=False, intake=100):
     try:
         # These totals describe default intake100, not the refusal boundary.
         # Ten ordinary clients remain viable after dropping 90 * 4 descriptors.
-        default_required = {"linux": 435, "darwin": 439}[sys.platform]
+        # Three inherited, fixed Host, 100 ordinary exchanges at four, two
+        # controls and discovery, authentication, and the intake wake pair.
+        default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + 403 + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
         minimum_required = default_required - 4 * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",

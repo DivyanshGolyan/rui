@@ -24,6 +24,7 @@ import h2.settings
 import control_integration as control
 import model_fixture as dispatch
 from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
+import os_semantics
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -191,7 +192,7 @@ def assert_observed_shape_work(payload):
 
 
 def host_physical_peak(pid):
-    if sys.platform != "darwin":
+    if not os_semantics.FOOTPRINT:
         return None
     report = subprocess.run(
         ["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
@@ -1344,7 +1345,7 @@ def main():
     selected = sys.argv[2].removeprefix("--case=") if len(sys.argv) == 3 and sys.argv[2].startswith("--case=") else None
     capture_cases = ("stalled-before", "stalled-progress", "paused-capture", "resume-capture")
     assert len(sys.argv) == 2 or observed_only or churn or selected in capture_cases
-    if churn and sys.platform != "darwin":
+    if churn and not os_semantics.FOOTPRINT:
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)

@@ -18,6 +18,7 @@ import bash_integration as bash_fixture
 import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
 from host_status_integration import socket_path, status
+import os_semantics
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -285,7 +286,7 @@ def main():
             inspector = fixture.start_command("session", "inspect", "--store", store, "--session", session)
             exchange_phase(diagnostics, "test_gate_waiting", began, time.monotonic() + 5,
                            subject=str(reply_gate))
-            held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if sys.platform == "linux" else None
+            held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if os_semantics.PROC_FS else None
 
             # Both classified headers and captured bodies still belong to
             # intake, not admission. Completing either after stop must not save

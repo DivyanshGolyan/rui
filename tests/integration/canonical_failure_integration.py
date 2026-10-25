@@ -22,6 +22,7 @@ import time
 
 import model_fixture as fixture
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
+import os_semantics
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -568,11 +569,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     if line is None:
                         assert "› " not in output, "unaccepted fresh configuration entered the frontend"
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original_terminal[3] &= ~mask
-                assert actual == original_terminal, "fatal invocation did not restore the terminal"
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal), "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
                 assert decoded["answer"]["status"] == "accepted"
@@ -670,11 +667,7 @@ def permission_read_cases(state):
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
                 assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original, "failed permission read did not restore terminal"
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "failed permission read did not restore terminal"
             finally:
                 if sys.exc_info()[0] is not None:
                     preserve_failure_metadata(state / "pty-failure.json", lambda: {
@@ -721,11 +714,7 @@ def permission_read_cases(state):
             assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
             assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original, "recoverable details failure did not restore terminal"
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "recoverable details failure did not restore terminal"
         finally:
             proxy.close()
             if caller is not None and caller.poll() is None:

@@ -18,6 +18,7 @@ from conversation_page_integration import host_resources, idle_resources, reques
 from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, stop_process
 from one_reply import one_reply
+import os_semantics
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
 SESSION = None
@@ -164,7 +165,7 @@ def main():
             assert page(store, first["end"]) == first, "bad request fenced healthy Store"
             print(f"proposal resources baseline={baseline} large_fields={host_resources(process.pid)} (Linux RSS bytes/FDs, not aggregate qualification)")
             print(subprocess.check_output([str(CALLER), "layout"], text=True).strip())
-            if sys.platform.startswith("linux") and pathlib.Path("/usr/bin/time").exists():
+            if os_semantics.GNU_TIME:
                 for label, mode, first_arg, second_arg in (("small-field", "field", items[0]["position"], "arguments"),
                         ("large-field", "field", items[1]["position"], "arguments"), ("page", "page", first["end"], 0)):
                     rss = state / "caller-rss"

@@ -11,12 +11,12 @@ import platform
 import resource
 import select
 import subprocess
-import sys
 import termios
 import time
 
 from host_process import dispose_all, stop_process
 from terminal_process import open_pty
+import os_semantics
 
 
 def event(kind, point=0, mods=0, pasted=False, outcome="none", text="headTAIL", cursor=4):
@@ -87,11 +87,7 @@ def replay(actor, name, steps, *, error=None):
         for control in (b"\x1b[?1049h", b"\x1b[?2004h", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[?1049l"):
             assert output.count(control) == 1, (name, "terminal mode lifecycle", control, bytes(output))
         actual, expected_attributes = termios.tcgetattr(slave), list(original)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            expected_attributes[3] &= ~mask
-        assert actual == expected_attributes, (name, "termios restoration", expected_attributes, actual)
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(expected_attributes), (name, "termios restoration", expected_attributes, actual)
         from terminal_restoration_integration import assert_file_flags
         assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
         print(bytes(records).decode(), end="")
@@ -108,7 +104,7 @@ def input_replay_cases():
     actor = os.environ["RUI_TEST_TERMINAL_NOTICE"]
     with open(actor, "rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    print(f"input replay: {platform.system()} {platform.release()} {platform.machine()} "
+    print(f"input replay: {os_semantics.DESCRIPTION} "
           f"Python {platform.python_version()} RLIMIT_NOFILE={resource.getrlimit(resource.RLIMIT_NOFILE)} "
           f"actor_sha256={digest}", flush=True)
     submit = event("key_press", 106, 4, outcome="submit")  # CR -> LF under ICRNL.

@@ -13,10 +13,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import os_semantics
 
 
 def run(binary):
-    assert sys.platform == "linux", "This loader witness qualifies Linux only"
+    assert not os_semantics.DARWIN, "This loader witness qualifies Linux only"
     binary = pathlib.Path(binary).resolve()
     with tempfile.TemporaryDirectory(prefix="rui-login-signal-") as root:
         root = pathlib.Path(root)

@@ -23,14 +23,21 @@ pub fn main(init: std.process.Init) !void {
     const self = try std.process.executablePathAlloc(init.io, arena);
     for ([_][]const u8{ "main", "thread" }) |case| {
         const result = try std.process.run(arena, init.io, .{ .argv = &.{ self, case } });
-        if (result.term != .signal or result.term.signal != .ABRT or
-            std.mem.indexOf(u8, result.stderr, "Segmentation fault at address") == null or
-            std.mem.indexOf(u8, result.stderr, "in overflow") == null)
+        // Without DWARF (CI-compiled Darwin binaries) frames name the symbol:
+        // "in _signal_stack_probe.overflow (".
+        if (result.term != .signal or result.term.signal != .ABRT or !guardFault(result.stderr) or
+            std.mem.indexOf(u8, result.stderr, "overflow (") == null)
         {
             std.debug.print("{s}: no stack overflow trace ({any})\n{s}\n", .{ case, result.term, result.stderr });
             return error.MissingStackOverflowTrace;
         }
     }
+}
+
+/// Darwin may deliver a guard-page hit as SIGBUS, which Zig reports as a bus error.
+fn guardFault(stderr: []const u8) bool {
+    if (std.mem.indexOf(u8, stderr, "Segmentation fault at address") != null) return true;
+    return @import("builtin").os.tag == .macos and std.mem.indexOf(u8, stderr, "Bus error at address") != null;
 }
 
 fn overflow(depth: usize) void {
