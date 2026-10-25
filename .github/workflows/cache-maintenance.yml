@@ -39,14 +39,14 @@ jobs:
       actions: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # workflow_run uses the default-branch SHA, never the producer's head.
           # Do not restore its caches or download its artifacts in this job.
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Remove obsolete Rui cache snapshots
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             await require('./.github/scripts/prune-caches.cjs')({github, context, core});
@@ -63,7 +63,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -88,7 +88,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -96,7 +96,7 @@ jobs:
         with:
           check-part: previous-release
       - name: Check out the pinned previous release
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Keep in step with previous-release-upgrade.yml.
           ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
@@ -105,7 +105,7 @@ jobs:
       - run: mv .amp/previous-release "$RUNNER_TEMP/previous-release"
       - name: Restore the existing previous-release compilation
         id: restore
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
@@ -120,7 +120,7 @@ jobs:
           zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/previous-install" --summary all
       - name: Publish the previous-release compilation
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
