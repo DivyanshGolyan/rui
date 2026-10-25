@@ -147,9 +147,8 @@ func (e *retryEndpoint) exact(prefix string, want int) bool {
 }
 func (e *retryEndpoint) Close() error { return e.server.Close() }
 
-func startHost(deadline measurement.Deadline, binary, store, url, artifacts string, capacity int, extra ...string) (*measurement.Host, error) {
-	arguments := []string{"--test-retry-waits-ms", "50,100,150"}
-	arguments = append(arguments, extra...)
+func startHost(deadline measurement.Deadline, binary, store, url, artifacts string, capacity int, waits string, extra ...string) (*measurement.Host, error) {
+	arguments := append([]string{"--test-retry-waits-ms", waits}, extra...)
 	return measurement.StartHost(binary, store, url, capacity, filepath.Join(artifacts, "host-stderr-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".log"), deadline, arguments...)
 }
 
@@ -174,7 +173,7 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	deadline := measurement.NewDeadline(2 * time.Minute)
 	marker := "timing-operation"
 	var session string
-	host, err := startHost(deadline, binary, store, e.URL(), directory, 1, "--test-retry-waits-ms", "600000,600000,600000")
+	host, err := startHost(deadline, binary, store, e.URL(), directory, 1, "600000,600000,600000")
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +204,7 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 		return nil, err
 	}
 	started := time.Now().UnixMilli()
-	host, err = startHost(deadline, binary, store, e.URL(), directory, 1, "--test-before-launch-delay-ms", "250", "--test-retry-waits-ms", "600000,600000,600000")
+	host, err = startHost(deadline, binary, store, e.URL(), directory, 1, "600000,600000,600000", "--test-before-launch-delay-ms", "250")
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +241,7 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 
 func replaceDue(binary, directory, store, session, operation, marker string, modelOperations, future int, e *retryEndpoint, deadline measurement.Deadline) (map[string]any, error) {
 	started := time.Now().UnixMilli()
-	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-before-launch-delay-ms", "250", "--test-retry-waits-ms", "600000,600000,600000")
+	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "600000,600000,600000", "--test-before-launch-delay-ms", "250")
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +289,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	rows := []map[string]any{}
 	sessions := make([]string, 100)
 	for _, target := range []int{1, 10, 100} {
-		host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-retry-waits-ms", "600000,600000,600000")
+		host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "600000,600000,600000")
 		if err != nil {
 			return nil, err
 		}
@@ -340,7 +339,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse future retry count %q: %w", futureText, err)
 	}
-	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-retry-waits-ms", "600000,600000,600000")
+	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "600000,600000,600000")
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +381,7 @@ func churn(binary, root string, e *retryEndpoint) (result map[string]any, result
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(8 * time.Minute)
-	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity)
+	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "50,100,150")
 	if err != nil {
 		return nil, err
 	}
