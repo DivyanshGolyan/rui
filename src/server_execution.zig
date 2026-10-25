@@ -240,21 +240,31 @@ const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     bash_window: [bash.copy_window_bytes]u8,
     capture_buffers: provider.CaptureWriter.Buffers,
+    /// Written only in a Host with managed authentication.
+    auth_worker: AuthWorker,
 };
 
 pub fn executionMain(host: *Host) void {
-    var auth_worker = AuthWorker{ .io = host.io, .authentication = host.authentication orelse undefined };
-    const auth_thread: ?std.Thread = if (host.authentication != null)
-        signal_stack.spawn(.{}, AuthWorker.run, .{&auth_worker}) catch |err| {
+    const workspace = mapZeroed(Workspace, 1) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    defer unmapZeroed(workspace);
+    const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
+        workspace[0].auth_worker = .{ .io = host.io, .authentication = authentication };
+        break :worker &workspace[0].auth_worker;
+    } else null;
+    const auth_thread: ?std.Thread = if (auth_worker) |worker|
+        signal_stack.spawn(.{}, AuthWorker.run, .{worker}) catch |err| {
             fenceDispatch(host, "authentication worker initialization", err);
             return;
         }
     else
         null;
-    if (auth_thread != null) host.auth_worker = &auth_worker;
+    host.auth_worker = auth_worker;
     defer if (auth_thread) |thread| {
         host.auth_worker = null;
-        auth_worker.stop(thread);
+        auth_worker.?.stop(thread);
     };
     // Zero bytes are a free slot and an empty Turn entry, so fresh pages
     // need no initializing pass and an idle slot never becomes resident.
@@ -272,11 +282,6 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
-    const workspace = mapZeroed(Workspace, 1) catch |err| {
-        fenceDispatch(host, "execution workspace allocation", err);
-        return;
-    };
-    defer unmapZeroed(workspace);
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
         .buffers = &workspace[0].capture_buffers,
