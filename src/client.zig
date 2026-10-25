@@ -6046,7 +6046,8 @@ test "transport cancellation quanta neither expire nor renew inactivity and obse
 
 test "transport cancellation saturated Unix backlog is not a connected writable socket" {
     // Darwin refuses a connect beyond the backlog at once; Linux leaves it
-    // pending until the deadline or cancellation.
+    // pending until the deadline or cancellation. Darwin's backlog holds more
+    // than the requested zero, so queue peers until one does not connect.
     const blocks = @import("os/os.zig").full_backlog_blocks_connect;
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
@@ -6057,10 +6058,15 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     defer listener.deinit(io);
     const queued = try address.connect(io);
     defer queued.close(io);
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
-    const blocked = connectRequest(.{ .io = io }, address, until);
-    if (blocked) |fd| closeTestDescriptor(fd) else |_| {}
-    try std.testing.expectError(if (blocks) error.TransferInactive else error.UnixConnectFailed, blocked);
+    var peers: [8]std.posix.fd_t = undefined;
+    var count: usize = 0;
+    defer for (peers[0..count]) |fd| closeTestDescriptor(fd);
+    const blocked = while (count < peers.len) {
+        const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+        peers[count] = connectRequest(.{ .io = io }, address, until) catch |err| break err;
+        count += 1;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(if (blocks) error.TransferInactive else error.UnixConnectFailed, blocked);
     var token: Cancellation = .{};
     const Stopper = struct {
         fn run(stop: *Cancellation) void {
