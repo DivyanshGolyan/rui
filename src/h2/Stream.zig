@@ -196,6 +196,9 @@ pub const Queue = struct {
     head: ?*Record = null,
     tail: ?*Record = null,
     len: u32 = 0,
+    /// The last record put back: put-back records wait at the front, in
+    /// the order they were put back, ahead of every fresh launch.
+    put_back: ?*Record = null,
 
     pub fn pushTail(self: *Queue, record: *Record) void {
         record.route = .{ .queued_next = null };
@@ -204,16 +207,25 @@ pub const Queue = struct {
         self.len += 1;
     }
 
-    /// A requeued record launched before everything still waiting goes first.
-    pub fn pushHead(self: *Queue, record: *Record) void {
-        record.route = .{ .queued_next = self.head };
-        self.head = record;
-        if (self.tail == null) self.tail = record;
+    /// A requeued record was launched before everything still waiting, so
+    /// it goes first, after any put back before it.
+    pub fn putBack(self: *Queue, record: *Record) void {
+        if (self.put_back) |previous| {
+            record.route = .{ .queued_next = previous.route.queued_next };
+            previous.route.queued_next = record;
+            if (self.tail == previous) self.tail = record;
+        } else {
+            record.route = .{ .queued_next = self.head };
+            self.head = record;
+            if (self.tail == null) self.tail = record;
+        }
+        self.put_back = record;
         self.len += 1;
     }
 
     pub fn popHead(self: *Queue) ?*Record {
         const head = self.head orelse return null;
+        if (self.put_back == head) self.put_back = null;
         self.head = head.route.queued_next;
         if (self.head == null) self.tail = null;
         self.len -= 1;
@@ -229,6 +241,8 @@ pub const Queue = struct {
             current = node.route.queued_next;
         }) {
             if (node != record) continue;
+            // Put-back records are the front run, so the one before is too.
+            if (self.put_back == node) self.put_back = previous;
             if (previous) |p| p.route.queued_next = node.route.queued_next else self.head = node.route.queued_next;
             if (self.tail == node) self.tail = previous;
             self.len -= 1;
@@ -251,17 +265,31 @@ test "the list keeps activity order through renewals and removals" {
     try std.testing.expectEqual(@as(?*Record, null), list.popHead());
 }
 
-test "the queue serves requeued records first" {
-    var records: [3]Record = undefined;
+test "the queue serves put-back records first, in the order put back" {
+    var records: [5]Record = undefined;
     for (&records) |*r| r.* = std.mem.zeroes(Record);
     var queue: Queue = .{};
     queue.pushTail(&records[0]);
     queue.pushTail(&records[1]);
-    queue.pushHead(&records[2]);
+    queue.putBack(&records[2]);
+    queue.putBack(&records[3]);
     queue.remove(&records[0]);
-    try std.testing.expectEqual(@as(u32, 2), queue.len);
+    try std.testing.expectEqual(@as(u32, 3), queue.len);
     try std.testing.expectEqual(&records[2], queue.popHead().?);
+    // A put back after the front moved still goes ahead of fresh launches.
+    queue.putBack(&records[4]);
+    try std.testing.expectEqual(&records[3], queue.popHead().?);
+    try std.testing.expectEqual(&records[4], queue.popHead().?);
     try std.testing.expectEqual(&records[1], queue.popHead().?);
+    try std.testing.expectEqual(@as(?*Record, null), queue.popHead());
+
+    // Removing the last put-back record moves the mark back one.
+    queue.putBack(&records[0]);
+    queue.putBack(&records[1]);
+    queue.remove(&records[1]);
+    queue.putBack(&records[2]);
+    try std.testing.expectEqual(&records[0], queue.popHead().?);
+    try std.testing.expectEqual(&records[2], queue.popHead().?);
     try std.testing.expectEqual(@as(?*Record, null), queue.popHead());
 }
 

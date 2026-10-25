@@ -1,8 +1,10 @@
-//! The client against the in-process peer over loopback h2c. Each test pumps
-//! the client and the peer on one thread, so every exchange is deterministic.
+//! The client against the in-process peer over loopback h2c and TLS. Each
+//! test pumps the client and the peer on one thread, so every exchange is
+//! deterministic.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
+const c = @import("h2_c");
 
 const ns_per_ms = std.time.ns_per_ms;
 
@@ -46,6 +48,9 @@ const Harness = struct {
         capacity: u32 = 8,
         inactivity_ns: u64 = 10 * std.time.ns_per_s,
         liveness: h2.Liveness = .{},
+        connect_timeout_ns: u64 = 5 * std.time.ns_per_s,
+        /// Overrides the peer's URL.
+        url: ?[]const u8 = null,
     };
 
     fn create(config: Config) !*Harness {
@@ -58,10 +63,12 @@ const Harness = struct {
         try self.client.init(allocator, std.testing.io, .{
             .stream_capacity = config.capacity,
             .inactivity_ns = config.inactivity_ns,
-            .connect_timeout_ns = 5 * std.time.ns_per_s,
+            .connect_timeout_ns = config.connect_timeout_ns,
             .liveness = config.liveness,
+            .trust = if (config.peer.tls == .none) .system else .{ .ca_file = self.peer.caPath() },
         });
-        self.endpoint = try self.client.addEndpoint(self.peer.url());
+        errdefer self.client.deinit();
+        self.endpoint = try self.client.addEndpoint(config.url orelse self.peer.url());
         return self;
     }
 
@@ -349,6 +356,71 @@ test "small DATA frames decoded from one read reach the sink in one write" {
     stream.deinit();
 }
 
+test "a stream that closes mid-read leaves its siblings one write each" {
+    const Both = struct {
+        const long: [200]u8 = @splat('l');
+        const short: [20]u8 = @splat('s');
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            if (stream.index != 1) return;
+            // Both bodies go out in one flush, their DATA frames interleaved,
+            // so the short stream ends inside the read that carries the long.
+            peer.respond(peer.streams.items[0], 200, &long);
+            peer.respond(stream, 200, &short);
+        }
+    };
+    const harness = try Harness.create(.{ .peer = .{ .data_chunk_bytes = 10, .interleave = true, .on_request = Both.handle } });
+    defer harness.destroy();
+    var long: h2.Stream = .idle;
+    var short: h2.Stream = .idle;
+    var long_sink: [256]u8 = undefined;
+    var short_sink: [32]u8 = undefined;
+    try harness.launch(&long, bytesRequest(harness.endpoint, "x", &long_sink));
+    try harness.launch(&short, bytesRequest(harness.endpoint, "x", &short_sink));
+    try harness.runUntilFinished(2);
+    while (harness.client.nextFinished()) |stream| {
+        try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, stream.end().?);
+    }
+    try std.testing.expectEqualSlices(u8, &Both.long, long_sink[0..@intCast(long.responseLength())]);
+    try std.testing.expectEqualSlices(u8, &Both.short, short_sink[0..@intCast(short.responseLength())]);
+    try std.testing.expectEqual(@as(u32, 2), harness.receiver.bodies);
+}
+
+test "a refused sink returns connection credit, so siblings keep flowing" {
+    const Both = struct {
+        var big: [64 * 1024]u8 = @splat('b');
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            peer.respond(stream, 200, &big);
+        }
+    };
+    const harness = try Harness.create(.{ .peer = .{ .on_request = Both.handle } });
+    defer harness.destroy();
+    var small: h2.Stream = .idle;
+    var large: h2.Stream = .idle;
+    var small_sink: [8]u8 = undefined;
+    var large_sink: [64 * 1024]u8 = undefined;
+    try harness.launch(&small, bytesRequest(harness.endpoint, "x", &small_sink));
+    try harness.launch(&large, bytesRequest(harness.endpoint, "x", &large_sink));
+    try harness.runUntilFinished(2);
+    try std.testing.expectEqual(h2.End{ .cause = .sink_refused, .request_sent = true }, try harness.collect(&small));
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&large));
+    try std.testing.expectEqual(@as(u64, Both.big.len), large.responseLength());
+}
+
+test "a peer allowing 100 streams gets a second connection for the 101st" {
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold }, .capacity = 101 });
+    defer harness.destroy();
+    var streams: [101]h2.Stream = @splat(.idle);
+    var sinks: [101][8]u8 = undefined;
+    for (&streams, &sinks) |*stream, *sink| try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
+    try harness.runUntilPeerStreams(101);
+    try std.testing.expectEqual(@as(u32, 2), harness.peer.seen.connections);
+    for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, "ok");
+    try harness.runUntilFinished(101);
+    while (harness.client.nextFinished()) |stream| {
+        try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, stream.end().?);
+    }
+}
+
 test "trailers arrive as their own block" {
     const Trailed = struct {
         fn handle(peer: *Peer, stream: *Peer.Stream) void {
@@ -544,7 +616,9 @@ test "a refused connection fails its streams as never sent" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    // A port that was free a moment ago and has no listener now.
+    // A port that was free a moment ago and has no listener now. A bound
+    // socket that never listens would hold the port, but Darwin drops SYNs
+    // to it instead of refusing them, so the connect would time out.
     const peer = try Peer.start(std.testing.allocator, .{});
     var url_buffer: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
@@ -601,5 +675,146 @@ test "requests the client cannot send are refused before anything opens" {
             .sink = .{ .buffer = &sink },
         }));
     }
+    // Never dereferenced: prepare refuses a sink its record cannot describe.
+    const huge = @as([*]u8, &sink)[0 .. @as(usize, std.math.maxInt(u32)) + 1];
+    try std.testing.expectError(error.InvalidRequest, harness.client.prepare(&stream, bytesRequest(harness.endpoint, "", huge)));
     try std.testing.expectError(error.CleartextNotLoopback, harness.client.addEndpoint("http://example.com/"));
+}
+
+test "a wait with the largest timeout still returns on wake" {
+    const harness = try Harness.create(.{});
+    defer harness.destroy();
+    harness.client.wake();
+    try harness.client.wait(std.math.maxInt(u32));
+}
+
+// ---------------------------------------------------------------------- TLS
+
+test "https: a request completes over TLS with ALPN h2" {
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2 } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try harness.launch(&stream, .{
+        .endpoint = harness.endpoint,
+        .fields = &.{.{ .name = "authorization", .value = "Bearer secret", .sensitive = true }},
+        .body = .{ .bytes = "{\"input\":1}" },
+        .sink = .{ .buffer = &sink },
+    });
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+    try std.testing.expectEqualStrings("ok", sink[0..@intCast(stream.responseLength())]);
+    try std.testing.expectEqualStrings("Bearer secret", harness.peer.streams.items[0].authorization.items);
+    try std.testing.expectEqualStrings("{\"input\":1}", harness.peer.streams.items[0].body.items);
+}
+
+test "https: large bodies both ways stay within the stream window" {
+    var body: [100 * 1024]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @truncate(index * 7);
+    var response: [300 * 1024]u8 = undefined;
+    for (&response, 0..) |*byte, index| byte.* = @truncate(index * 13);
+    const Respond = struct {
+        var bytes: []const u8 = &.{};
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            peer.respond(stream, 200, bytes);
+        }
+    };
+    Respond.bytes = &response;
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .on_request = Respond.handle } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [300 * 1024]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, &body, &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+    try std.testing.expectEqualSlices(u8, &body, harness.peer.streams.items[0].body.items);
+    try std.testing.expectEqualSlices(u8, &response, sink[0..@intCast(stream.responseLength())]);
+    try std.testing.expect(harness.peer.seen.max_stream_window <= h2.stream_window_bytes);
+}
+
+test "https by name: the lookup runs, every address is tried, and the name is verified" {
+    // localhost may resolve to ::1 first; the peer listens on 127.0.0.1 only.
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+}
+
+test "https: a partial TLS record waits for the socket instead of spinning" {
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .on_request = hold } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilPeerStreams(1);
+    try harness.runFor(20 * ns_per_ms);
+
+    // The peer's next record goes to memory, and only its first bytes reach
+    // the socket: the client reads them and needs the rest.
+    const connection = harness.peer.connections.items[0];
+    const ssl = connection.ssl.?;
+    const memory = c.BIO_new(c.BIO_s_mem()) orelse return error.OutOfMemory;
+    c.SSL_set0_wbio(ssl, memory);
+    var written: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 1), c.SSL_write_ex(ssl, "a whole record of plaintext", 27, &written));
+    var record: [128]u8 = undefined;
+    const record_len = c.BIO_read(memory, &record, record.len);
+    try std.testing.expect(record_len > 10);
+    try std.testing.expectEqual(@as(isize, 10), std.c.send(connection.socket, &record, 10, 0));
+    try harness.client.wait(100);
+    try harness.client.drive(&harness.receiver);
+
+    const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try harness.client.wait(200);
+    const waited = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
+    try std.testing.expect(waited >= 150 * ns_per_ms);
+    harness.client.cancel(&stream);
+}
+
+fn expectSetupFailure(config: Harness.Config, cause: h2.Cause) !void {
+    const harness = try Harness.create(config);
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = cause, .request_sent = false }, try harness.collect(&stream));
+    try std.testing.expectEqual(@as(usize, 0), harness.peer.streams.items.len);
+}
+
+test "https: a leaf from another issuer is untrusted, before any request byte" {
+    try expectSetupFailure(.{ .peer = .{ .tls = .h2, .untrusted_issuer = true } }, .untrusted_peer);
+}
+
+test "https: a leaf for another name is untrusted" {
+    try expectSetupFailure(.{ .peer = .{ .tls = .h2, .leaf_names = "DNS:other.example" } }, .untrusted_peer);
+    try expectSetupFailure(.{ .peer = .{ .tls = .h2, .leaf_names = "DNS:localhost" } }, .untrusted_peer);
+}
+
+test "https: a peer that does not choose h2 is refused" {
+    try expectSetupFailure(.{ .peer = .{ .tls = .no_alpn } }, .h2_refused);
+}
+
+test "https: a name that does not resolve fails the setup" {
+    try expectSetupFailure(.{
+        .peer = .{ .tls = .h2 },
+        .url = "https://h2-test.invalid/v1/responses",
+        .connect_timeout_ns = 30 * std.time.ns_per_s,
+    }, .resolve_failed);
+}
+
+test "https: trust is loaded by the first https endpoint, and a missing CA file fails it" {
+    var client: h2.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .{
+        .stream_capacity = 1,
+        .inactivity_ns = std.time.ns_per_s,
+        .connect_timeout_ns = std.time.ns_per_s,
+        .trust = .{ .ca_file = "/nonexistent/h2-ca.pem" },
+    });
+    defer client.deinit();
+    _ = try client.addEndpoint("http://127.0.0.1:9/v1");
+    try std.testing.expectError(error.InvalidCaFile, client.addEndpoint("https://127.0.0.1:9/v1"));
 }

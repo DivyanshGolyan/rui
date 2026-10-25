@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # Changing any of these can change Mac behaviour by itself.
 MAC_PATHS = (
     "src/os/*", "tests/integration/os_semantics.py",
+    # The self-contained HTTP/2 client cannot import src/os, so its sockets,
+    # waker and trust paths name the platform themselves.
+    "src/h2/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     "build.zig", "build.zig.zon",
     ".github/actions/setup/*", ".github/workflows/daily-macos.yml", ".github/workflows/qualify-macos.yml",

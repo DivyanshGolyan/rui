@@ -16,6 +16,8 @@ const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
 const Waker = @import("Waker.zig");
+const Resolver = @import("Resolver.zig");
+const tls = @import("tls.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
@@ -45,6 +47,9 @@ receiver: ?Receiver,
 stall_ns: u64,
 connection_serial: u64,
 waker: Waker,
+/// Built by the first `https://` endpoint, so a cleartext-only Client
+/// loads no trust store.
+tls_context: ?tls.Context,
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
@@ -64,6 +69,11 @@ pub const Origin = struct {
     /// connection is set up at a time.
     learned_max_streams: ?u32,
     pending: Record.Queue,
+    /// The address an IP-literal host names; null for a DNS name.
+    literal: ?Resolver.Address,
+    /// The one lookup of a DNS name, shared by the setups that use it.
+    lookup: ?*Resolver,
+    lookup_users: u32,
 };
 
 pub const Endpoint = struct {
@@ -141,6 +151,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .stall_ns = 0,
         .connection_serial = 0,
         .waker = waker,
+        .tls_context = null,
     };
     for (connections, 0..) |*connection, index| connection.* = .free(self, @intCast(index));
 }
@@ -151,7 +162,11 @@ pub fn deinit(self: *Engine) void {
     for (self.connections) |*connection| {
         if (connection.state != .free) connection.close(.goaway);
     }
+    for (self.origins[0..self.origin_count]) |origin| {
+        if (origin.lookup) |lookup| lookup.release();
+    }
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
+    if (self.tls_context) |*context| context.deinit();
     self.allocator.destroy(self.scratch);
     self.allocator.free(self.pollfds);
     self.allocator.free(self.views);
@@ -162,15 +177,14 @@ pub fn deinit(self: *Engine) void {
     self.* = undefined;
 }
 
-pub fn addEndpoint(self: *Engine, url: []const u8) (h2.UrlError || error{ OutOfMemory, TooManyEndpoints })!h2.Endpoint {
+pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint {
     std.debug.assert(self.receiver == null);
     _ = try h2.parseUrl(url);
     if (self.endpoint_count == h2.max_endpoints) return error.TooManyEndpoints;
     const owned = try self.allocator.dupe(u8, url);
     errdefer self.allocator.free(owned);
     const parsed = h2.parseUrl(owned) catch unreachable;
-    // HTTPS connections arrive with TLS; until then only h2c can connect.
-    if (parsed.scheme == .https) return error.InvalidUrl;
+    if (parsed.scheme == .https and self.tls_context == null) self.tls_context = try tls.Context.init(self.options.trust);
     const origin_index: u8 = for (self.origins[0..self.origin_count], 0..) |origin, index| {
         if (origin.scheme == parsed.scheme and origin.port == parsed.port and std.mem.eql(u8, origin.host, parsed.host))
             break @intCast(index);
@@ -182,6 +196,9 @@ pub fn addEndpoint(self: *Engine, url: []const u8) (h2.UrlError || error{ OutOfM
             .port = parsed.port,
             .learned_max_streams = null,
             .pending = .{},
+            .literal = Resolver.Address.literal(parsed.host, parsed.port),
+            .lookup = null,
+            .lookup_users = 0,
         };
         self.origin_count += 1;
         break :blk self.origin_count - 1;
@@ -198,6 +215,8 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     std.debug.assert(record.state == .idle);
     if (@backingInt(request.endpoint) >= self.endpoint_count) return error.InvalidRequest;
     if (request.fields.len > h2.max_fields) return error.InvalidRequest;
+    // The record keeps a buffer sink's capacity in 32 bits.
+    if (request.sink == .buffer and request.sink.buffer.len > std.math.maxInt(u32)) return error.InvalidRequest;
     var block_len: usize = 0;
     for (request.fields) |field| {
         if (!validFieldName(field.name) or !validFieldValue(field.value)) return error.InvalidRequest;
@@ -318,7 +337,7 @@ pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     record.state = .pending;
     record.body_offset = 0;
     record.flags.body_done = false;
-    self.originOf(record).pending.pushHead(record);
+    self.originOf(record).pending.putBack(record);
 }
 
 /// Emits `body_retired` once, and never after a cancel.
@@ -396,12 +415,14 @@ fn fillPollfds(self: *Engine) usize {
 fn advanceSetups(self: *Engine) void {
     const time = self.now();
     for (self.connections) |*connection| {
+        if (!connection.settingUp()) continue;
         switch (connection.state) {
-            .connecting, .awaiting_settings => {},
-            else => continue,
+            .resolving => connection.finishLookup(),
+            .connecting => if (connection.revents != 0) connection.finishConnect(),
+            .handshaking => if (connection.revents != 0) connection.continueHandshake(),
+            else => {},
         }
-        if (connection.state == .connecting and connection.revents != 0) connection.finishConnect();
-        if (connection.state != .free and connection.state != .ready and time >= connection.setup_deadline_ns)
+        if (connection.settingUp() and time >= connection.setup_deadline_ns)
             self.setupFailed(connection, .connect_timeout);
     }
 }
@@ -415,11 +436,8 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
     var ready_with_room: u32 = 0;
     for (self.connections) |*other| {
         if (other.origin != origin_index) continue;
-        switch (other.state) {
-            .connecting, .awaiting_settings => setting_up += 1,
-            .ready => ready_with_room += @intFromBool(other.hasRoom()),
-            else => {},
-        }
+        if (other.settingUp()) setting_up += 1;
+        ready_with_room += @intFromBool(other.hasRoom());
     }
     if (policy.pendingAfterSetupFailure(setting_up, ready_with_room) == .wait) return;
     const origin = &self.origins[origin_index];
@@ -430,7 +448,7 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
 fn readAll(self: *Engine) void {
     for (self.connections) |*connection| {
         connection.read_capped = false;
-        if (!connection.hasSession() or connection.revents == 0) continue;
+        if (!connection.hasSession() or (connection.revents == 0 and !connection.tlsPending())) continue;
         if (connection.receive() == .capped) connection.read_capped = true;
     }
 }
@@ -448,8 +466,7 @@ fn submitPending(self: *Engine) void {
         }
         var setting_up: u32 = 0;
         for (self.connections) |*connection| {
-            if (connection.origin == origin_index and (connection.state == .connecting or connection.state == .awaiting_settings))
-                setting_up += 1;
+            if (connection.origin == origin_index and connection.settingUp()) setting_up += 1;
         }
         var opening = policy.connectionsToOpen(origin.pending.len, setting_up, origin.learned_max_streams);
         while (opening > 0 and origin.pending.len > 0) : (opening -= 1) {
@@ -541,12 +558,17 @@ fn expireInactive(self: *Engine) void {
 
 /// The batch write: for each stream, everything this read decoded for it
 /// in one write, then its window reopens for exactly what was written.
-pub fn flush(self: *Engine, connection: *Connection) void {
+/// `only` flushes one stream, which is closing mid-read; the others keep
+/// their chunks for the one write after the read.
+pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
     const scratch = self.scratch;
-    defer scratch.chunk_count = 0;
+    defer if (only == null) {
+        scratch.chunk_count = 0;
+    };
     const chunks = scratch.chunks[0..scratch.chunk_count];
     for (chunks, 0..) |*first, start| {
         const record = first.record orelse continue;
+        if (only != null and only != record) continue;
         var total: usize = 0;
         var iovec_count: usize = 0;
         for (chunks[start..]) |*chunk| {
@@ -562,13 +584,15 @@ pub fn flush(self: *Engine, connection: *Connection) void {
             connection.consume(stream_id, total);
             continue;
         }
+        // A stream that takes no more bytes never gets its window back;
+        // only the connection's credit returns.
         if (self.observe(record, .{ .body = total }) == .refuse) {
-            connection.consume(stream_id, total);
+            connection.consumeConnection(total);
             connection.endOpen(record, .sink_refused);
             continue;
         }
         if (!self.writeSink(record, scratch.iovecs[0..iovec_count], total)) {
-            connection.consume(stream_id, total);
+            connection.consumeConnection(total);
             connection.endOpen(record, if (record.flags.sink_is_buffer) .sink_refused else .sink_failed);
             continue;
         }
@@ -619,7 +643,7 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
 /// Called from the DATA chunk callback.
 pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
     const scratch = self.scratch;
-    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection);
+    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection, null);
     scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
     scratch.chunk_count += 1;
 }
@@ -631,12 +655,15 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
     const count = self.fillPollfds();
     self.pollfds[0] = .{ .fd = self.waker.read_fd, .events = std.c.POLL.IN, .revents = 0 };
     var timeout = timeout_ms;
+    for (self.connections) |*connection| {
+        if (connection.tlsPending()) timeout = 0;
+    }
     if (self.nextDeadline()) |deadline| {
         const time = self.now();
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
         timeout = @intCast(@min(timeout, until));
     }
-    const result = std.c.poll(self.pollfds.ptr, @intCast(count + 1), @intCast(timeout));
+    const result = std.c.poll(self.pollfds.ptr, @intCast(count + 1), @intCast(@min(timeout, std.math.maxInt(c_int))));
     if (result < 0 and std.posix.errno(result) != .INTR) return error.PollFailed;
     if (result > 0 and self.pollfds[0].revents != 0) self.waker.drain();
 }
@@ -647,8 +674,8 @@ fn nextDeadline(self: *Engine) ?u64 {
     for (self.connections) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
-            .connecting, .awaiting_settings => connection.setup_deadline_ns,
             .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
+            else => connection.setup_deadline_ns,
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }

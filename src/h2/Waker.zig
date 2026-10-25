@@ -29,6 +29,7 @@ pub fn init() error{SystemResources}!Waker {
     return .{ .read_fd = fds[0], .write_fd = fds[1] };
 }
 
+/// Close failures are ignored: the descriptors are released either way.
 pub fn deinit(self: *Waker) void {
     _ = std.c.close(self.read_fd);
     if (self.write_fd != self.read_fd) _ = std.c.close(self.write_fd);

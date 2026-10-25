@@ -1,8 +1,11 @@
 //! One HTTP/2 connection: its socket and nghttp2 session. Internal.
 //!
-//!   free -> connecting -> awaiting_settings -> ready -> draining -> free
-//!                         (preface and our     (streams  (GOAWAY seen:
-//!                          SETTINGS sent)       submitted) no submits)
+//!   free -> [resolving] -> connecting -> [handshaking] -> awaiting_settings
+//!        (DNS names)   (one address     (https)         (preface and our
+//!                       at a time)                       SETTINGS sent)
+//!   -> ready -> draining -> free
+//!      (streams  (GOAWAY seen:
+//!       submitted) no submits)
 //!
 //! "No request bytes before the launch handoff" and the zero-bytes evidence
 //! both rest on one invariant: a stream is submitted only on a `ready`
@@ -16,9 +19,11 @@ const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
+const Resolver = @import("Resolver.zig");
+const tls = @import("tls.zig");
 const Connection = @This();
 
-pub const State = enum(u8) { free = 0, connecting, awaiting_settings, ready, draining };
+pub const State = enum(u8) { free = 0, resolving, connecting, handshaking, awaiting_settings, ready, draining };
 
 engine: *Engine,
 index: u32,
@@ -32,10 +37,22 @@ received_any: bool,
 read_capped: bool,
 /// The session ended through a protocol error on either side.
 protocol_failure: bool,
+/// An nghttp2 call that adjusts credit or queues a reset failed (out of
+/// memory). Streams would stall, so the connection fails at the next
+/// receive or send, outside nghttp2's callbacks.
+local_failure: bool,
 /// Index into the Engine's poll array for the current pass, 0 for none.
 poll_slot: u32,
 revents: i16,
 socket: std.posix.fd_t,
+/// For an https origin, from the TCP connect on.
+ssl: ?*c.SSL,
+/// Counted among its origin's lookup users until a connect succeeds.
+uses_lookup: bool,
+/// The next address to try.
+address_index: u8,
+/// The handshake, or a read, waits for the socket to take bytes.
+tls_wants_write: bool,
 session: ?*c.nghttp2_session,
 serial: u64,
 /// Streams submitted here that nghttp2 has not closed yet.
@@ -78,9 +95,14 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .received_any = false,
         .read_capped = false,
         .protocol_failure = false,
+        .local_failure = false,
         .poll_slot = 0,
         .revents = 0,
         .socket = -1,
+        .ssl = null,
+        .uses_lookup = false,
+        .address_index = 0,
+        .tls_wants_write = false,
         .session = null,
         .serial = 0,
         .streams = 0,
@@ -100,6 +122,20 @@ pub fn hasSession(self: *const Connection) bool {
     return self.session != null;
 }
 
+pub fn settingUp(self: *const Connection) bool {
+    return switch (self.state) {
+        .resolving, .connecting, .handshaking, .awaiting_settings => true,
+        .free, .ready, .draining => false,
+    };
+}
+
+/// OpenSSL holds decrypted bytes not yet read, which poll cannot see. A
+/// partial record does not count: it waits for the socket like any read.
+pub fn tlsPending(self: *const Connection) bool {
+    const ssl = self.ssl orelse return false;
+    return self.session != null and c.SSL_pending(ssl) > 0;
+}
+
 pub fn hasRoom(self: *const Connection) bool {
     return self.state == .ready and self.streams < self.peer_max_streams;
 }
@@ -115,10 +151,11 @@ pub fn view(self: *const Connection) policy.ConnectionView {
 
 pub fn pollEvents(self: *const Connection) ?i16 {
     return switch (self.state) {
-        .free => null,
+        .free, .resolving => null,
         .connecting => std.c.POLL.OUT,
+        .handshaking => if (self.tls_wants_write) std.c.POLL.OUT else std.c.POLL.IN,
         .awaiting_settings, .ready, .draining => blk: {
-            const write = self.unsent.len > 0 or c.nghttp2_session_want_write(self.session) != 0;
+            const write = self.tls_wants_write or self.unsent.len > 0 or c.nghttp2_session_want_write(self.session) != 0;
             break :blk if (write) std.c.POLL.IN | std.c.POLL.OUT else std.c.POLL.IN;
         },
     };
@@ -126,46 +163,90 @@ pub fn pollEvents(self: *const Connection) ?i16 {
 
 // ------------------------------------------------------------------ setup
 
-/// free -> connecting. Only loopback literals reach here until TLS lands.
+/// free -> resolving for a DNS name, else straight to connecting.
 pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
     std.debug.assert(self.state == .free);
     const engine = self.engine;
     const origin = &engine.origins[origin_index];
     self.origin = origin_index;
     self.serial = serial;
-    self.state = .connecting;
     self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-
-    var storage: std.c.sockaddr.in6 = undefined;
-    const family: c_uint, const length: std.c.socklen_t = if (std.mem.eql(u8, origin.host, "::1")) blk: {
-        storage = std.mem.zeroes(std.c.sockaddr.in6);
-        storage.family = std.c.AF.INET6;
-        storage.port = std.mem.nativeToBig(u16, origin.port);
-        storage.addr[15] = 1;
-        break :blk .{ std.c.AF.INET6, @sizeOf(std.c.sockaddr.in6) };
-    } else blk: {
-        std.debug.assert(std.mem.eql(u8, origin.host, "127.0.0.1"));
-        const v4: *std.c.sockaddr.in = @ptrCast(&storage);
-        v4.* = std.mem.zeroes(std.c.sockaddr.in);
-        v4.family = std.c.AF.INET;
-        v4.port = std.mem.nativeToBig(u16, origin.port);
-        v4.addr = std.mem.nativeToBig(u32, 0x7f00_0001);
-        break :blk .{ std.c.AF.INET, @sizeOf(std.c.sockaddr.in) };
+    if (origin.literal != null) return self.connectNext();
+    self.state = .resolving;
+    // Setups of one origin share its lookup; a finished one nobody uses is
+    // stale, so a new setup looks the name up again.
+    if (origin.lookup) |lookup| if (origin.lookup_users == 0 and lookup.result() != null) {
+        lookup.release();
+        origin.lookup = null;
     };
-    if (@hasField(std.c.sockaddr.in6, "len")) storage.len = @intCast(length);
+    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, origin.host, origin.port) orelse
+        return engine.setupFailed(self, .local_failure);
+    origin.lookup_users += 1;
+    self.uses_lookup = true;
+}
 
-    const fd = std.c.socket(family, std.c.SOCK.STREAM, 0);
-    if (fd < 0) return engine.setupFailed(self, .local_failure);
-    self.socket = fd;
-    if (!configureSocket(fd)) return engine.setupFailed(self, .local_failure);
-    while (true) {
-        switch (std.posix.errno(std.c.connect(fd, @ptrCast(&storage), length))) {
-            .SUCCESS => return self.startSession(),
-            .INTR => continue,
-            .INPROGRESS => return,
-            else => return engine.setupFailed(self, .connect_failed),
-        }
+/// resolving -> connecting, once the lookup finished.
+pub fn finishLookup(self: *Connection) void {
+    const addresses = self.engine.origins[self.origin].lookup.?.result() orelse return;
+    if (addresses.len == 0) return self.engine.setupFailed(self, .resolve_failed);
+    self.connectNext();
+}
+
+fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
+    const origin = &self.engine.origins[self.origin];
+    if (origin.literal) |literal| return if (index == 0) literal else null;
+    const addresses = origin.lookup.?.result().?;
+    return if (index < addresses.len) addresses[index] else null;
+}
+
+/// The last user of a finished lookup frees it. A running one stays with
+/// the origin for the next setup, so a stalled resolver never piles up
+/// threads: at most one lookup runs per origin.
+fn stopUsingLookup(self: *Connection) void {
+    if (!self.uses_lookup) return;
+    self.uses_lookup = false;
+    const origin = &self.engine.origins[self.origin];
+    origin.lookup_users -= 1;
+    const lookup = origin.lookup.?;
+    if (origin.lookup_users == 0 and lookup.result() != null) {
+        lookup.release();
+        origin.lookup = null;
     }
+}
+
+/// Connects to the next address, after any earlier one failed. One attempt
+/// at a time; the connect timeout bounds them all.
+fn connectNext(self: *Connection) void {
+    const engine = self.engine;
+    if (self.socket >= 0) {
+        closeSocket(self.socket);
+        self.socket = -1;
+    }
+    self.state = .connecting;
+    while (self.addressAt(self.address_index)) |address| {
+        self.address_index += 1;
+        const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
+        if (fd < 0) return engine.setupFailed(self, .local_failure);
+        self.socket = fd;
+        if (!configureSocket(fd)) return engine.setupFailed(self, .local_failure);
+        while (true) {
+            switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
+                .SUCCESS => return self.connected(),
+                .INTR => continue,
+                .INPROGRESS => return,
+                else => break,
+            }
+        }
+        closeSocket(fd);
+        self.socket = -1;
+    }
+    engine.setupFailed(self, .connect_failed);
+}
+
+/// A failed close leaves nothing to retry or report: the descriptor is
+/// released either way, and no write of ours is awaiting its result.
+fn closeSocket(fd: std.posix.fd_t) void {
+    _ = std.c.close(fd);
 }
 
 fn configureSocket(fd: std.posix.fd_t) bool {
@@ -185,8 +266,33 @@ pub fn finishConnect(self: *Connection) void {
     var result: c_int = 0;
     var result_len: std.c.socklen_t = @sizeOf(c_int);
     if (std.c.getsockopt(self.socket, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) != 0 or result != 0)
-        return self.engine.setupFailed(self, .connect_failed);
-    self.startSession();
+        return self.connectNext();
+    self.connected();
+}
+
+/// The addresses are done with; https goes on to its handshake.
+fn connected(self: *Connection) void {
+    self.stopUsingLookup();
+    const origin = &self.engine.origins[self.origin];
+    if (origin.scheme == .http) return self.startSession();
+    const context = &self.engine.tls_context.?;
+    self.ssl = context.newSession(self.socket, origin.host, if (origin.literal != null) .ip_literal else .dns_name) orelse
+        return self.engine.setupFailed(self, .local_failure);
+    self.state = .handshaking;
+    self.continueHandshake();
+}
+
+/// handshaking -> awaiting_settings once the peer is verified and chose h2.
+pub fn continueHandshake(self: *Connection) void {
+    switch (tls.handshake(self.ssl.?)) {
+        .done => {
+            self.tls_wants_write = false;
+            self.startSession();
+        },
+        .want_read => self.tls_wants_write = false,
+        .want_write => self.tls_wants_write = true,
+        .failed => |cause| self.engine.setupFailed(self, cause),
+    }
 }
 
 /// Our SETTINGS refuse push and grant each stream `stream_window_bytes`;
@@ -213,11 +319,15 @@ fn becomeReady(self: *Connection) void {
     self.state = .ready;
     self.idle_since_ns = time;
     self.last_inbound_ns = time;
-    // Enough for every stream this connection may carry to have its full
-    // window outstanding, so the connection never throttles one stream.
-    const carried: u64 = @min(self.peer_max_streams, engine.options.stream_capacity);
+}
+
+/// Enough for every stream this connection may carry to have its full
+/// window outstanding, so the connection never throttles one stream. Set
+/// again whenever the peer's SETTINGS change its stream limit.
+fn sizeWindow(self: *Connection) void {
+    const carried: u64 = @min(self.peer_max_streams, self.engine.options.stream_capacity);
     const window: i32 = @intCast(@min(@as(u64, h2.stream_window_bytes) * @max(carried, 1), std.math.maxInt(i32)));
-    _ = c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window);
+    self.check(c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window));
 }
 
 // ------------------------------------------------------------- streaming
@@ -283,7 +393,7 @@ fn nv(name: []const u8, value: []const u8, flags: u8) c.nghttp2_nv {
 pub fn detach(self: *Connection, record: *Record) void {
     const stream_id = record.route.open.stream_id;
     if (stream_id != self.closing_stream_id) {
-        _ = c.nghttp2_submit_rst_stream(self.session, c.NGHTTP2_FLAG_NONE, stream_id, c.NGHTTP2_CANCEL);
+        self.check(c.nghttp2_submit_rst_stream(self.session, c.NGHTTP2_FLAG_NONE, stream_id, c.NGHTTP2_CANCEL));
     }
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.head.record = null;
@@ -298,7 +408,17 @@ pub fn endOpen(self: *Connection, record: *Record, cause: policy.Cause) void {
 /// Returns `bytes` of credit to the stream and the connection. For a stream
 /// nghttp2 already closed, only the connection's.
 pub fn consume(self: *Connection, stream_id: i32, bytes: usize) void {
-    _ = c.nghttp2_session_consume(self.session, stream_id, bytes);
+    self.check(c.nghttp2_session_consume(self.session, stream_id, bytes));
+}
+
+/// Returns credit to the connection only, for bytes a stream will never
+/// take: that stream's window stays shut.
+pub fn consumeConnection(self: *Connection, bytes: usize) void {
+    self.check(c.nghttp2_session_consume_connection(self.session, bytes));
+}
+
+fn check(self: *Connection, result: c_int) void {
+    if (result != 0) self.local_failure = true;
 }
 
 pub fn ping(self: *Connection, time: u64) void {
@@ -314,24 +434,19 @@ pub fn receive(self: *Connection) ReadOutcome {
     const engine = self.engine;
     const buffer = &engine.scratch.read_buffer;
     var total: usize = 0;
+    self.tls_wants_write = false;
     while (total < h2.read_allowance_bytes) {
-        const read = std.c.recv(self.socket, buffer, buffer.len, 0);
-        if (read < 0) switch (std.posix.errno(read)) {
-            .AGAIN => return .drained,
-            .INTR => continue,
-            else => {
+        const bytes = switch (self.readSome(buffer)) {
+            .bytes => |count| buffer[0..count],
+            .again => return .drained,
+            .closed => {
                 self.fail(.connection_lost);
                 return .closed;
             },
         };
-        if (read == 0) {
-            self.fail(.connection_lost);
-            return .closed;
-        }
-        const bytes = buffer[0..@intCast(read)];
         self.last_inbound_ns = engine.now();
         self.ping_sent_ns = null;
-        if (!self.received_any and self.state == .awaiting_settings) {
+        if (!self.received_any and self.state == .awaiting_settings and self.ssl == null) {
             self.received_any = true;
             // An HTTP/1 server answers the preface with a status line; an
             // HTTP/2 one starts with a SETTINGS frame, whose first byte is 0.
@@ -341,10 +456,14 @@ pub fn receive(self: *Connection) ReadOutcome {
             }
         }
         const decoded = c.nghttp2_session_mem_recv2(self.session, bytes.ptr, bytes.len);
-        engine.flush(self);
+        engine.flush(self, null);
         if (decoded < 0) {
             self.protocol_failure = true;
             self.fail(.protocol_error);
+            return .closed;
+        }
+        if (self.local_failure) {
+            self.fail(.local_failure);
             return .closed;
         }
         total += bytes.len;
@@ -355,6 +474,7 @@ pub fn receive(self: *Connection) ReadOutcome {
 /// Writes what nghttp2 has packed until it has nothing or the socket would
 /// block. nghttp2 coalesces all pending frames into each buffer.
 pub fn send(self: *Connection) void {
+    if (self.local_failure) return self.fail(.local_failure);
     while (true) {
         if (self.unsent.len == 0) {
             var data: [*c]const u8 = undefined;
@@ -363,24 +483,66 @@ pub fn send(self: *Connection) void {
             if (packed_len == 0) break;
             self.unsent = data[0..@intCast(packed_len)];
         }
-        const sent = std.c.send(self.socket, self.unsent.ptr, self.unsent.len, if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0);
-        if (sent < 0) switch (std.posix.errno(sent)) {
-            .AGAIN => return,
-            .INTR => continue,
-            else => return self.fail(.connection_lost),
-        };
-        self.unsent = self.unsent[@intCast(sent)..];
+        switch (self.writeSome(self.unsent)) {
+            .bytes => |count| self.unsent = self.unsent[count..],
+            .again => return,
+            .closed => return self.fail(.connection_lost),
+        }
     }
     // nghttp2 wants neither: the session ended (GOAWAY sent or received).
     if (c.nghttp2_session_want_read(self.session) == 0 and c.nghttp2_session_want_write(self.session) == 0)
         self.fail(if (self.protocol_failure) .protocol_error else .connection_lost);
 }
 
+const Transfer = union(enum) { bytes: usize, again, closed };
+
+/// One socket read, through TLS for https. Never zero bytes.
+fn readSome(self: *Connection, buffer: []u8) Transfer {
+    if (self.ssl) |ssl| return switch (tls.read(ssl, buffer)) {
+        .bytes => |count| .{ .bytes = count },
+        .want_read => .again,
+        .want_write => blk: {
+            self.tls_wants_write = true;
+            break :blk .again;
+        },
+        .closed => .closed,
+    };
+    while (true) {
+        const read = std.c.recv(self.socket, buffer.ptr, buffer.len, 0);
+        if (read > 0) return .{ .bytes = @intCast(read) };
+        if (read == 0) return .closed;
+        switch (std.posix.errno(read)) {
+            .AGAIN => return .again,
+            .INTR => continue,
+            else => return .closed,
+        }
+    }
+}
+
+/// One socket write, through TLS for https. A TLS write that needs a read
+/// first waits for readability, which every session state polls for.
+fn writeSome(self: *Connection, bytes: []const u8) Transfer {
+    if (self.ssl) |ssl| return switch (tls.write(ssl, bytes)) {
+        .bytes => |count| .{ .bytes = count },
+        .want_read, .want_write => .again,
+        .closed => .closed,
+    };
+    while (true) {
+        const sent = std.c.send(self.socket, bytes.ptr, bytes.len, tls.send_flags);
+        if (sent >= 0) return .{ .bytes = @intCast(sent) };
+        switch (std.posix.errno(sent)) {
+            .AGAIN => return .again,
+            .INTR => continue,
+            else => return .closed,
+        }
+    }
+}
+
 fn fail(self: *Connection, cause: policy.Cause) void {
     switch (self.state) {
         .free => {},
-        .connecting, .awaiting_settings => self.engine.setupFailed(self, if (cause == .connection_lost) .connect_failed else cause),
         .ready, .draining => self.lose(cause),
+        else => self.engine.setupFailed(self, if (cause == .connection_lost) .connect_failed else cause),
     }
 }
 
@@ -409,16 +571,27 @@ pub fn lose(self: *Connection, cause: policy.Cause) void {
 pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     if (self.session) |session| {
         if (mode == .goaway and (self.state == .ready or self.state == .draining)) {
-            if (c.nghttp2_session_terminate_session(session, c.NGHTTP2_NO_ERROR) == 0) {
+            // GOAWAY may only follow whole frames, and a blocked TLS write
+            // must be retried with the same bytes, so a connection with
+            // bytes still unsent just closes.
+            if (self.unsent.len == 0 and c.nghttp2_session_terminate_session(session, c.NGHTTP2_NO_ERROR) == 0) {
                 var data: [*c]const u8 = undefined;
-                if (self.unsent.len > 0) _ = std.c.send(self.socket, self.unsent.ptr, self.unsent.len, 0);
                 const packed_len = c.nghttp2_session_mem_send2(session, &data);
-                if (packed_len > 0) _ = std.c.send(self.socket, data, @intCast(packed_len), if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0);
+                const goaway_sent = packed_len > 0 and switch (self.writeSome(data[0..@intCast(packed_len)])) {
+                    .bytes => |count| count == packed_len,
+                    .again, .closed => false,
+                };
+                // close_notify, best effort and without waiting for the peer's.
+                if (goaway_sent) if (self.ssl) |ssl| {
+                    _ = c.SSL_shutdown(ssl);
+                };
             }
         }
         c.nghttp2_session_del(session);
     }
-    if (self.socket >= 0) _ = std.c.close(self.socket);
+    if (self.ssl) |ssl| c.SSL_free(ssl);
+    self.stopUsingLookup();
+    if (self.socket >= 0) closeSocket(self.socket);
     self.releaseHead();
     self.head.fields.deinit(self.engine.allocator);
     self.head.refs.deinit(self.engine.allocator);
@@ -554,6 +727,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
             self.engine.origins[self.origin].learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
+            self.sizeWindow();
         },
         c.NGHTTP2_GOAWAY => {
             // nghttp2 closes the streams above `last_stream_id` as
@@ -615,10 +789,10 @@ fn onStreamClose(_: ?*c.nghttp2_session, stream_id: i32, error_code: u32, user_d
     const engine = self.engine;
     self.streams -= 1;
     if (self.streams == 0) self.idle_since_ns = engine.now();
-    if (self.recordOf(stream_id) == null) return 0;
+    const closing = self.recordOf(stream_id) orelse return 0;
     self.closing_stream_id = stream_id;
     defer self.closing_stream_id = 0;
-    engine.flush(self);
+    engine.flush(self, closing);
     const record = self.recordOf(stream_id) orelse return 0;
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.releaseHead();
