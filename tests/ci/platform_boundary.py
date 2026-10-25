@@ -52,6 +52,7 @@ ALLOWANCES = {
     "src/platform.zig": 1,
     "src/provider.zig": 1,
     "src/server.zig": 8,
+    "src/signal_stack_probe.zig": 1,
     "src/store.zig": 1,
 }
 
