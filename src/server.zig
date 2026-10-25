@@ -882,14 +882,16 @@ pub fn serve(
 
     var bash_environment = try bash.environment(io, allocator, home);
     defer bash_environment.deinit();
-    const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
-    defer allocator.free(custody_records);
+    // Zero bytes are an empty custody record and retention entry, so fresh
+    // pages need no initializing pass and an unused one never becomes resident.
+    const custody_records = try server_host.mapZeroed(execution.CustodyRecord, active_capacity);
+    defer server_host.unmapZeroed(custody_records);
     const retention_capacity = @min(
         default_retention_entry_capacity,
         limits.retention_entry_capacity orelse default_retention_entry_capacity,
     );
-    const retention_entries = try allocator.alloc(output_retention.Entry, retention_capacity);
-    defer allocator.free(retention_entries);
+    const retention_entries = try server_host.mapZeroed(output_retention.Entry, retention_capacity);
+    defer server_host.unmapZeroed(retention_entries);
     var host = Host{
         .io = io,
         .allocator = allocator,
