@@ -39,7 +39,7 @@ func newEndpoint() (*endpoint, error) {
 		return nil, err
 	}
 	fixture := &endpoint{listener: listener, release: make(chan struct{}), h2Peers: make(map[string]struct{})}
-	fixture.server = &http.Server{Handler: http.HandlerFunc(fixture.serve)}
+	fixture.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(fixture.serve)}
 	go fixture.server.Serve(listener)
 	return fixture, nil
 }

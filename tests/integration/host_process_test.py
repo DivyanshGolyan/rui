@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Failure-sensitive checks for bounded Host process startup."""
 
+import http.client
+import http.server
 import json
 import io
 import contextlib
@@ -18,6 +20,12 @@ import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import h2.config
+import h2.connection
+import h2.errors
+import h2.events
+import h2.settings
 
 from host_process import (
     READINESS_LIMIT,
@@ -133,6 +141,7 @@ def main():
     prove_short_optional_receipt()
     prove_gate_broadcast()
     prove_numeric_listener()
+    prove_h2c_fixture()
 
 
 def prove_numeric_listener():
@@ -150,6 +159,153 @@ def prove_numeric_listener():
                     assert client.recv(1) == b"x", "numeric fixture listener is not usable"
     assert endpoint.fileno() == -1, "numeric fixture listener was not closed"
     print("Numeric HTTP fixture: usable bound listener and exact port without reverse DNS")
+
+
+class _H2cProbeHandler(http.server.BaseHTTPRequestHandler):
+    """A fixture handler written for HTTP/1.1, as every fixture's is."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.server.seen.append((self.path, body, self.headers["X-Probe"], self.headers["Host"]))
+        if self.path == "/disconnect":
+            self.close_connection = True
+            return
+        if self.path == "/stall":
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"x")
+            self.server.stalled.set()
+            # The client resets the stream; its reset reaches the server
+            # thread at some point, after which every write fails.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    self.wfile.write(b"")
+                except OSError as error:
+                    self.server.write_errors.append(error)
+                    break
+                time.sleep(0.01)
+            self.close_connection = True
+            return
+        payload, step = (b"y" * (200 * 1024), 50000) if self.path == "/large" else (b"abcdefgh", 3)
+        self.send_response(201)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.send_header("X-Reply", "one")
+        self.end_headers()
+        for start in range(0, len(payload), step):
+            self.wfile.write(payload[start:start + step])
+            self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, _format, *_args):
+        pass
+
+
+class _H2cProbeClient:
+    def __init__(self, address):
+        self.sock = socket.create_connection(address, timeout=5)
+        self.conn = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True, header_encoding=None))
+        self.conn.initiate_connection()
+        self.sock.sendall(self.conn.data_to_send())
+        self.settings = {}
+
+    def request(self, path, body=b"ping"):
+        stream_id = self.conn.get_next_available_stream_id()
+        self.conn.send_headers(stream_id, [
+            (b":method", b"POST"), (b":scheme", b"http"), (b":authority", b"fixture.test"), (b":path", path.encode()),
+            (b"content-length", str(len(body)).encode()), (b"x-probe", b"probe")])
+        self.conn.send_data(stream_id, body, end_stream=True)
+        self.sock.sendall(self.conn.data_to_send())
+        return stream_id
+
+    def events(self):
+        data = self.sock.recv(65536)
+        if not data:
+            return None
+        events = self.conn.receive_data(data)
+        for event in events:
+            if isinstance(event, h2.events.DataReceived):
+                self.conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+            elif isinstance(event, h2.events.RemoteSettingsChanged):
+                self.settings.update({code: change.new_value for code, change in event.changed_settings.items()})
+        self.sock.sendall(self.conn.data_to_send())
+        return events
+
+    def response(self, stream_id):
+        head, frames = None, []
+        while True:
+            events = self.events()
+            assert events is not None, "connection closed mid-response"
+            for event in events:
+                if getattr(event, "stream_id", None) != stream_id:
+                    continue
+                if isinstance(event, h2.events.ResponseReceived):
+                    head = dict(event.headers)
+                elif isinstance(event, h2.events.DataReceived) and event.data:
+                    # The stream ends with an empty DATA frame.
+                    frames.append(event.data)
+                elif isinstance(event, h2.events.StreamEnded):
+                    return head, frames
+
+
+def prove_h2c_fixture():
+    class Server(TestHTTPServer):
+        h2_max_concurrent_streams = 3
+
+    with Server(("127.0.0.1", 0), _H2cProbeHandler) as endpoint:
+        endpoint.seen, endpoint.write_errors = [], []
+        endpoint.stalled = threading.Event()
+        serving = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        serving.start()
+        try:
+            client = _H2cProbeClient(endpoint.server_address)
+            # Head and body as one HEADERS frame and a DATA frame per write;
+            # connection fields dropped, names lowercased.
+            head, frames = client.response(client.request("/echo"))
+            assert head[b":status"] == b"201", head
+            assert head[b"x-reply"] == b"one" and b"connection" not in head, head
+            assert frames == [b"abc", b"def", b"gh"], frames
+            assert client.settings[h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS] == 3, client.settings
+            assert endpoint.seen[-1] == ("/echo", b"ping", "probe", "fixture.test"), endpoint.seen
+
+            # More than the initial 64 KiB window, so writes wait for credit.
+            head, frames = client.response(client.request("/large"))
+            assert b"".join(frames) == b"y" * (200 * 1024)
+
+            # A write after the client's reset fails as a closed socket would.
+            stream_id = client.request("/stall")
+            assert endpoint.stalled.wait(5)
+            client.conn.reset_stream(stream_id, h2.errors.ErrorCodes.CANCEL)
+            client.sock.sendall(client.conn.data_to_send())
+            deadline = time.monotonic() + 5
+            while not endpoint.write_errors:
+                assert time.monotonic() < deadline, "write after reset did not fail"
+                time.sleep(0.01)
+            assert isinstance(endpoint.write_errors[0], BrokenPipeError), endpoint.write_errors
+
+            # The same connection still serves; a handler that sends no head
+            # drops the whole connection.
+            head, _ = client.response(client.request("/echo"))
+            assert head[b":status"] == b"201"
+            client.request("/disconnect")
+            while client.events() is not None:
+                pass
+            client.sock.close()
+
+            # HTTP/1.1 is unchanged on the same listener.
+            plain = http.client.HTTPConnection(*endpoint.server_address, timeout=5)
+            plain.request("POST", "/echo", body=b"h1", headers={"X-Probe": "h1"})
+            reply = plain.getresponse()
+            assert (reply.status, reply.read(), reply.version) == (201, b"abcdefgh", 11)
+            plain.close()
+        finally:
+            endpoint.shutdown()
+            serving.join()
+    print("h2c fixture: HTTP/1.1 handlers serve h2c streams; heads, frames, flow control, resets, disconnect, HTTP/1.1 kept")
 
 
 def prove_private_environment():

@@ -58,7 +58,7 @@ func startStreamEndpoint(tlsEnabled bool, root string) (*streamEndpoint, error) 
 		return nil, err
 	}
 	e.listener = listener
-	e.server = &http.Server{Handler: http.HandlerFunc(e.serve)}
+	e.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(e.serve)}
 	go e.server.Serve(listener)
 	return e, nil
 }
@@ -705,7 +705,7 @@ func startSuccessEndpoint(answerBytes int, tlsRoot string) (*successEndpoint, er
 		return nil, err
 	}
 	endpoint.listener = listener
-	endpoint.server = &http.Server{Handler: http.HandlerFunc(endpoint.serve)}
+	endpoint.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(endpoint.serve)}
 	go endpoint.server.Serve(listener)
 	return endpoint, nil
 }

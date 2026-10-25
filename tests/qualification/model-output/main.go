@@ -286,7 +286,7 @@ func startPayloadEndpoint() (*payloadEndpoint, error) {
 		return nil, err
 	}
 	value := &payloadEndpoint{listener: listener}
-	value.server = &http.Server{Handler: http.HandlerFunc(value.serve)}
+	value.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(value.serve)}
 	go value.server.Serve(listener)
 	return value, nil
 }

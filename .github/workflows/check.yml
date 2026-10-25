@@ -108,6 +108,8 @@ jobs:
         with:
           # Import-cycle allowances may only shrink from trusted main history.
           fetch-depth: 0
+      - name: Install the pinned fixture packages tests/ci imports
+        run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
       - run: python3 -B -m unittest discover -s tests/ci -v
       - name: Reject undefined fixture names before native builds
         run: |

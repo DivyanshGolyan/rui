@@ -1072,3 +1072,13 @@ func EncodeJSON(writer io.Writer, value any) error {
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
 }
+
+// LoopbackProtocols lets a plain-http fixture serve HTTP/1.1 and HTTP/2 by
+// prior knowledge (h2c) on one listener, so it works with Rui's curl build
+// and its own HTTP/2 client alike.
+func LoopbackProtocols() *http.Protocols {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return protocols
+}
