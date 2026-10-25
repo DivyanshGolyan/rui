@@ -48,8 +48,9 @@ const Range = struct { start: u64, length: u64 };
 /// One validation workspace, not one buffer per event or live transport.
 /// Keep raw capture immutable for diagnostics; metadata addresses these bytes.
 pub const EventData = struct {
-    io: std.Io,
-    file: std.Io.File,
+    /// Owns the file and keeps the newest bytes written, so the event they
+    /// complete parses from memory.
+    window: Window,
     budget: protocol.ScratchBudget,
     length: u64 = 0,
     charged: u64 = 0,
@@ -67,55 +68,92 @@ pub const EventData = struct {
             retained.* = .init(io, file, null, name, budget, 0, .native);
             return err;
         };
-        return .{ .io = io, .file = file, .budget = budget };
+        return .{ .window = .{ .io = io, .file = file }, .budget = budget };
     }
 
     fn append(self: *EventData, bytes: []const u8) !void {
         if (!self.budget.allocate(bytes.len)) return error.EventDataScratchExhausted;
         // A partial write remains charged until disposal, just like capture.
         self.charged += bytes.len;
-        self.file.writeStreamingAll(self.io, bytes) catch return error.EventDataWriteFailed;
+        self.window.file.writeStreamingAll(self.window.io, bytes) catch return error.EventDataWriteFailed;
+        self.window.remember(self.length, bytes);
         self.length += bytes.len;
     }
 
-    fn copy(self: *EventData, source: std.Io.File, range: Range) !void {
-        var offset: u64 = 0;
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        while (offset < range.length) {
-            const wanted: usize = @intCast(@min(range.length - offset, buffer.len));
-            const count = try source.readPositionalAll(self.io, buffer[0..wanted], range.start + offset);
-            if (count != wanted) return error.ShortSealedRead;
-            try self.append(buffer[0..count]);
-            offset += count;
+    fn copy(self: *EventData, source: *Window, range: Range) !void {
+        // Appending moves this window, so it cannot also be the source.
+        std.debug.assert(source != &self.window);
+        var offset = range.start;
+        const end = try std.math.add(u64, range.start, range.length);
+        while (offset < end) {
+            const bytes = try source.bytesAt(offset, end);
+            try self.append(bytes);
+            offset += bytes.len;
         }
     }
 
     fn seal(self: *EventData) !void {
-        self.file.sync(self.io) catch return error.EventDataSealFailed;
-        const length = self.file.length(self.io) catch return error.EventDataSealFailed;
+        self.window.file.sync(self.window.io) catch return error.EventDataSealFailed;
+        const length = self.window.file.length(self.window.io) catch return error.EventDataSealFailed;
         if (length != self.length) return error.EventDataSealFailed;
     }
 
     pub fn deinit(self: *EventData) void {
-        self.file.close(self.io);
+        self.window.file.close(self.window.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
 };
 
-const FileSource = struct {
+/// One read window over an append-only file, shared by every reader of that
+/// file. A field, a nested object and the digest of an event all read the
+/// same bytes, so whichever reader needs them first loads them and the rest
+/// find them in memory.
+const Window = struct {
     io: std.Io,
     file: std.Io.File,
+    start: u64 = 0,
+    length: usize = 0,
+    bytes: [protocol.content_window_bytes]u8 = undefined,
+
+    /// Borrowed bytes from `position` up to at most `end`, never empty; valid
+    /// until the next call on this window.
+    fn bytesAt(self: *Window, position: u64, end: u64) ![]const u8 {
+        std.debug.assert(position < end);
+        if (position < self.start or position >= self.start + self.length) {
+            self.length = 0;
+            const wanted: usize = @intCast(@min(end - position, self.bytes.len));
+            const count = try self.file.readPositionalAll(self.io, self.bytes[0..wanted], position);
+            if (count != wanted) return error.ShortSealedRead;
+            self.start = position;
+            self.length = count;
+        }
+        const offset: usize = @intCast(position - self.start);
+        return self.bytes[offset..][0..@intCast(@min(self.length - offset, end - position))];
+    }
+
+    /// Keep bytes just written at `position`. Contiguous writes extend the
+    /// window; any other write starts it again, at the write.
+    fn remember(self: *Window, position: u64, bytes: []const u8) void {
+        if (self.start + self.length != position or bytes.len > self.bytes.len - self.length) {
+            self.start = position;
+            self.length = 0;
+        }
+        if (bytes.len > self.bytes.len) return;
+        @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+        self.length += bytes.len;
+    }
+};
+
+const FileSource = struct {
+    window: *Window,
     start: u64,
     end: u64,
     position: u64,
-    buffer_start: u64 = 0,
-    buffer_length: usize = 0,
-    buffer: [protocol.content_window_bytes]u8 = undefined,
 
-    fn init(io: std.Io, file: std.Io.File, range: Range) !FileSource {
+    fn init(window: *Window, range: Range) !FileSource {
         const end = try std.math.add(u64, range.start, range.length);
-        return .{ .io = io, .file = file, .start = range.start, .end = end, .position = range.start };
+        return .{ .window = window, .start = range.start, .end = end, .position = range.start };
     }
 
     fn offset(self: *const FileSource) u64 {
@@ -124,14 +162,11 @@ const FileSource = struct {
 
     fn peek(self: *FileSource) !?u8 {
         if (self.position == self.end) return null;
-        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
-            self.buffer_start = self.position;
-            const wanted: usize = @intCast(@min(self.end - self.position, self.buffer.len));
-            const count = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.position);
-            if (count != wanted) return error.ShortSealedRead;
-            self.buffer_length = count;
-        }
-        return self.buffer[@intCast(self.position - self.buffer_start)];
+        // Parsing asks for every byte, so the common case stays this check.
+        const window = self.window;
+        const index = self.position -% window.start;
+        if (index < window.length) return window.bytes[@intCast(index)];
+        return (try window.bytesAt(self.position, self.end))[0];
     }
 
     pub fn take(self: *FileSource) !u8 {
@@ -429,21 +464,21 @@ fn collectFields(source: anytype, comptime names: []const []const u8) !Fields(na
     return fields;
 }
 
-fn readFields(io: std.Io, file: std.Io.File, object: Range, comptime names: []const []const u8) !Fields(names) {
-    var source = try FileSource.init(io, file, object);
+fn readFields(window: *Window, object: Range, comptime names: []const []const u8) !Fields(names) {
+    var source = try FileSource.init(window, object);
     return collectFields(&source, names);
 }
 
-fn exactOverflowCode(io: std.Io, file: std.Io.File, value: ?Range) !bool {
+fn exactOverflowCode(window: *Window, value: ?Range) !bool {
     const range = value orelse return false;
     var code: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, range, &code);
+    _ = try readString(window, range, &code);
     return code.eql("context_length_exceeded");
 }
 
-fn errorOverflow(io: std.Io, file: std.Io.File, range: Range) !bool {
-    const fields = try readFields(io, file, range, &.{"code"});
-    return exactOverflowCode(io, file, try fields.get("code"));
+fn errorOverflow(window: *Window, range: Range) !bool {
+    const fields = try readFields(window, range, &.{"code"});
+    return exactOverflowCode(window, try fields.get("code"));
 }
 
 fn malformedEnvelope(err: anyerror) !bool {
@@ -472,32 +507,34 @@ fn malformedEnvelope(err: anyerror) !bool {
 /// Syntax failures are negative evidence, never permission to drop context.
 pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
     if (http_status < 400 or http_status >= 600) return false;
-    const fields = readFields(io, file, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedEnvelope(err);
+    var envelope: Window = .{ .io = io, .file = file };
+    const fields = readFields(&envelope, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedEnvelope(err);
     const failure = (fields.get("error") catch return false) orelse return false;
-    return errorOverflow(io, file, failure) catch |err| malformedEnvelope(err);
+    return errorOverflow(&envelope, failure) catch |err| malformedEnvelope(err);
 }
 
 /// Only an exact code in a valid HTTP 429 error envelope establishes a quota
 /// refusal. Reset metadata is optional and cannot make that refusal retryable.
 pub fn httpQuota(io: std.Io, file: std.Io.File, length: u64, http_status: u16) !?transport_policy.Quota {
     if (http_status != 429) return null;
-    return quotaEnvelope(io, file, .{ .start = 0, .length = length }) catch |err| {
+    var envelope: Window = .{ .io = io, .file = file };
+    return quotaEnvelope(&envelope, .{ .start = 0, .length = length }) catch |err| {
         _ = try malformedEnvelope(err);
         return null;
     };
 }
 
-fn quotaEnvelope(io: std.Io, file: std.Io.File, range: Range) !?transport_policy.Quota {
-    const fields = try readFields(io, file, range, &.{"error"});
+fn quotaEnvelope(window: *Window, range: Range) !?transport_policy.Quota {
+    const fields = try readFields(window, range, &.{"error"});
     const failure = try fields.required("error");
-    const detail = try readFields(io, file, failure, &.{ "code", "resets_at" });
+    const detail = try readFields(window, failure, &.{ "code", "resets_at" });
     var code: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try detail.required("code"), &code);
+    _ = try readString(window, try detail.required("code"), &code);
     var quota = transport_policy.Quota{
         .code = std.meta.stringToEnum(transport_policy.Quota.Code, code.slice()) orelse return null,
     };
     if (detail.get("resets_at") catch null) |reset| {
-        quota.resets_at = readIndex(io, file, reset) catch |err| switch (err) {
+        quota.resets_at = readIndex(window, reset) catch |err| switch (err) {
             error.InvalidProviderIndex, error.Overflow, error.TrailingJson => null,
             else => return err,
         };
@@ -505,28 +542,28 @@ fn quotaEnvelope(io: std.Io, file: std.Io.File, range: Range) !?transport_policy
     return quota;
 }
 
-fn streamError(io: std.Io, file: std.Io.File, event: Range, failed_response: bool) !void {
+fn streamError(window: *Window, event: Range, failed_response: bool) !void {
     var failure = event;
     if (failed_response) {
-        const fields = try readFields(io, file, event, &.{"response"});
-        const response = try readFields(io, file, try fields.required("response"), &.{ "status", "error" });
+        const fields = try readFields(window, event, &.{"response"});
+        const response = try readFields(window, try fields.required("response"), &.{ "status", "error" });
         var status: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, try response.required("status"), &status);
+        _ = try readString(window, try response.required("status"), &status);
         if (!status.eql("failed")) return error.IncompleteProviderOutput;
         failure = try response.get("error") orelse return error.TemporaryProviderFailure;
     } else {
-        const fields = try readFields(io, file, event, &.{ "code", "error" });
+        const fields = try readFields(window, event, &.{ "code", "error" });
         // Preserve the top-level Responses error code when supplied. Some
         // error events instead carry the provider error in a nested object.
         if (try fields.get("code") == null) {
             if (try fields.get("error")) |nested| failure = nested;
         }
     }
-    if (try rangeEquals(io, file, failure, "null")) return error.TemporaryProviderFailure;
-    const fields = try readFields(io, file, failure, &.{"code"});
+    if (try rangeEquals(window, failure, "null")) return error.TemporaryProviderFailure;
+    const fields = try readFields(window, failure, &.{"code"});
     var code: protocol.Bounded(max_evidence_bytes) = .{};
     if (try fields.get("code")) |value| {
-        if (!try rangeEquals(io, file, value, "null")) _ = try readString(io, file, value, &code);
+        if (!try rangeEquals(window, value, "null")) _ = try readString(window, value, &code);
     }
     if (code.eql("context_length_exceeded")) return error.ContextOverflow;
     // Codex 970111f6 codex-api/src/sse/responses_error.rs. Known terminal
@@ -537,36 +574,36 @@ fn streamError(io: std.Io, file: std.Io.File, event: Range, failed_response: boo
     return error.TemporaryProviderFailure;
 }
 
-fn incompleteOverflow(io: std.Io, file: std.Io.File, event: Range) !bool {
-    const fields = try readFields(io, file, event, &.{"response"});
-    const response = try readFields(io, file, try fields.required("response"), &.{ "status", "error", "incomplete_details" });
+fn incompleteOverflow(window: *Window, event: Range) !bool {
+    const fields = try readFields(window, event, &.{"response"});
+    const response = try readFields(window, try fields.required("response"), &.{ "status", "error", "incomplete_details" });
     var status: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try response.required("status"), &status);
+    _ = try readString(window, try response.required("status"), &status);
     if (!status.eql("incomplete")) return false;
     if (try response.get("error")) |failure| {
-        if (!try rangeEquals(io, file, failure, "null") and try errorOverflow(io, file, failure)) return true;
+        if (!try rangeEquals(window, failure, "null") and try errorOverflow(window, failure)) return true;
     }
     if (try response.get("incomplete_details")) |details| {
-        const reason = try readFields(io, file, details, &.{"reason"});
-        return exactOverflowCode(io, file, try reason.get("reason"));
+        const reason = try readFields(window, details, &.{"reason"});
+        return exactOverflowCode(window, try reason.get("reason"));
     }
     return false;
 }
 
-fn readString(io: std.Io, file: std.Io.File, value: Range, destination: *protocol.Bounded(max_evidence_bytes)) !ParsedString {
+fn readString(window: *Window, value: Range, destination: *protocol.Bounded(max_evidence_bytes)) !ParsedString {
     destination.len = 0;
     var decoded = Decoded{ .bounded = destination };
-    var source = try FileSource.init(io, file, value);
+    var source = try FileSource.init(window, value);
     const parsed = try parseString(&source, &decoded);
     try source.expectEnd();
     if (decoded.overflow) return error.ProviderValueTooLong;
     return parsed;
 }
 
-fn stringDigest(io: std.Io, file: std.Io.File, value: Range) ![32]u8 {
+fn stringDigest(window: *Window, value: Range) ![32]u8 {
     var hash = protocol.contentHasher();
     var decoded = Decoded{ .hash = &hash };
-    var source = try FileSource.init(io, file, value);
+    var source = try FileSource.init(window, value);
     const parsed = try parseString(&source, &decoded);
     try source.expectEnd();
     if (parsed.decoded_length == 0) return error.EmptyProviderIdentity;
@@ -590,8 +627,8 @@ pub fn authenticateCall(source: anytype, references: anytype) !void {
     }
 }
 
-fn readIndex(io: std.Io, file: std.Io.File, value: Range) !u64 {
-    var source = try FileSource.init(io, file, value);
+fn readIndex(window: *Window, value: Range) !u64 {
+    var source = try FileSource.init(window, value);
     try source.space();
     var result: u64 = 0;
     var digits: usize = 0;
@@ -611,8 +648,8 @@ const Array = struct {
     done: bool = false,
     first: bool = true,
 
-    fn init(io: std.Io, file: std.Io.File, range: Range) !Array {
-        var source = try FileSource.init(io, file, range);
+    fn init(window: *Window, range: Range) !Array {
+        var source = try FileSource.init(window, range);
         try source.expect('[');
         return .{ .source = source };
     }
@@ -635,16 +672,16 @@ const Array = struct {
     }
 };
 
-fn optionalCompleted(io: std.Io, file: std.Io.File, status_range: ?Range) !void {
+fn optionalCompleted(window: *Window, status_range: ?Range) !void {
     const status = status_range orelse return;
     var value: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, status, &value);
+    _ = try readString(window, status, &value);
     if (!value.eql("completed")) return error.UnsupportedItemStatus;
 }
 
-fn optionalFalse(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
+fn optionalFalse(window: *Window, value_range: ?Range) !void {
     const value = value_range orelse return;
-    var source = try FileSource.init(io, file, value);
+    var source = try FileSource.init(window, value);
     try source.space();
     if (try source.peek() == 'n') {
         try literal(&source, "null");
@@ -658,9 +695,9 @@ fn optionalFalse(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
     try source.expectEnd();
 }
 
-fn optionalEmptyString(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
+fn optionalEmptyString(window: *Window, value_range: ?Range) !void {
     const value = value_range orelse return;
-    var source = try FileSource.init(io, file, value);
+    var source = try FileSource.init(window, value);
     try source.space();
     if (try source.peek() == 'n') {
         try literal(&source, "null");
@@ -672,9 +709,9 @@ fn optionalEmptyString(io: std.Io, file: std.Io.File, value_range: ?Range) !void
     if (parsed.decoded_length != 0) return error.UnsupportedCallControl;
 }
 
-fn validateCaller(io: std.Io, file: std.Io.File, caller_range: ?Range) !void {
+fn validateCaller(window: *Window, caller_range: ?Range) !void {
     const caller = caller_range orelse return;
-    var source = try FileSource.init(io, file, caller);
+    var source = try FileSource.init(window, caller);
     try source.space();
     if (try source.peek() == 'n') {
         try literal(&source, "null");
@@ -684,20 +721,20 @@ fn validateCaller(io: std.Io, file: std.Io.File, caller_range: ?Range) !void {
     const fields = try collectFields(&source, &.{"type"});
     const type_range = try fields.get("type") orelse return error.UnsupportedCaller;
     var caller_type: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, type_range, &caller_type);
+    _ = try readString(window, type_range, &caller_type);
     if (!caller_type.eql("direct")) return error.UnsupportedCaller;
 }
 
-fn validateFunctionCallControls(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
-    try validateCaller(io, file, try fields.get("caller"));
-    try optionalFalse(io, file, try fields.get("async"));
-    try optionalEmptyString(io, file, try fields.get("namespace"));
-    try optionalEmptyString(io, file, try fields.get("encrypted_function_args"));
+fn validateFunctionCallControls(window: *Window, fields: ItemFields) !void {
+    try validateCaller(window, try fields.get("caller"));
+    try optionalFalse(window, try fields.get("async"));
+    try optionalEmptyString(window, try fields.get("namespace"));
+    try optionalEmptyString(window, try fields.get("encrypted_function_args"));
 }
 
-fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Range) !void {
+fn validateMetadataAuthority(window: *Window, metadata_range: ?Range) !void {
     const metadata = metadata_range orelse return;
-    const fields = try readFields(io, file, metadata, &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" });
+    const fields = try readFields(window, metadata, &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" });
     inline for (.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }) |field| {
         if (try fields.get(field) != null) return error.UnsupportedMetadataAuthority;
     }
@@ -706,11 +743,11 @@ fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Ran
 const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary", "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" };
 const ItemFields = Fields(item_field_names);
 
-fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
-    try optionalCompleted(io, file, try fields.get("status"));
+fn validateReasoning(window: *Window, fields: ItemFields) !void {
+    try optionalCompleted(window, try fields.get("status"));
     if (try fields.get("text") != null) return error.UnsupportedReasoningText;
     const encrypted = (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable;
-    var source = try FileSource.init(io, file, encrypted);
+    var source = try FileSource.init(window, encrypted);
     const parsed = try parseString(&source, null);
     try source.expectEnd();
     if (parsed.decoded_length == 0) return error.ContinuationUnavailable;
@@ -718,13 +755,13 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
     const type_names = [_][]const u8{ "summary_text", "reasoning_text" };
     inline for (field_names, type_names) |field_name, type_name| {
         if (try fields.get(field_name)) |array_range| {
-            var array = try Array.init(io, file, array_range);
+            var array = try Array.init(window, array_range);
             while (try array.next()) |block| {
-                const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
+                const block_fields = try readFields(window, block, &.{ "type", "text", "annotations" });
                 var kind: protocol.Bounded(max_evidence_bytes) = .{};
-                _ = try readString(io, file, try block_fields.required("type"), &kind);
+                _ = try readString(window, try block_fields.required("type"), &kind);
                 if (!kind.eql(type_name)) return error.UnsupportedReasoningBlock;
-                var text = try FileSource.init(io, file, try block_fields.required("text"));
+                var text = try FileSource.init(window, try block_fields.required("text"));
                 _ = try parseString(&text, null);
                 try text.expectEnd();
             }
@@ -732,13 +769,13 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
     }
 }
 
-fn validateAnnotations(io: std.Io, file: std.Io.File, annotations_range: ?Range) !void {
+fn validateAnnotations(window: *Window, annotations_range: ?Range) !void {
     const annotations = annotations_range orelse return;
-    var array = try Array.init(io, file, annotations);
+    var array = try Array.init(window, annotations);
     while (try array.next()) |annotation| {
-        const fields = try readFields(io, file, annotation, &.{"type"});
+        const fields = try readFields(window, annotation, &.{"type"});
         var kind: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, try fields.required("type"), &kind);
+        _ = try readString(window, try fields.required("type"), &kind);
         if (!kind.eql("url_citation")) return error.UnsupportedAnnotation;
     }
 }
@@ -752,27 +789,26 @@ const ItemValidation = struct {
 };
 
 fn validateItem(
-    io: std.Io,
-    file: std.Io.File,
+    window: *Window,
     item: Range,
     ordinal: u64,
     metadata: *output_format.OutputMetadataWriter,
     answer_hash: *std.crypto.hash.sha2.Sha256,
     operation: output_format.ModelOperationKind,
 ) !ItemValidation {
-    const fields = try readFields(io, file, item, item_field_names);
+    const fields = try readFields(window, item, item_field_names);
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try fields.required("type"), &kind_name);
-    const id_digest = try stringDigest(io, file, try fields.required("id"));
-    try validateMetadataAuthority(io, file, try fields.get("internal_chat_message_metadata_passthrough"));
+    _ = try readString(window, try fields.required("type"), &kind_name);
+    const id_digest = try stringDigest(window, try fields.required("id"));
+    try validateMetadataAuthority(window, try fields.get("internal_chat_message_metadata_passthrough"));
     if (kind_name.eql("reasoning")) {
-        try validateReasoning(io, file, fields);
+        try validateReasoning(window, fields);
         return .{ .kind = .reasoning, .id_digest = id_digest };
     }
     if (kind_name.eql("compaction")) {
         if (operation != .compaction) return error.UnsupportedProviderOutput;
-        try optionalCompleted(io, file, try fields.get("status"));
-        var encrypted = try FileSource.init(io, file, (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable);
+        try optionalCompleted(window, try fields.get("status"));
+        var encrypted = try FileSource.init(window, (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable);
         const value = try parseString(&encrypted, null);
         try encrypted.expectEnd();
         if (value.decoded_length == 0) return error.ContinuationUnavailable;
@@ -780,8 +816,8 @@ fn validateItem(
     }
     if (kind_name.eql("function_call")) {
         if (operation == .compaction) return error.UnsupportedProviderOutput;
-        try optionalCompleted(io, file, try fields.get("status"));
-        try validateFunctionCallControls(io, file, fields);
+        try optionalCompleted(window, try fields.get("status"));
+        try validateFunctionCallControls(window, fields);
         inline for (.{
             .{ "id", output_format.OutputRecordTag.item_id, true },
             .{ "name", output_format.OutputRecordTag.name, true },
@@ -790,7 +826,7 @@ fn validateItem(
         }) |descriptor| {
             var hash = protocol.contentHasher();
             var decoded = Decoded{ .hash = &hash };
-            var source = try FileSource.init(io, file, try fields.required(descriptor[0]));
+            var source = try FileSource.init(window, try fields.required(descriptor[0]));
             const value = try parseString(&source, &decoded);
             try source.expectEnd();
             if (descriptor[2] and value.decoded_length == 0) return error.EmptyProviderIdentity;
@@ -808,31 +844,31 @@ fn validateItem(
         return .{ .kind = .function_call, .id_digest = id_digest };
     }
     if (!kind_name.eql("message")) return error.UnsupportedItemType;
-    try optionalCompleted(io, file, try fields.get("status"));
+    try optionalCompleted(window, try fields.get("status"));
     var role: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try fields.required("role"), &role);
+    _ = try readString(window, try fields.required("role"), &role);
     if (!role.eql("assistant")) return error.UnsupportedMessageRole;
     var message_phase: @FieldType(ItemValidation, "phase") = .unphased;
     if (try fields.get("phase")) |phase_range| {
-        if (!try rangeEquals(io, file, phase_range, "null")) {
+        if (!try rangeEquals(window, phase_range, "null")) {
             var phase: protocol.Bounded(max_evidence_bytes) = .{};
-            _ = try readString(io, file, phase_range, &phase);
+            _ = try readString(window, phase_range, &phase);
             message_phase = if (phase.eql("commentary") or phase.eql("partial_answer")) .commentary else if (phase.eql("final_answer")) .final_answer else return error.UnsupportedMessagePhase;
         }
     }
     const content = try fields.required("content");
-    var array = try Array.init(io, file, content);
+    var array = try Array.init(window, content);
     var text_records: u64 = 0;
     var non_whitespace = false;
     while (try array.next()) |block| {
-        const block_fields = try readFields(io, file, block, &.{ "type", "text", "refusal", "annotations" });
+        const block_fields = try readFields(window, block, &.{ "type", "text", "refusal", "annotations" });
         var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, try block_fields.required("type"), &block_kind);
+        _ = try readString(window, try block_fields.required("type"), &block_kind);
         const refusal = block_kind.eql("refusal");
         if (!refusal and !block_kind.eql("output_text")) return error.UnsupportedContentBlock;
-        if (!refusal) try validateAnnotations(io, file, try block_fields.get("annotations"));
+        if (!refusal) try validateAnnotations(window, try block_fields.get("annotations"));
         const text_value = if (refusal) try block_fields.required("refusal") else try block_fields.required("text");
-        var source = try FileSource.init(io, file, text_value);
+        var source = try FileSource.init(window, text_value);
         var decoded = Decoded{ .hash = answer_hash };
         const text = try parseString(&source, &decoded);
         try source.expectEnd();
@@ -1475,13 +1511,13 @@ const Added = struct {
     id_digest: [32]u8 = @splat(0),
 };
 
-fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
+fn itemIdentity(window: *Window, item: Range) !struct {
     kind: output_format.OutputItemKind,
     id_digest: [32]u8,
 } {
-    const fields = try readFields(io, file, item, &.{ "type", "id" });
+    const fields = try readFields(window, item, &.{ "type", "id" });
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try fields.required("type"), &kind_name);
+    _ = try readString(window, try fields.required("type"), &kind_name);
     const kind: output_format.OutputItemKind = if (kind_name.eql("reasoning"))
         .reasoning
     else if (kind_name.eql("message"))
@@ -1494,14 +1530,19 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
         return error.UnsupportedItemType;
     return .{
         .kind = kind,
-        .id_digest = try stringDigest(io, file, try fields.required("id")),
+        .id_digest = try stringDigest(window, try fields.required("id")),
     };
 }
 
 /// Derive the pressure anchor while validating provider bytes, not during
 /// Store replay. The raw usage range remains private immutable evidence.
 pub fn usagePressure(io: std.Io, file: std.Io.File, start: u64, length: u64) !?u64 {
-    var source = try FileSource.init(io, file, .{ .start = start, .length = length });
+    var window: Window = .{ .io = io, .file = file };
+    return usageTokens(&window, .{ .start = start, .length = length });
+}
+
+fn usageTokens(window: *Window, usage: Range) !?u64 {
+    var source = try FileSource.init(window, usage);
     var depth: usize = 0;
     var total: ?u64 = null;
     var input: ?u64 = null;
@@ -1566,34 +1607,33 @@ pub fn usagePressure(io: std.Io, file: std.Io.File, start: u64, length: u64) !?u
 }
 
 fn validateCompleted(
-    io: std.Io,
-    file: std.Io.File,
+    window: *Window,
     response: Range,
     metadata: *output_format.OutputMetadataWriter,
     expected_items: u64,
     evidence: *Evidence,
 ) !void {
-    const fields = try readFields(io, file, response, &.{ "status", "id", "model", "output", "usage" });
+    const fields = try readFields(window, response, &.{ "status", "id", "model", "output", "usage" });
     var status: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try fields.required("status"), &status);
+    _ = try readString(window, try fields.required("status"), &status);
     if (!status.eql("completed")) return error.UnsupportedResponseStatus;
-    _ = try readString(io, file, try fields.required("id"), &evidence.response_id);
+    _ = try readString(window, try fields.required("id"), &evidence.response_id);
     if (evidence.response_id.len == 0) return error.EmptyProviderIdentity;
     if (try fields.get("model")) |model| {
-        if (!try rangeEquals(io, file, model, "null")) {
+        if (!try rangeEquals(window, model, "null")) {
             var wide: protocol.Bounded(max_evidence_bytes) = .{};
-            _ = try readString(io, file, model, &wide);
+            _ = try readString(window, model, &wide);
             if (wide.len == 0) return error.EmptyProviderIdentity;
             try evidence.served_model.set(wide.slice());
         }
     }
     const output = try fields.required("output");
-    var array = try Array.init(io, file, output);
-    var reader = try output_format.OutputMetadataReader.init(io, metadata.file, expected_items);
+    var array = try Array.init(window, output);
+    var reader = try output_format.OutputMetadataReader.init(window.io, metadata.file, expected_items);
     var index: u64 = 0;
     while (try array.next()) |terminal_item| {
-        const identity = try itemIdentity(io, file, terminal_item);
-        const content_digest = try contentDigestRange(io, file, terminal_item);
+        const identity = try itemIdentity(window, terminal_item);
+        const content_digest = try contentDigestRange(window, terminal_item);
         const record = try reader.nextItem() orelse return error.ContradictoryProviderOutput;
         if (record.ordinal != index or record.kind != identity.kind or
             !std.mem.eql(u8, &record.id_digest, &identity.id_digest) or
@@ -1605,15 +1645,15 @@ fn validateCompleted(
     if (index != 0 and (index != expected_items or try reader.nextItem() != null))
         return error.ContradictoryProviderOutput;
     if (try fields.get("usage")) |usage| {
-        if (try rangeEquals(io, file, usage, "null")) return;
-        const usage_fields = try readFields(io, file, usage, &.{"total_tokens"});
+        if (try rangeEquals(window, usage, "null")) return;
+        const usage_fields = try readFields(window, usage, &.{"total_tokens"});
         _ = try usage_fields.get("total_tokens");
         try metadata.append(.{
             .tag = .usage,
             .start = usage.start,
             .length = usage.length,
-            .content_digest = try contentDigestRange(io, file, usage),
-            .usage_tokens = try usagePressure(io, file, usage.start, usage.length),
+            .content_digest = try contentDigestRange(window, usage),
+            .usage_tokens = try usageTokens(window, usage),
         });
     }
 }
@@ -1643,8 +1683,7 @@ const AnswerSelection = struct {
 };
 
 fn processEvent(
-    io: std.Io,
-    file: std.Io.File,
+    window: *Window,
     event: Range,
     raw_start: u64,
     metadata: *output_format.OutputMetadataWriter,
@@ -1661,26 +1700,26 @@ fn processEvent(
     rejection.* = .{ .stage = .event, .byte_offset = raw_start };
     if (completed.*) return error.LateProviderOutput;
     var kind: protocol.Bounded(max_evidence_bytes) = .{};
-    const fields = try readFields(io, file, event, &.{ "type", "output_index", "item", "response" });
-    _ = try readString(io, file, try fields.required("type"), &kind);
+    const fields = try readFields(window, event, &.{ "type", "output_index", "item", "response" });
+    _ = try readString(window, try fields.required("type"), &kind);
     if (kind.eql("response.output_item.added")) {
         if (added.active) return error.ContradictoryProviderOutput;
-        const index = try readIndex(io, file, try fields.required("output_index"));
+        const index = try readIndex(window, try fields.required("output_index"));
         rejection.output_index = index;
         if (index != item_count.*) return error.ContradictoryProviderOutput;
-        const identity = try itemIdentity(io, file, try fields.required("item"));
+        const identity = try itemIdentity(window, try fields.required("item"));
         added.* = .{ .active = true, .index = index, .kind = identity.kind, .id_digest = identity.id_digest };
         return;
     }
     if (kind.eql("response.output_item.done")) {
-        const index = try readIndex(io, file, try fields.required("output_index"));
+        const index = try readIndex(window, try fields.required("output_index"));
         rejection.stage = .item;
         rejection.output_index = index;
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
         var message_hash = protocol.contentHasher();
         const previous_length = metadata.decoded_length;
-        const validation = try validateItem(io, file, item, index, metadata, &message_hash, operation);
+        const validation = try validateItem(window, item, index, metadata, &message_hash, operation);
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
@@ -1701,7 +1740,7 @@ fn processEvent(
             .start = item.start,
             .length = item.length,
             .id_digest = validation.id_digest,
-            .content_digest = try contentDigestRange(io, file, item),
+            .content_digest = try contentDigestRange(window, item),
         });
         item_count.* += 1;
         return;
@@ -1715,38 +1754,35 @@ fn processEvent(
         if (answer.finals > 1) return error.MultipleFinalAnswers;
         if (operation == .assistant_response and answer.ordinal == null and call_count.* == 0) return error.MissingAssistantAnswer;
         if (operation == .compaction and compaction_count.* != 1) return error.MissingCompactionItem;
-        try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
+        try validateCompleted(window, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
         completed.* = true;
         return;
     }
-    if (kind.eql("error") or kind.eql("response.failed")) return streamError(io, file, event, kind.eql("response.failed"));
+    if (kind.eql("error") or kind.eql("response.failed")) return streamError(window, event, kind.eql("response.failed"));
     if (kind.eql("response.incomplete")) {
-        if (incompleteOverflow(io, file, event) catch |err| try malformedEnvelope(err)) return error.ContextOverflow;
+        if (incompleteOverflow(window, event) catch |err| try malformedEnvelope(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
     }
     if (std.mem.startsWith(u8, kind.slice(), "response.output_item.")) return error.UnsupportedEventType;
 }
 
-fn rangeEquals(io: std.Io, file: std.Io.File, range: Range, expected: []const u8) !bool {
+fn rangeEquals(window: *Window, range: Range, expected: []const u8) !bool {
     if (range.length != expected.len) return false;
-    var buffer: [32]u8 = undefined;
-    if (expected.len > buffer.len) return false;
-    const count = try file.readPositionalAll(io, buffer[0..expected.len], range.start);
-    if (count != expected.len) return error.ShortSealedRead;
-    return std.mem.eql(u8, buffer[0..expected.len], expected);
+    var source = try FileSource.init(window, range);
+    var equal = true;
+    for (expected) |byte| equal = try source.take() == byte and equal;
+    return equal;
 }
 
-fn contentDigestRange(io: std.Io, file: std.Io.File, range: Range) ![32]u8 {
+fn contentDigestRange(window: *Window, range: Range) ![32]u8 {
     var hash = protocol.contentHasher();
-    var offset: u64 = 0;
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    while (offset < range.length) {
-        const wanted: usize = @intCast(@min(range.length - offset, buffer.len));
-        const count = try file.readPositionalAll(io, buffer[0..wanted], range.start + offset);
-        if (count != wanted) return error.ShortSealedRead;
-        hash.update(buffer[0..count]);
-        offset += count;
+    var offset = range.start;
+    const end = try std.math.add(u64, range.start, range.length);
+    while (offset < end) {
+        const bytes = try window.bytesAt(offset, end);
+        hash.update(bytes);
+        offset += bytes.len;
     }
     return hash.finalResult();
 }
@@ -1762,7 +1798,8 @@ pub fn validate(
     faults: Faults,
 ) !Validated {
     if (faults.metadata) metadata.fail_writes = true;
-    var source = try FileSource.init(io, source_file, .{ .start = 0, .length = source_length });
+    var capture: Window = .{ .io = io, .file = source_file };
+    var source = try FileSource.init(&capture, .{ .start = 0, .length = source_length });
     var data: ?Range = null;
     var raw_start: u64 = 0;
     var completed = false;
@@ -1773,7 +1810,7 @@ pub fn validate(
     var answer: AnswerSelection = .{ .digest = protocol.contentDigest("") };
     var evidence: Evidence = .{};
     var added: Added = .{};
-    if (source_length >= 3 and try rangeEquals(io, source_file, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
+    if (source_length >= 3 and try rangeEquals(&capture, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
         // SSE has three line endings. Retain only the field prefix; payload
@@ -1797,14 +1834,13 @@ pub fn validate(
         if (line.length == 0) {
             if (data) |payload| {
                 if (payload.length == 0) return error.EmptySseData;
-                if (try rangeEquals(io, event_data.file, payload, "[DONE]")) {
+                if (try rangeEquals(&event_data.window, payload, "[DONE]")) {
                     if (!completed or done_marker) return error.ContradictoryProviderOutput;
                     done_marker = true;
                 } else {
                     if (done_marker) return error.LateProviderOutput;
                     try processEvent(
-                        io,
-                        event_data.file,
+                        &event_data.window,
                         payload,
                         raw_start,
                         metadata,
@@ -1830,7 +1866,7 @@ pub fn validate(
                 data = .{ .start = event_data.length, .length = 0 };
                 raw_start = line.start + skip;
             } else try event_data.append("\n");
-            try event_data.copy(source_file, .{ .start = line.start + skip, .length = line.length - skip });
+            try event_data.copy(&capture, .{ .start = line.start + skip, .length = line.length - skip });
             data.?.length = event_data.length - data.?.start;
         }
         // Comments and every other field, including colonless fields, carry
@@ -1840,7 +1876,7 @@ pub fn validate(
     if (!completed) return error.ProviderConnectionClosed;
     try event_data.seal();
     return .{
-        .source = event_data.file,
+        .source = event_data.window.file,
         .source_length = event_data.length,
         .item_count = item_count,
         .call_count = call_count,
@@ -1882,11 +1918,11 @@ pub fn failureCode(err: anyerror) []const u8 {
     };
 }
 
-fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
+fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !Window {
     const file = try tmp.dir.createFile(std.testing.io, "object", .{ .read = true });
     errdefer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
-    return FileSource.init(std.testing.io, file, .{ .start = 0, .length = bytes.len });
+    return .{ .io = std.testing.io, .file = file };
 }
 
 const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: output_format.OutputMetadataRecord };
@@ -2720,8 +2756,9 @@ test "provider field collection traverses large open values once for all lookups
     const names = &.{ "type", "id", "status", "role", "phase", "content", "internal_chat_message_metadata_passthrough" };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var source = try testingObject(&tmp, input);
-    defer source.file.close(std.testing.io);
+    var object = try testingObject(&tmp, input);
+    defer object.file.close(std.testing.io);
+    var source = try FileSource.init(&object, .{ .start = 0, .length = input.len });
     const fields = try collectFields(&source, names);
     inline for (names) |name| _ = try fields.required(name);
     try std.testing.expectEqual(input.len, source.position);
@@ -2732,18 +2769,71 @@ test "provider field collection traverses large open values once for all lookups
     try std.testing.expectEqualStrings("\"message\"", input[@intCast(kind.start)..][0..@intCast(kind.length)]);
 }
 
+test "a decoded event is parsed from the bytes just written, never read back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var data = try EventData.init(std.testing.io, path, "event-data", .{ .used = &used, .limit = 64 * 1024 }, false, &retained);
+    defer data.deinit();
+    // Reads through a write-only handle fail, so any read back is an error.
+    const unreadable = try tmp.dir.createFile(std.testing.io, "unreadable", .{});
+    defer unreadable.close(std.testing.io);
+
+    const event = "{\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}";
+    const line = "data: " ++ event;
+    var capture = try testingObject(&tmp, line);
+    defer capture.file.close(std.testing.io);
+    // The SSE line scan already loaded this line; copying it reuses those bytes.
+    _ = try capture.bytesAt(0, line.len);
+    const capture_file = capture.file;
+    capture.file = unreadable;
+    // A nearly full window starts again at the event, so the event stays whole.
+    try data.append(&@as([protocol.content_window_bytes - 8]u8, @splat(' ')));
+    const start = data.length;
+    try data.copy(&capture, .{ .start = "data: ".len, .length = event.len });
+    capture.file = capture_file;
+
+    const data_file = data.window.file;
+    data.window.file = unreadable;
+    const range = Range{ .start = start, .length = event.len };
+    const fields = try readFields(&data.window, range, &.{ "type", "delta" });
+    var kind: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = try readString(&data.window, try fields.required("type"), &kind);
+    try std.testing.expect(kind.eql("response.output_text.delta"));
+    try std.testing.expectEqual(protocol.contentDigest(event), try contentDigestRange(&data.window, range));
+    data.window.file = data_file;
+
+    var written: [event.len]u8 = undefined;
+    try std.testing.expectEqual(event.len, try data.window.file.readPositionalAll(std.testing.io, &written, start));
+    try std.testing.expectEqualStrings(event, &written);
+    // An event larger than the window is read back from the file instead.
+    const large_start = data.length;
+    try data.append("{\"delta\":\"");
+    try data.append(&@as([2 * protocol.content_window_bytes]u8, @splat('x')));
+    try data.append("\"}");
+    const large = try readFields(&data.window, .{ .start = large_start, .length = data.length - large_start }, &.{"delta"});
+    try std.testing.expectEqual(2 * protocol.content_window_bytes + 2, (try large.required("delta")).length);
+}
+
 test "provider field collection preserves escaped keys duplicates and missing fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var source = try testingObject(&tmp, "{\"ty\\u0070e\":\"message\",\"unused\":1,\"unused\":2}");
-    defer source.file.close(std.testing.io);
+    const unused = "{\"ty\\u0070e\":\"message\",\"unused\":1,\"unused\":2}";
+    var object = try testingObject(&tmp, unused);
+    defer object.file.close(std.testing.io);
+    var source = try FileSource.init(&object, .{ .start = 0, .length = unused.len });
     const fields = try collectFields(&source, &.{ "type", "id", "unused" });
     _ = try fields.required("type");
     try std.testing.expectEqual(null, try fields.get("id"));
     try std.testing.expectError(error.MissingProviderField, fields.required("id"));
     try std.testing.expectError(error.DuplicateJsonField, fields.get("unused"));
-    var duplicate = try testingObject(&tmp, "{\"type\":1,\"ty\\u0070e\":2,\"type\":3}");
-    defer duplicate.file.close(std.testing.io);
+    const repeated_key = "{\"type\":1,\"ty\\u0070e\":2,\"type\":3}";
+    var repeated_object = try testingObject(&tmp, repeated_key);
+    defer repeated_object.file.close(std.testing.io);
+    var duplicate = try FileSource.init(&repeated_object, .{ .start = 0, .length = repeated_key.len });
     const repeated = try collectFields(&duplicate, &.{"type"});
     try std.testing.expectError(error.DuplicateJsonField, repeated.required("type"));
 }
@@ -2760,8 +2850,9 @@ test "provider field collection validates unknown and late syntax" {
     inline for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var source = try testingObject(&tmp, case[0]);
-        defer source.file.close(std.testing.io);
+        var object = try testingObject(&tmp, case[0]);
+        defer object.file.close(std.testing.io);
+        var source = try FileSource.init(&object, .{ .start = 0, .length = case[0].len });
         try std.testing.expectError(case[1], collectFields(&source, &.{"type"}));
     }
 }
@@ -2769,13 +2860,10 @@ test "provider field collection validates unknown and late syntax" {
 test "provider field collection cannot grant authority through escaped metadata keys" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var source = try testingObject(&tmp, "{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}");
-    defer source.file.close(std.testing.io);
-    try std.testing.expectError(error.UnsupportedMetadataAuthority, validateMetadataAuthority(
-        std.testing.io,
-        source.file,
-        .{ .start = 0, .length = source.end },
-    ));
+    const metadata = "{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}";
+    var object = try testingObject(&tmp, metadata);
+    defer object.file.close(std.testing.io);
+    try std.testing.expectError(error.UnsupportedMetadataAuthority, validateMetadataAuthority(&object, .{ .start = 0, .length = metadata.len }));
 }
 
 test "provider authority metadata rejects every supported item on acceptance and replay" {
