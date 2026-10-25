@@ -198,15 +198,18 @@ test "refresh transport requires positive evidence that no request was sent" {
     try std.testing.expect(answer.request_not_sent);
 }
 
-/// A raw h2c server: it writes `reply`, then reads the client's bytes
-/// until `until` appears, and closes.
+/// A raw TCP peer: it writes `greeting`, reads the client's bytes until
+/// `until` appears, and closes. A `reply` is written only then, so a client
+/// that fails on it has already been seen, and the peer reads on until the
+/// client closes: closing first on unread bytes could reset the connection
+/// before the client reads the reply.
 const RawPeer = struct {
-    fn run(server: *std.Io.net.Server, reply: []const u8, until: []const u8) bool {
+    fn run(server: *std.Io.net.Server, greeting: []const u8, until: []const u8, reply: []const u8) bool {
         const io = std.testing.io;
         const peer = server.accept(io) catch return false;
         defer peer.close(io);
         var writer = peer.writer(io, &.{});
-        writer.interface.writeAll(reply) catch return false;
+        writer.interface.writeAll(greeting) catch return false;
         var received: [4096]u8 = undefined;
         var used: usize = 0;
         while (used < received.len) {
@@ -214,7 +217,16 @@ const RawPeer = struct {
             const count = (peer.readWithControl(io, &data, &.{}) catch return false).data_len;
             if (count == 0) return false;
             used += count;
-            if (std.mem.indexOf(u8, received[0..used], until) != null) return true;
+            if (std.mem.indexOf(u8, received[0..used], until) != null) {
+                // `until` was seen; a client gone before the reply changes nothing.
+                if (reply.len == 0) return true;
+                writer.interface.writeAll(reply) catch return true;
+                while (true) {
+                    var rest = [_][]u8{&received};
+                    const drained = (peer.readWithControl(io, &rest, &.{}) catch return true).data_len;
+                    if (drained == 0) return true;
+                }
+            }
         }
         return false;
     }
@@ -222,14 +234,14 @@ const RawPeer = struct {
     /// Posts against a RawPeer and reports whether the peer saw `until`.
     /// The peer is cancelled after the post, so a post that never connects
     /// fails the test instead of leaving `accept` blocked.
-    fn exchangeWith(reply: []const u8, until: []const u8, answer: *Response) !struct { anyerror!u16, bool } {
+    fn exchangeWith(greeting: []const u8, until: []const u8, reply: []const u8, answer: *Response) !struct { anyerror!u16, bool } {
         const io = std.testing.io;
         var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
         defer listener.deinit(io);
         var url: [64]u8 = undefined;
         var request = json_request;
         request.url = try testUrl(&url, listener.socket.address.getPort());
-        var peer = try std.Io.concurrent(io, run, .{ &listener, reply, until });
+        var peer = try std.Io.concurrent(io, run, .{ &listener, greeting, until, reply });
         const outcome = post(io, request, answer, null);
         return .{ outcome, peer.cancel(io) };
     }
@@ -242,7 +254,7 @@ const empty_settings = [_]u8{ 0, 0, 0, 4, 0, 0, 0, 0, 0 };
 test "refresh transport keeps not-sent evidence when the peer goes before it is ready" {
     var answer: Response = .{};
     // The peer closes after the client's preface, without its own SETTINGS.
-    const outcome, const saw = try RawPeer.exchangeWith("", preface, &answer);
+    const outcome, const saw = try RawPeer.exchangeWith("", preface, "", &answer);
     try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
     try std.testing.expect(answer.request_not_sent);
@@ -250,7 +262,7 @@ test "refresh transport keeps not-sent evidence when the peer goes before it is 
 
 test "refresh transport keeps not-sent evidence when the peer does not speak HTTP/2" {
     var answer: Response = .{};
-    const outcome, const saw = try RawPeer.exchangeWith("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n", preface, &answer);
+    const outcome, const saw = try RawPeer.exchangeWith("", preface, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n", &answer);
     try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
     try std.testing.expect(answer.request_not_sent);
@@ -259,7 +271,7 @@ test "refresh transport keeps not-sent evidence when the peer does not speak HTT
 test "refresh transport retains sent evidence when the peer loses its reply" {
     var answer: Response = .{};
     // DATA payloads are plain bytes on h2c, so the body shows on the wire.
-    const outcome, const saw = try RawPeer.exchangeWith(&empty_settings, "synthetic", &answer);
+    const outcome, const saw = try RawPeer.exchangeWith(&empty_settings, "synthetic", "", &answer);
     try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
     try std.testing.expect(!answer.request_not_sent);
