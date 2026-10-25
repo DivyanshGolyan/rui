@@ -70,7 +70,7 @@ func startEndpoint(payload []byte, held bool) (*endpoint, error) {
 	if !held {
 		e.Release()
 	}
-	e.server = &http.Server{Handler: http.HandlerFunc(e.serve)}
+	e.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(e.serve)}
 	go func() { _ = e.server.Serve(listener) }()
 	return e, nil
 }

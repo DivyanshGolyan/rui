@@ -1226,7 +1226,7 @@ func Start(config Config) (*Server, error) {
 		facts.Close()
 		return nil, err
 	}
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	result := &Server{fixture: fixture, config: config, round: 1, server: server, listener: listener, facts: facts, shutdown: make(chan struct{})}
 	serveResponse := func(writer http.ResponseWriter, request *http.Request) {
 		if config.TLS && (request.ProtoMajor != 2 || request.TLS == nil || request.TLS.NegotiatedProtocol != "h2") {

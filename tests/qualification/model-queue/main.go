@@ -130,7 +130,7 @@ func startEndpoint() (*endpoint, error) {
 		return nil, err
 	}
 	e := &endpoint{listener: listener, first: make(chan time.Time, 1), release: make(chan struct{})}
-	e.server = &http.Server{Handler: http.HandlerFunc(e.serve)}
+	e.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(e.serve)}
 	go e.server.Serve(listener)
 	return e, nil
 }

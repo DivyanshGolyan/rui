@@ -43,7 +43,7 @@ func newEndpoint() (*endpoint, error) {
 		return nil, e
 	}
 	x := &endpoint{listener: l, plans: map[string][]*requestPlan{}, releases: map[string]chan struct{}{}}
-	x.server = &http.Server{Handler: http.HandlerFunc(x.serve)}
+	x.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(x.serve)}
 	go func() {
 		if err := x.server.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			x.mu.Lock()

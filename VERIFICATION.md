@@ -4,7 +4,7 @@
 
 ## Canonical gates
 
-Integration fixtures require Python 3.11 or newer on PATH; the composed driver rejects older interpreters and records the one selected. On macOS, do not use `/usr/bin/python3`. Diagnose interpreter failures apart from product assertions.
+Integration fixtures require Python 3.11 or newer on PATH, with the packages pinned in [tests/integration/requirements.txt](tests/integration/requirements.txt) (python-h2 serves every loopback fixture over h2c); the composed driver rejects older interpreters and records the one selected. On macOS, do not use `/usr/bin/python3`. Diagnose interpreter failures apart from product assertions.
 
 | Change class | Required gate or evidence |
 | --- | --- |

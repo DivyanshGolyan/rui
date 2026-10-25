@@ -28,6 +28,9 @@ def model_instructions(workspace, baseline="", *, store, session):
 
 class FailureEndpoint(TestHTTPServer):
     allow_reuse_address = True
+    # One stream per h2c connection, so a dropped connection (/disconnect)
+    # fails one request only, as it does over HTTP/1.1.
+    h2_max_concurrent_streams = 1
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), FailureHandler)

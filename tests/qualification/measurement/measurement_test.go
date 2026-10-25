@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -676,5 +678,37 @@ func TestCanonicalStoreResolvesExistingPrefixAndKeepsMissingLeaf(t *testing.T) {
 	got, err = CanonicalStore(filepath.Join(root, "link", "store"))
 	if err != nil || got != filepath.Join(root, "real", "store") {
 		t.Fatalf("existing Store = %q, %v", got, err)
+	}
+}
+
+func TestLoopbackProtocolsServeHTTP1AndH2C(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Protocols: LoopbackProtocols(), Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		fmt.Fprint(writer, request.Proto)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	http1, h2c := new(http.Protocols), new(http.Protocols)
+	http1.SetHTTP1(true)
+	h2c.SetUnencryptedHTTP2(true)
+	for _, test := range []struct {
+		client *http.Protocols
+		want   string
+	}{{http1, "HTTP/1.1"}, {h2c, "HTTP/2.0"}} {
+		transport := &http.Transport{Protocols: test.client}
+		defer transport.CloseIdleConnections()
+		client := &http.Client{Transport: transport}
+		response, err := client.Post("http://"+listener.Addr().String()+"/", "text/plain", strings.NewReader("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || string(body) != test.want {
+			t.Fatalf("served %q, %v; want %q", body, err, test.want)
+		}
 	}
 }

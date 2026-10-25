@@ -54,7 +54,7 @@ func startEndpoint() (*retryEndpoint, error) {
 		return nil, err
 	}
 	e := &retryEndpoint{listener: listener, counts: map[string]int{}, launches: map[string][]int64{}}
-	e.server = &http.Server{Handler: http.HandlerFunc(e.serve)}
+	e.server = &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(e.serve)}
 	go e.server.Serve(listener)
 	return e, nil
 }

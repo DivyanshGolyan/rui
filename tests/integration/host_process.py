@@ -1,17 +1,21 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
 import atexit
+import http.client
 import http.server
 import ctypes
 import errno
 import functools
+import io
 import json
 import mmap
 import os
 import pathlib
 import selectors
+import socket
 import socketserver
 import sqlite3
+import ssl
 import stat
 import struct
 import subprocess
@@ -20,6 +24,13 @@ import tempfile
 import threading
 import time
 from collections import Counter
+
+import h2.config
+import h2.connection
+import h2.errors
+import h2.events
+import h2.exceptions
+import h2.settings
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -500,7 +511,17 @@ def wait_for_execution_release(inspect, deadline):
 
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):
-    """Stop fixture accept loops promptly; response timing belongs to each case."""
+    """Stop fixture accept loops promptly; response timing belongs to each case.
+
+    Serves HTTP/1.1 and HTTP/2 by prior knowledge (h2c) on one listener, so
+    every fixture works with Rui's curl build and its own HTTP/2 client. A
+    cleartext connection that opens with the HTTP/2 preface runs each request
+    stream's handler on its own thread through `_H2Connection`; any other
+    connection, TLS included, takes the stock HTTP/1.1 path.
+    """
+
+    #: The SETTINGS_MAX_CONCURRENT_STREAMS an h2c connection advertises.
+    h2_max_concurrent_streams = 100
 
     def server_bind(self):
         # HTTPServer resolves a descriptive hostname after TCP binding. These
@@ -510,6 +531,245 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
 
     def serve_forever(self, poll_interval=0.01):
         super().serve_forever(poll_interval=poll_interval)
+
+    def finish_request(self, request, client_address):
+        if not isinstance(request, ssl.SSLSocket) and _opens_with_h2_preface(request):
+            _H2Connection(self, request, client_address).serve()
+        else:
+            super().finish_request(request, client_address)
+
+
+H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def _opens_with_h2_preface(sock, timeout=5):
+    """Peek until the bytes rule the preface in or out, without consuming.
+    A client that stalls inside a prefix of the preface gets the HTTP/1.1
+    path, which answers it as that server would."""
+    deadline = time.monotonic() + timeout
+    while True:
+        head = sock.recv(len(H2_PREFACE), socket.MSG_PEEK)
+        if not head or not H2_PREFACE.startswith(head):
+            return False
+        if len(head) == len(H2_PREFACE):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
+
+
+class _H2Stream:
+    def __init__(self, stream_id, fields):
+        self.stream_id = stream_id
+        pseudo = {name: value for name, value in fields if name.startswith(b":")}
+        self.method = pseudo.get(b":method", b"").decode("latin-1")
+        self.path = pseudo.get(b":path", b"").decode("latin-1")
+        lines = [b"Host: " + pseudo.get(b":authority", b"")]
+        lines += [name + b": " + value for name, value in fields if not name.startswith(b":")]
+        self.headers = http.client.parse_headers(io.BytesIO(b"\r\n".join(lines) + b"\r\n\r\n"))
+        self.body = bytearray()
+        self.reset = False
+
+
+class _H2Connection:
+    """One h2c connection. Its thread reads and decodes; each stream's handler
+    thread writes. python-h2 is not thread-safe, so every use of its state
+    and of the socket holds `cond`. A send that blocks because the client is
+    not reading holds it too, which stalls only this test connection."""
+
+    def __init__(self, server, sock, client_address):
+        self.server, self.sock, self.client_address = server, sock, client_address
+        self.h2 = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False, header_encoding=None))
+        self.cond = threading.Condition()
+        self.streams = {}
+        self.handlers = []
+        self.closed = False
+
+    def serve(self):
+        with self.cond:
+            self.h2.local_settings = h2.settings.Settings(client=False, initial_values={
+                h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS: self.server.h2_max_concurrent_streams})
+            self.h2.initiate_connection()
+            self._flush()
+        try:
+            while not self.closed:
+                try:
+                    data = self.sock.recv(65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with self.cond:
+                    try:
+                        events = self.h2.receive_data(data)
+                    except h2.exceptions.ProtocolError:
+                        self._flush()
+                        break
+                    for event in events:
+                        self._receive(event)
+                    self._flush()
+                    self.cond.notify_all()
+        finally:
+            self.close()
+            for handler in self.handlers:
+                handler.join()
+
+    def _receive(self, event):
+        if isinstance(event, h2.events.RequestReceived):
+            self.streams[event.stream_id] = _H2Stream(event.stream_id, event.headers)
+        elif isinstance(event, h2.events.DataReceived):
+            self.streams[event.stream_id].body += event.data
+            # Fixtures are not the flow-control subject: credit returns at once.
+            self.h2.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+        elif isinstance(event, h2.events.StreamEnded):
+            handler = threading.Thread(target=self._run_handler, args=(self.streams[event.stream_id],), daemon=True)
+            self.handlers.append(handler)
+            handler.start()
+        elif isinstance(event, h2.events.StreamReset) and event.stream_id in self.streams:
+            self.streams[event.stream_id].reset = True
+
+    def _flush(self):
+        data = self.h2.data_to_send()
+        if data:
+            try:
+                self.sock.sendall(data)
+            except OSError:
+                self.closed = True
+
+    def _run_handler(self, stream):
+        """The subclass's handler, against the request this stream carried."""
+        handler = object.__new__(self.server.RequestHandlerClass)
+        handler.server = self.server
+        handler.client_address = self.client_address
+        handler.command = stream.method
+        handler.path = stream.path
+        handler.request_version = "HTTP/2.0"
+        handler.requestline = f"{stream.method} {stream.path} HTTP/2.0"
+        handler.headers = stream.headers
+        handler.rfile = io.BytesIO(stream.body)
+        handler.wfile = _H2StreamWriter(self, stream)
+        handler.close_connection = False
+        try:
+            method = getattr(handler, "do_" + stream.method, None)
+            if method is None:
+                handler.send_error(http.HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({stream.method!r})")
+            else:
+                method()
+        except Exception:
+            self.server.handle_error(self.sock, self.client_address)
+            self.reset(stream, h2.errors.ErrorCodes.INTERNAL_ERROR)
+        else:
+            if handler.wfile.head_sent:
+                self.end(stream)
+            else:
+                # As an HTTP/1.1 handler that returns without answering.
+                self.close()
+        finally:
+            with self.cond:
+                self.streams.pop(stream.stream_id, None)
+
+    # Writes from handler threads. A write after the client reset the
+    # stream, or after the connection went, raises BrokenPipeError, as a
+    # closed socket would.
+
+    def send_head(self, stream, fields):
+        with self.cond:
+            self._check_open(stream)
+            self.h2.send_headers(stream.stream_id, fields)
+            self._flush()
+
+    def send_body(self, stream, data):
+        """One DATA frame per call, unless the window or frame size splits it."""
+        view = memoryview(data)
+        # An empty write still reports a reset stream or a closed connection.
+        with self.cond:
+            self._check_open(stream)
+        while view:
+            with self.cond:
+                while True:
+                    self._check_open(stream)
+                    try:
+                        window = self.h2.local_flow_control_window(stream.stream_id)
+                    except h2.exceptions.StreamClosedError:
+                        raise BrokenPipeError(errno.EPIPE, "stream closed")
+                    if window > 0:
+                        break
+                    self.cond.wait()
+                size = min(window, self.h2.max_outbound_frame_size, len(view))
+                self.h2.send_data(stream.stream_id, bytes(view[:size]))
+                self._flush()
+            view = view[size:]
+
+    def end(self, stream):
+        with self.cond:
+            if stream.reset or self.closed:
+                return
+            try:
+                self.h2.end_stream(stream.stream_id)
+            except h2.exceptions.StreamClosedError:
+                return
+            self._flush()
+
+    def reset(self, stream, code):
+        with self.cond:
+            if stream.reset or self.closed:
+                return
+            try:
+                self.h2.reset_stream(stream.stream_id, code)
+            except h2.exceptions.StreamClosedError:
+                return
+            self._flush()
+
+    def close(self):
+        """Drop the whole connection."""
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _check_open(self, stream):
+        if stream.reset or self.closed:
+            raise BrokenPipeError(errno.EPIPE, "stream reset or connection closed")
+
+
+class _H2StreamWriter:
+    """A handler's wfile. The head that send_response, send_header and
+    end_headers write becomes one HEADERS frame (names lowercased,
+    connection-specific fields dropped); each later write is DATA, so a
+    handler's write sizes are its frame sizes."""
+
+    CONNECTION_FIELDS = {b"connection", b"keep-alive", b"proxy-connection", b"transfer-encoding", b"upgrade"}
+
+    def __init__(self, connection, stream):
+        self.connection, self.stream = connection, stream
+        self.head = bytearray()
+        self.head_sent = False
+
+    def write(self, data):
+        data = bytes(data)
+        if self.head_sent:
+            self.connection.send_body(self.stream, data)
+            return len(data)
+        self.head += data
+        end = self.head.find(b"\r\n\r\n")
+        if end >= 0:
+            status_line, *lines = bytes(self.head[:end]).split(b"\r\n")
+            fields = [(b":status", status_line.split(b" ")[1])]
+            for line in lines:
+                name, _, value = line.partition(b":")
+                name = name.strip().lower()
+                if name not in self.CONNECTION_FIELDS:
+                    fields.append((name, value.strip()))
+            self.connection.send_head(self.stream, fields)
+            self.head_sent = True
+            self.connection.send_body(self.stream, bytes(self.head[end + 4:]))
+        return len(data)
+
+    def flush(self):
+        pass
 
 
 class ReleaseGate:

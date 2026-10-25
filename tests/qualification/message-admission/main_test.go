@@ -25,7 +25,7 @@ func TestConfigurationCaptureReturnsAllocatedIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	captured := make(chan map[string]any, 1)
-	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := &http.Server{Protocols: measurement.LoopbackProtocols(), Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var command map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&command); err != nil {
 			http.Error(writer, err.Error(), http.StatusBadRequest)
