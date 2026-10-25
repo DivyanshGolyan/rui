@@ -841,10 +841,10 @@ def main():
         sessions = [configure(state, store, ordinal) for ordinal in range(4)]
         message(state, store, sessions[0], 0)
         message(state, store, sessions[1], 1)
-        # At capacity two the H1 fixture has one bounded connection. Both
-        # Attempts retain their own custody while the second waits in curl.
-        endpoint.wait_for("requests", 1)
-        assert endpoint.requests == 1, endpoint.requests
+        # At capacity two both streams share one connection and are held by
+        # the peer at once, each Attempt with its own custody.
+        endpoint.wait_for("requests", 2)
+        assert endpoint.requests == 2, endpoint.requests
         assert host.poll() is None, diagnostics.tail()
 
         endpoint.release.set()
@@ -856,8 +856,8 @@ def main():
         endpoint.release.clear()
         message(state, store, sessions[2], 2)
         message(state, store, sessions[3], 3)
-        endpoint.wait_for("requests", 3)
-        assert endpoint.requests == 3, endpoint.requests
+        endpoint.wait_for("requests", 4)
+        assert endpoint.requests == 4, endpoint.requests
         assert endpoint.completed == 2, endpoint.completed
         endpoint.release.set()
         endpoint.wait_for("completed", 4)

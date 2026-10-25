@@ -204,7 +204,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                         request_headers=[headers, headers, {**headers, b"x-openai-fedramp": b"true"}])
                     identities = [dict(turn=str(7 + index), operation=str(11 + index), attempt="2") for index in range(3)]
                     transfers = [{"rui_test_phase": "codex_transfer", "operation": identities[index]["operation"],
-                                  "http_version": "3", "connection_id": "1", "new_connections": str(index == 0 and 1 or 0)}
+                                  "new_connections": str(index == 0 and 1 or 0), "replays": "0"}
                                  for index in range(3)]
                     preparations = [dict(identity, rui_test_phase="preparation_completed") for identity in identities]
                     observation_index = [0]
@@ -240,7 +240,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                         if args[0] == "openssl":
                             return SimpleNamespace(returncode=0)
                         if args[0] == "sh":
-                            fixed, authentication = (11, 10) if platform == "darwin" else (9, 8)
+                            fixed, authentication = (9, 7) if platform == "darwin" else (8, 6)
                             required = inherited + fixed + 403 + 10 + authentication + 2
                             limit = int(args[4])
                             launches.append(limit)
@@ -259,14 +259,14 @@ class ManagedDescriptorTests(unittest.TestCase):
                     def start(args, **kwargs):
                         # Derive the launch contract independently for all
                         # three native inherited populations and both intakes.
-                        full = (435 if platform == "linux" else 439) + inherited - 3
+                        full = (432 if platform == "linux" else 434) + inherited - 3
                         limit = full - (360 if intake == 10 else 0) + (2 if observed else 0)
                         self.assertEqual(int(args[4]), limit)
                         self.assertEqual(kwargs["required_fields"]["intake_capacity"], str(intake))
                         self.assertEqual(kwargs["required_fields"]["descriptor_requirement"], str(limit))
                         self.assertEqual(kwargs["required_fields"]["descriptor_limit"], str(limit))
-                        self.assertEqual(launches, [74 if platform == "linux" else 78] +
-                                         ([79] if inherited == 4 else []))
+                        self.assertEqual(launches, [71 if platform == "linux" else 73] +
+                                         ([74] if inherited == 4 else []))
                         return SimpleNamespace(pid=1), {}
 
                     with contextlib.ExitStack() as stack:
@@ -297,34 +297,34 @@ class ManagedDescriptorTests(unittest.TestCase):
                                 codex_h2.run(observed=observed, intake=intake)
 
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
-        for inherited, required in ((3, 439), (4, 440)):
+        for inherited, required in ((3, 434), (4, 435)):
             with self.subTest(inherited=inherited):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
-                    f"required={required} soft_limit=78 inherited={inherited} "
-                    "fixed_host=11 clients=403 execution=10 authentication=10 self_wake=2\n"))
+                    f"required={required} soft_limit=73 inherited={inherited} "
+                    "fixed_host=9 clients=403 execution=10 authentication=7 self_wake=2\n"))
                 with os_semantics.simulate("darwin"):
-                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 78), required)
+                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 73), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
-                   "required=440 soft_limit=79 inherited=4 fixed_host=11 clients=403 "
-                   "execution=10 authentication=10 self_wake=2\n")
-        for before, after in (("required=440", "required=439"), ("authentication=10", "authentication=9"),
-                              ("inherited=4", "inherited=5"), ("soft_limit=79", "soft_limit=78")):
+                   "required=435 soft_limit=74 inherited=4 fixed_host=9 clients=403 "
+                   "execution=10 authentication=7 self_wake=2\n")
+        for before, after in (("required=435", "required=434"), ("authentication=7", "authentication=6"),
+                              ("inherited=4", "inherited=5"), ("soft_limit=74", "soft_limit=73")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
                 with os_semantics.simulate("darwin"):
                     with self.assertRaises(AssertionError):
-                        codex_h2.assert_managed_descriptor_rejection(rejected, 79)
+                        codex_h2.assert_managed_descriptor_rejection(rejected, 74)
 
 
-class H1ResponseBoundaryTests(unittest.TestCase):
+class HeldResponseBoundaryTests(unittest.TestCase):
     def test_complete_response_does_not_wait_for_handler_retirement(self):
         tail_entered = threading.Event()
         release_tail = threading.Event()
 
-        class HeldTail(transport.H1Handler):
+        class HeldTail(transport.HeldHandler):
             def __setattr__(self, name, value):
                 super().__setattr__(name, value)
                 if (name == "close_connection" and value is True
@@ -334,9 +334,9 @@ class H1ResponseBoundaryTests(unittest.TestCase):
                     tail_entered.set()
                     assert release_tail.wait(5), "post-response handler tail was not released"
 
-        with patch.object(transport, "H1Handler", HeldTail), \
+        with patch.object(transport, "HeldHandler", HeldTail), \
                 patch.object(transport.socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
-            endpoint = transport.H1Endpoint()
+            endpoint = transport.HeldEndpoint()
         endpoint.release_first.set()
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
@@ -367,50 +367,42 @@ class H1ResponseBoundaryTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
 
-class QueuedH1CleanupTests(unittest.TestCase):
+class HeldPopulationCleanupTests(unittest.TestCase):
     def test_actual_caller_preserves_body_error_and_attempts_every_disposal(self):
-        for caller in ("queued_h1", "queued_h1_inactivity"):
-            with self.subTest(caller=caller):
-                self.run_caller(caller, fail_body=True)
+        self.run_caller("held_population", fail_body=True)
 
     def test_successful_body_reports_cleanup_failure_after_every_disposal(self):
-        for caller in ("queued_h1", "queued_h1_inactivity"):
-            with self.subTest(caller=caller):
-                self.run_caller(caller, fail_body=False)
+        self.run_caller("held_population", fail_body=False)
 
-    def test_inactivity_startup_failure_still_disposes_endpoint(self):
-        self.run_caller("queued_h1_inactivity", fail_body=False, fail_start=True)
+    def test_startup_failure_still_disposes_endpoint(self):
+        self.run_caller("held_population", fail_body=False, fail_start=True)
 
     def test_actual_body_requires_every_caller_eof_before_first_idle_sample(self):
-        self.run_caller("queued_h1", fail_body=False, eof_oracle=True)
+        self.run_caller("held_population", fail_body=False, eof_oracle=True)
         for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
             with self.subTest(omitted_eof=kind):
-                self.run_caller("queued_h1", fail_body=False, eof_oracle=True, omitted_eof=kind)
+                self.run_caller("held_population", fail_body=False, eof_oracle=True, omitted_eof=kind)
 
     def test_idle_samples_require_report_retirement_after_every_caller_eof(self):
         for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
             with self.subTest(held_report=kind):
-                self.run_caller("queued_h1", fail_body=False, eof_oracle=True, held_report=kind)
+                self.run_caller("held_population", fail_body=False, eof_oracle=True, held_report=kind)
 
     def test_native_retirement_does_not_excuse_a_retained_descriptor(self):
-        self.run_caller("queued_h1", fail_body=False, eof_oracle=True, leaked_descriptor=True)
+        self.run_caller("held_population", fail_body=False, eof_oracle=True, leaked_descriptor=True)
 
     def run_caller(self, caller, *, fail_body, fail_start=False, eof_oracle=False, omitted_eof=None, held_report=None, leaked_descriptor=False):
         calls = []
-        primary = AssertionError("original queued H1 body failure")
+        primary = AssertionError("original held population body failure")
         secondary = RuntimeError("endpoint shutdown failure")
         endpoint = SimpleNamespace(server_port=1, lock=contextlib.nullcontext(),
             first_ready=SimpleNamespace(wait=lambda timeout: True), requests=[],
-            connections=[], active=1, maximum_active=1, serve_forever=lambda: None)
-        pending = []
+            connections=[], active=1, maximum_active=1, h2_connections=1, serve_forever=lambda: None)
         released = [False]
 
         def release():
             calls.append("release")
             released[0] = True
-            endpoint.requests.extend((text, b"") for text in pending)
-            endpoint.connections.extend(pending)
-            pending.clear()
 
         endpoint.release_first = SimpleNamespace(set=release)
 
@@ -432,11 +424,9 @@ class QueuedH1CleanupTests(unittest.TestCase):
         def message(root, store, key, session, text):
             if fail_body:
                 raise primary
-            if not endpoint.requests or released[0]:
-                endpoint.requests.append((text, b""))
-                endpoint.connections.append(text)
-            else:
-                pending.append(text)
+            # Every stream arrives at once; only the first response is held.
+            endpoint.requests.append((text, b""))
+            endpoint.connections.append(text)
 
         def observe(store, key, **kwargs):
             if not kwargs:
@@ -450,7 +440,7 @@ class QueuedH1CleanupTests(unittest.TestCase):
 
         def read(store, key, **kwargs):
             reads.append(key)
-            text = key.replace("h1-message-", "h1-").replace("queued-message-", "queued-")
+            text = key.replace("held-message-", "held-")
             return ("answer-" + text).encode()
 
         replies = []
@@ -511,7 +501,7 @@ class QueuedH1CleanupTests(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             for owner, name, value in (
-                    (transport, "H1Endpoint", lambda **kwargs: endpoint),
+                    (transport, "HeldEndpoint", lambda **kwargs: endpoint),
                     (transport.threading, "Thread", lambda **kwargs: thread),
                     (transport.time, "sleep", lambda _: None),
                     (transport.subprocess, "check_output", lambda *a, **k: "0"),
@@ -550,17 +540,15 @@ class QueuedH1CleanupTests(unittest.TestCase):
                 with self.assertRaises(type(expected)) as raised:
                     getattr(transport, caller)(pathlib.Path("/fixture"))
                 self.assertIs(raised.exception, expected)
-        order = ["release", "stop"] if caller == "queued_h1" else ["stop", "release"]
+        order = ["release", "stop"]
         if fail_start:
             order.remove("stop")
         expected_disposals = [*order, "shutdown", "close", ("join", 5)]
         self.assertEqual(calls[-len(expected_disposals):], expected_disposals)
-        if not fail_body and not fail_start and caller == "queued_h1":
+        if not fail_body and not fail_start:
             self.assertEqual(len(endpoint.requests), 8 if omitted_eof else 16)
             if not omitted_eof and not leaked_descriptor:
                 self.assertEqual(json.loads(output.getvalue())["requests"], 16)
-        elif not fail_body and not fail_start:
-            self.assertEqual(reads, ["queued-message-0"])
 
 
 class ObservationDeadlineTests(unittest.TestCase):
@@ -568,9 +556,9 @@ class ObservationDeadlineTests(unittest.TestCase):
         class Released(Exception):
             pass
 
-        cases = (("round_trip", 45, 2), ("queued_h1", 40, 8),
-                 ("stalled_capture", 45, 100), ("paused_capture_inactivity", 20, 20),
-                 ("capture_failure_on_resume", 20, 20), ("isolated_bad_header", 20, 2),
+        cases = (("round_trip", 45, 2), ("held_population", 40, 8),
+                 ("held_streams", 45, 100),
+                 ("write_failure_isolated", 20, 20), ("isolated_bad_header", 20, 2),
                  ("connection_failure", 20, 2), ("isolated_terminal_stream", 20, 2))
         for name, budget, population in cases:
             phases = ("release",) if name in ("isolated_bad_header", "connection_failure") else ("read", "release")
@@ -584,20 +572,23 @@ class ObservationDeadlineTests(unittest.TestCase):
                         endpoint = SimpleNamespace(server_address=("localhost", 1), observed_shape=False,
                             ready=SimpleNamespace(wait=lambda timeout: True), connections=["connection"],
                             streams=[("connection", 1, "isolation-target", b""), ("connection", 3, "isolation-sibling", b"")],
-                            resets=[1], stream_ids={"isolation-target": 1}, answers={})
+                            resets=[1], stream_ids={"isolation-target": 1, "held-0": 1}, answers={},
+                            held=SimpleNamespace(wait=lambda timeout: True),
+                            held_prefix_bytes=0, held_prefixes={"held-0": 0},
+                            release=SimpleNamespace(set=lambda: None, is_set=lambda: False))
                         if name == "round_trip":
                             endpoint.answers = {f"h2-2-0-{i}": b"answer" for i in range(2)}
-                        elif name in ("stalled_capture", "paused_capture_inactivity", "capture_failure_on_resume"):
-                            prefix = {"stalled_capture": "stalled", "paused_capture_inactivity": "paused",
-                                      "capture_failure_on_resume": "resume"}[name]
+                        elif name in ("held_streams", "write_failure_isolated"):
+                            prefix = {"held_streams": "held", "write_failure_isolated": "isolated"}[name]
                             endpoint.streams = [None] * population
                             endpoint.answers = {f"{prefix}-{i}": b"answer" for i in range(population)}
-                            endpoint.answers["resume-after"] = b"answer"
+                            endpoint.answers["isolated-after"] = b"answer"
                         endpoint.server_port = 1
                         endpoint.first_ready = endpoint.ready
                         endpoint.release_first = SimpleNamespace(set=lambda: None)
                         endpoint.lock = contextlib.nullcontext()
-                        endpoint.requests, endpoint.active = [("first", b"")], 1
+                        endpoint.requests = [(f"held-0-{i}", b"") for i in range(population)]
+                        endpoint.active, endpoint.h2_connections = 1, 1
                         endpoint.serve_forever = endpoint.shutdown = endpoint.server_close = lambda: None
 
                         def observe(store, key, *, deadline=None):
@@ -607,9 +598,9 @@ class ObservationDeadlineTests(unittest.TestCase):
                             if observations[0] == 1:
                                 clock[0] += budget * 0.6
                             status, code = "completed", None
-                            if name == "stalled_capture" and observations[0] == 1:
+                            if name == "held_streams" and observations[0] == 1:
                                 status = "cancelled"
-                            if name == "capture_failure_on_resume" and observations[0] == 1:
+                            if name == "write_failure_isolated" and observations[0] == 1:
                                 status, code = "failed", "response_write_failed"
                             if name == "isolated_bad_header":
                                 status, code = "failed", ("invalid_provider_headers" if observations[0] == 1 else "provider_http_422")
@@ -624,14 +615,14 @@ class ObservationDeadlineTests(unittest.TestCase):
                             if late == "read" and observations[0] == population:
                                 clock[0] = start + budget + boundary
                             assert clock[0] < deadline, "read exceeded original deadline"
-                            if name == "queued_h1":
-                                return f"answer-h1-0-{key.rsplit('-', 1)[1]}".encode()
+                            if name == "held_population":
+                                return f"answer-held-0-{key.rsplit('-', 1)[1]}".encode()
                             return b"unaffected sibling" if name == "isolated_terminal_stream" else b"answer"
 
                         def command(resource, operation, *args, **kwargs):
                             if (resource, operation) == ("session", "inspect"):
                                 if "timeout" not in kwargs:
-                                    return {"execution": {**clean, "custody_occupied": "1"}}
+                                    return {"execution": {**clean, "custody_occupied": str(population) if name == "held_streams" else "1"}}
                                 if late == "release":
                                     clock[0] = start + budget + boundary
                                 return {"execution": clean}
@@ -655,8 +646,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                             raise Released()  # Stop before unrelated native Store/FD audits.
 
                         diagnostics = SimpleNamespace(observations=SimpleNamespace(plan="transport"),
-                            wait=lambda *args, **kwargs: [{"written_bytes": "0"}],
-                            matching=lambda *args: [{}], records=[], dispose_capture=lambda *args, **kwargs: None)
+                            wait=lambda *args, **kwargs: [{}],
+                            matching=lambda *args: [{}], records=[], dispose_interrupt=lambda *args, **kwargs: None)
                         if name == "connection_failure":
                             endpoint.streams = [("connection", i, f"drop-{i % 2}", b"") for i in range(4)]
                         with contextlib.ExitStack() as stack:
@@ -670,8 +661,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 (transport.dispatch, "observe", observe), (transport.dispatch, "read_result", read),
                                 (transport.dispatch, "command", command), (transport, "closed_host_request", request),
                                 (transport, "wait_for_drain", drain), (transport, "HostDiagnostics", lambda *a: diagnostics),
-                                (transport, "ReleaseGate", lambda path: SimpleNamespace(path=path, release=lambda: None)),
-                                (transport, "H1Endpoint", lambda: endpoint), (transport, "open_descriptors", lambda *a: 10),
+                                (transport, "HeldEndpoint", lambda: endpoint), (transport, "open_descriptors", lambda *a: 10),
                                 (transport.subprocess, "check_output", lambda *a, **k: "0")):
                                 stack.enter_context(patch.object(owner, attribute, side_effect=value))
                             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -681,8 +671,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 root = pathlib.Path(temporary)
                                 if name == "round_trip":
                                     transport.round_trip(root, endpoint, 2, root / "ca", rounds=1)
-                                elif name == "queued_h1":
-                                    transport.queued_h1(root)
+                                elif name == "held_population":
+                                    transport.held_population(root)
                                 elif name == "isolated_terminal_stream":
                                     transport.isolated_terminal_stream(root, endpoint, "capture")
                                 else:

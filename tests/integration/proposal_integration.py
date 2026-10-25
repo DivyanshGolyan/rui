@@ -14,7 +14,7 @@ import threading
 import time
 
 from control_integration import RUI, command, configure, inspect_execution, message, observe, start_host, successful_sse, wait_for
-from conversation_page_integration import host_resources, idle_resources, request
+from conversation_page_integration import host_resources, idle_resources, provider_connections, request
 from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, stop_process
 from one_reply import one_reply
@@ -144,7 +144,8 @@ def main():
                     assert caller(store, "field", items[index]["position"], "arguments") == CALLS[index][2].encode()
             idle = host_resources(process.pid)
             if baseline is not None:
-                wait_for(lambda: host_resources(process.pid)[1] == baseline[1], "proposal reader descriptor recovery")
+                wait_for(lambda: host_resources(process.pid)[1] == baseline[1] + provider_connections(process.pid, endpoint.server_port),
+                         "proposal reader descriptor recovery")
                 idle = host_resources(process.pid)
             print(f"proposal retained idle after repeated small/large reads={idle} (Linux RSS bytes/FDs)")
             message(state, store, "second", SESSION, "later group")

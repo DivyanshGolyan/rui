@@ -1372,7 +1372,11 @@ def main():
         assert_cleanup_population(success_milestones, actions=[success_action["action"]],
                                   models=2, inspection_limit=321 + 2)
         success_milestones = None
-        host = fixture.start_host(store, endpoint_url, active_capacity=0)
+        host = fixture.start_host(store, endpoint_url, "--test-phase-trace", active_capacity=0)
+        # A zero-capacity Host with a provider endpoint runs no transport: its
+        # execution loop serves and the Host stays up.
+        HostDiagnostics(host).wait("lifecycle_service_observation", timeout=5)
+        assert host.poll() is None, host.returncode
         session = configure(state, store, "rollback-config")
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url)

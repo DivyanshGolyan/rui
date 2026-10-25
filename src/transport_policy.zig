@@ -1,10 +1,8 @@
-//! Model transport policy over values: how a finished provider transfer is
-//! classified, which outcomes keep the response body, and when an Attempt's
-//! inactivity interval expires. `provider.zig` owns the curl handles,
-//! callbacks, capture writer and clock reads, and passes their facts here.
+//! Model transport policy over values: how a finished provider stream is
+//! classified, which outcomes keep the response body, and how a provider's
+//! Retry-After is read. `provider.zig` owns the h2 Client, the capture and
+//! the clock reads, and passes their facts here.
 const std = @import("std");
-
-pub const Timestamp = std.Io.Clock.Timestamp;
 
 pub const Disposition = enum {
     success,
@@ -12,7 +10,6 @@ pub const Disposition = enum {
     temporary_http,
     temporary_connection,
     permanent_transport,
-    authentication_failure,
     tls_verification_failure,
     invalid_headers,
     unsupported_http_version,
@@ -70,66 +67,78 @@ pub const TransferOutcome = union(enum) {
     transport_finished: Evidence,
 };
 
-/// The curl results classification distinguishes. The shell maps each tag
-/// to the `CURLE_` constant with its upper-cased name and any other code to
-/// `other`.
-pub const CurlResult = enum {
-    ok,
-    aborted_by_callback,
-    couldnt_resolve_proxy,
-    couldnt_resolve_host,
-    couldnt_connect,
-    send_error,
-    recv_error,
-    got_nothing,
-    partial_file,
-    operation_timedout,
-    http2,
-    http2_stream,
-    http3,
-    quic_connect_error,
-    ssl_connect_error,
-    login_denied,
-    peer_failed_verification,
-    other,
+/// How an h2 stream ended: `h2.Cause` tag for tag. This file stays free of
+/// the transport build, so `provider.zig` converts by name and fails to
+/// compile if either enum gains a tag the other lacks.
+pub const Cause = enum {
+    complete,
+    sink_refused,
+    sink_failed,
+    body_failed,
+    rejected_headers,
+    h2_refused,
+    untrusted_peer,
+    resolve_failed,
+    connect_failed,
+    connect_timeout,
+    tls_failed,
+    connection_lost,
+    protocol_error,
+    reset_by_peer,
+    refused,
+    peer_silent,
+    inactive,
+    local_failure,
 };
 
-pub const HttpVersion = enum { http1_1, http2, other };
-
-/// Facts about one finished transfer, read by the shell after curl reports it.
+/// Facts about one finished h2 stream, gathered by `provider.zig`.
 pub const Finished = struct {
-    result: CurlResult,
-    /// curl's error message; the patched TLS ALPN guard marks refused H2 here.
-    error_message: []const u8 = "",
-    requires_h2: bool,
-    headers_invalid: bool = false,
-    inactivity_expired: bool = false,
-    version: HttpVersion,
-    /// Null when curl cannot report a status.
-    response_code: ?i64,
+    cause: Cause,
+    /// The final response status, once a final header block arrived.
+    status: ?u16,
+    /// The receiver refused a header block for want of memory, not for its
+    /// values.
+    headers_local_failure: bool = false,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
 };
 
-pub const alpn_refused_marker = "RUI_ALPN_H2_REQUIRED:";
-
-pub fn classify(finished: Finished) error{InvalidHttpEvidence}!Evidence {
-    // Only the ALPN guard emits the marker. A negotiated H2 stream can also
-    // fail with `http2` before any response version.
-    if (finished.requires_h2 and finished.result == .http2 and
-        std.mem.startsWith(u8, finished.error_message, alpn_refused_marker))
-        return .{ .disposition = .unsupported_http_version };
-    const required: HttpVersion = if (finished.requires_h2) .http2 else .http1_1;
-    if (finished.result == .ok and finished.version != required)
-        return .{ .disposition = .unsupported_http_version };
-    if (finished.headers_invalid or finished.result != .ok) return .{
-        .disposition = if (finished.headers_invalid) .invalid_headers else curlFailure(finished.result, finished.inactivity_expired),
+/// The priority order is capture failure, then request source, then the
+/// transport's evidence.
+pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
+    const disposition: Disposition = switch (finished.cause) {
+        .sink_refused => return .{ .response_capture_failed = .scratch_exhausted },
+        .sink_failed => return .{ .response_capture_failed = .write_failed },
+        .body_failed => return .request_source_failed,
+        .complete => return .{ .transport_finished = try answered(finished) },
+        .rejected_headers => if (finished.headers_local_failure) .permanent_transport else .invalid_headers,
+        .h2_refused => .unsupported_http_version,
+        .untrusted_peer => .tls_verification_failure,
+        .resolve_failed,
+        .connect_failed,
+        .connect_timeout,
+        .tls_failed,
+        .connection_lost,
+        .protocol_error,
+        .reset_by_peer,
+        .refused,
+        .peer_silent,
+        .inactive,
+        => .temporary_connection,
+        .local_failure => .permanent_transport,
+    };
+    // A refused version carries no provider retry constraint.
+    if (disposition == .unsupported_http_version) return .{ .transport_finished = .{ .disposition = disposition } };
+    return .{ .transport_finished = .{
+        .disposition = disposition,
         .retry_after_ms = finished.retry_after_ms,
         .retry_after_deadline_ms = finished.retry_after_deadline_ms,
-    };
-    const code = finished.response_code orelse return error.InvalidHttpEvidence;
-    if (code < 100 or code > 599) return error.InvalidHttpEvidence;
-    const status: u16 = @intCast(code);
+    } };
+}
+
+fn answered(finished: Finished) error{InvalidHttpEvidence}!Evidence {
+    const status = finished.status orelse return error.InvalidHttpEvidence;
+    if (status < 100 or status > 599) return error.InvalidHttpEvidence;
     return .{
         .disposition = if (status >= 200 and status < 300)
             .success
@@ -143,267 +152,264 @@ pub fn classify(finished: Finished) error{InvalidHttpEvidence}!Evidence {
     };
 }
 
-fn curlFailure(result: CurlResult, inactivity_expired: bool) Disposition {
-    return switch (result) {
-        .ok => unreachable,
-        .aborted_by_callback => if (inactivity_expired) .temporary_connection else .permanent_transport,
-        .couldnt_resolve_proxy,
-        .couldnt_resolve_host,
-        .couldnt_connect,
-        .send_error,
-        .recv_error,
-        .got_nothing,
-        .partial_file,
-        .operation_timedout,
-        .http2,
-        .http2_stream,
-        .http3,
-        .quic_connect_error,
-        .ssl_connect_error,
-        => .temporary_connection,
-        .login_denied => .authentication_failure,
-        .peer_failed_verification => .tls_verification_failure,
-        .other => .permanent_transport,
+pub const RetryAfter = union(enum) {
+    delay_ms: u64,
+    deadline_ms: i64,
+};
+
+/// Delta-seconds, or an HTTP-date in any of RFC 9110's three forms.
+pub fn parseRetryAfter(value: []const u8, now_seconds: i64) ?RetryAfter {
+    if (value.len == 0 or value.len > 128) return null;
+    if (std.fmt.parseInt(u64, value, 10)) |seconds| {
+        const delay_ms = std.math.mul(u64, seconds, 1000) catch return null;
+        if (delay_ms > std.math.maxInt(i64)) return null;
+        const now_ms = std.math.mul(i64, now_seconds, 1000) catch return null;
+        _ = std.math.add(i64, now_ms, @intCast(delay_ms)) catch return null;
+        return .{ .delay_ms = delay_ms };
+    } else |_| {}
+    const due_seconds = parseHttpDate(value, now_seconds) orelse return null;
+    return .{ .deadline_ms = std.math.mul(i64, due_seconds, 1000) catch return null };
+}
+
+const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+const long_day_names = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
+const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+/// Seconds since the epoch for an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
+/// GMT`), an RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`) or an asctime
+/// date (`Sun Nov  6 08:49:37 1994`). The weekday is checked against the
+/// date, as RFC 9110 lets a recipient do. `now_seconds` places an RFC 850
+/// two-digit year.
+pub fn parseHttpDate(value: []const u8, now_seconds: i64) ?i64 {
+    var day: u8 = undefined;
+    var month: u4 = undefined;
+    var year: u16 = undefined;
+    var time: []const u8 = undefined;
+    var weekday: usize = undefined;
+    if (value.len == 29 and value[3] == ',' and std.mem.endsWith(u8, value, " GMT")) {
+        // IMF-fixdate.
+        weekday = indexOf(&day_names, value[0..3]) orelse return null;
+        if (value[4] != ' ' or value[7] != ' ' or value[11] != ' ' or value[16] != ' ') return null;
+        day = digits(u8, value[5..7]) orelse return null;
+        month = monthOf(value[8..11]) orelse return null;
+        year = digits(u16, value[12..16]) orelse return null;
+        time = value[17..25];
+    } else if (std.mem.indexOfScalar(u8, value, ',')) |comma| {
+        weekday = indexOf(&long_day_names, value[0..comma]) orelse return null;
+        const rest = value[comma + 1 ..];
+        if (rest.len != 23 or rest[0] != ' ' or rest[3] != '-' or rest[7] != '-' or rest[10] != ' ' or !std.mem.endsWith(u8, rest, " GMT")) return null;
+        day = digits(u8, rest[1..3]) orelse return null;
+        month = monthOf(rest[4..7]) orelse return null;
+        const short = digits(u16, rest[8..10]) orelse return null;
+        year = rfc850Year(short, now_seconds);
+        time = rest[11..19];
+    } else if (value.len == 24) {
+        // asctime.
+        weekday = indexOf(&day_names, value[0..3]) orelse return null;
+        if (value[3] != ' ' or value[7] != ' ' or value[10] != ' ' or value[19] != ' ') return null;
+        month = monthOf(value[4..7]) orelse return null;
+        day = if (value[8] == ' ') digits(u8, value[9..10]) orelse return null else digits(u8, value[8..10]) orelse return null;
+        time = value[11..19];
+        year = digits(u16, value[20..24]) orelse return null;
+    } else return null;
+    if (time[2] != ':' or time[5] != ':') return null;
+    const hour = digits(u8, time[0..2]) orelse return null;
+    const minute = digits(u8, time[3..5]) orelse return null;
+    const second = digits(u8, time[6..8]) orelse return null;
+    if (hour > 23 or minute > 59 or second > 60) return null;
+    if (year < 1970 or day == 0 or day > daysInMonth(year, month)) return null;
+    var days: i64 = daysBeforeYear(year);
+    var m: u4 = 1;
+    while (m < month) : (m += 1) days += daysInMonth(year, m);
+    days += day - 1;
+    // 1970-01-01 was a Thursday.
+    if (@as(usize, @intCast(@mod(days + 3, 7))) != weekday) return null;
+    return days * 86_400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+}
+
+/// RFC 9110 section 5.6.7: a two-digit year more than 50 years in the
+/// future is the most recent past year with the same last two digits.
+fn rfc850Year(short: u16, now_seconds: i64) u16 {
+    const current = yearOf(@divFloor(@max(now_seconds, 0), 86_400));
+    const year = current / 100 * 100 + short;
+    return if (year > current + 50) year - 100 else year;
+}
+
+/// The year holding `days` since 1970-01-01. An estimate from the
+/// 365.2425-day mean year is off by at most one.
+fn yearOf(days: i64) u16 {
+    var year: u16 = @intCast(@min(1970 + @divFloor(days * 10_000, 3_652_425), 9998));
+    if (daysBeforeYear(year) > days) year -= 1;
+    if (daysBeforeYear(year + 1) <= days) year += 1;
+    return year;
+}
+
+/// Days from 1970-01-01 to January 1 of `year`.
+fn daysBeforeYear(year: u16) i64 {
+    return 365 * (@as(i64, year) - 1970) + leapYearsThrough(year - 1) - leapYearsThrough(1969);
+}
+
+/// Leap years in 1..=year, so a date costs no loop over the years.
+fn leapYearsThrough(year: u16) i64 {
+    const y: i64 = year;
+    return @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
+}
+
+fn isLeap(year: u16) bool {
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
+}
+
+fn daysInMonth(year: u16, month: u4) u8 {
+    return switch (month) {
+        2 => if (isLeap(year)) 29 else 28,
+        4, 6, 9, 11 => 30,
+        else => 31,
     };
 }
 
-/// One Attempt's inactivity interval over awake-clock timestamps. Download
-/// progress renews it. A local capture pause excludes only its own duration,
-/// because the provider is not the party that went quiet.
-pub const Inactivity = struct {
-    limit_ns: i64,
-    last_download: i64 = 0,
-    last_progress: Timestamp = undefined,
-    paused_at: ?Timestamp = null,
-    armed: bool = false,
-    expired: bool = false,
+fn indexOf(names: []const []const u8, text: []const u8) ?usize {
+    for (names, 0..) |name, index| if (std.mem.eql(u8, name, text)) return index;
+    return null;
+}
 
-    pub fn arm(self: *Inactivity, now: Timestamp) void {
-        self.last_progress = now;
-        self.paused_at = null;
-        self.armed = true;
-        self.expired = false;
-    }
+fn monthOf(text: []const u8) ?u4 {
+    return @intCast((indexOf(&month_names, text) orelse return null) + 1);
+}
 
-    pub fn isPaused(self: *const Inactivity) bool {
-        return self.paused_at != null;
-    }
+fn digits(comptime T: type, text: []const u8) ?T {
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return null;
+    return std.fmt.parseInt(T, text, 10) catch null;
+}
 
-    pub fn pause(self: *Inactivity, now: Timestamp) void {
-        if (self.paused_at == null) self.paused_at = now;
-    }
-
-    pub fn resumeAfterPause(self: *Inactivity, now: Timestamp) void {
-        const paused_at = self.paused_at orelse unreachable;
-        self.last_progress = self.last_progress.addDuration(paused_at.durationTo(now));
-        self.paused_at = null;
-    }
-
-    /// curl's progress report: renews on new download bytes and returns
-    /// whether the transfer should abort.
-    pub fn progress(self: *Inactivity, now: Timestamp, downloaded: i64) bool {
-        if (!self.armed or self.isPaused()) return false;
-        if (downloaded != self.last_download) {
-            self.last_download = downloaded;
-            self.last_progress = now;
-        }
-        return self.expiredAt(now);
-    }
-
-    pub fn expiredAt(self: *Inactivity, now: Timestamp) bool {
-        if (!self.armed or self.isPaused()) return false;
-        if (self.last_progress.durationTo(now).raw.nanoseconds < self.limit_ns) return false;
-        self.expired = true;
-        return true;
-    }
-};
-
-test "curl failures retry only temporary connection loss and explicit inactivity" {
-    const cases = [_]struct { result: CurlResult, expired: bool, expected: Disposition }{
-        .{ .result = .couldnt_connect, .expired = false, .expected = .temporary_connection },
-        .{ .result = .couldnt_resolve_host, .expired = false, .expected = .temporary_connection },
-        .{ .result = .http2_stream, .expired = false, .expected = .temporary_connection },
-        .{ .result = .operation_timedout, .expired = false, .expected = .temporary_connection },
-        .{ .result = .ssl_connect_error, .expired = false, .expected = .temporary_connection },
-        .{ .result = .aborted_by_callback, .expired = true, .expected = .temporary_connection },
-        // A callback abort without expiry is a local refusal, not provider silence.
-        .{ .result = .aborted_by_callback, .expired = false, .expected = .permanent_transport },
-        // Expiry does not turn an unrelated failure temporary.
-        .{ .result = .other, .expired = true, .expected = .permanent_transport },
-        .{ .result = .login_denied, .expired = false, .expected = .authentication_failure },
-        .{ .result = .peer_failed_verification, .expired = false, .expected = .tls_verification_failure },
+test "h2 endings retry only temporary connection loss and keep their Retry-After" {
+    const cases = [_]struct { cause: Cause, local: bool = false, expected: Disposition }{
+        .{ .cause = .connect_failed, .expected = .temporary_connection },
+        .{ .cause = .resolve_failed, .expected = .temporary_connection },
+        .{ .cause = .connect_timeout, .expected = .temporary_connection },
+        .{ .cause = .tls_failed, .expected = .temporary_connection },
+        .{ .cause = .connection_lost, .expected = .temporary_connection },
+        .{ .cause = .protocol_error, .expected = .temporary_connection },
+        .{ .cause = .reset_by_peer, .expected = .temporary_connection },
+        .{ .cause = .refused, .expected = .temporary_connection },
+        .{ .cause = .peer_silent, .expected = .temporary_connection },
+        .{ .cause = .inactive, .expected = .temporary_connection },
+        .{ .cause = .untrusted_peer, .expected = .tls_verification_failure },
+        .{ .cause = .rejected_headers, .expected = .invalid_headers },
+        // A block refused for want of memory is a local failure, not the
+        // provider's contradiction.
+        .{ .cause = .rejected_headers, .local = true, .expected = .permanent_transport },
+        .{ .cause = .local_failure, .expected = .permanent_transport },
     };
     for (cases) |case| {
-        const evidence = try classify(.{
-            .result = case.result,
-            .inactivity_expired = case.expired,
-            .requires_h2 = true,
-            .version = .other,
-            .response_code = 0,
+        const result = try outcome(.{
+            .cause = case.cause,
+            .status = null,
+            .headers_local_failure = case.local,
             .retry_after_ms = 7_000,
             .retry_after_deadline_ms = 1_700_000_001_000,
         });
-        try std.testing.expectEqual(case.expected, evidence.disposition);
-        try std.testing.expectEqual(@as(u16, 0), evidence.http_status);
-        try std.testing.expectEqual(@as(?u64, 7_000), evidence.retry_after_ms);
-        try std.testing.expectEqual(@as(?i64, 1_700_000_001_000), evidence.retry_after_deadline_ms);
+        try std.testing.expectEqual(TransferOutcome{ .transport_finished = .{
+            .disposition = case.expected,
+            .retry_after_ms = 7_000,
+            .retry_after_deadline_ms = 1_700_000_001_000,
+        } }, result);
     }
+}
+
+test "local capture and request failures come before transport evidence" {
+    try std.testing.expectEqual(TransferOutcome{ .response_capture_failed = .scratch_exhausted }, try outcome(.{ .cause = .sink_refused, .status = 200 }));
+    try std.testing.expectEqual(TransferOutcome{ .response_capture_failed = .write_failed }, try outcome(.{ .cause = .sink_failed, .status = 200 }));
+    try std.testing.expectEqual(TransferOutcome.request_source_failed, try outcome(.{ .cause = .body_failed, .status = null }));
+}
+
+test "a peer that does not speak HTTP/2 is refused without a retry constraint" {
+    try std.testing.expectEqual(
+        TransferOutcome{ .transport_finished = .{ .disposition = .unsupported_http_version } },
+        try outcome(.{ .cause = .h2_refused, .status = null, .retry_after_ms = 3_000 }),
+    );
 }
 
 test "HTTP status classes and their Retry-After constraints" {
-    const cases = [_]struct { code: ?i64, expected: ?Disposition }{
-        .{ .code = 200, .expected = .success },
-        .{ .code = 299, .expected = .success },
-        .{ .code = 199, .expected = .permanent_http },
-        .{ .code = 300, .expected = .permanent_http },
-        .{ .code = 400, .expected = .permanent_http },
-        .{ .code = 407, .expected = .permanent_http },
-        .{ .code = 408, .expected = .temporary_http },
-        .{ .code = 429, .expected = .temporary_http },
-        .{ .code = 499, .expected = .permanent_http },
-        .{ .code = 500, .expected = .temporary_http },
-        .{ .code = 599, .expected = .temporary_http },
-        .{ .code = 100, .expected = .permanent_http },
-        .{ .code = 99, .expected = null },
-        .{ .code = 600, .expected = null },
-        .{ .code = null, .expected = null },
+    const cases = [_]struct { status: ?u16, expected: ?Disposition }{
+        .{ .status = 200, .expected = .success },
+        .{ .status = 299, .expected = .success },
+        .{ .status = 199, .expected = .permanent_http },
+        .{ .status = 300, .expected = .permanent_http },
+        .{ .status = 400, .expected = .permanent_http },
+        .{ .status = 407, .expected = .permanent_http },
+        .{ .status = 408, .expected = .temporary_http },
+        .{ .status = 429, .expected = .temporary_http },
+        .{ .status = 499, .expected = .permanent_http },
+        .{ .status = 500, .expected = .temporary_http },
+        .{ .status = 599, .expected = .temporary_http },
+        .{ .status = 100, .expected = .permanent_http },
+        .{ .status = 99, .expected = null },
+        .{ .status = 600, .expected = null },
+        .{ .status = null, .expected = null },
     };
     for (cases) |case| {
-        const finished: Finished = .{
-            .result = .ok,
-            .requires_h2 = false,
-            .version = .http1_1,
-            .response_code = case.code,
-            .retry_after_ms = 12_000,
-        };
+        const finished: Finished = .{ .cause = .complete, .status = case.status, .retry_after_ms = 12_000 };
         const expected = case.expected orelse {
-            try std.testing.expectError(error.InvalidHttpEvidence, classify(finished));
+            try std.testing.expectError(error.InvalidHttpEvidence, outcome(finished));
             continue;
         };
-        const evidence = try classify(finished);
-        try std.testing.expectEqual(expected, evidence.disposition);
-        try std.testing.expectEqual(@as(u16, @intCast(case.code.?)), evidence.http_status);
-        try std.testing.expectEqual(@as(?u64, 12_000), evidence.retry_after_ms);
-        try std.testing.expectEqual(@as(?i64, null), evidence.retry_after_deadline_ms);
+        try std.testing.expectEqual(TransferOutcome{ .transport_finished = .{
+            .disposition = expected,
+            .http_status = case.status.?,
+            .retry_after_ms = 12_000,
+        } }, try outcome(finished));
     }
-}
-
-test "TLS requires negotiated H2 and loopback HTTP requires HTTP/1.1" {
-    const cases = [_]struct { requires_h2: bool, result: CurlResult, message: []const u8, version: HttpVersion, expected: Disposition }{
-        // The ALPN guard's refusal precedes the connection-failure class of `http2`.
-        .{ .requires_h2 = true, .result = .http2, .message = "RUI_ALPN_H2_REQUIRED: server did not negotiate h2", .version = .other, .expected = .unsupported_http_version },
-        .{ .requires_h2 = true, .result = .http2, .message = "stream reset", .version = .http2, .expected = .temporary_connection },
-        .{ .requires_h2 = false, .result = .http2, .message = "RUI_ALPN_H2_REQUIRED:", .version = .other, .expected = .temporary_connection },
-        .{ .requires_h2 = true, .result = .ok, .message = "", .version = .http1_1, .expected = .unsupported_http_version },
-        .{ .requires_h2 = true, .result = .ok, .message = "", .version = .http2, .expected = .success },
-        .{ .requires_h2 = false, .result = .ok, .message = "", .version = .http2, .expected = .unsupported_http_version },
-        .{ .requires_h2 = false, .result = .ok, .message = "", .version = .other, .expected = .unsupported_http_version },
-        .{ .requires_h2 = false, .result = .ok, .message = "", .version = .http1_1, .expected = .success },
-        // A failed transfer has no negotiated version to check.
-        .{ .requires_h2 = true, .result = .recv_error, .message = "", .version = .http1_1, .expected = .temporary_connection },
-    };
-    for (cases) |case| {
-        const evidence = try classify(.{
-            .result = case.result,
-            .error_message = case.message,
-            .requires_h2 = case.requires_h2,
-            .version = case.version,
-            .response_code = 204,
-            .retry_after_ms = 3_000,
-        });
-        try std.testing.expectEqual(case.expected, evidence.disposition);
-        // Version refusals carry no status or provider retry constraint.
-        if (case.expected == .unsupported_http_version) try std.testing.expectEqual(Evidence{ .disposition = .unsupported_http_version }, evidence);
-    }
-}
-
-test "contradictory response headers fail the transfer unless its version is refused" {
-    const invalid = try classify(.{
-        .result = .ok,
-        .headers_invalid = true,
-        .requires_h2 = true,
-        .version = .http2,
-        .response_code = 200,
-        .retry_after_deadline_ms = 9,
-    });
-    try std.testing.expectEqual(Evidence{ .disposition = .invalid_headers, .retry_after_deadline_ms = 9 }, invalid);
-    // The header callback refuses the line, so curl normally reports a write error.
-    try std.testing.expectEqual(Disposition.invalid_headers, (try classify(.{
-        .result = .other,
-        .headers_invalid = true,
-        .requires_h2 = true,
-        .version = .http2,
-        .response_code = null,
-    })).disposition);
-    try std.testing.expectEqual(Disposition.unsupported_http_version, (try classify(.{
-        .result = .ok,
-        .headers_invalid = true,
-        .requires_h2 = true,
-        .version = .http1_1,
-        .response_code = 200,
-    })).disposition);
 }
 
 test "only HTTP responses keep their captured body" {
     for (std.enums.values(Disposition)) |disposition| {
-        const answered = disposition == .permanent_http or disposition == .temporary_http;
-        try std.testing.expectEqual(answered, disposition.answered());
-        try std.testing.expectEqual(disposition == .success or answered, disposition.retainsResponse());
+        const is_answer = disposition == .permanent_http or disposition == .temporary_http;
+        try std.testing.expectEqual(is_answer, disposition.answered());
+        try std.testing.expectEqual(disposition == .success or is_answer, disposition.retainsResponse());
     }
 }
 
-const ns_per_ms = 1_000_000;
-const ns_per_s = 1_000 * ns_per_ms;
-
-fn at(start: Timestamp, milliseconds: i64) Timestamp {
-    return start.addDuration(.{ .raw = .fromMilliseconds(milliseconds), .clock = .awake });
+test "Retry-After preserves dates and delays without unchecked arithmetic" {
+    try std.testing.expectEqual(RetryAfter{ .delay_ms = 12_000 }, parseRetryAfter("12", 1_700_000_000).?);
+    try std.testing.expectEqual(RetryAfter{ .deadline_ms = 1_700_000_001_000 }, parseRetryAfter("Tue, 14 Nov 2023 22:13:21 GMT", 1_700_000_000).?);
+    try std.testing.expectEqual(RetryAfter{ .deadline_ms = 1_699_999_999_000 }, parseRetryAfter("Tue, 14 Nov 2023 22:13:19 GMT", 1_700_000_000).?);
+    try std.testing.expect(parseRetryAfter("9223372036854775", 1_700_000_000) == null);
+    try std.testing.expect(parseRetryAfter("invalid", 1_700_000_000) == null);
+    try std.testing.expect(parseRetryAfter("18446744073709551615", 1_700_000_000) == null);
 }
 
-test "inactivity renews on download progress and expires at its limit" {
-    const start: Timestamp = .{ .raw = .{ .nanoseconds = 100 * ns_per_s }, .clock = .awake };
-    var inactivity: Inactivity = .{ .limit_ns = ns_per_s };
-    // An unarmed interval belongs to a transfer that has not been added yet.
-    try std.testing.expect(!inactivity.expiredAt(at(start, 5_000)));
-    try std.testing.expect(!inactivity.progress(at(start, 5_000), 0));
-    inactivity.arm(start);
-    try std.testing.expect(!inactivity.progress(at(start, 999), 0));
-    try std.testing.expect(!inactivity.expired);
-    // Upload-only reports carry an unchanged download count and do not renew.
-    try std.testing.expect(inactivity.progress(at(start, 1_000), 0));
-    try std.testing.expect(inactivity.expired);
-
-    inactivity.arm(start);
-    try std.testing.expect(!inactivity.expired);
-    try std.testing.expect(!inactivity.progress(at(start, 600), 12));
-    try std.testing.expect(!inactivity.progress(at(start, 1_599), 12));
-    try std.testing.expect(inactivity.expiredAt(at(start, 1_600)));
+test "HTTP-dates in all three RFC 9110 forms, and nothing else" {
+    // RFC 9110 section 5.6.7's example instant, 784111777.
+    for ([_][]const u8{
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+    }) |date| try std.testing.expectEqual(@as(?i64, 784_111_777), parseHttpDate(date, 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 0), parseHttpDate("Thu, 01 Jan 1970 00:00:00 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 951_782_400), parseHttpDate("Tue, 29 Feb 2000 00:00:00 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tuesday, 14-Nov-23 22:13:21 GMT", 1_700_000_000));
+    try std.testing.expectEqual(@as(?i64, 1_700_000_001), parseHttpDate("Tue Nov 14 22:13:21 2023", 1_700_000_000));
+    for ([_][]const u8{
+        "Mon, 06 Nov 1994 08:49:37 GMT", // wrong weekday
+        "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Sun, 31 Nov 1994 08:49:37 GMT",
+        "Thu, 29 Feb 2001 00:00:00 GMT",
+        "Sun, 06 Nov 1994 24:00:00 GMT",
+        "Sun, 06 Nov 1994 08:60:00 GMT",
+        "Sun, 6 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Foo 1994 08:49:37 GMT",
+        "Wed, 31 Dec 1969 23:59:59 GMT",
+        "Sun, 06 Nov 1994 08:49:37 GMT ",
+        "Sundae, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov 6 08:49:37 1994",
+        "",
+    }) |date| try std.testing.expectEqual(@as(?i64, null), parseHttpDate(date, 1_700_000_000));
 }
 
-test "a local capture pause excludes only its own duration from inactivity" {
-    const now: Timestamp = .{ .raw = .{ .nanoseconds = 100 * ns_per_s }, .clock = .awake };
-    var inactivity: Inactivity = .{ .limit_ns = ns_per_s };
-    inactivity.arm(at(now, -250));
-    inactivity.pause(now);
-    try std.testing.expect(!inactivity.expiredAt(at(now, 10_000)));
-    try std.testing.expect(!inactivity.progress(at(now, 10_000), 0));
-    try std.testing.expect(!inactivity.expired);
-    // A synchronous callback during resume can pause again before resume returns.
-    inactivity.pause(at(now, 1_000));
-    try std.testing.expectEqual(now, inactivity.paused_at.?);
-
-    const resume_at = at(now, 5_000);
-    inactivity.resumeAfterPause(resume_at);
-    try std.testing.expectEqual(@as(i96, 250 * ns_per_ms), inactivity.last_progress.durationTo(resume_at).raw.nanoseconds);
-    var boundary = inactivity;
-    try std.testing.expect(!boundary.expiredAt(at(resume_at, 749)));
-    try std.testing.expect(boundary.expiredAt(at(resume_at, 750)));
-
-    const second_pause = at(resume_at, 100);
-    inactivity.pause(second_pause);
-    try std.testing.expect(!inactivity.expiredAt(at(second_pause, 2_000)));
-    const second_resume = at(second_pause, 2_000);
-    inactivity.resumeAfterPause(second_resume);
-    boundary = inactivity;
-    try std.testing.expect(!boundary.expiredAt(at(second_resume, 649)));
-    try std.testing.expect(boundary.expiredAt(at(second_resume, 650)));
+test "an RFC 850 two-digit year is at most 50 years ahead of now" {
+    // Now is 2026: 60 and 76 are ahead by at most 50 years, 77 is not.
+    const now = 1_790_000_000;
+    try std.testing.expectEqual(@as(?i64, 2_840_140_800), parseHttpDate("Thursday, 01-Jan-60 00:00:00 GMT", now));
+    try std.testing.expectEqual(@as(?i64, 3_345_062_400), parseHttpDate("Wednesday, 01-Jan-76 00:00:00 GMT", now));
+    try std.testing.expectEqual(@as(?i64, 220_924_800), parseHttpDate("Saturday, 01-Jan-77 00:00:00 GMT", now));
 }

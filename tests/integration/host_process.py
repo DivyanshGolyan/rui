@@ -60,7 +60,7 @@ OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
 # plus twenty-three non-poll numbered exchanges, each with a release; five stop
 # issuers, twelve observe classifications, three two-phase cleanup owners,
-# capture entry, Bash handoff, three Message classification/header pairs and
+# Bash handoff, three Message classification/header pairs and
 # one owned report gate. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
@@ -75,13 +75,13 @@ OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # transport: at most 100 configurations and twenty waves of 100 Messages,
 # 100 result reads, 100 initial result probes plus 1,801 failed probes within
 # the shared 45s/25ms budget, and 801 drain inspections within 20s/25ms.
-# The smaller two-wave H1 case has a shared 40s result/drain budget.
+# The smaller two-wave held-stream case has a shared 40s result/drain budget.
 # HostRequests enforces issuance before traffic; retain both native endpoints.
 # dispatch: seven routed controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance and one exhausted-recovery hold per separately
 # observed Host, not retry history.
-# capture: one gate, one exact cancellation and one injected resume failure.
-# No cleanup or polling history; public drainage remains its separate oracle.
+# interrupt: one exact cancellation. No cleanup or polling history; public
+# drainage remains its separate oracle.
 # recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
 # managed: three preparations/transfers, at most three injected delayed handoffs.
 # bash_cleanup: reuse has four model attempts and two Bash owners, three
@@ -91,11 +91,11 @@ OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
-                      "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
+                      "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 3 * 2 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
                       "transport": 2 * TRANSPORT_EXCHANGE_LIMIT,
-                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
+                      "interrupt": 1, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
@@ -126,26 +126,24 @@ OBSERVATION_FIELDS = {
     21: "start_ns",
     22: "wait_ns",
     23: "custody_occupied",
-    24: "written_bytes",
-    25: "http_version",
-    26: "connection_id",
-    27: "new_connections",
-    28: "work_bytes",
-    29: "work_items",
-    30: "request_bytes",
-    31: "process_memory_current_bytes",
-    32: "process_memory_highwater_bytes",
-    33: "cache_used_bytes",
-    34: "cache_spills",
-    35: "hard_heap_limit_bytes",
-    36: "page_size_bytes",
-    37: "cache_size_setting",
-    38: "cache_spill_threshold",
-    39: "mmap_size_bytes",
-    40: "synchronous",
-    41: "temp_store",
-    42: "busy_timeout_ms",
-    43: "journal_mode",
+    24: "new_connections",
+    25: "replays",
+    26: "work_bytes",
+    27: "work_items",
+    28: "request_bytes",
+    29: "process_memory_current_bytes",
+    30: "process_memory_highwater_bytes",
+    31: "cache_used_bytes",
+    32: "cache_spills",
+    33: "hard_heap_limit_bytes",
+    34: "page_size_bytes",
+    35: "cache_size_setting",
+    36: "cache_spill_threshold",
+    37: "mmap_size_bytes",
+    38: "synchronous",
+    39: "temp_store",
+    40: "busy_timeout_ms",
+    41: "journal_mode",
 }
 
 
@@ -514,7 +512,7 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
     """Stop fixture accept loops promptly; response timing belongs to each case.
 
     Serves HTTP/1.1 and HTTP/2 by prior knowledge (h2c) on one listener, so
-    every fixture works with Rui's curl build and its own HTTP/2 client. A
+    every fixture works with Rui's HTTP/2 client. A
     cleartext connection that opens with the HTTP/2 preface runs each request
     stream's handler on its own thread through `_H2Connection`; any other
     connection, TLS included, takes the stock HTTP/1.1 path.
@@ -532,14 +530,20 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
     def serve_forever(self, poll_interval=0.01):
         super().serve_forever(poll_interval=poll_interval)
 
+    #: h2c connections accepted so far.
+    h2_connections = 0
+
     def finish_request(self, request, client_address):
         if not isinstance(request, ssl.SSLSocket) and _opens_with_h2_preface(request):
+            with _h2_connection_lock:
+                self.h2_connections += 1
             _H2Connection(self, request, client_address).serve()
         else:
             super().finish_request(request, client_address)
 
 
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+_h2_connection_lock = threading.Lock()
 
 
 def _opens_with_h2_preface(sock, timeout=5):
@@ -579,6 +583,9 @@ class _H2Connection:
 
     def __init__(self, server, sock, client_address):
         self.server, self.sock, self.client_address = server, sock, client_address
+        # Each frame is its own send. Without TCP_NODELAY, Nagle holds a frame
+        # until the client's delayed ACK, about 40 ms, so a large body crawls.
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.h2 = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False, header_encoding=None))
         self.cond = threading.Condition()
         self.streams = {}
@@ -916,8 +923,8 @@ class HostDiagnostics:
 
     def require_native_receipt(self, phase):
         plans = None
-        if phase in ("capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested"):
-            plans = ("capture", "stop") if phase == "capture_write_gate_entered" else ("capture",)
+        if phase == "effect_stop_requested":
+            plans = ("interrupt",)
         elif phase in ("action_attempt_admitted", "action_result_ready", "action_result_committed"):
             plans = ("recovery", "status") if phase == "action_attempt_admitted" else ("recovery",)
         elif phase in ("preparation_completed", "codex_transfer"):
@@ -951,30 +958,25 @@ class HostDiagnostics:
             except Exception:
                 pass  # Failure sampling cannot own release/reap or the primary error.
 
-    def dispose_capture(self, gate, collect, *, resume_failures=0, controls=()):
+    def dispose_interrupt(self, collect, *, controls=()):
+        """Stop the Host, then require exactly one native stop receipt per
+        named control and nothing else."""
         incoming_error = sys.exc_info()[1]
-        self.snapshot_failure(collect)  # Before emergency release, not a later reconstruction.
-        errors = []
-        for dispose in (gate.release, lambda: stop_process(self.process)):
-            try:
-                dispose()
-            except BaseException as error:
-                errors.append(error)
+        self.snapshot_failure(collect)
         try:
-            if errors:
-                for error in errors:
-                    try:
-                        print(f"Capture fixture cleanup failed: {error}", file=sys.stderr)
-                    except Exception:
-                        pass
-                if incoming_error is not None:
-                    raise incoming_error from errors[0]
-                raise errors[0]
+            stop_process(self.process)
+        except BaseException as error:
+            try:
+                print(f"Interrupt fixture cleanup failed: {error}", file=sys.stderr)
+            except Exception:
+                pass
+            if incoming_error is not None:
+                raise incoming_error from error
+            raise
+        try:
             if incoming_error is None:
-                assert len(self.matching("capture_write_gate_entered")) == 1, self.records
-                assert len(self.matching("transport_resume_capture_failure", subject_kind="cause", subject="local_capture")) == resume_failures, self.records
                 assert Counter(record.get("control_key") for record in self.matching("effect_stop_requested")) == Counter(controls), self.records
-                assert len(self.records) == 1 + resume_failures + len(controls), self.records
+                assert len(self.records) == len(controls), self.records
         except BaseException:
             self.snapshot_failure(collect)
             self.observations.preserve_failure(getattr(self.process, "rui_failure_snapshot", None))
@@ -1220,11 +1222,6 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     if "--test-retry-recovery-gate-path" in args:
         observations = observations or "dispatch"
         assert observations == "dispatch", "retry recovery gate requires a selecting native plan"
-    if "--test-response-capture-gate-path" in args:
-        observations = observations or "capture"
-        assert observations in ("capture", "stop"), "capture gate requires a selecting native plan"
-        if "--test-phase-trace" not in args:
-            args.append("--test-phase-trace")
     if "--test-transition" in args and args[args.index("--test-transition") + 1] in (
             "action-attempt-admitted", "prepared-before-handoff", "action-result-ready", "action-result-committed"):
         transition = args[args.index("--test-transition") + 1]

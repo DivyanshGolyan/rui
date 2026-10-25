@@ -8,7 +8,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite };
+pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, interrupt, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -51,26 +51,24 @@ const FieldId = enum(u8) {
     start_ns = 21,
     wait_ns = 22,
     custody_occupied = 23,
-    written_bytes = 24,
-    http_version = 25,
-    connection_id = 26,
-    new_connections = 27,
-    work_bytes = 28,
-    work_items = 29,
-    request_bytes = 30,
-    process_memory_current_bytes = 31,
-    process_memory_highwater_bytes = 32,
-    cache_used_bytes = 33,
-    cache_spills = 34,
-    hard_heap_limit_bytes = 35,
-    page_size_bytes = 36,
-    cache_size_setting = 37,
-    cache_spill_threshold = 38,
-    mmap_size_bytes = 39,
-    synchronous = 40,
-    temp_store = 41,
-    busy_timeout_ms = 42,
-    journal_mode = 43,
+    new_connections = 24,
+    replays = 25,
+    work_bytes = 26,
+    work_items = 27,
+    request_bytes = 28,
+    process_memory_current_bytes = 29,
+    process_memory_highwater_bytes = 30,
+    cache_used_bytes = 31,
+    cache_spills = 32,
+    hard_heap_limit_bytes = 33,
+    page_size_bytes = 34,
+    cache_size_setting = 35,
+    cache_spill_threshold = 36,
+    mmap_size_bytes = 37,
+    synchronous = 38,
+    temp_store = 39,
+    busy_timeout_ms = 40,
+    journal_mode = 41,
 };
 const Record = struct {
     rui_test_phase: []const u8,
@@ -97,10 +95,8 @@ const Record = struct {
     start_ns: ?[]const u8 = null,
     wait_ns: ?[]const u8 = null,
     custody_occupied: ?[]const u8 = null,
-    written_bytes: ?[]const u8 = null,
-    http_version: ?i64 = null,
-    connection_id: ?i64 = null,
     new_connections: ?i64 = null,
+    replays: ?i64 = null,
     work_bytes: ?[]const u8 = null,
     work_items: ?[]const u8 = null,
     request_bytes: ?[]const u8 = null,
@@ -220,12 +216,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
         return std.mem.eql(u8, phase, "bash_leader_observed_with_open_pipes") or
             std.mem.eql(u8, phase, "control_store_complete");
     }
-    if (self.plan == .capture) {
-        inline for (.{ "capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested" }) |name| {
-            if (std.mem.eql(u8, phase, name)) return true;
-        }
-        return false;
-    }
+    if (self.plan == .interrupt) return std.mem.eql(u8, phase, "effect_stop_requested");
     if (self.plan == .recovery) {
         inline for (.{ "prepared_before_handoff", "action_attempt_admitted", "action_result_ready", "action_result_committed" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;
@@ -273,8 +264,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
             std.mem.eql(u8, phase, "test_gate_waiting") or
             std.mem.eql(u8, phase, "bash_handoff_committed") or
             std.mem.eql(u8, phase, "cleanup_started") or
-            std.mem.eql(u8, phase, "cleanup_completed") or
-            std.mem.eql(u8, phase, "capture_write_gate_entered");
+            std.mem.eql(u8, phase, "cleanup_completed");
     }
     if (std.mem.eql(u8, phase, "canonical_handoff_superseded"))
         self.lifecycle_due.store(true, .release);
@@ -411,7 +401,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .bash_cleanup => "cleanup_release_observed",
             .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
-            .capture => "capture_write_gate_entered",
+            .interrupt => "effect_stop_requested",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
             .execution => "settlement_complete",
@@ -481,7 +471,7 @@ test "private owner observations seal admission without forgiving held or late p
             .bash_cleanup => "cleanup_release_observed",
             .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
-            .capture => "capture_write_gate_entered",
+            .interrupt => "effect_stop_requested",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
             .execution => "settlement_complete",

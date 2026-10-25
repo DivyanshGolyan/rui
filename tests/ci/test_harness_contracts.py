@@ -25,7 +25,7 @@ FIELDS = (
     "store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns",
     "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
     "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
-    "written_bytes", "http_version", "connection_id", "new_connections",
+    "new_connections", "replays",
     "work_bytes", "work_items", "request_bytes",
     "process_memory_current_bytes", "process_memory_highwater_bytes", "cache_used_bytes",
     "cache_spills", "hard_heap_limit_bytes", "page_size_bytes", "cache_size_setting",
@@ -52,7 +52,7 @@ class ObservationCodecTest(unittest.TestCase):
     def test_frame_decodes_every_id_independent_of_field_order(self):
         values = {name: f"value-{index}" for index, name in enumerate(FIELDS)}
         # The integer-valued native fields still arrive as decimal text.
-        values.update(http_version="-7", connection_id="902", new_connections="0")
+        values.update(new_connections="0", replays="902")
         payload = b"".join(
             struct.pack("<BH", index, len(value)) + value
             for index, name in reversed(list(enumerate(FIELDS)))

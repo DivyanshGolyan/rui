@@ -29,8 +29,8 @@ def observations(host):
             if b'"rui_test_phase":"codex_transfer"' in line and len(records) < 8:
                 record = json.loads(line)
                 records.append({key: record[key] for key in (
-                    "operation", "http_version", "connection_id", "new_connections",
-                    "correlation_present", "correlation_sha256", "alpn",
+                    "operation", "new_connections", "replays",
+                    "correlation_present", "correlation_sha256",
                 )})
             rejection = re.search(rb"rui: provider output rejected for operation (\d+): ([A-Za-z][A-Za-z0-9_]*)", line)
             if rejection:
@@ -136,7 +136,7 @@ def run(model, external_credential=None):
                 required_fields={"execution": "enabled"}, timeout=20,
             )
             records, thread = observations(process)
-            return process, records, thread, {"curl": ready["curl"], "openssl": ready["openssl"]}
+            return process, records, thread, {"nghttp2": ready["nghttp2"], "openssl": ready["openssl"]}
 
         def stop():
             nonlocal host, reader
@@ -203,8 +203,6 @@ def run(model, external_credential=None):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(first_observations) >= 3, "first Host transport observations", timeout=10)
         assert len(first_observations) == 3, "expected reasoning, Bash proposal and tool-continuation managed transfers"
-        assert all(int(record["http_version"]) == 3 for record in first_observations), "HTTP/2 not observed"
-        assert len({record["connection_id"] for record in first_observations}) == 1, "connection reuse not observed"
         assert [int(record["new_connections"]) for record in first_observations] == [1, 0, 0], "sequential reuse not observed"
         resources = bash.process_resources(host)
 
@@ -231,7 +229,7 @@ def run(model, external_credential=None):
         caller.wait_for(lambda: bash.execution_custody_idle(store, session), "post-restart cleanup", timeout=30)
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(later_observations) >= 1, "fresh Host transport observation", timeout=10)
-        assert len(later_observations) == 1 and int(later_observations[0]["http_version"]) == 3
+        assert len(later_observations) == 1 and int(later_observations[0]["new_connections"]) == 1
         stop()  # release the Store owner before inspecting private response shape
         after = evidence(store)
         assert len(after) == 4 and after[:3] == before and after[3][0]

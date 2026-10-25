@@ -294,7 +294,7 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
     required = {"execution": "unavailable"}
     if endpoint is not None:
         args += ["--provider-endpoint", endpoint]
-        required = {"execution": "enabled", "curl": "8.22.0"}
+        required = {"execution": "enabled", "nghttp2": "1.70.0"}
     args += extra
     if observations is not None and "--test-phase-trace" not in args:
         args.append("--test-phase-trace")
@@ -1016,8 +1016,8 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
             "--test-model-result-gate-path",
             settlement_gate.path,
         ]
-        # H1 now has ceil(C/100) connections. Keep two independently held
-        # fixture responses while exercising the two client control places.
+        # Keep two independently held fixture responses while exercising the
+        # two client control places.
         process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers")
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)

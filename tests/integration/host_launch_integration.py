@@ -330,7 +330,7 @@ def managed_descriptor_rejection(store, env, limit):
     line = next(line for line in failed.stderr.splitlines() if "descriptor capacity insufficient:" in line)
     fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", line)}
     # Independent budget at the default capacity: macOS libmalloc may add one
-    # inherited socket; curl wakeups and authentication differ by platform.
+    # inherited socket; the h2 waker and authentication differ by platform.
     inherited = fields["inherited"]
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS

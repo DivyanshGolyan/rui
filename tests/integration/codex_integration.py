@@ -98,7 +98,7 @@ def start(store, endpoint, *extra):
     host, _ = start_ready_process(
         [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "2",
          "--test-codex-fixture-endpoint", endpoint, *extra],
-        required_fields={"execution": "enabled", "curl": "8.22.0"},
+        required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
         observations="managed" if "--test-phase-trace" in extra else None,
     )
     return host

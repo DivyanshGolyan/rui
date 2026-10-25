@@ -52,14 +52,12 @@ pub const Faults = struct {
     request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
-    completion_identity_fault: provider.CompletionIdentityFault = .none,
     response_acquire: bool = false,
     response_unlink: bool = false,
     response_write: bool = false,
-    response_write_on_resume: bool = false,
+    /// Fails the next launched Transfer's response writes, then disarms.
+    response_write_once: bool = false,
     response_seal: bool = false,
-    response_capture_gate_path: ?[]const u8 = null,
-    response_capture_gate_min_written_bytes: usize = 0,
     response_metadata: bool = false,
     response_metadata_unlink: bool = false,
     response_read: bool = false,
@@ -116,7 +114,9 @@ pub const Host = struct {
     provider_ca_file: ?[]const u8 = null,
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
-    capture_writer: ?*provider.CaptureWriter = null,
+    /// The scratch account every request and response of this Host
+    /// charges; set by the execution owner when a provider is configured.
+    scratch_budget: ?provider.ScratchBudget = null,
     /// Execution-thread-owned Codex sticky routing; in memory only.
     turn_states: model_adapter.TurnStates = .{},
     bash_path: []const u8 = default_bash_path,
@@ -663,10 +663,7 @@ pub fn testGateActive(host: *Host, path: []const u8) bool {
 }
 
 pub fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
-    const count = reactor.unprocessedCompletions() catch |err| {
-        fenceDispatch(host, "native completion observation", err);
-        return;
-    };
+    const count: u64 = reactor.finishedCount();
     if (host.last_unprocessed_completions) |previous| {
         if (previous == count) return;
     }

@@ -929,21 +929,17 @@ pub fn serve(
     host.retention = &retention;
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
-    var provider_initialization_owned = false;
     if (provider_endpoint) |endpoint| {
         try provider.validateEndpoint(endpoint);
         if (authentication) |selected| try model_adapter.validateAuthenticationEndpoint(endpoint, provider_ca_file, selected);
-        try provider.initialize();
-        provider_initialization_owned = true;
+        try provider.checkLibraries();
     }
-    errdefer if (provider_initialization_owned) provider.deinitialize();
     try std.Io.randomSecure(io, &host.instance);
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
     host.intake_wake = intake.wake[1];
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
-    provider_initialization_owned = false;
     defer {
         // Stop admitting new connections before releasing any Host-owned
         // execution or request custody. Store and lease outlive both drains.
@@ -959,7 +955,6 @@ pub fn serve(
         host.execution_shutdown.store(true, .release);
         host.launch_mutex.unlock(host.io);
         execution_thread.join();
-        if (provider_endpoint != null) provider.deinitialize();
     }
     var ready: protocol.ResponseBuffer = .{};
     try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
@@ -978,7 +973,7 @@ pub fn serve(
         if (provider_endpoint != null) "enabled" else "unavailable",
     });
     if (provider_endpoint != null) {
-        try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
+        try ready.appendFmt(" nghttp2={s} openssl={s}", .{ provider.nghttp2_version, provider.openssl_version });
     }
     try ready.append("\n");
     if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
