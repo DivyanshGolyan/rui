@@ -18,6 +18,7 @@ pub const TransportOptions = struct {
     // Borrowed until start returns; curl_slist owns copies through teardown.
     extra_headers: []const [:0]const u8 = &.{},
     observation_names: ObservationNames = .{},
+    turn_state: ?TurnStateSink = null,
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
     response_acquire_fault: bool = false,
@@ -490,10 +491,10 @@ const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     alternate_model: protocol.Bounded(protocol.max_model_bytes) = .{},
-    /// The first caller-named routing value of a successful header block.
-    /// A routing hint never fails the transfer: an unusable first value
-    /// leaves it empty, and later values are ignored.
-    turn_state: protocol.Bounded(max_turn_state_bytes) = .{},
+    /// Receives the first caller-named routing value of a successful header
+    /// block. A routing hint never fails the transfer: an unusable first value
+    /// is dropped, and later values are ignored.
+    turn_state: ?TurnStateSink = null,
     turn_state_seen: bool = false,
     successful_block: bool = false,
     retry_after_ms: ?u64 = null,
@@ -509,6 +510,13 @@ pub const ObservationNames = struct {
 };
 
 pub const max_turn_state_bytes = 4096;
+
+/// Takes a routing value while its header block arrives, so a Transfer keeps
+/// no copy. The value is borrowed for the call only.
+pub const TurnStateSink = struct {
+    context: *anyopaque,
+    capture: *const fn (context: *anyopaque, value: []const u8) void,
+};
 
 pub const Transfer = struct {
     const Local = union(enum) {
@@ -579,7 +587,7 @@ pub const Transfer = struct {
             .easy = easy,
             .headers = headers,
             .request = request,
-            .header_context = .{ .names = options.observation_names },
+            .header_context = .{ .names = options.observation_names, .turn_state = options.turn_state },
             .read_context = .{
                 .io = request.io,
                 .file = request.file,
@@ -754,10 +762,6 @@ pub const Transfer = struct {
         return self.header_context.alternate_model.slice();
     }
 
-    pub fn observedTurnState(self: *const Transfer) []const u8 {
-        return self.header_context.turn_state.slice();
-    }
-
     pub fn identity(self: *const Transfer) TransferIdentity {
         return @ptrCast(self);
     }
@@ -856,8 +860,9 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     if (context.names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.turn_state)) {
         if (!context.successful_block or context.turn_state_seen) return bytes;
         context.turn_state_seen = true;
+        if (value.len == 0 or value.len > max_turn_state_bytes) return bytes;
         for (value) |byte| if (byte < 0x20 or byte > 0x7e) return bytes;
-        context.turn_state.set(value) catch {};
+        if (context.turn_state) |sink| sink.capture(sink.context, value);
         return bytes;
     }
     const destination = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
@@ -1025,17 +1030,35 @@ test "turn state observation keeps only the first value of a successful response
         .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-states: prefix\r\n", "x-codex-turn-stat: prefix\r\n" }, .expected = "" },
     };
     for (cases) |case| {
-        var context: HeaderContext = .{ .names = .{ .turn_state = name } };
+        var record: TurnStateRecord = .{};
+        var context: HeaderContext = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
         for (case.lines) |line| try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
-        try std.testing.expectEqualStrings(case.expected, context.turn_state.slice());
+        try std.testing.expectEqualStrings(case.expected, record.value.slice());
+        try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
         try std.testing.expect(!context.invalid);
     }
     // Unnamed callers observe nothing.
-    var unnamed: HeaderContext = .{};
+    var record: TurnStateRecord = .{};
+    var unnamed: HeaderContext = .{ .turn_state = record.sink() };
     for ([_][]const u8{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: value\r\n" }) |line|
         try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &unnamed));
-    try std.testing.expectEqualStrings("", unnamed.turn_state.slice());
+    try std.testing.expectEqual(@as(usize, 0), record.captures);
 }
+
+const TurnStateRecord = struct {
+    value: protocol.Bounded(max_turn_state_bytes) = .{},
+    captures: usize = 0,
+
+    fn sink(self: *TurnStateRecord) TurnStateSink {
+        return .{ .context = self, .capture = capture };
+    }
+
+    fn capture(context: *anyopaque, value: []const u8) void {
+        const self: *TurnStateRecord = @ptrCast(@alignCast(context));
+        self.captures += 1;
+        self.value.set(value) catch unreachable;
+    }
+};
 
 test "idle reactor reports zero unprocessed completions without consuming messages" {
     try initialize();

@@ -478,6 +478,23 @@ pub const TurnStates = struct {
         used: u64 = 0,
     };
 
+    /// One launched transfer's capture authority: its Turn and launch epoch.
+    /// The transfer's header callback delivers its value straight here.
+    pub const Capture = struct {
+        states: *TurnStates,
+        turn_id: u64,
+        epoch: u64,
+
+        pub fn sink(self: *Capture) provider.TurnStateSink {
+            return .{ .context = self, .capture = observe };
+        }
+
+        fn observe(context: *anyopaque, value: []const u8) void {
+            const self: *Capture = @ptrCast(@alignCast(context));
+            self.states.capture(self.turn_id, self.epoch, value);
+        }
+    };
+
     pub fn owner(record: *const codex_credentials.Record) Owner {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update(&.{@intFromBool(record.fedramp)});

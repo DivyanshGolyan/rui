@@ -48,8 +48,9 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// The managed routing epoch selected when this transfer was launched.
-    turn_epoch: ?u64 = null,
+    /// Where a managed transfer delivers its Turn's routing value, with the
+    /// epoch selected at launch.
+    turn_state: ?model_adapter.TurnStates.Capture = null,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
     transfer: provider.Transfer = undefined,
@@ -1570,12 +1571,12 @@ fn launchPreparedRequest(
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_epoch: ?u64 = null;
+    var turn_state: ?model_adapter.TurnStates.Capture = null;
     if (credential) |value| {
         const account = model_adapter.TurnStates.owner(&value.record);
-        const turn_state = host.turn_states.replay(binding.turn_id, account);
-        turn_epoch = turn_state.epoch;
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, turn_state.value) catch |err| {
+        const replay = host.turn_states.replay(binding.turn_id, account);
+        turn_state = .{ .states = &host.turn_states, .turn_id = binding.turn_id, .epoch = replay.epoch };
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
@@ -1586,7 +1587,7 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
-        .turn_epoch = turn_epoch,
+        .turn_state = turn_state,
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
@@ -1595,6 +1596,7 @@ fn launchPreparedRequest(
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
         .observation_names = model_adapter.observation_names,
+        .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1676,9 +1678,6 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    // Transport observes only a successful response's value, so routing
-    // state survives a later body failure and an error answer sets none.
-    if (active.turn_epoch) |epoch| host.turn_states.capture(owner.binding.turn_id, epoch, active.transfer.observedTurnState());
     if (host.authentication != null and host.faults.test_phase_trace) {
         var publication = beginTestObservation(host, "codex_transfer", null);
         defer if (publication) |*value| value.finish();
