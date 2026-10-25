@@ -27,7 +27,7 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using tar
 | Server, protocol, shared execution and scratch | `check` on both systems | None |
 | Server admission or capture owner, admission fixture | Also `admission-debug-integration` on both systems | The routine Debug smoke does not cover the recovery matrix |
 | Bash | `test`, Bash owner, lifecycle, recovery and caller targets; `test-logic` for `src/BashLifecycle.zig` | No general sandbox or power-loss claim |
-| HTTP/2 client (`src/h2/`) | `test-h2`; `test-logic` for `src/h2/policy.zig` | Runs in `check` and the `check-full` execution part. Its peer tests run over loopback h2c and TLS in process |
+| HTTP/2 client (`src/h2/`) | `test-h2`; `test-logic` for `src/h2/policy.zig` | Runs in `check` and the `check-full` execution part. Its peer tests run over loopback h2c and TLS in process. System trust against real servers is manual, on each platform (macOS SecTrust above all), and not a gate: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2` and `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2` |
 | Model and transport | `test`, `dispatch-integration`, `transport-h2-integration`; `test-logic` for `src/transport_policy.zig` | Live provider remains opt-in |
 | Codex credentials | `test`, Codex, credential and Codex H2 targets; `test-logic` for `src/codex_credential_policy.zig` and `src/codex_token_wire.zig` | No real account login required |
 | Evaluator | `workflow-check`, `evaluator-host-integration`, `evaluator-churn`; string sanitizer for string changes | No Host resource campaign for an unchanged Host |

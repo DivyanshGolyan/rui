@@ -2,6 +2,7 @@
 //! Client test pumps the client and the peer on one thread, so every
 //! exchange is deterministic. `exchange` blocks its caller, so its tests
 //! pump the peer on a thread of its own.
+const builtin = @import("builtin");
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
@@ -801,6 +802,12 @@ test "https: the system roots do not trust a private CA" {
     try expectSetupFailure(.{ .peer = .{ .tls = .h2 }, .trust = .system }, .untrusted_peer);
 }
 
+// On macOS SecTrust answers after the handshake, where ALPN is known
+// first; an untrusted peer must still be untrusted, as on Linux.
+test "https: an untrusted peer that does not choose h2 is untrusted" {
+    try expectSetupFailure(.{ .peer = .{ .tls = .no_alpn }, .trust = .system }, .untrusted_peer);
+}
+
 // Manual checks of system trust against real servers, which CI cannot
 // make (its egress re-signs every certificate). Run on each platform:
 // `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2`
@@ -817,7 +824,6 @@ fn liveEnd(url: []const u8) !h2.End {
     defer client.deinit();
     const endpoint = try client.addEndpoint(url);
     var stream: h2.Stream = .idle;
-    defer stream.deinit();
     var sink: [4096]u8 = undefined;
     try client.prepare(&stream, bytesRequest(endpoint, "", &sink));
     client.launch(&stream);
@@ -828,6 +834,7 @@ fn liveEnd(url: []const u8) !h2.End {
     }
     const end = client.nextFinished().?.end().?;
     std.debug.print("live: {s} -> {any}, status {?d}\n", .{ url, end, stream.status() });
+    stream.deinit();
     return end;
 }
 
@@ -840,8 +847,10 @@ test "https live: system trust verifies a public server" {
 }
 
 // badssl.com's broken certificates, and an IP literal its certificate
-// does not name (badssl.com's address), each refused before any request
-// byte. 1.1.1.1's certificate names that IP, so it must verify.
+// does not name (badssl.com's address in October 2026), each refused
+// before any request byte. 1.1.1.1's certificate names that IP, so it
+// must verify. Only SecTrust checks revocation (with its revocation
+// policy), so revoked.badssl.com is asked on macOS alone.
 test "https live: system trust refuses broken certificates and unnamed IPs" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -852,7 +861,7 @@ test "https live: system trust refuses broken certificates and unnamed IPs" {
         "https://self-signed.badssl.com/",
         "https://untrusted-root.badssl.com/",
         "https://104.154.89.105/",
-    }) |url| {
+    } ++ if (builtin.os.tag == .macos) [_][]const u8{"https://revoked.badssl.com/"} else [_][]const u8{}) |url| {
         try std.testing.expectEqual(h2.End{ .cause = .untrusted_peer, .request_sent = false }, try liveEnd(url));
     }
     try std.testing.expectEqual(h2.Cause.complete, (try liveEnd("https://1.1.1.1/")).cause);

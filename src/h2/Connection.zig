@@ -297,7 +297,7 @@ pub fn continueHandshake(self: *Connection) void {
         .done => {
             self.tls_wants_write = false;
             if (sec_trust.enabled and self.engine.tls_context.?.deferred) return self.startVerification();
-            self.startSession();
+            self.startTrustedSession();
         },
         .want_read => self.tls_wants_write = false,
         .want_write => self.tls_wants_write = true,
@@ -319,11 +319,17 @@ pub fn finishVerification(self: *Connection) void {
         const verdict = (self.verification.?.result() orelse return).verdict;
         self.releaseVerification();
         switch (verdict) {
-            .trusted => self.startSession(),
+            .trusted => self.startTrustedSession(),
             .untrusted => self.engine.setupFailed(self, .untrusted_peer),
             .failed => self.engine.setupFailed(self, .local_failure),
         }
     }
+}
+
+/// A verified TLS session becomes an h2 session if the peer chose h2.
+fn startTrustedSession(self: *Connection) void {
+    if (!tls.choseH2(self.ssl.?)) return self.engine.setupFailed(self, .h2_refused);
+    self.startSession();
 }
 
 /// Our SETTINGS refuse push and grant each stream `stream_window_bytes`;

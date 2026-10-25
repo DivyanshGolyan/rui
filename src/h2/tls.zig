@@ -132,22 +132,27 @@ pub const Progress = union(enum) {
     failed: @import("policy.zig").Cause,
 };
 
-/// One nonblocking handshake step. Done means verified and ALPN `h2`.
+/// One nonblocking handshake step. Done means verified, unless SecTrust
+/// verifies the session after it; whether the peer chose h2 is asked
+/// with `choseH2` once it is trusted, so a peer that is neither is
+/// untrusted on every platform.
 pub fn handshake(ssl: *c.SSL) Progress {
     c.ERR_clear_error();
     const result = c.SSL_do_handshake(ssl);
-    if (result == 1) {
-        var selected: [*c]const u8 = null;
-        var selected_len: c_uint = 0;
-        c.SSL_get0_alpn_selected(ssl, &selected, &selected_len);
-        if (selected_len != 2 or !std.mem.eql(u8, selected[0..2], "h2")) return .{ .failed = .h2_refused };
-        return .done;
-    }
+    if (result == 1) return .done;
     return switch (c.SSL_get_error(ssl, result)) {
         c.SSL_ERROR_WANT_READ => .want_read,
         c.SSL_ERROR_WANT_WRITE => .want_write,
         else => .{ .failed = if (c.SSL_get_verify_result(ssl) != c.X509_V_OK) .untrusted_peer else .tls_failed },
     };
+}
+
+/// Whether ALPN chose `h2`, after a done handshake.
+pub fn choseH2(ssl: *c.SSL) bool {
+    var selected: [*c]const u8 = null;
+    var selected_len: c_uint = 0;
+    c.SSL_get0_alpn_selected(ssl, &selected, &selected_len);
+    return selected_len == 2 and std.mem.eql(u8, selected[0..2], "h2");
 }
 
 pub const Transfer = union(enum) {
