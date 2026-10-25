@@ -99,7 +99,6 @@ class SelectionTest(unittest.TestCase):
                 result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertEqual(result[family], expected)
-                self.assertEqual(setup_requirements(result["targets"])["terminal"], bool(set(pty) & set(expected)))
         result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
                         "review", AVAILABLE)
         self.assertNotIn("check", result["targets"] + result["native_targets"])
@@ -491,18 +490,15 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(result["linux_memory_checks"])
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
-    def test_setup_installs_only_selected_fixture_dependencies(self):
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "h2": False, "terminal": False})
-        self.assertEqual(setup_requirements(["check-full"]), {"go": False, "h2": False, "terminal": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "h2": False, "terminal": False})
-        for target in ("transport-h2-integration", "codex-h2-integration"):
-            self.assertEqual(setup_requirements([target, "measurement-check"]),
-                             {"go": True, "h2": True, "terminal": False})
-        # Standalone PTY steps decode screens too, including the upgrade workflow's.
-        for target in ("host-launch-integration", "terminal-restoration-integration",
-                       "canonical-failure-integration", "bash-recovery-integration",
-                       "current-facts-integration"):
-            self.assertTrue(setup_requirements([target])["terminal"], target)
+    def test_setup_installs_fixture_packages_for_any_target(self):
+        self.assertEqual(setup_requirements([]), {"go": False, "python": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "python": True})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "python": True})
+        imported = set()
+        for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
+            imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
+        pinned = {line.split("==")[0] for line in (Path(__file__).parents[1] / "integration/requirements.txt").read_text().split()}
+        self.assertLessEqual(imported, pinned)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):
         targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]

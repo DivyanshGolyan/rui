@@ -129,19 +129,12 @@ runs:
         "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
           "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
     - name: Install the selected Python fixture dependencies
-      if: ${{ steps.requirements.outputs.h2 == 'true' || steps.requirements.outputs.terminal == 'true' }}
+      if: ${{ steps.requirements.outputs.python == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
         python3 -m venv "$RUNNER_TEMP/rui-python"
-        packages=()
-        if [ '${{ steps.requirements.outputs.h2 }}' = true ]; then
-          packages+=('h2==4.3.0')
-        fi
-        if [ '${{ steps.requirements.outputs.terminal }}' = true ]; then
-          packages+=('pyte==0.8.2' 'wcwidth==0.2.13')
-        fi
-        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 "${packages[@]}"
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 -r tests/integration/requirements.txt
         echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
     - name: Select empty caches for scheduled acceptance
       if: ${{ inputs.cold == 'true' }}

@@ -183,16 +183,10 @@ CACHE_POLICY = {
 }
 
 
-# Targets whose PTY oracles decode screens with pyte (tests/integration/terminal_screen.py).
-TERMINAL_TARGETS = {"check", "check-full", "terminal-restoration-integration",
-                    "canonical-failure-integration", "host-launch-integration",
-                    "bash-recovery-integration", "current-facts-integration"}
-
-
 def setup_requirements(targets):
-    return {"go": "measurement-check" in targets,
-            "h2": bool(set(targets) & {"transport-h2-integration", "codex-h2-integration"}),
-            "terminal": bool(set(targets) & TERMINAL_TARGETS)}
+    # Every runner installs the same fixture packages (tests/integration/requirements.txt)
+    # for any target, so no fixture's import depends on a hand-kept target list.
+    return {"go": "measurement-check" in targets, "python": bool(targets)}
 
 
 def execution_batches(targets, check_part="all"):
