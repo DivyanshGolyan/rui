@@ -48,8 +48,9 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// The managed routing epoch selected when this transfer was launched.
-    turn_epoch: ?u64 = null,
+    /// Where a managed transfer delivers its Turn's routing value, with the
+    /// epoch selected at launch.
+    turn_state: ?model_adapter.TurnStates.Capture = null,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
     transfer: provider.Transfer = undefined,
@@ -229,6 +230,15 @@ const LifecycleMeasurement = struct {
 
 const lifecycle_trace_interval_ms = 100;
 
+/// The execution thread's large scratch, in fresh pages: each buffer becomes
+/// resident only when its work first runs. On the stack, ReleaseSafe would
+/// fill them all at startup. Never assign the whole struct.
+const Workspace = struct {
+    model_preparation: model_adapter.Preparation,
+    bash_window: [bash.copy_window_bytes]u8,
+    capture_buffers: provider.CaptureWriter.Buffers,
+};
+
 pub fn executionMain(host: *Host) void {
     var auth_worker = AuthWorker{ .io = host.io, .authentication = host.authentication orelse undefined };
     const auth_thread: ?std.Thread = if (host.authentication != null)
@@ -243,24 +253,30 @@ pub fn executionMain(host: *Host) void {
         host.auth_worker = null;
         auth_worker.stop(thread);
     };
-    const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
+    // Zero bytes are a free slot and an empty Turn entry, so fresh pages
+    // need no initializing pass and an idle slot never becomes resident.
+    const slots = mapZeroed(ExecutionSlot, host.custody.records.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    defer host.allocator.free(slots);
-    for (slots) |*slot| slot.* = .free;
-    const turn_states = host.allocator.alloc(model_adapter.TurnStates.Entry, slots.len) catch |err| {
+    defer unmapZeroed(slots);
+    const turn_states = mapZeroed(model_adapter.TurnStates.Entry, slots.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    for (turn_states) |*entry| entry.* = .{};
     host.turn_states = .{ .entries = turn_states };
     defer {
         host.turn_states = .{};
-        host.allocator.free(turn_states);
+        unmapZeroed(turn_states);
     }
+    const workspace = mapZeroed(Workspace, 1) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    defer unmapZeroed(workspace);
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
+        .buffers = &workspace[0].capture_buffers,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
         .test_observation = host.test_observation,
@@ -286,28 +302,27 @@ pub fn executionMain(host: *Host) void {
         null;
     defer if (reactor) |*active| active.deinit();
     var bash_preparation: ?bash.Preparation = null;
-    var model_preparation: model_adapter.Preparation = undefined;
+    const model_preparation = &workspace[0].model_preparation;
     defer shutdownExecution(
         host,
         if (reactor) |*active| active else null,
         slots,
         &bash_preparation,
-        &model_preparation,
+        model_preparation,
     );
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var next_receive_slot: usize = 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
-        var bash_window: [bash.copy_window_bytes]u8 = undefined;
         var native = NativeTurn{
             .host = host,
             .reactor = if (reactor) |*active| active else null,
             .slots = slots,
             .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
-            .model_preparation = &model_preparation,
-            .bash_window = &bash_window,
+            .model_preparation = model_preparation,
+            .bash_window = &workspace[0].bash_window,
             .measurement = &measurement,
             .fenced = false,
         };
@@ -661,7 +676,8 @@ test "receive advancement serves paused siblings across recurring queue pressure
             unreachable;
         }
     };
-    var writer = provider.CaptureWriter{ .io = std.testing.io };
+    var buffers: provider.CaptureWriter.Buffers = undefined;
+    var writer = provider.CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var host: Host = undefined;
     host.capture_writer = &writer;
     host.faults = .{};
@@ -755,6 +771,45 @@ fn cancelSupersededTransfers(
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
+}
+
+/// Returns `count` items in fresh anonymous pages: every byte is zero and no
+/// page is resident until first written. Allocator.alloc promises neither,
+/// because ReleaseSafe fills new memory with 0xAA and an init loop writes
+/// every page, so callers whose empty state is all zero bytes use this.
+fn mapZeroed(comptime T: type, count: usize) ![]T {
+    if (count == 0) return &.{};
+    const bytes = try std.posix.mmap(
+        null,
+        try std.math.mul(usize, @sizeOf(T), count),
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+}
+
+fn unmapZeroed(items: anytype) void {
+    if (items.len == 0) return;
+    std.posix.munmap(@alignCast(std.mem.sliceAsBytes(items)));
+}
+
+test "zeroed pages are free slots and empty Turn entries" {
+    const slots = try mapZeroed(ExecutionSlot, 3);
+    defer unmapZeroed(slots);
+    for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
+    try std.testing.expectEqual(slots.len, countFreeSlots(slots));
+    const entries = try mapZeroed(model_adapter.TurnStates.Entry, 2);
+    defer unmapZeroed(entries);
+    for (entries) |entry| {
+        try std.testing.expectEqual(@as(?u64, null), entry.turn_id);
+        try std.testing.expectEqualStrings("", entry.value.slice());
+        try std.testing.expectEqual(@as(u64, 0), entry.used);
+    }
+    var states: model_adapter.TurnStates = .{ .entries = entries };
+    try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
+    try std.testing.expectEqual(@as(usize, 0), (try mapZeroed(ExecutionSlot, 0)).len);
 }
 
 fn countFreeSlots(slots: []const ExecutionSlot) usize {
@@ -1531,12 +1586,12 @@ fn launchPreparedRequest(
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_epoch: ?u64 = null;
+    var turn_state: ?model_adapter.TurnStates.Capture = null;
     if (credential) |value| {
         const account = model_adapter.TurnStates.owner(&value.record);
-        const turn_state = host.turn_states.replay(binding.turn_id, account);
-        turn_epoch = turn_state.epoch;
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, turn_state.value) catch |err| {
+        const replay = host.turn_states.replay(binding.turn_id, account);
+        turn_state = .{ .states = &host.turn_states, .turn_id = binding.turn_id, .epoch = replay.epoch };
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
@@ -1547,7 +1602,7 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
-        .turn_epoch = turn_epoch,
+        .turn_state = turn_state,
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
@@ -1556,6 +1611,7 @@ fn launchPreparedRequest(
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
         .observation_names = model_adapter.observation_names,
+        .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1637,9 +1693,6 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    // Transport observes only a successful response's value, so routing
-    // state survives a later body failure and an error answer sets none.
-    if (active.turn_epoch) |epoch| host.turn_states.capture(owner.binding.turn_id, epoch, active.transfer.observedTurnState());
     if (host.authentication != null and host.faults.test_phase_trace) {
         var publication = beginTestObservation(host, "codex_transfer", null);
         defer if (publication) |*value| value.finish();
@@ -2288,7 +2341,8 @@ test "HTTP error capture retires before execution custody" {
         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
-        var writer = provider.CaptureWriter{ .io = io };
+        var buffers: provider.CaptureWriter.Buffers = undefined;
+        var writer = provider.CaptureWriter{ .io = io, .buffers = &buffers };
         var retained: ?named_scratch.Owner = null;
         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
             .io = io,

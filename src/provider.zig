@@ -18,6 +18,7 @@ pub const TransportOptions = struct {
     // Borrowed until start returns; curl_slist owns copies through teardown.
     extra_headers: []const [:0]const u8 = &.{},
     observation_names: ObservationNames = .{},
+    turn_state: ?TurnStateSink = null,
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
     response_acquire_fault: bool = false,
@@ -231,12 +232,15 @@ pub const CaptureWriter = struct {
     const Entry = struct {
         capture: *ResponseCapture,
         length: usize = 0,
-        bytes: [c.CURL_MAX_WRITE_SIZE]u8 = undefined,
         seal: bool = false,
         fail_seal: bool = false,
     };
+    /// Entry i's bytes. The caller owns this storage, so constructing a
+    /// writer does not write it and only queued chunks touch it.
+    pub const Buffers = [capacity][c.CURL_MAX_WRITE_SIZE]u8;
 
     io: std.Io,
+    buffers: *Buffers,
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
     entries: [capacity]Entry = undefined,
@@ -296,7 +300,7 @@ pub const CaptureWriter = struct {
                     _ = gate.readStreaming(self.io, &.{&release}) catch {};
                 } else |_| {}
             };
-            capture.file.writeStreamingAll(capture.io, entry.bytes[0..entry.length]) catch {
+            capture.file.writeStreamingAll(capture.io, self.buffers[self.head][0..entry.length]) catch {
                 self.mutex.lockUncancelable(self.io);
                 capture.failure = .write_failed;
                 self.mutex.unlock(self.io);
@@ -339,9 +343,9 @@ pub const CaptureWriter = struct {
             capture.failure = .write_failed;
             return 0;
         };
-        const entry = &self.entries[(self.head + self.count) % capacity];
-        entry.* = .{ .capture = capture, .length = bytes.len };
-        @memcpy(entry.bytes[0..bytes.len], bytes);
+        const index = (self.head + self.count) % capacity;
+        self.entries[index] = .{ .capture = capture, .length = bytes.len };
+        @memcpy(self.buffers[index][0..bytes.len], bytes);
         capture.pending_writes += 1;
         self.count += 1;
         self.available.signal(self.io);
@@ -490,10 +494,10 @@ const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     alternate_model: protocol.Bounded(protocol.max_model_bytes) = .{},
-    /// The first caller-named routing value of a successful header block.
-    /// A routing hint never fails the transfer: an unusable first value
-    /// leaves it empty, and later values are ignored.
-    turn_state: protocol.Bounded(max_turn_state_bytes) = .{},
+    /// Receives the first caller-named routing value of a successful header
+    /// block. A routing hint never fails the transfer: an unusable first value
+    /// is dropped, and later values are ignored.
+    turn_state: ?TurnStateSink = null,
     turn_state_seen: bool = false,
     successful_block: bool = false,
     retry_after_ms: ?u64 = null,
@@ -509,6 +513,13 @@ pub const ObservationNames = struct {
 };
 
 pub const max_turn_state_bytes = 4096;
+
+/// Takes a routing value while its header block arrives, so a Transfer keeps
+/// no copy. The value is borrowed for the call only.
+pub const TurnStateSink = struct {
+    context: *anyopaque,
+    capture: *const fn (context: *anyopaque, value: []const u8) void,
+};
 
 pub const Transfer = struct {
     const Local = union(enum) {
@@ -579,7 +590,7 @@ pub const Transfer = struct {
             .easy = easy,
             .headers = headers,
             .request = request,
-            .header_context = .{ .names = options.observation_names },
+            .header_context = .{ .names = options.observation_names, .turn_state = options.turn_state },
             .read_context = .{
                 .io = request.io,
                 .file = request.file,
@@ -754,10 +765,6 @@ pub const Transfer = struct {
         return self.header_context.alternate_model.slice();
     }
 
-    pub fn observedTurnState(self: *const Transfer) []const u8 {
-        return self.header_context.turn_state.slice();
-    }
-
     pub fn identity(self: *const Transfer) TransferIdentity {
         return @ptrCast(self);
     }
@@ -856,8 +863,9 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     if (context.names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.turn_state)) {
         if (!context.successful_block or context.turn_state_seen) return bytes;
         context.turn_state_seen = true;
+        if (value.len == 0 or value.len > max_turn_state_bytes) return bytes;
         for (value) |byte| if (byte < 0x20 or byte > 0x7e) return bytes;
-        context.turn_state.set(value) catch {};
+        if (context.turn_state) |sink| sink.capture(sink.context, value);
         return bytes;
     }
     const destination = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
@@ -1025,17 +1033,35 @@ test "turn state observation keeps only the first value of a successful response
         .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-states: prefix\r\n", "x-codex-turn-stat: prefix\r\n" }, .expected = "" },
     };
     for (cases) |case| {
-        var context: HeaderContext = .{ .names = .{ .turn_state = name } };
+        var record: TurnStateRecord = .{};
+        var context: HeaderContext = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
         for (case.lines) |line| try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
-        try std.testing.expectEqualStrings(case.expected, context.turn_state.slice());
+        try std.testing.expectEqualStrings(case.expected, record.value.slice());
+        try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
         try std.testing.expect(!context.invalid);
     }
     // Unnamed callers observe nothing.
-    var unnamed: HeaderContext = .{};
+    var record: TurnStateRecord = .{};
+    var unnamed: HeaderContext = .{ .turn_state = record.sink() };
     for ([_][]const u8{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: value\r\n" }) |line|
         try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &unnamed));
-    try std.testing.expectEqualStrings("", unnamed.turn_state.slice());
+    try std.testing.expectEqual(@as(usize, 0), record.captures);
 }
+
+const TurnStateRecord = struct {
+    value: protocol.Bounded(max_turn_state_bytes) = .{},
+    captures: usize = 0,
+
+    fn sink(self: *TurnStateRecord) TurnStateSink {
+        return .{ .context = self, .capture = capture };
+    }
+
+    fn capture(context: *anyopaque, value: []const u8) void {
+        const self: *TurnStateRecord = @ptrCast(@alignCast(context));
+        self.captures += 1;
+        self.value.set(value) catch unreachable;
+    }
+};
 
 test "idle reactor reports zero unprocessed completions without consuming messages" {
     try initialize();
@@ -1071,7 +1097,8 @@ test "curl results reach transport policy by name" {
 }
 
 test "a full capture queue pauses the inactivity interval and curl progress cannot expire it" {
-    var writer = CaptureWriter{ .io = std.testing.io, .count = CaptureWriter.capacity };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers, .count = CaptureWriter.capacity };
     var transfer: Transfer = undefined;
     transfer.request.io = std.testing.io;
     transfer.writer = &writer;
@@ -1096,7 +1123,8 @@ test "Transfer finalization waits for real writer drainage and seals once" {
     const readonly = try tmp.dir.openFile(std.testing.io, "capture", .{});
     try tmp.dir.deleteFile(std.testing.io, "capture");
     var used = std.atomic.Value(u64).init(0);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var transfer: Transfer = undefined;
     transfer.writer = &writer;
     transfer.response = .{
@@ -1132,7 +1160,8 @@ test "Transfer finalization waits for real writer drainage and seals once" {
 }
 
 test "receive scans without resume capacity still settle capture failure and queue expiry" {
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var reactor: Reactor = undefined; // Neither case retains a native handle.
     var inject_resume_failure = false;
     for ([_]bool{ true, false }) |capture_failed| {
@@ -1161,7 +1190,8 @@ test "full capture queue rejects an offer without changing its charge or pending
     const readonly = try tmp.dir.openFile(std.testing.io, "full-queue", .{});
     try tmp.dir.deleteFile(std.testing.io, "full-queue");
     var used = std.atomic.Value(u64).init(0);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var capture = ResponseCapture{
         .io = std.testing.io,
         .file = file,
@@ -1189,7 +1219,8 @@ test "Transfer finalization records late capture failure and retains discarded w
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var used = std.atomic.Value(u64).init(41);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     for ([_]enum { write_failure, seal_failure, discard, discard_after_completion }{
         .write_failure, .seal_failure, .discard, .discard_after_completion,
     }, 0..) |scenario, index| {
