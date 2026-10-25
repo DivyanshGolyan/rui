@@ -1048,6 +1048,7 @@ fn configureTransport(
     options.addOption([]const u8, "revision", buildRevision(b));
     options.addOption([]const u8, "version", buildVersion(b));
     compile.root_module.addOptions("transport_options", options);
+    if (addH2(b, target, compile.root_module.optimize.?, maybe_pinned)) |h2| compile.root_module.addImport("h2", h2);
     const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
     const pinned = maybe_pinned orelse {
         bindings.addIncludePath(b.dependency("curl", .{}).path("include"));
@@ -1082,12 +1083,13 @@ fn configureTransport(
 }
 
 /// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
-/// or null where the pinned transport is not built.
+/// or null where the pinned transport is not built. With only headers it
+/// type-checks and links nothing.
 fn addH2(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    pinned: PinnedTransport,
+    maybe_pinned: ?PinnedTransport,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -1103,6 +1105,10 @@ fn addH2(
         \\#include <openssl/x509v3.h>
         \\
     );
+    const pinned = maybe_pinned orelse {
+        bindings.addIncludePath(addTransportHeaders(b, target));
+        return module;
+    };
     bindings.addIncludePath(pinned.output.path(b, "include"));
     module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
     module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
@@ -1120,6 +1126,19 @@ fn addH2(
         module.linkSystemLibrary("dl", .{});
     }
     return module;
+}
+
+/// The pinned OpenSSL and nghttp2 headers for `target`, generated without
+/// building either library.
+fn addTransportHeaders(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.LazyPath {
+    const generate = b.addSystemCommand(&.{"sh"});
+    generate.addFileArg(b.path("src/build_transport_headers.sh"));
+    generate.addDirectoryArg2(b.dependency("openssl", .{}).path("."), .{ .make_absolute = true });
+    generate.addDirectoryArg2(b.dependency("nghttp2", .{}).path("."), .{ .make_absolute = true });
+    const target_name = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+    const output = generate.addOutputDirectoryArg2(b.fmt("transport-headers-{s}", .{target_name}), .{ .make_absolute = true });
+    generate.addArg(target_name);
+    return output.path(b, "include");
 }
 
 fn transportEnabled(target: std.Build.ResolvedTarget) bool {

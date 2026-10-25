@@ -6,7 +6,9 @@
 //!
 //! Shape: a polled engine for one owner thread. The owner calls `drive` to
 //! do all ready work and `wait` to block until there is some; nothing here
-//! runs on its own. Other threads may only call `Client.wake`.
+//! runs on its own. Other threads may only call `Client.wake`. `exchange`
+//! is one blocking request on a private Client, for callers that send one
+//! request at a time.
 //!
 //! What the engine owns, so its caller does not:
 //! - one connection pool per origin, opening another connection only when
@@ -393,6 +395,87 @@ pub const Client = extern struct {
     }
 };
 
+// ----------------------------------------------------------------- exchange
+
+pub const Exchange = struct {
+    url: []const u8,
+    fields: []const Field,
+    body: []const u8,
+    /// The response body lands here; a longer one ends `.sink_refused`.
+    response: []u8,
+    trust: Trust = .system,
+    connect_timeout_ns: u64,
+    /// From the call until the stream ends, whatever arrives meanwhile.
+    total_timeout_ns: u64,
+    /// Polled at least every 100 ms; true cancels the request and returns
+    /// `error.Interrupted`.
+    cancelled: ?*const fn () bool = null,
+};
+
+pub const ExchangeOutcome = union(enum) {
+    /// The whole response, its body a prefix of `Exchange.response`.
+    answered: struct { status: u16, body: []const u8 },
+    /// Never `.complete`.
+    failed: End,
+    /// `total_timeout_ns` passed first.
+    timed_out: struct { request_sent: bool },
+};
+
+pub const ExchangeError = InitError || EndpointError || PrepareError || DriveError || error{Interrupted};
+
+/// One request on a private Client and connection, blocking the calling
+/// thread until it ends: no pool and no reuse, as a curl easy handle.
+/// Allocates from the page allocator, since its callers (token refresh,
+/// device login) have none and run a few times an hour at most.
+pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
+    const started = std.Io.Clock.awake.now(io).nanoseconds;
+    if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
+    var client: Client = undefined;
+    try client.init(std.heap.page_allocator, io, .{
+        .stream_capacity = 1,
+        // The total deadline below is the one that matters; this only
+        // keeps the inactivity timer from ending the stream first.
+        .inactivity_ns = request.total_timeout_ns +| std.time.ns_per_s,
+        .connect_timeout_ns = request.connect_timeout_ns,
+        .trust = request.trust,
+    });
+    defer client.deinit();
+    const endpoint = try client.addEndpoint(request.url);
+    var stream: Stream = .idle;
+    try client.prepare(&stream, .{
+        .endpoint = endpoint,
+        .fields = request.fields,
+        .body = .{ .bytes = request.body },
+        .sink = .{ .buffer = request.response },
+    });
+    defer {
+        client.cancel(&stream);
+        stream.deinit();
+    }
+    client.launch(&stream);
+    var receiver: AcceptAll = .{};
+    while (true) {
+        try client.drive(&receiver);
+        if (client.nextFinished()) |_| {
+            const end = stream.end().?;
+            if (end.cause != .complete) return .{ .failed = end };
+            return .{ .answered = .{ .status = stream.status().?, .body = request.response[0..@intCast(stream.responseLength())] } };
+        }
+        if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        if (elapsed >= request.total_timeout_ns)
+            return .{ .timed_out = .{ .request_sent = Record.of(&stream).flags.request_sent } };
+        const remaining_ms = std.math.divCeil(u64, request.total_timeout_ns - elapsed, std.time.ns_per_ms) catch unreachable;
+        try client.wait(@intCast(@min(remaining_ms, 100)));
+    }
+}
+
+const AcceptAll = struct {
+    pub fn observe(_: *AcceptAll, _: *Stream, _: Event) Verdict {
+        return .accept;
+    }
+};
+
 // -------------------------------------------------------------------- tests
 
 test "the linked libraries are the pinned versions" {
@@ -445,5 +528,6 @@ test {
     _ = Engine;
     _ = @import("Waker.zig");
     _ = @import("Resolver.zig");
+    _ = @import("tls.zig");
     _ = @import("tests.zig");
 }

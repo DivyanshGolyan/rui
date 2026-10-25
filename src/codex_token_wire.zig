@@ -12,14 +12,15 @@ pub const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const response_limit = 64 * 1024;
 pub const token_limit = policy.max_token_bytes;
 const Required = policy.Required;
-const json_content = "Content-Type: application/json";
-const form_content = "Content-Type: application/x-www-form-urlencoded";
+const json_content = "application/json";
+const form_content = "application/x-www-form-urlencoded";
 const token_url = issuer ++ "/oauth/token";
 
 /// One POST to the issuer. The body may borrow caller-owned secret bytes.
 pub const Request = struct {
-    url: [:0]const u8,
-    content_type: [*:0]const u8,
+    url: []const u8,
+    /// The content-type field's value.
+    content_type: []const u8,
     body: []const u8,
 };
 
@@ -408,7 +409,7 @@ test "refresh request escapes the refresh token as JSON" {
     var buffer: [256]u8 = undefined;
     const request = try refreshRequest(&record, &buffer);
     try std.testing.expectEqualStrings(issuer ++ "/oauth/token", request.url);
-    try std.testing.expectEqualStrings(json_content, std.mem.span(request.content_type));
+    try std.testing.expectEqualStrings(json_content, request.content_type);
     try std.testing.expectEqualStrings(
         "{\"grant_type\":\"refresh_token\",\"client_id\":\"" ++ client_id ++ "\",\"refresh_token\":\"a\\\"b\\\\c\"}",
         request.body,
@@ -440,7 +441,7 @@ test "device start validates codes and builds the poll body" {
     try std.testing.expectEqual(@as(u16, 5), start.interval_seconds);
     const poll = start.pollRequest();
     try std.testing.expectEqualStrings(issuer ++ "/api/accounts/deviceauth/token", poll.url);
-    try std.testing.expectEqualStrings(json_content, std.mem.span(poll.content_type));
+    try std.testing.expectEqualStrings(json_content, poll.content_type);
     try std.testing.expectEqualStrings("{\"device_auth_id\":\"dev-1\",\"user_code\":\"ABCD-EFGH\"}", poll.body);
     try std.testing.expectEqualStrings("{\"client_id\":\"" ++ client_id ++ "\"}", device_start.body);
     try std.testing.expectError(error.DeviceAuthenticationUnavailable, parseDeviceStart(404, "", &start));
@@ -480,7 +481,7 @@ test "authorization exchange percent-encodes code and verifier independently" {
     var buffer: [512]u8 = undefined;
     const request = try grantExchangeRequest("{\"authorization_code\":\"a+b &\",\"code_challenge\":\"x\",\"code_verifier\":\"v/=+\"}", &buffer);
     try std.testing.expectEqualStrings(issuer ++ "/oauth/token", request.url);
-    try std.testing.expectEqualStrings(form_content, std.mem.span(request.content_type));
+    try std.testing.expectEqualStrings(form_content, request.content_type);
     try std.testing.expectEqualStrings(
         "grant_type=authorization_code&client_id=" ++ client_id ++
             "&code=a%2Bb%20%26&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback&code_verifier=v%2F%3D%2B",

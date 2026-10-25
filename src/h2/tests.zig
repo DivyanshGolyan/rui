@@ -1,6 +1,7 @@
 //! The client against the in-process peer over loopback h2c and TLS. Each
-//! test pumps the client and the peer on one thread, so every exchange is
-//! deterministic.
+//! Client test pumps the client and the peer on one thread, so every
+//! exchange is deterministic. `exchange` blocks its caller, so its tests
+//! pump the peer on a thread of its own.
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
@@ -853,4 +854,155 @@ test "https: trust is loaded by the first https endpoint, and a missing CA file 
     defer client.deinit();
     _ = try client.addEndpoint("http://127.0.0.1:9/v1");
     try std.testing.expectError(error.InvalidCaFile, client.addEndpoint("https://127.0.0.1:9/v1"));
+}
+
+// ----------------------------------------------------------------- exchange
+
+/// A peer pumped on its own thread, since `exchange` blocks the test's.
+/// Only that thread touches the peer until `join` returns.
+const PeerThread = struct {
+    peer: *Peer,
+    thread: ?std.Thread,
+    stopping: std.atomic.Value(bool) = .init(false),
+    failure: ?anyerror = null,
+
+    fn start(self: *PeerThread, options: Peer.Options) !void {
+        self.* = .{ .peer = try Peer.start(std.testing.allocator, options), .thread = null };
+        errdefer self.peer.stop();
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *PeerThread) void {
+        while (!self.stopping.load(.acquire)) {
+            self.peer.pump() catch |err| {
+                self.failure = err;
+                return;
+            };
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    /// Stops and joins the thread; the peer stays readable until `stop`.
+    fn join(self: *PeerThread) !void {
+        if (self.thread) |thread| {
+            self.stopping.store(true, .release);
+            thread.join();
+            self.thread = null;
+        }
+        if (self.failure) |err| return err;
+    }
+
+    /// Joins first, so the peer is never freed under its thread.
+    fn stop(self: *PeerThread) void {
+        self.join() catch {};
+        self.peer.stop();
+    }
+
+    fn streams(self: *const PeerThread) []*Peer.Stream {
+        std.debug.assert(self.thread == null);
+        return self.peer.streams.items;
+    }
+};
+
+fn exchangeRequest(url: []const u8, response: []u8) h2.Exchange {
+    return .{
+        .url = url,
+        .fields = &.{.{ .name = "content-type", .value = "application/x-www-form-urlencoded" }},
+        .body = "grant_type=refresh_token",
+        .response = response,
+        .connect_timeout_ns = 5 * std.time.ns_per_s,
+        .total_timeout_ns = 5 * std.time.ns_per_s,
+    };
+}
+
+test "exchange: one request and its whole answer" {
+    var peer: PeerThread = undefined;
+    try peer.start(.{});
+    defer peer.stop();
+    var response: [64]u8 = undefined;
+    const outcome = try h2.exchange(std.testing.io, exchangeRequest(peer.peer.url(), &response));
+    try peer.join();
+    try std.testing.expectEqual(@as(u16, 200), outcome.answered.status);
+    try std.testing.expectEqualStrings("ok", outcome.answered.body);
+    const seen = peer.streams()[0];
+    try std.testing.expectEqualStrings("/v1/responses", seen.path.items);
+    try std.testing.expectEqualStrings("grant_type=refresh_token", seen.body.items);
+    try std.testing.expectEqual(@as(u32, 1), peer.peer.seen.connections);
+}
+
+test "exchange: https against a CA file" {
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .tls = .h2 });
+    defer peer.stop();
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest(peer.peer.url(), &response);
+    request.trust = .{ .ca_file = peer.peer.caPath() };
+    const outcome = try h2.exchange(std.testing.io, request);
+    try peer.join();
+    try std.testing.expectEqual(@as(u16, 200), outcome.answered.status);
+    try std.testing.expectEqualStrings("ok", outcome.answered.body);
+}
+
+test "exchange: an answer longer than the buffer is refused, as sent" {
+    const Respond = struct {
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            peer.respond(stream, 200, "0123456789");
+        }
+    };
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .on_request = Respond.handle });
+    defer peer.stop();
+    var response: [4]u8 = undefined;
+    const outcome = try h2.exchange(std.testing.io, exchangeRequest(peer.peer.url(), &response));
+    try peer.join();
+    try std.testing.expectEqual(h2.End{ .cause = .sink_refused, .request_sent = true }, outcome.failed);
+}
+
+test "exchange: the total deadline ends a request the peer never answers" {
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .on_request = hold });
+    defer peer.stop();
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest(peer.peer.url(), &response);
+    request.total_timeout_ns = 300 * ns_per_ms;
+    const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    const outcome = try h2.exchange(std.testing.io, request);
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - started;
+    try peer.join();
+    try std.testing.expect(outcome.timed_out.request_sent);
+    try std.testing.expect(elapsed >= 300 * ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), peer.streams().len);
+}
+
+test "exchange: cancellation stops a request in flight" {
+    const Cancel = struct {
+        var requested: std.atomic.Value(bool) = .init(false);
+        fn handle(_: *Peer, _: *Peer.Stream) void {
+            requested.store(true, .release);
+        }
+        fn cancelled() bool {
+            return requested.load(.acquire);
+        }
+    };
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .on_request = Cancel.handle });
+    defer peer.stop();
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest(peer.peer.url(), &response);
+    request.cancelled = Cancel.cancelled;
+    try std.testing.expectError(error.Interrupted, h2.exchange(std.testing.io, request));
+    try peer.join();
+    try std.testing.expectEqual(@as(usize, 1), peer.streams().len);
+}
+
+test "exchange: a refused connection is positive evidence nothing was sent" {
+    // As in the Client test: a port whose listener just closed.
+    const peer = try Peer.start(std.testing.allocator, .{});
+    var url_buffer: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
+    peer.stop();
+    var response: [64]u8 = undefined;
+    const outcome = try h2.exchange(std.testing.io, exchangeRequest(url, &response));
+    try std.testing.expectEqual(h2.End{ .cause = .connect_failed, .request_sent = false }, outcome.failed);
+    try std.testing.expectError(error.InvalidUrl, h2.exchange(std.testing.io, exchangeRequest("://", &response)));
 }

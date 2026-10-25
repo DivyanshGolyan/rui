@@ -28,6 +28,12 @@ pub const system_bundles = [_][:0]const u8{
 };
 
 const alpn_h2 = "\x02h2";
+/// TLS 1.2 suites, all AEAD with ephemeral keys (RFC 9113 9.2.2). TLS 1.3
+/// suites are set apart and already qualify.
+const tls12_ciphers = "ECDHE+AESGCM:ECDHE+CHACHA20";
+// SSL_OP_NO_TICKET and SSL_OP_NO_RENEGOTIATION; their macros do not translate.
+const no_ticket: u64 = 1 << 14;
+const no_renegotiation: u64 = 1 << 30;
 
 pub const HostKind = enum { dns_name, ip_literal };
 
@@ -40,7 +46,9 @@ pub const Context = struct {
     /// Sessions are verified by SecTrust after their handshake.
     deferred: bool,
 
-    /// TLS 1.2 or later; ALPN `h2` only; no session cache, so every
+    /// TLS 1.2 or later, with only the AEAD suites HTTP/2 allows on 1.2 and
+    /// no renegotiation (RFC 9113 9.2), so no certificate arrives after the
+    /// verified one; ALPN `h2` only; no session cache, so every
     /// connection verifies the peer afresh; RELEASE_BUFFERS, so an idle
     /// connection holds no OpenSSL record buffers; partial writes from a
     /// moving buffer, for nghttp2's frame buffer.
@@ -51,8 +59,8 @@ pub const Context = struct {
         c.SSL_CTX_set_verify(ctx, c.SSL_VERIFY_PEER, null);
         _ = c.SSL_CTX_set_mode(ctx, c.SSL_MODE_RELEASE_BUFFERS | c.SSL_MODE_ENABLE_PARTIAL_WRITE | c.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
         _ = c.SSL_CTX_set_session_cache_mode(ctx, c.SSL_SESS_CACHE_OFF);
-        // SSL_OP_NO_TICKET; its macro does not translate.
-        _ = c.SSL_CTX_set_options(ctx, @as(u64, 1) << 14);
+        if (c.SSL_CTX_set_cipher_list(ctx, tls12_ciphers) != 1) return error.OutOfMemory;
+        _ = c.SSL_CTX_set_options(ctx, no_ticket | no_renegotiation);
         // Inverted convention: 0 is success.
         if (c.SSL_CTX_set_alpn_protos(ctx, alpn_h2, alpn_h2.len) != 0) return error.OutOfMemory;
         const bio_method = newBioMethod() orelse return error.OutOfMemory;
@@ -84,6 +92,8 @@ pub const Context = struct {
             self.deferred or c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1
         else
             c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and (self.deferred or c.SSL_set1_host(ssl, &host_z) == 1);
+        // A wildcard covers a whole label (`*.example.com`), never part of one.
+        c.SSL_set_hostflags(ssl, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
         if (!named) {
             c.SSL_free(ssl);
             return null;
@@ -234,4 +244,27 @@ fn bioCtrl(_: ?*c.BIO, command: c_int, _: c_long, _: ?*anyopaque) callconv(.c) c
 fn bioCreate(bio: ?*c.BIO) callconv(.c) c_int {
     c.BIO_set_init(bio, 1);
     return 1;
+}
+
+test "contexts offer only AEAD suites on TLS 1.2 and refuse renegotiation" {
+    var context = try Context.init(.system);
+    defer context.deinit();
+    try std.testing.expect(c.SSL_CTX_get_options(context.ctx) & no_renegotiation != 0);
+    const ciphers = c.SSL_CTX_get_ciphers(context.ctx).?;
+    const count: usize = @intCast(c.OPENSSL_sk_num(@ptrCast(ciphers)));
+    try std.testing.expect(count > 0);
+    for (0..count) |index| {
+        const cipher: *const c.SSL_CIPHER = @ptrCast(c.OPENSSL_sk_value(@ptrCast(ciphers), @intCast(index)).?);
+        try std.testing.expect(c.SSL_CIPHER_is_aead(cipher) == 1);
+    }
+}
+
+test "sessions checked by OpenSSL refuse partial-label wildcards" {
+    var context = try Context.init(.system);
+    defer context.deinit();
+    if (context.deferred) return error.SkipZigTest;
+    // The descriptor is never used: no handshake runs.
+    const ssl = context.newSession(0, "example.com", .dns_name).?;
+    defer c.SSL_free(ssl);
+    try std.testing.expectEqual(@as(c_uint, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS), c.X509_VERIFY_PARAM_get_hostflags(c.SSL_get0_param(ssl)));
 }
