@@ -168,7 +168,6 @@ pub fn build(b: *std.Build) void {
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        test_step.dependOn(&run_h2_tests.step);
     }
 
     const renderer_allocation = b.addExecutable(.{
@@ -596,7 +595,10 @@ pub fn build(b: *std.Build) void {
     process_integrations.step.dependOn(&format.step);
     // The execution part owns native tests and evaluator/sanitizer work. The
     // callers part runs on another machine, isolated from that child-process load.
-    if (check_part != .callers) process_integrations.step.dependOn(&full_evaluator_host.step);
+    if (check_part != .callers) {
+        process_integrations.step.dependOn(&full_evaluator_host.step);
+        process_integrations.step.dependOn(h2_test_step);
+    }
     process_integrations.addFileInput(ci.path(release));
     full_check_step.dependOn(&process_integrations.step);
 

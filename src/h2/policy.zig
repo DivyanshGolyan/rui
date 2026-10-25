@@ -195,9 +195,8 @@ pub fn liveness(facts: LivenessFacts, config: Liveness) LivenessAction {
         const since = facts.idle_since_ns orelse return .none;
         return if (facts.now_ns -| since >= config.idle_close_ns) .close else .none;
     }
-    if (facts.ping_sent_ns) |sent| {
-        // Anything inbound after the PING proves the connection is alive.
-        if (facts.last_inbound_ns > sent) return .none;
+    // Anything inbound after the PING answers it; quiet time counts again from there.
+    if (pingOutstanding(facts)) |sent| {
         return if (facts.now_ns -| sent >= config.ping_timeout_ns) .dead else .none;
     }
     return if (facts.now_ns -| facts.last_inbound_ns >= config.ping_after_quiet_ns) .ping else .none;
@@ -211,11 +210,13 @@ pub fn livenessDeadline(facts: LivenessFacts, config: Liveness) ?u64 {
         const since = facts.idle_since_ns orelse return null;
         return since +| config.idle_close_ns;
     }
-    if (facts.ping_sent_ns) |sent| {
-        if (facts.last_inbound_ns > sent) return facts.last_inbound_ns +| config.ping_after_quiet_ns;
-        return sent +| config.ping_timeout_ns;
-    }
+    if (pingOutstanding(facts)) |sent| return sent +| config.ping_timeout_ns;
     return facts.last_inbound_ns +| config.ping_after_quiet_ns;
+}
+
+fn pingOutstanding(facts: LivenessFacts) ?u64 {
+    const sent = facts.ping_sent_ns orelse return null;
+    return if (facts.last_inbound_ns > sent) null else sent;
 }
 
 /// The earliest of the timer list's head deadline and the given connection
@@ -346,6 +347,8 @@ test "one PING per quiet connection, a missed PING is fatal, idle connections cl
         .{ .facts = with(with(busy, "last_inbound_ns", 50 * s), "ping_sent_ns", 85 * s), .action = .dead, .deadline = 100 * s },
         // Any inbound byte after the PING counts as the answer.
         .{ .facts = with(with(busy, "last_inbound_ns", 90 * s), "ping_sent_ns", 80 * s), .action = .none, .deadline = 135 * s },
+        // ...and once it is quiet that long again, the next PING is due.
+        .{ .facts = with(with(with(busy, "last_inbound_ns", 90 * s), "ping_sent_ns", 80 * s), "now_ns", 135 * s), .action = .ping, .deadline = 135 * s },
         // An empty connection: kept only while it is its origin's one idle connection.
         .{ .facts = with(with(busy, "streams", 0), "idle_since_ns", 0), .action = .none, .deadline = 118 * s },
         .{ .facts = with(with(busy, "streams", 0), "idle_since_ns", 100 * s), .action = .none, .deadline = 218 * s },
