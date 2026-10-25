@@ -12,7 +12,9 @@
 //! - one connection pool per origin, opening another connection only when
 //!   the peer's SETTINGS_MAX_CONCURRENT_STREAMS is full, and draining a
 //!   connection after GOAWAY;
-//! - h2c by prior knowledge for loopback `http://`;
+//! - TLS with ALPN `h2` only, verified against the host's CA bundle or one
+//!   CA file, and h2c by prior knowledge for loopback `http://`;
+//! - name lookup on a short-lived thread per connection setup;
 //! - request bodies read from the caller's file within the peer's window,
 //!   never copied into a buffer per request;
 //! - response bodies written from the one shared read buffer straight to
@@ -39,6 +41,8 @@ pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";
 
 pub const max_url_bytes = 2048;
+/// The longest DNS name; IP literals are shorter.
+pub const max_host_bytes = 253;
 pub const max_endpoints = 4;
 /// Request fields a caller may set; pseudo-headers and content-length are
 /// the client's own.
@@ -116,7 +120,7 @@ pub fn parseUrl(url: []const u8) UrlError!Url {
             host = authority[0..colon];
             port_text = authority[colon + 1 ..];
         }
-        if (host.len == 0) return error.InvalidUrl;
+        if (host.len == 0 or host.len > max_host_bytes) return error.InvalidUrl;
         for (host) |byte| switch (byte) {
             'a'...'z', 'A'...'Z', '0'...'9', '.', '-' => {},
             else => return error.InvalidUrl,
@@ -144,6 +148,14 @@ pub const Endpoint = enum(u8) { _ };
 
 pub const Liveness = policy.Liveness;
 
+/// What verifies an `https://` peer. Verification is never off.
+pub const Trust = union(enum) {
+    /// The first readable bundle among the host's usual CA bundle paths.
+    system,
+    /// Only the certificates in this PEM file (`--provider-ca-file`).
+    ca_file: []const u8,
+};
+
 pub const Options = struct {
     /// Most streams alive at once. Sizes the connection table: one
     /// connection per stream at worst, when the peer allows one stream.
@@ -152,9 +164,12 @@ pub const Options = struct {
     /// (queue time counts) and renewed by response bytes on the stream.
     /// Being uniform is what lets one list order every deadline.
     inactivity_ns: u64,
-    /// Connect plus the peer's first SETTINGS, per connection.
+    /// Lookup, connect, TLS and the peer's first SETTINGS, per connection.
     connect_timeout_ns: u64,
     liveness: Liveness = .{},
+    /// Loaded once, by the first `https://` `addEndpoint`, which fails when
+    /// the bundle or file cannot be loaded.
+    trust: Trust = .system,
 };
 
 // ----------------------------------------------------------------- requests
@@ -291,6 +306,7 @@ pub const Stream = extern struct {
 // ------------------------------------------------------------------- Client
 
 pub const InitError = error{ OutOfMemory, SystemResources };
+pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 
@@ -310,7 +326,8 @@ pub const Client = extern struct {
     }
 
     /// Registers a URL. Endpoints with one origin share its pool.
-    pub fn addEndpoint(self: *Client, url: []const u8) (UrlError || error{ OutOfMemory, TooManyEndpoints })!Endpoint {
+    /// The first `https://` one loads `Options.trust`.
+    pub fn addEndpoint(self: *Client, url: []const u8) EndpointError!Endpoint {
         return Engine.of(self).addEndpoint(url);
     }
 
@@ -411,6 +428,12 @@ test "URLs: https anywhere, cleartext only to loopback literals" {
         "https://[::1/",
         "https://[not-ip]/",
         "https://example.com\xff/",
+        comptime long: {
+            var name: [max_host_bytes + 1]u8 = undefined;
+            @memset(&name, 'a');
+            const url = "https://" ++ name ++ "/";
+            break :long url;
+        },
     }) |url| try std.testing.expectError(error.InvalidUrl, parseUrl(url));
 }
 
@@ -419,5 +442,6 @@ test {
     _ = Record;
     _ = Engine;
     _ = @import("Waker.zig");
+    _ = @import("Resolver.zig");
     _ = @import("tests.zig");
 }

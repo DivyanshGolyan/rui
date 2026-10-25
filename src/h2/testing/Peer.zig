@@ -1,10 +1,14 @@
 //! An HTTP/2 server for the client's own tests: nghttp2's server session on
-//! a loopback listener, h2c by prior knowledge. Single-threaded and
+//! a loopback listener, h2c by prior knowledge or TLS. Single-threaded and
 //! nonblocking: a test pumps it between client drives, so every exchange is
 //! deterministic and nothing races.
+//!
+//! A TLS peer generates its own CA and leaf certificate (P-256) at start,
+//! and writes the CA to `caPath()` for the client's `.ca_file` trust.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("h2_c");
+const tls = @import("../tls.zig");
 const Peer = @This();
 
 allocator: std.mem.Allocator,
@@ -17,10 +21,23 @@ connections: std.ArrayList(*Connection),
 /// Every request stream in arrival order.
 streams: std.ArrayList(*Stream),
 seen: Seen,
-url_buffer: [64]u8,
+url_buffer: [96]u8,
 url_len: usize,
+/// For a TLS peer.
+ssl_ctx: ?*c.SSL_CTX,
+bio_method: ?*c.BIO_METHOD,
+tmp: ?std.testing.TmpDir,
+ca_path_buffer: [96]u8,
+ca_path_len: usize,
 
 pub const Options = struct {
+    tls: enum { none, h2, no_alpn } = .none,
+    /// The leaf certificate's subjectAltName.
+    leaf_names: [:0]const u8 = "IP:127.0.0.1,DNS:localhost",
+    /// Sign the leaf with a CA other than the one written to `caPath()`.
+    untrusted_issuer: bool = false,
+    /// The host in `url()`.
+    url_host: []const u8 = "127.0.0.1",
     max_concurrent_streams: u32 = 100,
     /// Answer the preface as an HTTP/1.1 server would.
     speak_http11: bool = false,
@@ -47,6 +64,7 @@ pub const Connection = struct {
     session: ?*c.nghttp2_session,
     closed: bool,
     received_any: bool,
+    ssl: ?*c.SSL,
 };
 
 pub const Stream = struct {
@@ -106,9 +124,114 @@ pub fn start(allocator: std.mem.Allocator, options: Options) !*Peer {
         .seen = .{},
         .url_buffer = undefined,
         .url_len = 0,
+        .ssl_ctx = null,
+        .bio_method = null,
+        .tmp = null,
+        .ca_path_buffer = undefined,
+        .ca_path_len = 0,
     };
-    self.url_len = (try std.fmt.bufPrint(&self.url_buffer, "http://127.0.0.1:{d}/v1/responses", .{self.port})).len;
+    const scheme = if (options.tls == .none) "http" else "https";
+    self.url_len = (try std.fmt.bufPrint(&self.url_buffer, "{s}://{s}:{d}/v1/responses", .{ scheme, options.url_host, self.port })).len;
+    if (options.tls != .none) try self.setUpTls();
     return self;
+}
+
+pub fn caPath(self: *const Peer) []const u8 {
+    return self.ca_path_buffer[0..self.ca_path_len];
+}
+
+// --------------------------------------------------------------------- TLS
+
+fn setUpTls(self: *Peer) !void {
+    const ca_key = try generateKey();
+    defer c.EVP_PKEY_free(ca_key);
+    const ca = try certificate(ca_key, null, ca_key, "h2 test CA", &.{
+        .{ c.NID_basic_constraints, "critical,CA:TRUE" },
+        .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
+        .{ c.NID_subject_key_identifier, "hash" },
+    });
+    defer c.X509_free(ca);
+    // An untrusted leaf has an issuer of the same name but another key.
+    const issuer_key = if (self.options.untrusted_issuer) try generateKey() else ca_key;
+    defer if (issuer_key != ca_key) c.EVP_PKEY_free(issuer_key);
+    const issuer = if (self.options.untrusted_issuer) try certificate(issuer_key, null, issuer_key, "h2 test CA", &.{
+        .{ c.NID_basic_constraints, "critical,CA:TRUE" },
+        .{ c.NID_key_usage, "critical,keyCertSign,cRLSign" },
+        .{ c.NID_subject_key_identifier, "hash" },
+    }) else ca;
+    defer if (issuer != ca) c.X509_free(issuer);
+    const leaf_key = try generateKey();
+    defer c.EVP_PKEY_free(leaf_key);
+    const leaf = try certificate(leaf_key, issuer, issuer_key, "h2 test peer", &.{
+        .{ c.NID_subject_alt_name, self.options.leaf_names },
+        .{ c.NID_basic_constraints, "critical,CA:FALSE" },
+        .{ c.NID_key_usage, "critical,digitalSignature" },
+        .{ c.NID_ext_key_usage, "serverAuth" },
+        .{ c.NID_authority_key_identifier, "keyid:always" },
+    });
+    defer c.X509_free(leaf);
+
+    var tmp = std.testing.tmpDir(.{});
+    errdefer tmp.cleanup();
+    self.ca_path_len = (try std.fmt.bufPrint(&self.ca_path_buffer, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path})).len;
+    var path_z: [97]u8 = undefined;
+    @memcpy(path_z[0..self.ca_path_len], self.caPath());
+    path_z[self.ca_path_len] = 0;
+    const file = c.BIO_new_file(&path_z, "w") orelse return error.TlsSetupFailed;
+    defer _ = c.BIO_free(file);
+    if (c.PEM_write_bio_X509(file, ca) != 1) return error.TlsSetupFailed;
+    self.tmp = tmp;
+
+    const ctx = c.SSL_CTX_new(c.TLS_server_method()) orelse return error.TlsSetupFailed;
+    self.ssl_ctx = ctx;
+    if (c.SSL_CTX_use_certificate(ctx, leaf) != 1 or c.SSL_CTX_use_PrivateKey(ctx, leaf_key) != 1) return error.TlsSetupFailed;
+    c.SSL_CTX_set_alpn_select_cb(ctx, selectProtocol, self);
+    self.bio_method = tls.newBioMethod() orelse return error.TlsSetupFailed;
+}
+
+fn generateKey() !*c.EVP_PKEY {
+    const context = c.EVP_PKEY_CTX_new_from_name(null, "EC", null) orelse return error.TlsSetupFailed;
+    defer c.EVP_PKEY_CTX_free(context);
+    if (c.EVP_PKEY_keygen_init(context) != 1 or c.EVP_PKEY_CTX_set_group_name(context, "P-256") != 1) return error.TlsSetupFailed;
+    var key: ?*c.EVP_PKEY = null;
+    if (c.EVP_PKEY_generate(context, &key) != 1) return error.TlsSetupFailed;
+    return key.?;
+}
+
+var next_serial: i64 = 1;
+
+/// Self-signed when `issuer` is null.
+fn certificate(key: *c.EVP_PKEY, issuer: ?*c.X509, issuer_key: *c.EVP_PKEY, common_name: [:0]const u8, extensions: []const struct { c_int, [:0]const u8 }) !*c.X509 {
+    const x509 = c.X509_new() orelse return error.TlsSetupFailed;
+    errdefer c.X509_free(x509);
+    next_serial += 1;
+    if (c.X509_set_version(x509, 2) != 1 or c.ASN1_INTEGER_set_int64(c.X509_get_serialNumber(x509), next_serial) != 1) return error.TlsSetupFailed;
+    if (c.X509_time_adj_ex(c.X509_getm_notBefore(x509), -1, 0, null) == null) return error.TlsSetupFailed;
+    if (c.X509_time_adj_ex(c.X509_getm_notAfter(x509), 1, 0, null) == null) return error.TlsSetupFailed;
+    if (c.X509_set_pubkey(x509, key) != 1) return error.TlsSetupFailed;
+    const name = c.X509_get_subject_name(x509);
+    if (c.X509_NAME_add_entry_by_txt(name, "CN", c.MBSTRING_ASC, common_name.ptr, -1, -1, 0) != 1) return error.TlsSetupFailed;
+    if (c.X509_set_issuer_name(x509, if (issuer) |parent| c.X509_get_subject_name(parent) else name) != 1) return error.TlsSetupFailed;
+    var v3 = std.mem.zeroes(c.X509V3_CTX);
+    c.X509V3_set_ctx(&v3, issuer orelse x509, x509, null, null, 0);
+    for (extensions) |extension| {
+        const value = c.X509V3_EXT_conf_nid(null, &v3, extension[0], extension[1].ptr) orelse return error.TlsSetupFailed;
+        defer c.X509_EXTENSION_free(value);
+        if (c.X509_add_ext(x509, value, -1) != 1) return error.TlsSetupFailed;
+    }
+    if (c.X509_sign(x509, issuer_key, c.EVP_sha256()) <= 0) return error.TlsSetupFailed;
+    return x509;
+}
+
+fn selectProtocol(_: ?*c.SSL, out: [*c][*c]const u8, out_len: [*c]u8, offered: [*c]const u8, offered_len: c_uint, argument: ?*anyopaque) callconv(.c) c_int {
+    const self: *Peer = @ptrCast(@alignCast(argument.?));
+    if (self.options.tls == .no_alpn) return c.SSL_TLSEXT_ERR_NOACK;
+    const ours = "\x02h2";
+    var selected: [*c]u8 = null;
+    if (c.SSL_select_next_proto(&selected, out_len, ours, ours.len, offered, offered_len) != c.OPENSSL_NPN_NEGOTIATED)
+        return c.SSL_TLSEXT_ERR_NOACK;
+    out.* = selected;
+    return c.SSL_TLSEXT_ERR_OK;
 }
 
 pub fn url(self: *const Peer) []const u8 {
@@ -130,6 +253,9 @@ pub fn stop(self: *Peer) void {
     self.streams.deinit(self.allocator);
     c.nghttp2_option_del(self.session_options);
     c.nghttp2_session_callbacks_del(self.callbacks);
+    if (self.ssl_ctx) |ctx| c.SSL_CTX_free(ctx);
+    if (self.bio_method) |method| c.BIO_meth_free(method);
+    if (self.tmp) |*tmp| tmp.cleanup();
     _ = std.c.close(self.listener);
     self.allocator.destroy(self);
 }
@@ -140,8 +266,19 @@ pub fn pump(self: *Peer) !void {
         const fd = std.c.accept(self.listener, null, null);
         if (fd < 0) break;
         try nonblocking(fd);
+        if (builtin.os.tag.isDarwin()) {
+            // A client that went away must not SIGPIPE the test process.
+            const one: c_int = 1;
+            _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int));
+        }
         const connection = try self.allocator.create(Connection);
-        connection.* = .{ .peer = self, .socket = fd, .session = null, .closed = false, .received_any = false };
+        connection.* = .{ .peer = self, .socket = fd, .session = null, .closed = false, .received_any = false, .ssl = null };
+        if (self.ssl_ctx) |ctx| {
+            const ssl = c.SSL_new(ctx) orelse return error.OutOfMemory;
+            connection.ssl = ssl;
+            if (!tls.attachSocket(ssl, self.bio_method.?, fd)) return error.OutOfMemory;
+            c.SSL_set_accept_state(ssl);
+        }
         try self.connections.append(self.allocator, connection);
         self.seen.connections += 1;
         if (!self.options.speak_http11) {
@@ -158,12 +295,14 @@ pub fn pump(self: *Peer) !void {
         if (connection.closed) continue;
         var buffer: [16 * 1024]u8 = undefined;
         while (!connection.closed) {
-            const read = std.c.recv(connection.socket, &buffer, buffer.len, 0);
-            if (read < 0) break;
-            if (read == 0) {
-                self.closeConnection(connection);
-                break;
-            }
+            const read: usize = switch (receiveSome(connection, &buffer)) {
+                .bytes => |count| count,
+                .again => break,
+                .closed => {
+                    self.closeConnection(connection);
+                    break;
+                },
+            };
             if (connection.session == null) {
                 // An HTTP/1.1 server's answer to the HTTP/2 preface.
                 const answer = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
@@ -171,7 +310,7 @@ pub fn pump(self: *Peer) !void {
                 self.closeConnection(connection);
                 break;
             }
-            if (c.nghttp2_session_mem_recv2(connection.session, &buffer, @intCast(read)) < 0) {
+            if (c.nghttp2_session_mem_recv2(connection.session, &buffer, read) < 0) {
                 self.closeConnection(connection);
                 break;
             }
@@ -180,7 +319,36 @@ pub fn pump(self: *Peer) !void {
     }
 }
 
+const Transfer = union(enum) { bytes: usize, again, closed };
+
+/// Over TLS the first reads also run the server handshake.
+fn receiveSome(connection: *Connection, buffer: []u8) Transfer {
+    if (connection.ssl) |ssl| return switch (tls.read(ssl, buffer)) {
+        .bytes => |count| .{ .bytes = count },
+        .want_read, .want_write => .again,
+        .closed => .closed,
+    };
+    const read = std.c.recv(connection.socket, buffer.ptr, buffer.len, 0);
+    if (read > 0) return .{ .bytes = @intCast(read) };
+    if (read == 0) return .closed;
+    return .again;
+}
+
+fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
+    if (connection.ssl) |ssl| return switch (tls.write(ssl, bytes)) {
+        .bytes => |count| .{ .bytes = count },
+        .want_read, .want_write => .again,
+        .closed => .closed,
+    };
+    const sent = std.c.send(connection.socket, bytes.ptr, bytes.len, if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0);
+    if (sent >= 0) return .{ .bytes = @intCast(sent) };
+    if (std.posix.errno(sent) == .AGAIN) return .again;
+    return .closed;
+}
+
 fn flush(self: *Peer, connection: *Connection) void {
+    // Frames wait for the handshake, which the reads drive.
+    if (connection.ssl) |ssl| if (c.SSL_is_init_finished(ssl) != 1) return;
     while (true) {
         var data: [*c]const u8 = undefined;
         const length = c.nghttp2_session_mem_send2(connection.session, &data);
@@ -188,16 +356,14 @@ fn flush(self: *Peer, connection: *Connection) void {
         // Loopback with small test payloads: a blocking-free full write.
         var sent: usize = 0;
         while (sent < length) {
-            const result = std.c.send(connection.socket, data + sent, @as(usize, @intCast(length)) - sent, 0);
-            if (result <= 0) {
-                if (result < 0 and std.posix.errno(result) == .AGAIN) {
+            switch (sendSome(connection, data[sent..@intCast(length)])) {
+                .bytes => |count| sent += count,
+                .again => {
                     var poll = [_]std.c.pollfd{.{ .fd = connection.socket, .events = std.c.POLL.OUT, .revents = 0 }};
                     _ = std.c.poll(&poll, 1, 100);
-                    continue;
-                }
-                return self.closeConnection(connection);
+                },
+                .closed => return self.closeConnection(connection),
             }
-            sent += @intCast(result);
         }
     }
     for (self.streams.items) |stream| {
@@ -213,6 +379,8 @@ pub fn closeConnection(self: *Peer, connection: *Connection) void {
     connection.closed = true;
     if (connection.session) |session| c.nghttp2_session_del(session);
     connection.session = null;
+    if (connection.ssl) |ssl| c.SSL_free(ssl);
+    connection.ssl = null;
     _ = std.c.close(connection.socket);
 }
 

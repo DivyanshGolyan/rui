@@ -16,6 +16,7 @@ const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
 const Waker = @import("Waker.zig");
+const tls = @import("tls.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
@@ -45,6 +46,9 @@ receiver: ?Receiver,
 stall_ns: u64,
 connection_serial: u64,
 waker: Waker,
+/// Built by the first `https://` endpoint, so a cleartext-only Client
+/// loads no trust store.
+tls_context: ?tls.Context,
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
@@ -141,6 +145,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .stall_ns = 0,
         .connection_serial = 0,
         .waker = waker,
+        .tls_context = null,
     };
     for (connections, 0..) |*connection, index| connection.* = .free(self, @intCast(index));
 }
@@ -152,6 +157,7 @@ pub fn deinit(self: *Engine) void {
         if (connection.state != .free) connection.close(.goaway);
     }
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
+    if (self.tls_context) |*context| context.deinit();
     self.allocator.destroy(self.scratch);
     self.allocator.free(self.pollfds);
     self.allocator.free(self.views);
@@ -162,15 +168,14 @@ pub fn deinit(self: *Engine) void {
     self.* = undefined;
 }
 
-pub fn addEndpoint(self: *Engine, url: []const u8) (h2.UrlError || error{ OutOfMemory, TooManyEndpoints })!h2.Endpoint {
+pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint {
     std.debug.assert(self.receiver == null);
     _ = try h2.parseUrl(url);
     if (self.endpoint_count == h2.max_endpoints) return error.TooManyEndpoints;
     const owned = try self.allocator.dupe(u8, url);
     errdefer self.allocator.free(owned);
     const parsed = h2.parseUrl(owned) catch unreachable;
-    // HTTPS connections arrive with TLS; until then only h2c can connect.
-    if (parsed.scheme == .https) return error.InvalidUrl;
+    if (parsed.scheme == .https and self.tls_context == null) self.tls_context = try tls.Context.init(self.options.trust);
     const origin_index: u8 = for (self.origins[0..self.origin_count], 0..) |origin, index| {
         if (origin.scheme == parsed.scheme and origin.port == parsed.port and std.mem.eql(u8, origin.host, parsed.host))
             break @intCast(index);
@@ -396,12 +401,14 @@ fn fillPollfds(self: *Engine) usize {
 fn advanceSetups(self: *Engine) void {
     const time = self.now();
     for (self.connections) |*connection| {
+        if (!connection.settingUp()) continue;
         switch (connection.state) {
-            .connecting, .awaiting_settings => {},
-            else => continue,
+            .resolving => connection.finishLookup(),
+            .connecting => if (connection.revents != 0) connection.finishConnect(),
+            .handshaking => if (connection.revents != 0) connection.continueHandshake(),
+            else => {},
         }
-        if (connection.state == .connecting and connection.revents != 0) connection.finishConnect();
-        if (connection.state != .free and connection.state != .ready and time >= connection.setup_deadline_ns)
+        if (connection.settingUp() and time >= connection.setup_deadline_ns)
             self.setupFailed(connection, .connect_timeout);
     }
 }
@@ -415,11 +422,8 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
     var ready_with_room: u32 = 0;
     for (self.connections) |*other| {
         if (other.origin != origin_index) continue;
-        switch (other.state) {
-            .connecting, .awaiting_settings => setting_up += 1,
-            .ready => ready_with_room += @intFromBool(other.hasRoom()),
-            else => {},
-        }
+        if (other.settingUp()) setting_up += 1;
+        ready_with_room += @intFromBool(other.hasRoom());
     }
     if (policy.pendingAfterSetupFailure(setting_up, ready_with_room) == .wait) return;
     const origin = &self.origins[origin_index];
@@ -430,7 +434,7 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
 fn readAll(self: *Engine) void {
     for (self.connections) |*connection| {
         connection.read_capped = false;
-        if (!connection.hasSession() or connection.revents == 0) continue;
+        if (!connection.hasSession() or (connection.revents == 0 and !connection.tlsPending())) continue;
         if (connection.receive() == .capped) connection.read_capped = true;
     }
 }
@@ -448,8 +452,7 @@ fn submitPending(self: *Engine) void {
         }
         var setting_up: u32 = 0;
         for (self.connections) |*connection| {
-            if (connection.origin == origin_index and (connection.state == .connecting or connection.state == .awaiting_settings))
-                setting_up += 1;
+            if (connection.origin == origin_index and connection.settingUp()) setting_up += 1;
         }
         var opening = policy.connectionsToOpen(origin.pending.len, setting_up, origin.learned_max_streams);
         while (opening > 0 and origin.pending.len > 0) : (opening -= 1) {
@@ -631,6 +634,9 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
     const count = self.fillPollfds();
     self.pollfds[0] = .{ .fd = self.waker.read_fd, .events = std.c.POLL.IN, .revents = 0 };
     var timeout = timeout_ms;
+    for (self.connections) |*connection| {
+        if (connection.tlsPending()) timeout = 0;
+    }
     if (self.nextDeadline()) |deadline| {
         const time = self.now();
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
@@ -647,7 +653,7 @@ fn nextDeadline(self: *Engine) ?u64 {
     for (self.connections) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
-            .connecting, .awaiting_settings => connection.setup_deadline_ns,
+            .resolving, .connecting, .handshaking, .awaiting_settings => connection.setup_deadline_ns,
             .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
