@@ -413,12 +413,47 @@ func inspectCustodyZero(client measurement.Client, session string) (bool, error)
 	return custodyOK && scratchOK && custody == 0 && scratch == 0, nil
 }
 
+// stopHost stops an observed Host through its observations, which validate
+// the final channel state.
+func stopHost(host *measurement.Host, observations *measurement.Observations) error {
+	if observations != nil {
+		return observations.Stop(host, measurement.TeardownAllowance)
+	}
+	return host.Stop(measurement.TeardownAllowance)
+}
+
+// The Host refuses ordinary clients only at reduced intake, so scenarios
+// that saturate it restart the Host at the descriptor limit that leaves the
+// ten-client floor. The probe launches the same way, so it inherits the same
+// descriptors the limited Host counts.
+func startTenClientHost(plan, binary, directory, store, url string, capacity int, deadline measurement.Deadline, extra ...string) (*measurement.Host, *measurement.Observations, error) {
+	launch := measurement.Launch{ObservationPlan: plan}
+	probe, observations, err := measurement.StartHostWith(launch, binary, store, url, capacity, filepath.Join(directory, "probe-stderr.log"), deadline, extra...)
+	if err != nil {
+		return nil, nil, err
+	}
+	required, requiredErr := strconv.Atoi(probe.Ready["descriptor_requirement"])
+	intake, intakeErr := strconv.Atoi(probe.Ready["intake_capacity"])
+	if err := errors.Join(requiredErr, intakeErr, stopHost(probe, observations)); err != nil {
+		return nil, nil, err
+	}
+	launch.DescriptorLimit = required - 4*(intake-ordinaryClients)
+	host, observations, err := measurement.StartHostWith(launch, binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline, extra...)
+	if err != nil {
+		return nil, nil, err
+	}
+	if host.Ready["intake_capacity"] != strconv.Itoa(ordinaryClients) {
+		return nil, nil, errors.Join(fmt.Errorf("descriptor limit %d gave intake %s, want %d", launch.DescriptorLimit, host.Ready["intake_capacity"], ordinaryClients), stopHost(host, observations))
+	}
+	return host, observations, nil
+}
+
 func headroom(binary, root, url string) (result map[string]any, resultError error) {
 	directory := filepath.Join(root, "headroom")
 	_ = os.Mkdir(directory, 0o700)
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(4 * time.Minute)
-	host, err := measurement.StartHost(binary, store, url, 8, filepath.Join(directory, "host-stderr.log"), deadline)
+	host, _, err := startTenClientHost("", binary, directory, store, url, 8, deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -997,38 +1032,6 @@ func drainResponses(connections []net.Conn, timeout time.Duration) error {
 	return result
 }
 
-func phaseRecords(path, phase string) ([]map[string]any, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	result := []map[string]any{}
-	scanner := bufio.NewScanner(file)
-	buffer := make([]byte, 64*1024)
-	scanner.Buffer(buffer, 1024*1024)
-	for scanner.Scan() {
-		var record map[string]any
-		if json.Unmarshal(scanner.Bytes(), &record) == nil && record["rui_test_phase"] == phase {
-			result = append(result, record)
-		}
-	}
-	return result, scanner.Err()
-}
-
-func waitPhase(deadline measurement.Deadline, path, phase string, count int) ([]map[string]any, error) {
-	var records []map[string]any
-	err := measurement.WaitFor(deadline, 25*time.Millisecond, phase, func() (bool, error) {
-		value, err := phaseRecords(path, phase)
-		if err != nil {
-			return false, err
-		}
-		records = value
-		return len(records) >= count, nil
-	})
-	return records, err
-}
-
 type controlResult struct {
 	index     int
 	reply     map[string]any
@@ -1071,13 +1074,12 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	defer endpoint.Close()
 	deadline := measurement.NewDeadline(4 * time.Minute)
 	store := filepath.Join(directory, "store")
-	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), controlHeadroom, stderrPath, deadline, "--provider-ca-file", endpoint.caFile, "--test-phase-trace", "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
+	host, observations, err := measurement.StartHostWith(measurement.Launch{ObservationPlan: "control"}, binary, store, endpoint.URL(), controlHeadroom, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", endpoint.caFile, "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	sessions := make([]string, controlHeadroom)
@@ -1104,11 +1106,11 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		return nil, err
 	}
 	defer closeAll(inspections)
-	if _, err := waitPhase(deadline, stderrPath, "inspection_captured", ordinaryClients); err != nil {
+	if _, err := observations.Wait(deadline, "inspection_captured", ordinaryClients); err != nil {
 		return nil, err
 	}
 	endpoint.releaseAll()
-	if _, err := waitPhase(deadline, stderrPath, "sealed_before_settlement", 1); err != nil {
+	if _, err := observations.Wait(deadline, "sealed_before_settlement", 1); err != nil {
 		return nil, err
 	}
 	controls := concurrentStops(client, sessions, nil)
@@ -1119,7 +1121,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		}
 		latencies = append(latencies, control.latencyMS)
 	}
-	if _, err := waitPhase(deadline, stderrPath, "model_settlement_superseded", 1); err != nil {
+	if _, err := observations.Wait(deadline, "model_settlement_superseded", 1); err != nil {
 		return nil, err
 	}
 	if err := drainResponses(inspections, 15*time.Second); err != nil {
@@ -1230,13 +1232,12 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	defer endpoint.Close()
 	deadline := measurement.NewDeadline(6 * time.Minute)
 	store := filepath.Join(directory, "store")
-	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "20000", "--test-client-send-buffer-bytes", "4096")
+	host, observations, err := startTenClientHost("control", binary, directory, store, endpoint.URL(), 1, deadline, "--test-inspection-reply-delay-ms", "20000", "--test-client-send-buffer-bytes", "4096")
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	session, err := client.Submit("real-settlement-message", "", "large committed output")
@@ -1265,7 +1266,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		return nil, err
 	}
 	defer closeAll(inspections)
-	if _, err := waitPhase(deadline, stderrPath, "inspection_captured", ordinaryClients); err != nil {
+	if _, err := observations.Wait(deadline, "inspection_captured", ordinaryClients); err != nil {
 		return nil, err
 	}
 	idle, err := sample(host, directory, "reports-captured")
@@ -1314,7 +1315,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		preparedControls = append(preparedControls, prepared)
 	}
 	endpoint.releaseAll()
-	lockRecords, err := waitPhase(deadline, stderrPath, "settlement_lock_acquired", 1)
+	lockRecords, err := observations.Wait(deadline, "settlement_lock_acquired", 1)
 	if err != nil {
 		return nil, err
 	}
@@ -1337,11 +1338,11 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 			idleStopSelectionTurns["settlement-later-stop-1"] = nil
 		}
 	}
-	completeRecords, err := waitPhase(deadline, stderrPath, "settlement_complete", 1)
+	completeRecords, err := observations.Wait(deadline, "settlement_complete", 1)
 	if err != nil {
 		return nil, err
 	}
-	controlTimingRecords, err := waitPhase(deadline, stderrPath, "control_timing", controlHeadroom)
+	controlTimingRecords, err := observations.Wait(deadline, "control_timing", controlHeadroom)
 	if err != nil {
 		return nil, err
 	}
@@ -1431,7 +1432,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "physical release", func() (bool, error) { return inspectCustodyZero(client, session) }); err != nil {
 		return nil, err
 	}
-	cleanupRecords, err := waitPhase(deadline, stderrPath, "cleanup_completed", 1)
+	cleanupRecords, err := observations.Wait(deadline, "cleanup_completed", 1)
 	if err != nil {
 		return nil, err
 	}

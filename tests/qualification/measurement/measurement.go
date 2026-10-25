@@ -153,6 +153,11 @@ func StartHost(
 	deadline Deadline,
 	extra ...string,
 ) (*Host, error) {
+	host, _, err := StartHostWith(Launch{}, binary, store, endpoint, capacity, stderrPath, deadline, extra...)
+	return host, err
+}
+
+func hostArguments(store, endpoint string, capacity int, extra []string) []string {
 	arguments := []string{
 		"host", "serve", "--store", store,
 		"--active-capacity", strconv.Itoa(capacity),
@@ -160,8 +165,10 @@ func StartHost(
 	if endpoint != "" {
 		arguments = append(arguments, "--provider-endpoint", endpoint)
 	}
-	arguments = append(arguments, extra...)
-	cmd := exec.Command(binary, arguments...)
+	return append(arguments, extra...)
+}
+
+func startHost(cmd *exec.Cmd, stderrPath string, deadline Deadline) (*Host, error) {
 	// Tunable comparisons affect only the Host. Probe activation and collection
 	// belong to the separate linux-memory diagnostic, not qualification.
 	if value, set := os.LookupEnv("RUI_MEASURE_GLIBC_TUNABLES"); set {

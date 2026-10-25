@@ -222,7 +222,7 @@ CREATE TEMP TABLE q(v INTEGER);
 INSERT INTO q SELECT content_id FROM content WHERE byte_length>0 ORDER BY content_id DESC LIMIT 1;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
- SELECT 'h-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='template-configure'),randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
+ SELECT 'h-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='template-configure'),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
  SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,(SELECT v FROM q),100+i,unixepoch() FROM n;
@@ -238,17 +238,17 @@ INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_
 UPDATE session SET next_position=2*%[1]d+1 WHERE session_ref=(SELECT target FROM core_command WHERE command_key='template-configure');
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
- SELECT 's-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
+ SELECT 's-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
  SELECT 1000100+i,(SELECT target FROM core_command WHERE command_key='s-config'),'s-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
- SELECT 's-stop',3,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),NULL,NULL,1,'accepted',1,0 WHERE %[2]d>0;
+ SELECT 's-stop',3,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),NULL,NULL,1,'',1,0 WHERE %[2]d>0;
 INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff)
  SELECT 's-stop',(SELECT target FROM core_command WHERE command_key='s-config'),NULL,1000100+%[2]d WHERE %[2]d>0;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
- SELECT 'e-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='e-config-'||i),randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
+ SELECT 'e-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='e-config-'||i),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
  SELECT 2000100+i,(SELECT target FROM core_command WHERE command_key='e-config-'||i),'e-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;

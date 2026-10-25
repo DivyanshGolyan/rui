@@ -39,6 +39,10 @@ class ObservationCodecTest(unittest.TestCase):
         self.assertEqual(len(entries), len(expected), "missing or duplicate codec field")
         self.assertEqual({int(value): name for name, value in entries}, expected)
         self.assertEqual(HOST.OBSERVATION_FIELDS, expected)
+        go = (ROOT / "tests/qualification/measurement/observation.go").read_text()
+        table = re.search(r"var observationFields = \[\.\.\.\]string\{([^}]+)\}", go)
+        self.assertIsNotNone(table, "Go qualification codec must list field IDs in order")
+        self.assertEqual(dict(enumerate(re.findall(r'"(\w+)"', table[1]))), expected)
 
     def test_frame_decodes_every_id_independent_of_field_order(self):
         values = {name: f"value-{index}" for index, name in enumerate(FIELDS)}
