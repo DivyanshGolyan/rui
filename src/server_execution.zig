@@ -282,7 +282,10 @@ pub fn executionMain(host: *Host) void {
         if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
     );
     var reactor_storage: provider.Reactor = undefined;
-    const reactor: ?*provider.Reactor = if (host.provider_endpoint) |endpoint| reactor: {
+    // With no slots no Transfer can start, so a zero-capacity Host runs no
+    // transport (h2 requires a positive stream capacity).
+    const endpoint_with_slots = if (slots.len == 0) null else host.provider_endpoint;
+    const reactor: ?*provider.Reactor = if (endpoint_with_slots) |endpoint| reactor: {
         reactor_storage.init(host.allocator, host.io, .{
             .endpoint = endpoint,
             .ca_file = host.provider_ca_file,
