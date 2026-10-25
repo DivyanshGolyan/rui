@@ -2,6 +2,7 @@
 //! reads that after join.
 const std = @import("std");
 const client = @import("client.zig");
+const signal_stack = @import("signal_stack.zig");
 const Self = @This();
 
 pub const Run = *const fn (*anyopaque, *Self) anyerror!void;
@@ -23,7 +24,7 @@ pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
     self.cancellation = .{};
     self.result = null;
     self.read_failure = null;
-    self.thread = try std.Thread.spawn(.{}, execute, .{self});
+    self.thread = try signal_stack.spawn(.{}, execute, .{self});
 }
 
 fn execute(self: *Self) void {

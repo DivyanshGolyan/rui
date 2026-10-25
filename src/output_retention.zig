@@ -50,7 +50,9 @@ pub const Queue = struct {
         entries: []Entry,
         removal: named_scratch.Removal,
     ) Queue {
-        for (entries) |*entry| entry.* = .{};
+        // Entries start empty, as `.{}` or all zero bytes, so fresh pages need
+        // no initializing pass and an unused entry never becomes resident.
+        for (entries) |entry| std.debug.assert(entry.state == .free);
         return .{
             .io = io,
             .scratch_path = scratch_path,
@@ -250,7 +252,7 @@ test "retention evicts the oldest pair without refunding newer files" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 16 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
@@ -281,7 +283,7 @@ test "shared scratch reservations reclaim retained output and fail when none is 
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 3 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
@@ -306,7 +308,7 @@ test "already absent retained files release their entries and scratch charge" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
@@ -332,7 +334,7 @@ test "unconfirmed retained-file deletion preserves its entry and scratch charge"
     const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root});
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, missing, budget, &entries);
 
     try std.testing.expect(budget.charge(2));
@@ -361,7 +363,7 @@ test "reserved output is not evictable before producer aliases close and publica
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
@@ -412,7 +414,7 @@ test "cancelling a reserved pair releases entry capacity without refunding produ
     // 2 more bytes while its pair reservation is outstanding.
     var used = std.atomic.Value(u64).init(41);
     const budget = ScratchBudget{ .used = &used, .limit = 50 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
@@ -439,7 +441,7 @@ test "zero-byte retained files occupy entries without occupying scratch bytes" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
@@ -468,7 +470,7 @@ test "entry capacity evicts zero-byte output while byte capacity remains spare" 
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 10 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
@@ -498,7 +500,7 @@ test "failed eviction retains its charge until the same queue retries successful
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 4 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var gate: std.atomic.Value(bool) = .init(true);
     var queue = Queue.initializeWithRemoval(std.testing.io, root, budget, &entries, .{ .gated = &gate });
     defer queue.cleanupAll();
@@ -536,7 +538,7 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
     const removable_charge: u64 = 5;
     var used = std.atomic.Value(u64).init(baseline);
     const budget = ScratchBudget{ .used = &used, .limit = 64 };
-    var entries: [2]Entry = undefined;
+    var entries: [2]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
