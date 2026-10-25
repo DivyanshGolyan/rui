@@ -23,17 +23,11 @@ def workflow(name):
 
 
 class LandingTest(unittest.TestCase):
-    def test_upgrade_check_runs_on_exactly_the_strict_paths(self):
-        text = workflow('previous-release-upgrade.yml')
-        on = text.split('\npermissions:', 1)[0]
-        lists = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", on)
-        self.assertEqual(len(lists), 1, 'strict PRs filter; stable dispatch never filters')
-        for block in lists:
-            self.assertEqual(tuple(re.findall(r"'([^']+)'", block)), STRICT)
-        self.assertNotIn('  push:', on)
-        self.assertIn('  workflow_dispatch:', on)
+    def test_upgrade_check_runs_only_by_stable_dispatch(self):
+        on = workflow('previous-release-upgrade.yml').split('\npermissions:', 1)[0]
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_dispatch'])
 
-    def test_upgrade_concurrency_cancels_superseded_prs_but_keeps_main_shas(self):
+    def test_upgrade_concurrency_keeps_main_shas(self):
         text = workflow('previous-release-upgrade.yml')
         template = re.search(r'(?m)^  group: (.+)$', text)[1]
 
@@ -44,10 +38,6 @@ class LandingTest(unittest.TestCase):
                 {'github': github})), template)
 
         self.assertIn('  cancel-in-progress: true', text)
-        self.assertEqual(group('pull_request', 'refs/pull/3/merge', 'a' * 40),
-                         group('pull_request', 'refs/pull/3/merge', 'b' * 40))
-        self.assertNotEqual(group('pull_request', 'refs/pull/3/merge', 'a' * 40),
-                            group('pull_request', 'refs/pull/4/merge', 'a' * 40))
         self.assertNotEqual(group('workflow_dispatch', 'refs/heads/main', 'a' * 40),
                             group('workflow_dispatch', 'refs/heads/main', 'b' * 40))
         self.assertEqual(group('workflow_dispatch', 'refs/heads/main', 'a' * 40),
@@ -492,14 +482,14 @@ class LandingTest(unittest.TestCase):
                             self.assertTrue(json.loads(outputs['macos_matrix'])['include'])
                         else:
                             self.assertEqual(json.loads(outputs['targets']), selection['targets'])
-                            expected = selection['native_targets'] if event == 'pull_request' else []
-                            self.assertEqual(json.loads(outputs['native_targets']), expected)
-                            self.assertEqual(outputs['native'], str(bool(expected)).lower())
+                            self.assertEqual(json.loads(outputs['native_targets']), [])
+                            self.assertEqual(outputs['native'], 'false')
 
     def test_auto_land_wiring(self):
         on = workflow('auto-land.yml').split('\npermissions:', 1)[0]
         self.assertIn('workflows: [Selected checks, Previous installed-release upgrade]', on)
         self.assertIn("branches: ['wip/land-*', main]", on)
+        self.assertIn('  push:\n    branches: [main]\n', on)
         self.assertIn('auto_land.py', workflow('auto-land.yml'))
         text = workflow('auto-land.yml')
         self.assertNotRegex(text, r'(?m)^concurrency:')
@@ -522,6 +512,7 @@ class LandingTest(unittest.TestCase):
                              fromJSON=json.loads, contains=lambda rows, row: row in rows))
 
         self.assertTrue(eligible('workflow_dispatch', 'success'))
+        self.assertTrue(eligible('push'), 'a merged PR still wakes stable promotion')
         for result in ('failure', 'cancelled', 'timed_out', 'skipped'):
             self.assertFalse(eligible('workflow_dispatch', result))
             self.assertTrue(eligible('workflow_run', result), 'normal Linux landing remains independent')

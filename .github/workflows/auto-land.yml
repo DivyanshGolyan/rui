@@ -6,6 +6,9 @@ on:
     workflows: [Selected checks, Previous installed-release upgrade]
     types: [completed]
     branches: ['wip/land-*', main]
+  # A merged PR moves main without a landing; promotion dispatches its absent Mac and upgrade runs.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       completed_run:
@@ -42,8 +45,8 @@ jobs:
           timeout --kill-after=5s 120s gh run watch "$COMPLETED_RUN" --exit-status --repo "$GITHUB_REPOSITORY"
   land:
     needs: completion
-    # Landing-tip pushes and dispatched qualifications wake the lander; pull_request runs never do.
-    if: ${{ always() && !github.event.repository.private && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.completion.result == 'success') || (github.event_name == 'workflow_run' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    # Landing-tip pushes, main pushes and dispatched qualifications wake the lander; pull_request runs never do.
+    if: ${{ always() && !github.event.repository.private && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.completion.result == 'success') || (github.event_name == 'workflow_run' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository)) }}
     concurrency:
       # Only ref writers serialize. Waiting for a qualification never holds main.
       group: auto-land

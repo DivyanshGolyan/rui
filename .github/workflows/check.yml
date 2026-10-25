@@ -79,8 +79,8 @@ jobs:
               p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS)
                                            | {'check', 'admission-debug-integration'})
               p['retry'] = False
-          elif os.environ['EVENT_NAME'] != 'pull_request':
-              # Landing is Linux-only, even for strict paths. Mac runs after main.
+          else:
+              # PRs and landings are Linux-only, even for strict paths. Mac runs after main.
               p['native_targets'] = []
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
@@ -190,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
+        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:

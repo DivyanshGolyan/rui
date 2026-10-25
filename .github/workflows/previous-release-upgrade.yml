@@ -1,18 +1,6 @@
 name: Previous installed-release upgrade
-# Strict PR paths; every main-tip stable candidate runs by explicit dispatch.
+# Every main-tip stable candidate runs by explicit dispatch.
 on:
-  pull_request:
-    paths:
-      - 'src/store*'
-      - 'src/*schema*'
-      - 'src/server*'
-      - 'src/execution*'
-      - 'src/*recovery*'
-      - 'tests/integration/*recovery*'
-      - 'tests/integration/bash*'
-      - 'build.zig'
-      - 'build.zig.zon'
-      - 'install.sh'
   workflow_dispatch:
 
 permissions:
@@ -22,7 +10,7 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.sha || '' }}
+  group: previous-release-upgrade-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
