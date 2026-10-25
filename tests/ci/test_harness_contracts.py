@@ -26,6 +26,7 @@ FIELDS = (
     "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
     "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
     "written_bytes", "http_version", "connection_id", "new_connections",
+    "work_bytes", "work_items", "request_bytes",
 )
 
 

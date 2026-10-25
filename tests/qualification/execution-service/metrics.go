@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +8,9 @@ import (
 	"strconv"
 )
 
-const maxTraceBytes = 64 * 1024 * 1024
-
 type executionID struct {
 	Run       string `json:"run"`
 	Process   string `json:"process"`
-	Clock     string `json:"clock"`
 	Turn      string `json:"turn"`
 	Operation string `json:"operation"`
 	Action    string `json:"action,omitempty"`
@@ -23,9 +18,6 @@ type executionID struct {
 }
 
 func (id executionID) valid() bool {
-	if id.Clock != "awake_ns" {
-		return false
-	}
 	for _, field := range []string{id.Run, id.Process, id.Turn, id.Operation, id.Attempt} {
 		n, e := strconv.ParseUint(field, 10, 64)
 		if e != nil || n == 0 {
@@ -43,15 +35,14 @@ func (id executionID) valid() bool {
 
 type traceEvent struct {
 	executionID
-	Phase                                                                                string `json:"rui_test_phase"`
-	AtText                                                                               string `json:"at_ns"`
-	SequenceText                                                                         string `json:"sequence"`
-	StartText                                                                            string `json:"start_ns"`
-	WaitText                                                                             string `json:"wait_ns"`
-	WorkBytesText                                                                        string `json:"work_bytes"`
-	WorkItemsText                                                                        string `json:"work_items"`
-	RequestBytesText                                                                     string `json:"request_bytes"`
-	TraceLost                                                                            bool   `json:"trace_lost"`
+	Phase                                                         string `json:"rui_test_phase"`
+	AtText                                                        string `json:"at_ns"`
+	SequenceText                                                  string `json:"sequence"`
+	StartText                                                     string `json:"start_ns"`
+	WaitText                                                      string `json:"wait_ns"`
+	WorkBytesText                                                 string `json:"work_bytes"`
+	WorkItemsText                                                 string `json:"work_items"`
+	RequestBytesText                                              string `json:"request_bytes"`
 	At, Sequence, Start, Wait, WorkBytes, WorkItems, RequestBytes uint64 `json:"-"`
 }
 
@@ -93,37 +84,30 @@ func uintField(s, name string) (uint64, error) {
 	return n, nil
 }
 
-func parseTraces(data []byte) ([]traceEvent, error) {
-	if len(data) > maxTraceBytes {
-		return nil, errors.New("trace collection capacity exceeded")
-	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		return nil, errors.New("incomplete final trace line")
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+// parseObservations reads the Host's lossless observation records, already
+// in sequence order with run and process from the frame header.
+func parseObservations(records []map[string]any) ([]traceEvent, error) {
 	events := []traceEvent{}
-	var run, process, clock string
+	var run, process string
 	var sequence uint64
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if !bytes.HasPrefix(line, []byte(`{"rui_test_phase"`)) {
-			continue
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
 		}
 		var e traceEvent
-		if err := json.Unmarshal(line, &e); err != nil {
-			return nil, fmt.Errorf("malformed trace: %w", err)
+		if err := json.Unmarshal(encoded, &e); err != nil {
+			return nil, fmt.Errorf("malformed observation: %w", err)
 		}
-		if e.Run == "" || e.Process == "" || e.Clock != "awake_ns" || e.TraceLost {
-			return nil, errors.New("missing provenance or producer trace loss")
+		if e.Run == "" || e.Process == "" {
+			return nil, errors.New("missing observation provenance")
 		}
 		if run == "" {
-			run, process, clock = e.Run, e.Process, e.Clock
+			run, process = e.Run, e.Process
 		}
-		if e.Run != run || e.Process != process || e.Clock != clock {
-			return nil, errors.New("mixed Host runs or clock domains")
+		if e.Run != run || e.Process != process {
+			return nil, errors.New("mixed Host runs")
 		}
-		var err error
 		e.Sequence, err = uintField(e.SequenceText, "sequence")
 		if err != nil {
 			return nil, err
@@ -176,9 +160,6 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 			}
 		}
 		events = append(events, e)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
 	return events, nil

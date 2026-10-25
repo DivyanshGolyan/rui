@@ -8,7 +8,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes };
+pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes, execution };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -55,6 +55,9 @@ const FieldId = enum(u8) {
     http_version = 25,
     connection_id = 26,
     new_connections = 27,
+    work_bytes = 28,
+    work_items = 29,
+    request_bytes = 30,
 };
 const Record = struct {
     rui_test_phase: []const u8,
@@ -85,6 +88,9 @@ const Record = struct {
     http_version: ?i64 = null,
     connection_id: ?i64 = null,
     new_connections: ?i64 = null,
+    work_bytes: ?[]const u8 = null,
+    work_items: ?[]const u8 = null,
+    request_bytes: ?[]const u8 = null,
 };
 
 comptime {
@@ -169,6 +175,14 @@ pub const Publication = struct {
 };
 
 fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
+    if (self.plan == .execution) {
+        // Every service boundary and every interval endpoint: gaps are derived
+        // from the complete sequence, so no sampling.
+        inline for (.{ "lifecycle_boundary", "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_complete" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
     if (self.plan == .bash_cleanup) {
         inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;
@@ -373,6 +387,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
+            .execution => "settlement_complete",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for ([_]bool{ false, true }) |selected_kill| {
@@ -441,6 +456,7 @@ test "private owner observations seal admission without forgiving held or late p
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
+            .execution => "settlement_complete",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for (0..3) |kind| {

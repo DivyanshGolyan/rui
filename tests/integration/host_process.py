@@ -119,6 +119,9 @@ OBSERVATION_FIELDS = {
     25: "http_version",
     26: "connection_id",
     27: "new_connections",
+    28: "work_bytes",
+    29: "work_items",
+    30: "request_bytes",
 }
 
 

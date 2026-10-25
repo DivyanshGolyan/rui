@@ -51,7 +51,7 @@ func summarizeRows(rows []map[string]any) []map[string]any {
 	summary := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		selected := map[string]any{}
-		for _, key := range []string{"parameters", "status", "error", "resources", "trace_sha256", "trace_events"} {
+		for _, key := range []string{"parameters", "status", "error", "resources", "observations_sha256", "observations"} {
 			if value, ok := row[key]; ok {
 				selected[key] = value
 			}
@@ -160,10 +160,12 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	}
 	defer ep.close()
 	store := filepath.Join(dir, "store")
-	tracePath := filepath.Join(dir, "host-stderr.log")
-	host, err := measurement.StartHost(
-		binary, store, ep.URL(), s.Capacity, tracePath, d,
-		"--test-phase-trace",
+	stderrPath := filepath.Join(dir, "host-stderr.log")
+	// Stderr traces drop records under contention; the observation channel
+	// accounts for every selected record or fails the run.
+	host, observations, err := measurement.StartHostWith(
+		measurement.Launch{ObservationPlan: "execution"},
+		binary, store, ep.URL(), s.Capacity, stderrPath, d,
 	)
 	if err != nil {
 		return nil, err
@@ -171,11 +173,11 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	stopped := false
 	defer func() {
 		if !stopped {
-			err = errors.Join(err, host.Stop(measurement.TeardownAllowance))
+			err = errors.Join(err, observations.Stop(host, measurement.TeardownAllowance))
 		}
 	}()
 	c := measurement.Client{Binary: binary, Artifacts: dir, Store: store, Deadline: d}
-	row = map[string]any{"parameters": s, "trace_path": tracePath, "status": "failed"}
+	row = map[string]any{"parameters": s, "stderr_path": stderrPath, "status": "failed"}
 
 	targetInputs := [][]byte{}
 	session, err := c.Configure("target-config", "", "--tools", "none")
@@ -216,20 +218,24 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	if err = ep.audit(); err != nil {
 		return row, err
 	}
-	err = host.Stop(measurement.TeardownAllowance)
+	err = observations.Stop(host, measurement.TeardownAllowance)
 	stopped = true
 	if err != nil {
 		return row, err
 	}
-	data, e := os.ReadFile(tracePath)
-	if e != nil {
-		return row, e
+	records, err := observations.Records()
+	if err != nil {
+		return row, err
 	}
-	events, err := parseTraces(data)
+	events, err := parseObservations(records)
 	if err != nil {
 		return row, err
 	}
 	m := deriveMetrics(events)
+	data, err := json.Marshal(records)
+	if err != nil {
+		return row, err
+	}
 	sum := sha256.Sum256(data)
 	slotBytes, e1 := strconv.Atoi(host.Ready["execution_slot_bytes"])
 	prepBytes, e2 := strconv.Atoi(host.Ready["model_preparation_bytes"])
@@ -238,8 +244,8 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	}
 	row["status"] = m.Status
 	row["metrics"] = m
-	row["trace_sha256"] = hex.EncodeToString(sum[:])
-	row["trace_events"] = len(events)
+	row["observations_sha256"] = hex.EncodeToString(sum[:])
+	row["observations"] = len(events)
 	row["resources"] = map[string]any{
 		"custody_and_scratch_drained": true,
 		"execution_slot_bytes":        slotBytes,
@@ -316,7 +322,7 @@ func main() {
 		status = "invalid"
 	}
 	report := map[string]any{
-		"format": "rui-execution-service-v4-go", "status": status, "artifacts": root, "cases": rows,
+		"format": "rui-execution-service-v5-go", "status": status, "artifacts": root, "cases": rows,
 		"provenance": provenance, "source_sha256": sourceHashes,
 		"limits": []string{
 			"ungated empirical service gaps only; turn ordering is proved by zig build test-logic",

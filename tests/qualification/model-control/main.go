@@ -1081,6 +1081,10 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
+	// Raw requests must name the Host's Store exactly; Darwin's /tmp is a link.
+	if store, err = host.CanonicalStore(); err != nil {
+		return nil, err
+	}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	sessions := make([]string, controlHeadroom)
 	for index := range controlHeadroom {
@@ -1239,6 +1243,10 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
+	// Raw requests must name the Host's Store exactly; Darwin's /tmp is a link.
+	if store, err = host.CanonicalStore(); err != nil {
+		return nil, err
+	}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	session, err := client.Submit("real-settlement-message", "", "large committed output")
 	if err != nil {
