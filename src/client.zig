@@ -6046,15 +6046,16 @@ test "transport cancellation quanta neither expire nor renew inactivity and obse
 
 test "transport cancellation saturated Unix backlog is not a connected writable socket" {
     // Darwin refuses a connect beyond the backlog at once; Linux leaves it
-    // pending until the deadline or cancellation. Darwin's backlog holds more
-    // than the requested zero, so queue peers until one does not connect.
+    // pending until the deadline or cancellation. Darwin reads a zero backlog
+    // as its maximum, so request one and queue peers until one does not
+    // connect.
     const blocks = @import("os/os.zig").full_backlog_blocks_connect;
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
     var address_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
     const address = try tmp.address("socket", &address_buffer);
-    var listener = try address.listen(io, .{ .kernel_backlog = 0 });
+    var listener = try address.listen(io, .{ .kernel_backlog = 1 });
     defer listener.deinit(io);
     const queued = try address.connect(io);
     defer queued.close(io);
