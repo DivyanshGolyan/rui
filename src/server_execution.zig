@@ -230,6 +230,15 @@ const LifecycleMeasurement = struct {
 
 const lifecycle_trace_interval_ms = 100;
 
+/// The execution thread's large scratch, in fresh pages: each buffer becomes
+/// resident only when its work first runs. On the stack, ReleaseSafe would
+/// fill them all at startup. Never assign the whole struct.
+const Workspace = struct {
+    model_preparation: model_adapter.Preparation,
+    bash_window: [bash.copy_window_bytes]u8,
+    capture_buffers: provider.CaptureWriter.Buffers,
+};
+
 pub fn executionMain(host: *Host) void {
     var auth_worker = AuthWorker{ .io = host.io, .authentication = host.authentication orelse undefined };
     const auth_thread: ?std.Thread = if (host.authentication != null)
@@ -260,8 +269,14 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
+    const workspace = mapZeroed(Workspace, 1) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    defer unmapZeroed(workspace);
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
+        .buffers = &workspace[0].capture_buffers,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
         .test_observation = host.test_observation,
@@ -287,28 +302,27 @@ pub fn executionMain(host: *Host) void {
         null;
     defer if (reactor) |*active| active.deinit();
     var bash_preparation: ?bash.Preparation = null;
-    var model_preparation: model_adapter.Preparation = undefined;
+    const model_preparation = &workspace[0].model_preparation;
     defer shutdownExecution(
         host,
         if (reactor) |*active| active else null,
         slots,
         &bash_preparation,
-        &model_preparation,
+        model_preparation,
     );
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var next_receive_slot: usize = 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
-        var bash_window: [bash.copy_window_bytes]u8 = undefined;
         var native = NativeTurn{
             .host = host,
             .reactor = if (reactor) |*active| active else null,
             .slots = slots,
             .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
-            .model_preparation = &model_preparation,
-            .bash_window = &bash_window,
+            .model_preparation = model_preparation,
+            .bash_window = &workspace[0].bash_window,
             .measurement = &measurement,
             .fenced = false,
         };
@@ -662,7 +676,8 @@ test "receive advancement serves paused siblings across recurring queue pressure
             unreachable;
         }
     };
-    var writer = provider.CaptureWriter{ .io = std.testing.io };
+    var buffers: provider.CaptureWriter.Buffers = undefined;
+    var writer = provider.CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var host: Host = undefined;
     host.capture_writer = &writer;
     host.faults = .{};
@@ -2326,7 +2341,8 @@ test "HTTP error capture retires before execution custody" {
         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
-        var writer = provider.CaptureWriter{ .io = io };
+        var buffers: provider.CaptureWriter.Buffers = undefined;
+        var writer = provider.CaptureWriter{ .io = io, .buffers = &buffers };
         var retained: ?named_scratch.Owner = null;
         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
             .io = io,

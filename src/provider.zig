@@ -232,12 +232,15 @@ pub const CaptureWriter = struct {
     const Entry = struct {
         capture: *ResponseCapture,
         length: usize = 0,
-        bytes: [c.CURL_MAX_WRITE_SIZE]u8 = undefined,
         seal: bool = false,
         fail_seal: bool = false,
     };
+    /// Entry i's bytes. The caller owns this storage, so constructing a
+    /// writer does not write it and only queued chunks touch it.
+    pub const Buffers = [capacity][c.CURL_MAX_WRITE_SIZE]u8;
 
     io: std.Io,
+    buffers: *Buffers,
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
     entries: [capacity]Entry = undefined,
@@ -297,7 +300,7 @@ pub const CaptureWriter = struct {
                     _ = gate.readStreaming(self.io, &.{&release}) catch {};
                 } else |_| {}
             };
-            capture.file.writeStreamingAll(capture.io, entry.bytes[0..entry.length]) catch {
+            capture.file.writeStreamingAll(capture.io, self.buffers[self.head][0..entry.length]) catch {
                 self.mutex.lockUncancelable(self.io);
                 capture.failure = .write_failed;
                 self.mutex.unlock(self.io);
@@ -340,9 +343,9 @@ pub const CaptureWriter = struct {
             capture.failure = .write_failed;
             return 0;
         };
-        const entry = &self.entries[(self.head + self.count) % capacity];
-        entry.* = .{ .capture = capture, .length = bytes.len };
-        @memcpy(entry.bytes[0..bytes.len], bytes);
+        const index = (self.head + self.count) % capacity;
+        self.entries[index] = .{ .capture = capture, .length = bytes.len };
+        @memcpy(self.buffers[index][0..bytes.len], bytes);
         capture.pending_writes += 1;
         self.count += 1;
         self.available.signal(self.io);
@@ -1094,7 +1097,8 @@ test "curl results reach transport policy by name" {
 }
 
 test "a full capture queue pauses the inactivity interval and curl progress cannot expire it" {
-    var writer = CaptureWriter{ .io = std.testing.io, .count = CaptureWriter.capacity };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers, .count = CaptureWriter.capacity };
     var transfer: Transfer = undefined;
     transfer.request.io = std.testing.io;
     transfer.writer = &writer;
@@ -1119,7 +1123,8 @@ test "Transfer finalization waits for real writer drainage and seals once" {
     const readonly = try tmp.dir.openFile(std.testing.io, "capture", .{});
     try tmp.dir.deleteFile(std.testing.io, "capture");
     var used = std.atomic.Value(u64).init(0);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var transfer: Transfer = undefined;
     transfer.writer = &writer;
     transfer.response = .{
@@ -1155,7 +1160,8 @@ test "Transfer finalization waits for real writer drainage and seals once" {
 }
 
 test "receive scans without resume capacity still settle capture failure and queue expiry" {
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var reactor: Reactor = undefined; // Neither case retains a native handle.
     var inject_resume_failure = false;
     for ([_]bool{ true, false }) |capture_failed| {
@@ -1184,7 +1190,8 @@ test "full capture queue rejects an offer without changing its charge or pending
     const readonly = try tmp.dir.openFile(std.testing.io, "full-queue", .{});
     try tmp.dir.deleteFile(std.testing.io, "full-queue");
     var used = std.atomic.Value(u64).init(0);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     var capture = ResponseCapture{
         .io = std.testing.io,
         .file = file,
@@ -1212,7 +1219,8 @@ test "Transfer finalization records late capture failure and retains discarded w
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var used = std.atomic.Value(u64).init(41);
-    var writer = CaptureWriter{ .io = std.testing.io };
+    var buffers: CaptureWriter.Buffers = undefined;
+    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
     for ([_]enum { write_failure, seal_failure, discard, discard_after_completion }{
         .write_failure, .seal_failure, .discard, .discard_after_completion,
     }, 0..) |scenario, index| {
