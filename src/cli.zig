@@ -157,7 +157,7 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
         .host_start, .host_stop, .host_status => try host(init, command, parsed),
         .host_serve => {
-            try configureHostAllocator(init, args);
+            try @import("os/process.zig").applyHostMallocDefaults(init, args);
             try serve(init, parsed);
         },
         // Inspection has its own read-only operation; configure's grammar
@@ -165,27 +165,6 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
         .defaults_inspect, .defaults_configure => try setup(init, parsed, false),
         .auth_login => try login(init, &.{parsed.positional.?}, false, codex_auth.login),
     }
-}
-
-fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
-    if (@import("builtin").os.tag != .macos) return;
-    if (std.mem.eql(u8, init.environ_map.get("RUI_HOST_MALLOC_DEFAULTS") orelse "", "0")) return;
-    var changed = false;
-    for ([_][]const u8{ "MallocMaxMagazines", "MallocSpaceEfficient" }) |key| {
-        if (init.environ_map.get(key) != null) continue;
-        try init.environ_map.put(key, "1");
-        changed = true;
-    }
-    if (!changed) return;
-
-    // libmalloc reads these at process startup, before main. Replace this
-    // image before acquiring Store custody; key presence prevents another exec.
-    // Explicit caller values (including empty values) always take precedence.
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path_len = try std.process.executablePath(init.io, &path_buffer);
-    const argv = try init.arena.allocator().dupe([]const u8, args);
-    argv[0] = path_buffer[0..path_len];
-    return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
 }
 
 const post_command_ready_fd_environment = "RUI_TEST_POST_COMMAND_READY_FD";

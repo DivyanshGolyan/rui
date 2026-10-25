@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const credentials = @import("codex_credentials.zig");
 const policy = @import("codex_credential_policy.zig");
 const wire = @import("codex_token_wire.zig");
@@ -176,7 +175,7 @@ fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () boo
     try opt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
     try opt(easy, c.CURLOPT_SSL_VERIFYPEER, @as(c_long, 1));
     try opt(easy, c.CURLOPT_SSL_VERIFYHOST, @as(c_long, 2));
-    if (builtin.os.tag == .macos)
+    if (@import("os/os.zig").native_trust_store)
         try opt(easy, c.CURLOPT_SSL_OPTIONS, @as(c_long, c.CURLSSLOPT_NATIVE_CA));
     try opt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, @as(c_long, 15_000));
     try opt(easy, c.CURLOPT_TIMEOUT_MS, @as(c_long, 60_000));

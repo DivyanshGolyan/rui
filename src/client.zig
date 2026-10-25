@@ -1,4 +1,5 @@
 const std = @import("std");
+const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
@@ -5951,7 +5952,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         var response: [256]u8 = undefined;
         try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\na", .{ content_type, length }));
         // An answer's final window is delivered only after its EOF.
-        if (kind == .result) try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(peer.socket.handle, std.c.SHUT.WR));
+        if (kind == .result) try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(peer.socket.handle, std.c.SHUT.WR));
         const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
         while (!worker.sink.entered.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
             try std.Io.sleep(io, .fromMilliseconds(1), .awake);
@@ -6044,7 +6045,7 @@ test "transport cancellation quanta neither expire nor renew inactivity and obse
 }
 
 test "transport cancellation saturated Unix backlog is not a connected writable socket" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!@import("os/os.zig").full_backlog_blocks_connect) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();

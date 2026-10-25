@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from platform_boundary import mac_specific
+from platform_boundary import mac_path
 from strict_paths import strict
 
 
@@ -117,7 +117,11 @@ RULES = (
     (("src/evaluator*", "tests/integration/evaluator*"),
      ("workflow-check", "evaluator-host-integration", "evaluator-churn"),
      ("workflow-check", "evaluator-host-integration", "evaluator-churn"), "Evaluator lifetime, output and cleanup"),
-    (("src/descriptor*", "src/host_launch.c", "src/server*.zig", "src/platform.zig", "src/cli.zig",
+    (("src/os/*",),
+     ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
+     ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
+     "Platform boundary: the native owners it serves on each OS"),
+    (("src/descriptor*", "src/os/descriptor_limit.zig", "src/host_launch.c", "src/server*.zig", "src/platform.zig", "src/cli.zig",
       "tests/integration/descriptor*", "tests/integration/host_launch*", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
      ("test", "host-launch-integration", "descriptor-capacity-integration",
@@ -273,7 +277,7 @@ def select(paths, phase, available):
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS
     # Linux predicts Mac except where code may differ by platform.
-    mac_required = phase == "review" and any(mac_specific(path) for path in paths)
+    mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
     if phase == "development":

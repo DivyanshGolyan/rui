@@ -34,10 +34,9 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// Darwin may deliver a guard-page hit as SIGBUS, which Zig reports as a bus error.
 fn guardFault(stderr: []const u8) bool {
     if (std.mem.indexOf(u8, stderr, "Segmentation fault at address") != null) return true;
-    return @import("builtin").os.tag == .macos and std.mem.indexOf(u8, stderr, "Bus error at address") != null;
+    return @import("os/os.zig").stack_guard_bus_error and std.mem.indexOf(u8, stderr, "Bus error at address") != null;
 }
 
 fn overflow(depth: usize) void {
