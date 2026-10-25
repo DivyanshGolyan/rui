@@ -43,7 +43,7 @@ jobs:
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Refuse a second open landing stack before native jobs start
@@ -79,8 +79,8 @@ jobs:
               p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS)
                                            | {'check', 'admission-debug-integration'})
               p['retry'] = False
-          elif os.environ['EVENT_NAME'] != 'pull_request':
-              # Landing is Linux-only, even for strict paths. Mac runs after main.
+          else:
+              # PRs and landings are Linux-only, even for strict paths. Mac runs after main.
               p['native_targets'] = []
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Import-cycle allowances may only shrink from trusted main history.
           fetch-depth: 0
@@ -139,7 +139,7 @@ jobs:
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
@@ -148,7 +148,7 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
           name: compiled-linux-${{ github.run_attempt }}
@@ -164,7 +164,7 @@ jobs:
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
@@ -173,7 +173,7 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
           name: compiled-macos-${{ github.run_attempt }}
@@ -190,11 +190,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
+        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: '["test-logic"]'
@@ -216,7 +216,7 @@ jobs:
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
@@ -241,7 +241,7 @@ jobs:
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-linux-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
@@ -290,7 +290,7 @@ jobs:
       max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
@@ -314,7 +314,7 @@ jobs:
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-macos-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
