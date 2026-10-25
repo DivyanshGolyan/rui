@@ -129,5 +129,5 @@ jobs:
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 -B tests/ci/report_issue.py \
-            --title "Nightly renderer contracts failed on ${GITHUB_SHA::12}" \
+            --title "Nightly renderer contracts failed" \
             --body "Nightly renderer contracts on main $GITHUB_SHA: contracts $CONTRACTS, mutations $MUTATIONS. $URL"
