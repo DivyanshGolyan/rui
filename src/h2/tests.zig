@@ -616,20 +616,13 @@ test "a refused connection fails its streams as never sent" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    // A port held by a bound socket that never listens refuses connects,
-    // and nothing else can take it while the test runs.
-    const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-    try std.testing.expect(fd >= 0);
-    defer _ = std.c.close(fd);
-    var address = std.mem.zeroes(std.c.sockaddr.in);
-    address.family = std.c.AF.INET;
-    address.addr = std.mem.nativeToBig(u32, 0x7f00_0001);
-    if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)));
-    var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.getsockname(fd, @ptrCast(&address), &length));
+    // A port that was free a moment ago and has no listener now. A bound
+    // socket that never listens would hold the port, but Darwin drops SYNs
+    // to it instead of refusing them, so the connect would time out.
+    const peer = try Peer.start(std.testing.allocator, .{});
     var url_buffer: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/v1", .{std.mem.bigToNative(u16, address.port)});
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
+    peer.stop();
     const endpoint = try client.addEndpoint(url);
     var stream: h2.Stream = .idle;
     var sink: [8]u8 = undefined;

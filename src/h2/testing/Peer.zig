@@ -353,28 +353,53 @@ fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
 fn flush(self: *Peer, connection: *Connection) void {
     // Frames wait for the handshake, which the reads drive.
     if (connection.ssl) |ssl| if (c.SSL_is_init_finished(ssl) != 1) return;
+    // nghttp2 hands out one frame at a time. Batched into one send, frames
+    // flushed together reach the client in one read: Darwin delivers
+    // loopback segments asynchronously, so a send per frame lets a read land
+    // between them.
+    var batch: [16 * 1024]u8 = undefined;
+    var batched: usize = 0;
     while (true) {
         var data: [*c]const u8 = undefined;
-        const length = c.nghttp2_session_mem_send2(connection.session, &data);
-        if (length <= 0) break;
-        // Loopback with small test payloads: a blocking-free full write.
-        var sent: usize = 0;
-        while (sent < length) {
-            switch (sendSome(connection, data[sent..@intCast(length)])) {
-                .bytes => |count| sent += count,
-                .again => {
-                    var poll = [_]std.c.pollfd{.{ .fd = connection.socket, .events = std.c.POLL.OUT, .revents = 0 }};
-                    _ = std.c.poll(&poll, 1, 100);
-                },
-                .closed => return self.closeConnection(connection),
-            }
+        const length: usize = @intCast(@max(0, c.nghttp2_session_mem_send2(connection.session, &data)));
+        if (length == 0) break;
+        if (batched + length > batch.len) {
+            if (!self.sendAll(connection, batch[0..batched])) return;
+            batched = 0;
         }
+        if (length > batch.len) {
+            if (!self.sendAll(connection, data[0..length])) return;
+            continue;
+        }
+        @memcpy(batch[batched..][0..length], data[0..length]);
+        batched += length;
     }
+    if (!self.sendAll(connection, batch[0..batched])) return;
     for (self.streams.items) |stream| {
         if (stream.connection != connection or stream.closed) continue;
         const window = c.nghttp2_session_get_stream_remote_window_size(connection.session, stream.id);
         self.seen.max_stream_window = @max(self.seen.max_stream_window, window);
     }
+}
+
+/// Loopback with small test payloads: a blocking-free full write. False
+/// when the connection closed.
+fn sendAll(self: *Peer, connection: *Connection, bytes: []const u8) bool {
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        switch (sendSome(connection, bytes[sent..])) {
+            .bytes => |count| sent += count,
+            .again => {
+                var poll = [_]std.c.pollfd{.{ .fd = connection.socket, .events = std.c.POLL.OUT, .revents = 0 }};
+                _ = std.c.poll(&poll, 1, 100);
+            },
+            .closed => {
+                self.closeConnection(connection);
+                return false;
+            },
+        }
+    }
+    return true;
 }
 
 pub fn closeConnection(self: *Peer, connection: *Connection) void {
