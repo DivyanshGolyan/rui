@@ -41,7 +41,7 @@ fn map() std.posix.MMapError!Stack {
 
 fn install(stack: Stack) void {
     if (stack.len == 0) return;
-    std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = @intCast(stack.len) }, null) catch unreachable; // A sized stack outside any signal handler.
+    std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = stack.len }, null) catch unreachable; // A sized stack outside any signal handler.
 }
 
 fn release(stack: Stack) void {
