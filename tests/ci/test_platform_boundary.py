@@ -46,7 +46,8 @@ class PlatformBoundaryTest(unittest.TestCase):
                      "src/build_transport.sh", "tests/integration/evaluator_driver.c", "build.zig", "build.zig.zon",
                      ".github/actions/setup/action.yml", ".github/workflows/daily-macos.yml",
                      ".github/workflows/qualify-macos.yml", "tests/ci/qualification.py", "install.sh",
-                     "src/os/process.zig", "src/os/descriptor_limit.zig"):
+                     "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
+                     "src/h2/testing/Peer.zig"):
             self.assertTrue(mac_path(path), path)
         for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
                      ".github/workflows/check.yml", "README.md"):
