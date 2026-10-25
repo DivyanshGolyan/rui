@@ -243,21 +243,21 @@ pub fn executionMain(host: *Host) void {
         host.auth_worker = null;
         auth_worker.stop(thread);
     };
-    const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
+    // Zero bytes are a free slot and an empty Turn entry, so fresh pages
+    // need no initializing pass and an idle slot never becomes resident.
+    const slots = mapZeroed(ExecutionSlot, host.custody.records.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    defer host.allocator.free(slots);
-    for (slots) |*slot| slot.* = .free;
-    const turn_states = host.allocator.alloc(model_adapter.TurnStates.Entry, slots.len) catch |err| {
+    defer unmapZeroed(slots);
+    const turn_states = mapZeroed(model_adapter.TurnStates.Entry, slots.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    for (turn_states) |*entry| entry.* = .{};
     host.turn_states = .{ .entries = turn_states };
     defer {
         host.turn_states = .{};
-        host.allocator.free(turn_states);
+        unmapZeroed(turn_states);
     }
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
@@ -755,6 +755,45 @@ fn cancelSupersededTransfers(
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
+}
+
+/// Returns `count` items in fresh anonymous pages: every byte is zero and no
+/// page is resident until first written. Allocator.alloc promises neither,
+/// because ReleaseSafe fills new memory with 0xAA and an init loop writes
+/// every page, so callers whose empty state is all zero bytes use this.
+fn mapZeroed(comptime T: type, count: usize) ![]T {
+    if (count == 0) return &.{};
+    const bytes = try std.posix.mmap(
+        null,
+        try std.math.mul(usize, @sizeOf(T), count),
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+}
+
+fn unmapZeroed(items: anytype) void {
+    if (items.len == 0) return;
+    std.posix.munmap(@alignCast(std.mem.sliceAsBytes(items)));
+}
+
+test "zeroed pages are free slots and empty Turn entries" {
+    const slots = try mapZeroed(ExecutionSlot, 3);
+    defer unmapZeroed(slots);
+    for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
+    try std.testing.expectEqual(slots.len, countFreeSlots(slots));
+    const entries = try mapZeroed(model_adapter.TurnStates.Entry, 2);
+    defer unmapZeroed(entries);
+    for (entries) |entry| {
+        try std.testing.expectEqual(@as(?u64, null), entry.turn_id);
+        try std.testing.expectEqualStrings("", entry.value.slice());
+        try std.testing.expectEqual(@as(u64, 0), entry.used);
+    }
+    var states: model_adapter.TurnStates = .{ .entries = entries };
+    try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
+    try std.testing.expectEqual(@as(usize, 0), (try mapZeroed(ExecutionSlot, 0)).len);
 }
 
 fn countFreeSlots(slots: []const ExecutionSlot) usize {

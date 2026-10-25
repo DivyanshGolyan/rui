@@ -489,7 +489,10 @@ pub const TurnStates = struct {
     /// epoch. An observed account change invalidates every cached Turn.
     pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) Replay {
         if (self.account == null or !std.mem.eql(u8, &self.account.?, &account)) {
-            for (self.entries) |*entry| entry.* = .{};
+            // Only occupied entries are reset, so an unused entry stays untouched.
+            for (self.entries) |*entry| if (entry.turn_id != null) {
+                entry.* = .{};
+            };
             self.account = account;
             self.epoch += 1;
             self.uses = 0;
