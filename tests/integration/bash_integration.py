@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import pathlib
-import platform
 import shlex
 import shutil
 import signal
@@ -12,11 +11,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from collections import Counter
 
 import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
+import os_semantics
 
 
 def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
@@ -777,8 +776,7 @@ def walkthrough():
     try:
         print("Rui Bash approve-and-recover walkthrough")
         show_observation(
-            f"exercise revision: {source_revision()}; platform: {platform.system()} "
-            f"{platform.release()} {platform.machine()}"
+            f"exercise revision: {source_revision()}; platform: {os_semantics.DESCRIPTION}"
         )
         show_observation(f"temporary Store: {store}")
         show_observation(f"temporary Workspace (working directory, not a sandbox): {workspace}")

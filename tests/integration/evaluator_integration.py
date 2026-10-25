@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import os_semantics
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('binary')
@@ -214,7 +215,7 @@ time.sleep({child_seconds})
 
 if args.churn_only:
     check_repetition('churn')
-    print(f'evaluator churn: 1,000 same-parent exact results and descriptor balance passed on {sys.platform}')
+    print(f'evaluator churn: 1,000 same-parent exact results and descriptor balance passed on {os_semantics.SYSTEM}')
     sys.exit(0)
 
 
@@ -231,7 +232,7 @@ for injected in (False, True):
     with tempfile.TemporaryDirectory() as directory:
         check_append_gate(pathlib.Path(directory), injected)
 if args.native_gates_only:
-    print(f'evaluator native decisions, stale bridge, wait ownership and gates passed on {sys.platform}')
+    print(f'evaluator native decisions, stale bridge, wait ownership and gates passed on {os_semantics.SYSTEM}')
     sys.exit(0)
 
 
@@ -434,7 +435,7 @@ while :; do printf "\\001\\000\\000\\000x"; done
     assert owned(fake, 'output-cancel').returncode == 1
     assert marker.exists()
     assert time.monotonic() - start < 1
-    if sys.platform == 'linux':
+    if os_semantics.PROC_FS:
         assert not pathlib.Path(f'/proc/{int(marker.read_text())}').exists()
     fake.write_text('#!/bin/sh\nprintf "\\001\\000\\000\\000x\\000\\000\\000\\000"\nexit 1\n')
     assert owned(fake, 'run').returncode == 1
@@ -461,4 +462,4 @@ while :; do printf "\\001\\000\\000\\000x"; done
         assert json.loads(owned(probe, 'run').stdout) == {'env': 0, 'extraFds': 2}
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, normal)
-print(f'evaluator boundary: compile-only, result, CPU, framing, and cleanup passed on {sys.platform}')
+print(f'evaluator boundary: compile-only, result, CPU, framing, and cleanup passed on {os_semantics.SYSTEM}')

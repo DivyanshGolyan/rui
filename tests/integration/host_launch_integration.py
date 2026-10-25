@@ -30,6 +30,7 @@ from host_process import (canonical_fixture_root, start_ready_process, stop_proc
                           copy_failure_diagnostics, STORE_SCHEMA)
 import codex_integration as codex_fixture
 from product_defaults import DEFAULTS
+import os_semantics
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -331,9 +332,9 @@ def managed_descriptor_rejection(store, env, limit):
     # Independent budget at the default capacity: macOS libmalloc may add one
     # inherited socket; curl wakeups and authentication differ by platform.
     inherited = fields["inherited"]
-    assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
-    fixed_host = 11 if sys.platform == "darwin" else 9
-    authentication = 10 if sys.platform == "darwin" else 8
+    assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
+    fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
+    authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
     # Other occupied slots at five descriptors plus the serial ten-descriptor
     # Bash spawn; ordinary exchanges at four, two controls and discovery.
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 4 + 3
@@ -706,7 +707,7 @@ def main():
             assert instance(status(store, env), DEFAULT_ACTIVE_CAPACITY) == identity
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
-            if sys.platform == "linux":
+            if os_semantics.PROC_FS:
                 for descriptor in range(2):
                     assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}") == "/dev/null"
                 # The private startup error channel is not a retained caller
@@ -876,11 +877,7 @@ def main():
             assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
             assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
             actual_terminal = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual_terminal[3] &= ~mask
-                original_terminal[3] &= ~mask
-            assert actual_terminal == original_terminal, (actual_terminal, original_terminal, output)
+            assert os_semantics.user_termios(actual_terminal) == os_semantics.user_termios(original_terminal), (actual_terminal, original_terminal, output)
             assert b"host_status" not in output and b'"diagnostics"' not in output, output
             assert instance(status(bare_store, bare_env), DEFAULT_ACTIVE_CAPACITY)
             inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],

@@ -18,6 +18,7 @@ import tempfile
 
 import human_cli_integration as cli
 from host_process import start_ready_process, stop_process
+import os_semantics
 
 
 def sample(pid):
@@ -130,7 +131,7 @@ def retained(state, binary, label):
 
 
 def main():
-    if sys.platform != "linux":
+    if not os_semantics.PROC_FS:
         raise SystemExit("This diagnostic needs Linux /proc; macOS footprint is not measured here")
     baseline, candidate = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
     with tempfile.TemporaryDirectory(prefix="rui-saved-resources.") as temporary:

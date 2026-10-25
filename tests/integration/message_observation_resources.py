@@ -19,6 +19,7 @@ import threading
 import human_cli_integration as cli
 from host_process import start_ready_process, stop_process
 from saved_request_resources import sample
+import os_semantics
 
 
 def retained(state, binary, label, repetition, failed_key):
@@ -113,7 +114,7 @@ def baseline_observation(state, key):
 
 
 def main():
-    if sys.platform != "linux":
+    if not os_semantics.PROC_FS:
         raise SystemExit("This diagnostic needs Linux /proc; macOS footprint is not measured")
     baseline, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:3])
     for label, binary in (("baseline", baseline), ("candidate", candidate)):

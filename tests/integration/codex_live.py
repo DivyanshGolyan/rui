@@ -18,6 +18,7 @@ import time
 import bash_integration as bash
 import model_fixture as caller
 from host_process import start_ready_process
+import os_semantics
 
 
 def observations(host):
@@ -235,7 +236,7 @@ def run(model, external_credential=None):
         after = evidence(store)
         assert len(after) == 4 and after[:3] == before and after[3][0]
         print(json.dumps({
-            "revision": bash.source_revision(), "system": platform.system(),
+            "revision": bash.source_revision(), "system": os_semantics.SYSTEM,
             "architecture": platform.machine(), "requested_model": model,
             "route": "/backend-api/codex/responses", "authentication": "Rui device code",
             "native_dependencies": dependencies,

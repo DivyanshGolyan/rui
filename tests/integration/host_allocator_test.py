@@ -10,6 +10,7 @@ import tempfile
 from unittest.mock import patch
 
 from host_process import start_ready_process, stop_process
+import os_semantics
 
 
 PROBE = r"""
@@ -34,20 +35,20 @@ __attribute__((constructor)) static void observe(void) {
 
 def main():
     binary = Path(sys.argv[1]).resolve()
-    macos = sys.platform == "darwin"
+    macos = os_semantics.HOST_MALLOC_REEXEC
     with tempfile.TemporaryDirectory(prefix="rui-allocator-", dir="/tmp") as temporary:
         root = Path(temporary)
         source, library = root / "probe.c", root / "probe.so"
         source.write_text(PROBE)
         subprocess.run(
-            ["cc", "-dynamiclib" if macos else "-shared", "-fPIC", str(source), "-o", str(library)],
+            os_semantics.shared_library_command(source, library),
             check=True,
         )
         base = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("Malloc", "RUI_HOST_MALLOC_", "DYLD_", "LD_PRELOAD"))
         }
-        base["DYLD_INSERT_LIBRARIES" if macos else "LD_PRELOAD"] = str(library)
+        base[os_semantics.PRELOAD] = str(library)
         cases = [
             ({}, ("1", "1"), 2),
             ({"RUI_HOST_MALLOC_DEFAULTS": "0"}, ("absent", "absent"), 1),

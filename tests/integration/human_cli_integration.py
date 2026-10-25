@@ -34,6 +34,7 @@ from terminal_process import open_pty, terminal_process
 import terminal_process as terminal_process_module
 import model_fixture as fixture
 import codex_integration as codex_fixture
+import os_semantics
 
 
 def run(home, *args, success=True, environment=None, input=None):
@@ -1086,11 +1087,7 @@ def command_entry_cases():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert json.loads(run(home, "session", "list", "--all"))["sessions"][0]["reference"] == initial_session
         # More than one eight-row page here; a newer foreign Workspace must not
         # win --last. Exact resume is independent of that cwd filtering.
@@ -1118,7 +1115,7 @@ def command_entry_cases():
                     assert caller.returncode == 1, (caller.returncode, errors)
                     assert b"TERM=dumb does not" in errors and b"No Host or Session changed." in errors, errors
                     assert not select.select([master], [], [], 0.2)[0], "dumb terminal was drawn"
-                    assert termios.tcgetattr(slave) == original or sys.platform == "darwin"
+                    assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
                     continue
                 opening = read_terminal(master, "› ")
                 prompt_cell = drawn_style(master, "› ")
@@ -1130,10 +1127,7 @@ def command_entry_cases():
                 _, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0 and not errors, errors
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                assert actual == original
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert len(endpoint.requests) == 2, "resume submitted or restarted work"
         env = {**os.environ, "HOME": str(home)}
         # Fresh Configure without a selector allocates an ID with concrete
@@ -1256,9 +1250,7 @@ def command_entry_cases():
         assert set(records.glob("*.json")) == before_entry | added, "resume created a replacement Session"
         assert len(endpoint.requests) == 7, "entry recovery submitted provider work"
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            actual[3] &= ~mask
-        assert actual == original
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         literal = admit(home, "session", "configure", cwd=workspace)["admission"]["answer"]["session"]
         for index, (prompt, answer) in enumerate((("-", b"Literal dash answered."),
                 ("--model", b"Literal option answered.")), start=7):
@@ -1526,11 +1518,7 @@ def persistent_opening_case():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original, "opening terminal configuration was not restored"
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "opening terminal configuration was not restored"
         os.close(master)
         os.close(slave)
         master = slave = None
@@ -1555,11 +1543,7 @@ def persistent_opening_case():
             assert unverified not in drawn, ("truncated opening exposed unverified content", unverified, drawn)
         assert not drawn.count(b"\x1b[?1049h") or drawn.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in drawn, drawn
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original, "late opening error left terminal configuration changed"
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "late opening error left terminal configuration changed"
         assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 2, "opening error retried or caused work"
         proxy.close()
         proxy = None
@@ -1977,12 +1961,8 @@ def persistent_input_cases():
         _, errors = caller.communicate(timeout=5)
         assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            # NOW restores user configuration, not kernel-owned history flags.
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original, "persistent terminal configuration was not restored"
+        # NOW restores user configuration, not kernel-owned history flags.
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "persistent terminal configuration was not restored"
         completed = True
         print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
     finally:
@@ -2236,11 +2216,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             os.write(master, b"/exit\n")
             assert caller.wait(timeout=5) == 0, caller.stderr.read()
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert len(endpoint.requests) == 1
             assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
             completed = True
@@ -2600,11 +2576,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         caller.send_signal(signal.SIGTERM)
         assert caller.wait(timeout=5) == 0, caller.stderr.read()
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original, "signal after inspection handoff did not restore terminal"
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "signal after inspection handoff did not restore terminal"
         # Opening uses certified labels, not undisplayed exact proposal fields.
         # Explicit inspection and permission above still read the exact command.
         hidden_reads = []
@@ -2631,10 +2603,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-        assert actual == original, "label-only opening left terminal configuration changed"
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "label-only opening left terminal configuration changed"
         if exit_code:
             # Age the same saved result out of opening, then reconstruct it
             # through /history. Neither navigation nor export may rerun Bash.
@@ -2962,7 +2931,7 @@ def saved_capture_cases(state, store, workspace):
 
     # Linux libc fault injection reaches the actual post-rename directory sync,
     # not a fixture-only success path. No automatic send may follow uncertainty.
-    if sys.platform == "linux":
+    if os_semantics.SYNC_FAULT_PRELOAD:
         source, library = state / "capture-sync.c", state / "capture-sync.so"
         source.write_text(r"""
 #include <dlfcn.h>
@@ -2976,10 +2945,10 @@ int fsync(int fd) {
     return real_sync(fd);
 }
 """)
-        subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(library)], check=True)
+        subprocess.run(os_semantics.shared_library_command(source, library), check=True)
         before = set(json.loads(run(home, "request", "list")))
         failed = subprocess.run([str(fixture.RUI), *map(str, args)],
-            env={**os.environ, "HOME": str(home), "LD_PRELOAD": str(library)},
+            env={**os.environ, "HOME": str(home), os_semantics.PRELOAD: str(library)},
             capture_output=True, text=True, timeout=20)
         assert failed.returncode != 0 and "RecordDirectorySyncFailed" in failed.stderr, failed
         assert failed.stdout == "", failed.stdout
@@ -3059,11 +3028,7 @@ def silent_read_edit_cases():
                 _, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, errors
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
                 print(f"silent observation: {route} visible Unicode edit and exact capture passed", flush=True)
             finally:
                 dispose_all(release.set,
@@ -3373,11 +3338,7 @@ def incomplete_input_case(home, store, session, endpoint, host):
             assert b"IncompleteTerminalInput" in errors, (output, errors)
             assert b"\x1b[0m\x1b[?2004l" in output, "delayed collector lost terminal cleanup"
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original, (actual, original)
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (actual, original)
     finally:
         disposals = []
         for master, slave, entered, _, _ in callers:
@@ -3572,11 +3533,7 @@ def renderer_cases():
             yield terminal
             assert caller.poll() is not None, "case did not retire its renderer"
             actual, expected = termios.tcgetattr(slave), list(original)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                expected[3] &= ~mask
-            assert actual == expected, ("renderer termios restoration", expected, actual)
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(expected), ("renderer termios restoration", expected, actual)
             from terminal_restoration_integration import assert_file_flags
             assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
         finally:
@@ -5589,11 +5546,7 @@ def main(selected="all"):
                 assert outcome in answered and (notice is None or notice in answered), (keys, answered)
                 assert chooser.wait(timeout=5) == 0
                 restored, expected = termios.tcgetattr(slave), list(original)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    restored[3] &= ~mask
-                    expected[3] &= ~mask
-                assert restored == expected, ("one-shot choice termios restoration", keys, expected, restored)
+                assert os_semantics.user_termios(restored) == os_semantics.user_termios(expected), ("one-shot choice termios restoration", keys, expected, restored)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
             finally:
                 dispose_all(lambda: stop_process(chooser, timeout=5),
@@ -6651,11 +6604,7 @@ def main(selected="all"):
                 assert (b"error: TerminalTooSmall" in errors and b"Resume: rui session resume --store " in errors) == (columns == 7), errors
                 assert (b"Detached." in output) == (columns == 8), output
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original_terminal[3] &= ~mask
-                assert actual == original_terminal
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
                 assert set((fresh_home / ".config/rui/requests").glob("*.json")) == before
             finally:
                 dispose_all(lambda: stop_process(entered, timeout=5),
@@ -6706,11 +6655,7 @@ def main(selected="all"):
             assert b"Detached." not in lost and b"Not confirmed" not in lost, lost
             assert proxy.mutations == [("/v1/message", original)], "fatal observation retransmitted Message"
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original_terminal[3] &= ~mask
-            assert actual == original_terminal
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
             assert set(json.loads(run(home, "request", "list"))) == after and record.read_bytes() == original
             proxy.close()
             proxy = None

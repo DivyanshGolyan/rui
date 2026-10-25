@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import host_process
 import session_list_integration as fixture
+import os_semantics
 
 
 def expect_failure(operation, message):
@@ -45,7 +46,7 @@ def oracle_controls(platform="linux"):
     diagnostics = SimpleNamespace(records=records, read_error=None, condition=threading.Condition())
     invocation = (102, 102, time.monotonic() + 10)
     census = {"census": "observed"} if platform == "linux" else None
-    with patch.object(fixture.sys, "platform", platform), \
+    with os_semantics.simulate(platform), \
          patch.object(fixture, "linux_resources", return_value={"census": "observed"}):
         # Neither the selected release nor an earlier owner's release may be
         # skipped before teardown, even without a platform resource census.
@@ -254,7 +255,7 @@ def charge_negative(binary, client):
 
 
 def main():
-    if sys.platform != "linux":
+    if not os_semantics.PROC_FS:
         print("SKIP: real report-close and /proc proof requires native Linux")
         return
     binary = pathlib.Path(sys.argv[1]).resolve()

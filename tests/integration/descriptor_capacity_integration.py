@@ -20,6 +20,7 @@ import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
 from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
+import os_semantics
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -555,8 +556,7 @@ def prove_accept_pressure(state):
     prove_accept_record_oracle(state)
     source, library = state / "accept.c", state / "accept.so"
     source.write_text(ACCEPT_PROBE)
-    subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC",
-                    str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
+    subprocess.run(os_semantics.shared_library_command(source, library), check=True)
     prove_accept_inheritance(state, library)
     for label, injected in (("mfile", errno.EMFILE), ("nfile", errno.ENFILE),
                             ("nobufs", errno.ENOBUFS), ("nomem", errno.ENOMEM),
@@ -579,7 +579,7 @@ def prove_accept_pressure(state):
             return peer
 
         try:
-            env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            env = {**os.environ, os_semantics.PRELOAD: str(library),
                    "RUI_ACCEPT_LOG": str(log), "RUI_ACCEPT_ARM": str(arm), "RUI_ACCEPT_ERRNO": str(injected or 0),
                    "RUI_ACCEPT_HOLD": str(backlog_hold), "RUI_ACCEPT_READY": str(backlog_ready),
                    "RUI_ACCEPT_RELEASE": str(backlog_release)}
@@ -716,7 +716,7 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
     worker.start()
     host = peer = timer = None
     try:
-        env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+        env = {**os.environ, os_semantics.PRELOAD: str(library),
                "RUI_ACCEPT_LOG": str(root / "accept.log"), "RUI_ACCEPT_ARM": str(root / "unused"),
                "RUI_ACCEPT_HOLD": str(hold), "RUI_ACCEPT_READY": str(ready), "RUI_ACCEPT_RELEASE": str(release)}
         host, fields = start_ready_process([str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
@@ -765,15 +765,14 @@ def main():
         # Keep allocator defaults enabled. macOS libmalloc may itself open a
         # socket before Host ownership begins; it belongs in inherited, not
         # in the independently calculated Host population below.
-        if sys.platform == "darwin":
+        if os_semantics.HOST_MALLOC_REEXEC:
             assert os.environ.get("RUI_HOST_MALLOC_DEFAULTS") != "0"
             for name in ("MallocMaxMagazines", "MallocSpaceEfficient"):
                 assert os.environ.get(name, "1") == "1", (name, os.environ.get(name))
         prove_accept_pressure(state)
-        # Lease(2), SQLite(4), listener(1), and curl wake objects: two
-        # pipes on macOS, two eventfds on Linux. Two execution slots need
-        # one steady population(5) plus the serial Bash spawn peak(10).
-        fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
+        # Two execution slots need one steady population(5) plus the
+        # serial Bash spawn peak(10).
+        fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
         execution = 5 + 10
         # The supported burst is 100 ordinary exchanges (socket + up to
         # three content aliases each), two controls and one discovery.
@@ -802,7 +801,7 @@ def main():
         assert "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
         assert "active_capacity=2" in rejected.stderr, rejected.stderr
         fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-        assert fields["inherited"] in ({3, 4} if sys.platform == "darwin" else {3}), fields
+        assert fields["inherited"] in os_semantics.INHERITED_DESCRIPTORS, fields
         required = fixed + fields["inherited"]
         expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
             inherited=fields["inherited"], fixed_host=fixed_host, clients=clients, execution=execution,

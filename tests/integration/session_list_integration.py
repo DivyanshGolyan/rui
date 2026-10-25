@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
+import os_semantics
 
 
 def exchange(socket_path, route, request):
@@ -105,7 +106,7 @@ def released_resources(pid, diagnostics, invocation):
                     last_release = max((releases[key] for key in prefix), key=lambda record: int(record["sequence"]))
                     assert last_release["scratch_used_bytes"] == "0", ("retained scratch charge", last_release)
                     assert time.monotonic() <= deadline, "release exceeded original command budget"
-                    if sys.platform != "linux":
+                    if not os_semantics.PROC_FS:
                         return None  # Only the /proc resource census is Linux-specific.
                     census = linux_resources(pid)
                     assert census is not None, "Host vanished before resource census"

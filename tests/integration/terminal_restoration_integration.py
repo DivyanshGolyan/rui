@@ -24,15 +24,14 @@ import canonical_failure_integration as canonical
 import model_fixture as fixture
 import human_cli_integration as human
 from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
+import os_semantics
 
 
 def assert_file_flags(actual, expected):
-    # XNU xnu-11417.140.69 exposes kernel-only FWASWRITTEN through F_GETFL.
-    # A positive write sets it; successful F_SETFL cannot clear write history.
-    # Keep every other bit, including access mode and O_NONBLOCK, exact.
-    history = 0x00010000 if sys.platform == "darwin" else 0
-    assert actual & ~history == expected & ~history, (
-        f"file flags actual={actual:#x} expected={expected:#x} excluded={history:#x}")
+    # Keep every bit but kernel write history exact, including access mode
+    # and O_NONBLOCK.
+    assert os_semantics.user_file_flags(actual) == os_semantics.user_file_flags(expected), (
+        f"file flags actual={actual:#x} expected={expected:#x} excluded={os_semantics.FILE_FLAG_HISTORY:#x}")
 
 
 PROBE = r"""
@@ -859,7 +858,7 @@ def check_forwarding(state, library):
     caller = None
     try:
         env = {**os.environ,
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "forwarding"}
         caller = subprocess.Popen([str(executable)], stdin=slave, stdout=slave,
             stderr=subprocess.PIPE, env=env)
@@ -904,7 +903,7 @@ def check_forwarding(state, library):
     arm.touch()
     release.touch()
     env = {**os.environ,
-        "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+        os_semantics.PRELOAD: str(library),
         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
         "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)}
     negative = subprocess.run([str(executable), "contention-negatives"], env=env,
@@ -960,7 +959,7 @@ def capture_receipt_case(state, library):
         host, _ = start_ready_process(fixture.host_arguments(store,
             f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace",
             "--test-response-capture-gate-path", gate.path), env={**os.environ,
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
             "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
@@ -1065,7 +1064,7 @@ def persistent_cases(state, library, home, store, host, session):
         try:
             fault = "backpressure" if case.startswith("backpressure") else case.removeprefix("incomplete-")
             environment = {**os.environ, "HOME": str(home),
-                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                os_semantics.PRELOAD: str(library),
                 "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault,
                 "RUI_TERMINAL_BACKPRESSURE_ARM": str(state / f"persistent-{case}" / "arm")}
             if case.startswith("sync-"):
@@ -1185,11 +1184,7 @@ def persistent_cases(state, library, home, store, host, session):
                     "--session", session)["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
             if fault not in ("restore", "both"):
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original, (case, actual, original)
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (case, actual, original)
             if case == "admission-interrupt":
                 assert not reply_release.is_set(), "borrower cleanup needed the Host reply"
                 body, = [body for body, _ in proxy.exchanges]
@@ -1325,7 +1320,7 @@ def renderer_backpressure_case(state, library, home, store):
             "RUI_TERMINAL_FAULT": "renderer-backpressure",
             "RUI_TERMINAL_PROBE": str(log),
             "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm),
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library)}
+            os_semantics.PRELOAD: str(library)}
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", session], env=environment,
             stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
@@ -1393,11 +1388,7 @@ def renderer_backpressure_case(state, library, home, store):
         assert caller.wait(timeout=5) == 0, caller.stderr.read()
         assert not errors and not caller.stderr.read(), bytes(errors)
         actual = termios.tcgetattr(slave)
-        if sys.platform == "darwin":
-            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-            actual[3] &= ~mask
-            original[3] &= ~mask
-        assert actual == original, (actual, original)
+        assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (actual, original)
         for fd, expected in flags.items():
             assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL), expected)
         assert set(records.glob("*.json")) - before == {captured}
@@ -1449,7 +1440,7 @@ def consent_boundary_cases(state, library):
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": f"consent-{case}",
                     "RUI_TERMINAL_CHOICE_RELEASE": str(release), "RUI_TERMINAL_DRAIN_RELEASE": str(drain),
                     "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
@@ -1492,11 +1483,7 @@ def consent_boundary_cases(state, library):
             output, errors = human.terminal_exit(caller, master)
             assert caller.wait(timeout=5) == 0, (output, errors)
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             if case == "escape-allow":
                 assert (root / "effect").read_bytes() == b"forbidden", "fresh Allow was swallowed"
             else:
@@ -1601,7 +1588,7 @@ def command_interruption_cases(state, library, only=None):
                 environment = {**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)}
                 if not route:
-                    environment.update({"DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    environment.update({os_semantics.PRELOAD: str(library),
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
                     if route is None:
                         environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
@@ -1719,11 +1706,7 @@ def command_interruption_cases(state, library, only=None):
                 else:
                     assert not added, "read command captured a mutation"
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original and not (root / "effect").exists()
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original) and not (root / "effect").exists()
                 assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
                 reply_release.set()
                 if proxy is not None:
@@ -1851,11 +1834,7 @@ def fatal_reporting_cases(state):
             assert set(after) - set(before) == {records / f"{request['key']}.json" for request in (first, second)}
             assert after == {**before, **{records / f"{json.loads(body)['key']}.json": body for body, _ in proxy.exchanges}}
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             print("fatal reporting: current unconfirmed original passed", flush=True)
         finally:
             dispose_all(
@@ -1875,11 +1854,7 @@ def fatal_reporting_cases(state):
             os.write(master, b"\x1b[")
             assert caller.wait(timeout=6) == 1, "disconnected stderr bypassed acquired-terminal cleanup"
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
             assert {path: path.read_bytes() for path in records.glob("*.json")} == records_before
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
@@ -1985,11 +1960,7 @@ def decision_reporting_cases(state):
                 effect = root / f"effect-{name}"
                 assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if decision == "allow_once" else b"")
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
                 print(f"decision reporting: {name} passed", flush=True)
             finally:
                 if sys.exc_info()[0] is not None:
@@ -2039,7 +2010,7 @@ def entry_enable_cases(state, library):
                 try:
                     caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                         env={**os.environ, "HOME": str(home),
-                            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                            os_semantics.PRELOAD: str(library),
                             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
                         stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
                     _, errors = caller.communicate(timeout=6)
@@ -2105,7 +2076,7 @@ def detach_reporting_cases(state, library):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready),
-                        "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                        os_semantics.PRELOAD: str(library),
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault, "RUI_TERMINAL_DETACH_ARM": str(arm)},
                     pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 human.read_terminal(master, "› ")
@@ -2147,11 +2118,7 @@ def detach_reporting_cases(state, library):
                 if "mutated" in fault:
                     assert log.read_text().count("detach-mutated\n") == 1
                 actual = termios.tcgetattr(slave)
-                if sys.platform == "darwin":
-                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                    actual[3] &= ~mask
-                    original[3] &= ~mask
-                assert actual == original
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
                 assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
                 messages = [before[path] for path in records if json.loads(before[path])["kind"] == "message"]
                 assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
@@ -2211,7 +2178,7 @@ def startup_reporting_cases(state, library):
                 "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
-                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
                     "RUI_TERMINAL_STARTUP_ARM": str(arm)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -2262,14 +2229,10 @@ def startup_reporting_cases(state, library):
             assert {path: path.read_bytes() for path in records.glob("*.json")} == before
             assert proxy.mutations == mutations and not (root / "must-not-run").exists()
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
             if kind == "message-restore":
                 assert not actual[3] & termios.ICANON
             else:
-                assert actual == original
+                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             release.set()
             proxy.close()
             proxy = None
@@ -2332,7 +2295,7 @@ def visible_stream_handoff_cases(state, library):
             if phase == "opening": arm.touch()
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             if phase != "opening":
@@ -2397,11 +2360,7 @@ def visible_stream_handoff_cases(state, library):
                 assert b"Cancelled" not in errors, (phase, errors)
                 assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
             actual = termios.tcgetattr(slave)
-            if sys.platform == "darwin":
-                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
-                actual[3] &= ~mask
-                original[3] &= ~mask
-            assert actual == original
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
             assert "restore-other" in log.read_text() and "disable" in log.read_text()
             assert len(endpoint.requests) == len(responses), "held output restarted Host work"
@@ -2449,7 +2408,7 @@ def host_diagnostic_cases(state, library):
         host = subprocess.Popen(list(map(str, fixture.host_arguments(store, None))),
             stdout=write_fd, stderr=write_fd,
             env={**os.environ,
-                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                os_semantics.PRELOAD: str(library),
                 "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "alias-poison",
                 "RUI_DIAGNOSTIC_ARM": str(arm)})
         fixture.wait_for(lambda: log.exists() and "readiness-write-entry\n" in log.read_text(),
@@ -2559,7 +2518,7 @@ def host_diagnostic_cases(state, library):
         server.start()
         result = []
         env = {**os.environ,
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": kind,
             "RUI_DIAGNOSTIC_RELEASE": str(release)}
 
@@ -2619,7 +2578,7 @@ def host_diagnostic_cases(state, library):
         root.mkdir(mode=0o700)
         log = root / "probe.log"
         env = {**os.environ,
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": kind}
         host = None
         try:
@@ -2683,7 +2642,7 @@ def host_diagnostic_cases(state, library):
         inspectors = []
         contention_complete = False
         env = {**os.environ,
-            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            os_semantics.PRELOAD: str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-restore" if credit == "diagnostic-restore-startup" else credit,
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)}
         try:
@@ -3066,8 +3025,7 @@ def main(selected=None):
             return
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
-        subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared",
-            "-fPIC", str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
+        subprocess.run(os_semantics.shared_library_command(source, library), check=True)
         check_forwarding(state, library)
         if selected == "forwarding":
             completed = True
