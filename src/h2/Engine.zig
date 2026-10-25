@@ -29,11 +29,17 @@ origins: [h2.max_endpoints]Origin,
 origin_count: u8,
 endpoints: [h2.max_endpoints]Endpoint,
 endpoint_count: u8,
-/// Never moved: open streams name theirs by index + 1.
+/// Never moved: open streams name theirs by index + 1. Sized for the
+/// worst case, but each drive walks only the first `connections_len`
+/// entries, which end at the last one not free. An entry is written first
+/// when the table grows to it, so pages no connection ever reached are
+/// never written. Pages a burst reached stay resident after it, at most
+/// one entry per stream of capacity.
 connections: []Connection,
-/// One entry per connection, rebuilt for each routing decision.
+connections_len: u32,
+/// One entry per walked connection, rebuilt for each routing decision.
 views: []policy.ConnectionView,
-/// The waker first, then one entry per connection.
+/// The waker first, then one entry per walked connection.
 pollfds: []std.c.pollfd,
 timers: Record.List,
 finished: Record.List,
@@ -118,12 +124,12 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     c.nghttp2_option_set_no_auto_window_update(session_options, 1);
 
     const capacity = options.stream_capacity;
-    const connections = try allocator.alloc(Connection, capacity);
-    errdefer allocator.free(connections);
-    const views = try allocator.alloc(policy.ConnectionView, capacity);
-    errdefer allocator.free(views);
-    const pollfds = try allocator.alloc(std.c.pollfd, capacity + 1);
-    errdefer allocator.free(pollfds);
+    const connections = try allocUnwritten(allocator, Connection, capacity);
+    errdefer freeUnwritten(allocator, Connection, connections);
+    const views = try allocUnwritten(allocator, policy.ConnectionView, capacity);
+    errdefer freeUnwritten(allocator, policy.ConnectionView, views);
+    const pollfds = try allocUnwritten(allocator, std.c.pollfd, capacity + 1);
+    errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
     const scratch = try allocator.create(Scratch);
     errdefer allocator.destroy(scratch);
     scratch.chunk_count = 0;
@@ -141,6 +147,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .endpoints = undefined,
         .endpoint_count = 0,
         .connections = connections,
+        .connections_len = 0,
         .views = views,
         .pollfds = pollfds,
         .timers = .{},
@@ -153,13 +160,42 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .waker = waker,
         .tls_context = null,
     };
-    for (connections, 0..) |*connection, index| connection.* = .free(self, @intCast(index));
+}
+
+/// The walked table entries; every one past them is free.
+fn active(self: *Engine) []Connection {
+    return self.connections[0..self.connections_len];
+}
+
+/// Drops free entries off the walked end, so each drive's work follows
+/// the connections that exist rather than the most there ever were. An
+/// entry whose SecTrust job still runs is not `available` and stays.
+fn trimTable(self: *Engine) void {
+    while (self.connections_len > 0 and self.connections[self.connections_len - 1].available())
+        self.connections_len -= 1;
+}
+
+/// Allocator.alloc and Allocator.free fill the memory with `undefined`
+/// (0xAA) in safe builds, which writes, and so makes resident, every page
+/// of a table sized for the worst case: 566 pages at 10,000 entries in
+/// the test below. The raw calls skip that fill. Whether untouched pages
+/// stay unbacked is then the allocator's: true of the page allocator and
+/// of libc malloc at these sizes.
+fn allocUnwritten(allocator: std.mem.Allocator, comptime T: type, count: usize) error{OutOfMemory}![]T {
+    const bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
+    const memory = allocator.rawAlloc(bytes, .of(T), @returnAddress()) orelse return error.OutOfMemory;
+    const items: [*]T = @ptrCast(@alignCast(memory));
+    return items[0..count];
+}
+
+fn freeUnwritten(allocator: std.mem.Allocator, comptime T: type, items: []T) void {
+    allocator.rawFree(std.mem.sliceAsBytes(items), .of(T), @returnAddress());
 }
 
 pub fn deinit(self: *Engine) void {
     std.debug.assert(self.receiver == null);
     std.debug.assert(self.timers.head == null and self.finished.head == null);
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.state != .free) connection.close(.goaway);
         connection.releaseVerification();
     }
@@ -169,9 +205,9 @@ pub fn deinit(self: *Engine) void {
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     self.allocator.destroy(self.scratch);
-    self.allocator.free(self.pollfds);
-    self.allocator.free(self.views);
-    self.allocator.free(self.connections);
+    freeUnwritten(self.allocator, std.c.pollfd, self.pollfds);
+    freeUnwritten(self.allocator, policy.ConnectionView, self.views);
+    freeUnwritten(self.allocator, Connection, self.connections);
     c.nghttp2_option_del(self.session_options);
     c.nghttp2_session_callbacks_del(self.callbacks);
     self.waker.deinit();
@@ -382,6 +418,7 @@ pub fn drive(self: *Engine, receiver: Receiver) h2.DriveError!void {
     self.submitPending();
     self.sendAll();
     self.checkLiveness();
+    self.trimTable();
 }
 
 /// poll(0) over every socket, so each step below acts only on ready ones.
@@ -393,7 +430,7 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
         if (result >= 0) break;
         if (std.posix.errno(result) != .INTR) return error.PollFailed;
     }
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.poll_slot != 0) connection.revents = self.pollfds[connection.poll_slot].revents;
     }
 }
@@ -402,7 +439,7 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
 /// socket and returns the number of connection entries.
 fn fillPollfds(self: *Engine) usize {
     var count: usize = 0;
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         connection.revents = 0;
         connection.poll_slot = 0;
         const events = connection.pollEvents() orelse continue;
@@ -415,7 +452,7 @@ fn fillPollfds(self: *Engine) usize {
 
 fn advanceSetups(self: *Engine) void {
     const time = self.now();
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (!connection.settingUp()) continue;
         switch (connection.state) {
             .resolving => connection.finishLookup(),
@@ -436,7 +473,7 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
     connection.close(.abrupt);
     var setting_up: u32 = 0;
     var ready_with_room: u32 = 0;
-    for (self.connections) |*other| {
+    for (self.active()) |*other| {
         if (other.origin != origin_index) continue;
         if (other.settingUp()) setting_up += 1;
         ready_with_room += @intFromBool(other.hasRoom());
@@ -448,7 +485,7 @@ pub fn setupFailed(self: *Engine, connection: *Connection, cause: policy.Cause) 
 
 /// Marks each connection that stopped at its read allowance.
 fn readAll(self: *Engine) void {
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         connection.read_capped = false;
         if (!connection.hasSession() or (connection.revents == 0 and !connection.tlsPending())) continue;
         if (connection.receive() == .capped) connection.read_capped = true;
@@ -467,7 +504,7 @@ fn submitPending(self: *Engine) void {
             connection.adopt(record, stream_id);
         }
         var setting_up: u32 = 0;
-        for (self.connections) |*connection| {
+        for (self.active()) |*connection| {
             if (connection.origin == origin_index and connection.settingUp()) setting_up += 1;
         }
         var opening = policy.connectionsToOpen(origin.pending.len, setting_up, origin.learned_max_streams);
@@ -480,20 +517,27 @@ fn submitPending(self: *Engine) void {
 }
 
 fn route(self: *Engine, origin_index: u8) ?usize {
-    for (self.connections, self.views) |*connection, *view| {
+    const views = self.views[0..self.connections_len];
+    for (self.active(), views) |*connection, *view| {
         view.* = if (connection.origin == origin_index) connection.view() else .{ .ready = false, .draining = false, .streams = 0, .peer_max_streams = 0 };
     }
-    return policy.route(self.views);
+    return policy.route(views);
 }
 
 /// A free table entry, closing an empty connection when the table is full.
 /// With one entry per stream of capacity, a full table that still needs a
 /// connection always holds an empty one.
 fn freeConnection(self: *Engine) ?*Connection {
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.available()) return connection;
     }
-    for (self.connections) |*connection| {
+    if (self.connections_len < self.connections.len) {
+        const connection = &self.connections[self.connections_len];
+        connection.* = .free(self, self.connections_len);
+        self.connections_len += 1;
+        return connection;
+    }
+    for (self.active()) |*connection| {
         if ((connection.state == .ready or connection.state == .draining) and connection.streams == 0) {
             connection.close(.goaway);
             return connection;
@@ -503,14 +547,14 @@ fn freeConnection(self: *Engine) ?*Connection {
 }
 
 fn sendAll(self: *Engine) void {
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.hasSession()) connection.send();
     }
 }
 
 fn checkLiveness(self: *Engine) void {
     const time = self.now();
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.state != .ready and connection.state != .draining) continue;
         if (connection.state == .draining and connection.streams == 0) {
             connection.close(.abrupt);
@@ -657,7 +701,7 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
     const count = self.fillPollfds();
     self.pollfds[0] = .{ .fd = self.waker.read_fd, .events = std.c.POLL.IN, .revents = 0 };
     var timeout = timeout_ms;
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         if (connection.tlsPending()) timeout = 0;
     }
     if (self.nextDeadline()) |deadline| {
@@ -673,7 +717,7 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
 fn nextDeadline(self: *Engine) ?u64 {
     const time = self.now();
     var earliest: ?u64 = if (self.timers.head) |head| head.last_activity_ns +| self.options.inactivity_ns else null;
-    for (self.connections) |*connection| {
+    for (self.active()) |*connection| {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
             .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
@@ -682,4 +726,69 @@ fn nextDeadline(self: *Engine) ?u64 {
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }
     return earliest;
+}
+
+test "a large table stays unwritten until connections need it" {
+    if (builtin.os.tag != .linux and !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    var client: h2.Client = undefined;
+    // 10,000 entries: several megabytes that a Client never opening a
+    // connection must not make resident.
+    try client.init(std.heap.page_allocator, std.testing.io, .{
+        .stream_capacity = 10_000,
+        .inactivity_ns = std.time.ns_per_s,
+        .connect_timeout_ns = std.time.ns_per_s,
+    });
+    defer client.deinit();
+    const engine = of(&client);
+    const page = std.heap.pageSize();
+    for ([_][]u8{ std.mem.sliceAsBytes(engine.connections), std.mem.sliceAsBytes(engine.views), std.mem.sliceAsBytes(engine.pollfds) }) |table| {
+        const start = std.mem.alignForward(usize, @intFromPtr(table.ptr), page);
+        const end = std.mem.alignBackward(usize, @intFromPtr(table.ptr) + table.len, page);
+        if (end <= start) continue;
+        const pages = (end - start) / page;
+        var residency: [4096]u8 = undefined;
+        const checked = @min(pages, residency.len);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.mincore(@ptrFromInt(start), checked * page, &residency));
+        var resident: usize = 0;
+        for (residency[0..checked]) |flags| resident += flags & 1;
+        try std.testing.expectEqual(@as(usize, 0), resident);
+    }
+    try std.testing.expectEqual(@as(u32, 0), engine.connections_len);
+}
+
+test "drives walk only as far as the last connection not free" {
+    var client: h2.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .{
+        .stream_capacity = 4,
+        .inactivity_ns = std.time.ns_per_s,
+        .connect_timeout_ns = std.time.ns_per_s,
+    });
+    defer client.deinit();
+    // A port whose listener just closed refuses the connection.
+    const peer = try @import("testing/Peer.zig").start(std.testing.allocator, .{});
+    var url_buffer: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
+    peer.stop();
+    const endpoint = try client.addEndpoint(url);
+    var stream: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    try client.prepare(&stream, .{ .endpoint = endpoint, .fields = &.{}, .body = .{ .bytes = "x" }, .sink = .{ .buffer = &sink } });
+    client.launch(&stream);
+    const Ignore = struct {
+        pub fn observe(_: *@This(), _: *h2.Stream, _: h2.Event) h2.Verdict {
+            return .accept;
+        }
+    };
+    var receiver: Ignore = .{};
+    try client.drive(&receiver);
+    try std.testing.expectEqual(@as(u32, 1), of(&client).connections_len);
+    var steps: u32 = 0;
+    while (client.finishedCount() == 0) : (steps += 1) {
+        if (steps > 2000) return error.Timeout;
+        try client.drive(&receiver);
+        try client.wait(1);
+    }
+    try std.testing.expectEqual(@as(u32, 0), of(&client).connections_len);
+    _ = client.nextFinished();
+    stream.deinit();
 }
