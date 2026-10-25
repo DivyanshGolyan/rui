@@ -333,7 +333,7 @@ test "Store paths canonicalize aliases to one socket" {
 
 test "Store lease observation owns probe mechanics and releases every descriptor" {
     const io = std.testing.io;
-    const descriptors = @import("descriptor_limit.zig");
+    const descriptors = @import("os/descriptor_limit.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -425,7 +425,7 @@ test "absent destination preflight resumes filesystem checks after missing compo
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [2048]u8 = undefined;
-    const descriptors = @import("descriptor_limit.zig");
+    const descriptors = @import("os/descriptor_limit.zig");
     const baseline = (try descriptors.observe(io)).open_descriptors;
     const symlink = try std.fmt.bufPrint(&path_buffer, "{s}/missing/../link/../store", .{root});
     try std.testing.expectError(error.NotDir, validateStoreDestination(io, symlink));
@@ -452,7 +452,7 @@ test "absent destination preflight resumes filesystem checks after missing compo
 }
 
 test "absent destination preflight checks read-only ancestor reached through dot dot" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!@import("os/os.zig").read_only_sysfs) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

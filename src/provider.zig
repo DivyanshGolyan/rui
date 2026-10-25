@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const TestObservation = @import("TestObservation.zig");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
@@ -671,7 +670,7 @@ pub const Transfer = struct {
             c.CURL_HTTP_VERSION_1_1
         else
             c.CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE));
-        if (builtin.os.tag == .macos and !std.mem.startsWith(u8, endpoint, "http://")) {
+        if (@import("os/os.zig").native_trust_store and !std.mem.startsWith(u8, endpoint, "http://")) {
             try setOpt(easy, c.CURLOPT_SSL_OPTIONS, @as(c_long, c.CURLSSLOPT_NATIVE_CA));
         }
     }

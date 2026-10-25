@@ -2108,7 +2108,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var used: std.atomic.Value(u64) = .init(raw.len);
         const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 2 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
-        const descriptors = @import("descriptor_limit.zig");
+        const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root, "metadata", budget, false, &retained);
         var data = try EventData.init(std.testing.io, root, "response-9-1.tmp", budget, false, &retained);

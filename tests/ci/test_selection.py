@@ -199,8 +199,15 @@ class SelectionTest(unittest.TestCase):
                 ('["test-logic"]', 'success', 'success', 'success', result, False, 'failure'),
             ])
         cases.append(('[]', 'skipped', 'skipped', 'skipped', 'skipped', True, 'skipped'))
-        for targets, plan, policy, build, native, private, expected in cases:
-            with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private):
+        # The macOS type-check runs exactly when the Linux build does.
+        cases = [(*case, case[3]) for case in cases]
+        for result in ('failure', 'cancelled', 'skipped'):
+            cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, 'failure', result))
+        for result in ('success', 'failure'):
+            cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, 'failure', result))
+        for targets, plan, policy, build, native, private, expected, typecheck in cases:
+            with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
+                              typecheck=typecheck):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
                 github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
@@ -208,13 +215,13 @@ class SelectionTest(unittest.TestCase):
                 # Actions implicitly adds success() unless a status-check
                 # function appears; a skipped dependency otherwise skips us.
                 if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):
-                    admitted = admitted and all(value == 'success' for value in (plan, policy, build, native))
+                    admitted = admitted and all(value == 'success' for value in (plan, policy, build, native, typecheck))
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
                                             env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
-                                                 'NATIVE_RESULT': native})
+                                                 'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 

@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const c = @import("posix");
 const policy = @import("codex_credential_policy.zig");
 
@@ -311,7 +310,7 @@ fn validatePrivateFile(file: std.Io.File) !void {
 }
 
 fn validateOwner(handle: anytype) !void {
-    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
+    if (!@import("os/os.zig").supported) return error.UnsupportedPlatform;
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.StatFailed;
     if (stat.st_uid != c.geteuid()) return error.NotOwnedByCurrentUser;

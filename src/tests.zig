@@ -5,7 +5,9 @@ test {
     _ = @import("model_adapter.zig");
     _ = @import("model_capability.zig");
     _ = @import("descriptor_capacity.zig");
-    _ = @import("descriptor_limit.zig");
+    _ = @import("os/descriptor_limit.zig");
+    _ = @import("os/process.zig");
+    _ = @import("os/socket.zig");
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("platform.zig");

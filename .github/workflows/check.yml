@@ -159,6 +159,19 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+  macos_typecheck:
+    # Linux predicts Mac only while Mac compiles. Type-check the product and
+    # unit tests for Apple Silicon on Linux: no SDK, link or run.
+    needs: plan
+    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          check-part: typecheck-macos
+      - run: zig build typecheck-macos --summary failures
   macos_build:
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
@@ -259,7 +272,7 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     # Policy is required even for documentation-only changes.
-    needs: [plan, policy, linux_build, linux_suites]
+    needs: [plan, policy, linux_build, linux_suites, macos_typecheck]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -271,15 +284,18 @@ jobs:
           POLICY_RESULT: ${{ needs.policy.result }}
           BUILD_RESULT: ${{ needs.linux_build.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
+          TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$POLICY_RESULT" = success
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
             test "$NATIVE_RESULT" = success
+            test "$TYPECHECK_RESULT" = success
           else
             test "$BUILD_RESULT" = skipped
             test "$NATIVE_RESULT" = skipped
+            test "$TYPECHECK_RESULT" = skipped
           fi
   macos_suites:
     name: macos suites (${{ matrix.name }})

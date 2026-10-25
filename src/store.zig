@@ -1570,7 +1570,7 @@ pub const Store = struct {
         try exec(database.?, cache_size);
         try exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
         try exec(database.?, "PRAGMA synchronous=FULL");
-        if (@import("builtin").os.tag == .macos) try exec(database.?, "PRAGMA fullfsync=ON");
+        if (@import("os/os.zig").full_fsync) try exec(database.?, "PRAGMA fullfsync=ON");
         // Validation precedes this, so an incompatible Store keeps its journal mode.
         const journal_mode = diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
         if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;

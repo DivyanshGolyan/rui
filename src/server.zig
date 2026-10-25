@@ -1,12 +1,13 @@
 const std = @import("std");
-const builtin = @import("builtin");
+const os = @import("os/os.zig");
+const socket_os = @import("os/socket.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const product_defaults = @import("product_defaults.zig");
-const descriptor_limit = @import("descriptor_limit.zig");
+const descriptor_limit = @import("os/descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -749,7 +750,7 @@ pub fn serve(
         3, // Two controls and concurrent discovery.
         provider_endpoint != null,
         authentication != null,
-        builtin.os.tag,
+        os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
         if (limit < descriptor_requirement.total) {
@@ -787,7 +788,7 @@ pub fn serve(
         3,
         provider_endpoint != null,
         authentication != null,
-        builtin.os.tag,
+        os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
     const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
@@ -1154,7 +1155,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         return respondStatic(host.io, fd, 400, "invocation_error", "host_instance_required");
     }
     if (header.drop == .before_admission) return;
-    if (header.drop == .during_admission and std.c.shutdown(socket, std.c.SHUT.RDWR) != 0) {
+    if (header.drop == .during_admission and socket_os.shutdown(socket, std.c.SHUT.RDWR) == .failed) {
         return error.InjectedDisconnectFailed;
     }
 
@@ -2410,7 +2411,7 @@ test "Conversation stream native delivery decodes once and closes on failed hand
         // including when delivery fails before the assertions below.
         const thread = try std.Thread.spawn(.{}, Peer.drain, .{&peer});
         defer {
-            _ = std.c.shutdown(sockets[0], std.c.SHUT.WR);
+            _ = socket_os.shutdown(sockets[0], std.c.SHUT.WR);
             thread.join();
         }
         try deliverConversationContent(&host, sockets[0], command);
@@ -2645,7 +2646,7 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
                 if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= limit) {
                     // Bound even a mutant that keeps retrying poll with the
                     // original timeout. This is test cleanup, not Host policy.
-                    _ = std.c.shutdown(self.fd, std.c.SHUT.RDWR);
+                    _ = socket_os.shutdown(self.fd, std.c.SHUT.RDWR);
                     return;
                 }
                 _ = std.c.pthread_kill(self.target, .USR1);
@@ -3061,7 +3062,7 @@ test "disconnected reserved peers release classification while half-closed peers
                     if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n{");
                     try peer.read();
                     if (half_closed) {
-                        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[1], std.c.SHUT.WR));
+                        try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(sockets[1], std.c.SHUT.WR));
                     } else {
                         _ = std.c.close(sockets[1]);
                         clients[index] = -1;
@@ -3310,7 +3311,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
         try std.testing.expectEqual(.ready, retry.state);
         try retry.prepare();
         try retry.reply.?.deliver(sockets[0]);
-        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[0], std.c.SHUT.WR));
+        try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(sockets[0], std.c.SHUT.WR));
         var response: [1024]u8 = undefined;
         var length: usize = 0;
         while (true) {
@@ -3398,7 +3399,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             try writeAll(std.testing.io, fd, bytes);
             if (phase == .cleanup and std.mem.eql(u8, route, "/v1/message")) {
                 try writeAll(std.testing.io, fd, body[0 .. body.len - 3]);
-                try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(fd, std.c.SHUT.WR));
+                try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(fd, std.c.SHUT.WR));
             } else try writeAll(std.testing.io, fd, body);
         }
 

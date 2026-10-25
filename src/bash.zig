@@ -603,11 +603,12 @@ pub const Execution = struct {
 
     fn signalGroup(self: *Execution, signal_value: std.posix.SIG) void {
         if (self.faults.lifecycle == .signal) return self.lifecycle.recordSignal(.failed);
-        std.posix.kill(-self.pgid, signal_value) catch |err| self.lifecycle.recordSignal(switch (err) {
-            error.ProcessNotFound => .delivered,
-            error.PermissionDenied => if (@import("builtin").os.tag == .macos) .group_permission_denied else .failed,
-            else => .failed,
-        });
+        switch (@import("os/process.zig").signalGroup(self.pgid, signal_value)) {
+            .sent => {},
+            .absent => self.lifecycle.recordSignal(.delivered),
+            .zombie_group_denied => self.lifecycle.recordSignal(.group_permission_denied),
+            .failed => self.lifecycle.recordSignal(.failed),
+        }
     }
 
     fn signalLeader(self: *Execution, signal_value: std.posix.SIG) void {

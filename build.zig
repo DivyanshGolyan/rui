@@ -624,6 +624,28 @@ pub fn build(b: *std.Build) void {
     );
     cross_step.dependOn(linux_cross_step);
     cross_step.dependOn(macos_cross_step);
+    const macos_types_step = b.step(
+        "typecheck-macos",
+        "Type-check Rui and its unit tests for Apple Silicon macOS on any host (no SDK, link or run)",
+    );
+    {
+        const apple = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+        macos_types_step.dependOn(&addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null).step);
+        const apple_tests = b.addTest(.{
+            .name = "test-typecheck-macos",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/tests.zig"),
+                .target = apple,
+                .optimize = .ReleaseSafe,
+            }),
+        });
+        configureSqlite(b, apple_tests);
+        configureBashPlatform(b, apple_tests);
+        configureHostLaunch(b, apple_tests);
+        configureTerminalEditor(b, apple_tests);
+        configureTransport(b, apple_tests, apple, null);
+        macos_types_step.dependOn(&apple_tests.step);
+    }
     const targets = [_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .macos },
         .{ .cpu_arch = .x86_64, .os_tag = .macos },
@@ -932,7 +954,7 @@ fn addRui(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
-    pinned_transport: PinnedTransport,
+    pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
@@ -1005,7 +1027,8 @@ fn configureTransport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
-    pinned: PinnedTransport,
+    /// Null type-checks without the built transport: curl's source headers, no link.
+    maybe_pinned: ?PinnedTransport,
 ) void {
     const enabled = (target.result.os.tag == .macos or target.result.os.tag == .linux) and
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
@@ -1015,6 +1038,10 @@ fn configureTransport(
     options.addOption([]const u8, "version", buildVersion(b));
     compile.root_module.addOptions("transport_options", options);
     const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
+    const pinned = maybe_pinned orelse {
+        bindings.addIncludePath(b.dependency("curl", .{}).path("include"));
+        return;
+    };
     bindings.addIncludePath(if (enabled)
         pinned.output.path(b, "include")
     else
