@@ -3,6 +3,7 @@ package measurement
 import (
 	"encoding/binary"
 	"os"
+	"syscall"
 	"testing"
 )
 
@@ -23,11 +24,8 @@ func observationFrame(lost byte, sequence uint64, fields map[byte]string) []byte
 	return frame
 }
 
-func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+// testObservations maps fresh state as the Host initializes it.
+func testObservations(t *testing.T) *Observations {
 	state, err := os.CreateTemp(t.TempDir(), "state")
 	if err != nil {
 		t.Fatal(err)
@@ -35,17 +33,29 @@ func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
 	if err := state.Truncate(observationStateBytes); err != nil {
 		t.Fatal(err)
 	}
-	observations := &Observations{state: state, pending: map[uint64]map[string]any{}}
-	done := make(chan struct{})
-	go func() {
-		observations.read(reader)
-		close(done)
-	}()
+	observations, err := newObservations(state, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Munmap(observations.shared) })
+	binary.LittleEndian.PutUint64(observations.shared[0:], 1)
+	binary.LittleEndian.PutUint64(observations.shared[8:], 42)
+	binary.LittleEndian.PutUint64(observations.shared[16:], 7)
+	return observations
+}
+
+func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := testObservations(t)
+	go observations.read(reader)
 	// Field 9 is command_key and field 13 lock_acquired_at_ns.
 	writer.Write(observationFrame(0, 2, map[byte]string{0: "control_timing", 9: "second"}))
 	writer.Write(observationFrame(0, 1, map[byte]string{0: "control_timing", 9: "first", 13: "11"}))
 	writer.Close()
-	<-done
+	<-observations.done
 	records, err := observations.Phase("control_timing")
 	if err != nil {
 		t.Fatal(err)
@@ -54,11 +64,26 @@ func TestObservationsExposeOnlyTheCompleteSequencePrefix(t *testing.T) {
 		records[1]["command_key"] != "second" || records[0]["process"] != "42" || records[0]["run"] != "7" {
 		t.Fatalf("records = %v", records)
 	}
-	var loss [8]byte
-	loss[0] = 1
-	if _, err := state.WriteAt(loss[:], observationLossOffset); err != nil {
+	// Two delivered records, admission sealed and nothing in flight.
+	observations.word(observationCountOffset).Store(2 << 1)
+	observations.word(observationActiveOffset).Store(observationSealed)
+	if err := observations.validateFinal(); err != nil {
 		t.Fatal(err)
 	}
+	for name, mutate := range map[string]func(){
+		"late loss":          func() { observations.word(observationCountOffset).Store(2<<1 | 1) },
+		"cut publication":    func() { observations.word(observationActiveOffset).Store(observationSealed | 1) },
+		"undelivered record": func() { observations.word(observationCountOffset).Store(3 << 1) },
+		"unsealed admission": func() { observations.word(observationActiveOffset).Store(0) },
+	} {
+		mutate()
+		if err := observations.validateFinal(); err == nil {
+			t.Fatalf("final state with %s validated", name)
+		}
+		observations.word(observationCountOffset).Store(2 << 1)
+		observations.word(observationActiveOffset).Store(observationSealed)
+	}
+	observations.word(observationCountOffset).Store(2<<1 | 1)
 	if _, err := observations.Phase("control_timing"); err == nil {
 		t.Fatal("sticky native loss did not invalidate the records")
 	}

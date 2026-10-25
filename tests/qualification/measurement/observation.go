@@ -9,15 +9,19 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
-	observationRecordBytes = 512
-	observationHeaderBytes = 28
-	observationStateBytes  = 40
-	observationLossOffset  = 24
+	observationRecordBytes  = 512
+	observationHeaderBytes  = 28
+	observationStateBytes   = 40
+	observationCountOffset  = 24 // Sequence count above the sticky loss bit.
+	observationActiveOffset = 32
+	observationSealed       = uint64(1) << 63
 )
 
 // The stable field IDs of src/TestObservation.zig.
@@ -33,7 +37,9 @@ var observationFields = [...]string{
 // traces are best effort and drop records when threads contend for stderr;
 // this channel instead marks any selected record it cannot deliver as loss.
 type Observations struct {
-	state   *os.File
+	shared  []byte // The Host's MAP_SHARED state, read and sealed atomically.
+	process int
+	done    chan struct{}
 	mu      sync.Mutex
 	records []map[string]any
 	pending map[uint64]map[string]any
@@ -90,9 +96,27 @@ func StartHostWith(
 	if state == nil {
 		return host, nil, nil
 	}
-	observations := &Observations{state: state, pending: map[uint64]map[string]any{}}
+	observations, err := newObservations(state, host.Cmd.Process.Pid)
+	if err != nil {
+		reader.Close()
+		return nil, nil, errors.Join(err, host.Stop(TeardownAllowance))
+	}
 	go observations.read(reader)
 	return host, observations, nil
+}
+
+// newObservations maps the state file and closes it.
+func newObservations(state *os.File, process int) (*Observations, error) {
+	defer state.Close()
+	shared, err := syscall.Mmap(int(state.Fd()), 0, observationStateBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, err
+	}
+	return &Observations{shared: shared, process: process, done: make(chan struct{}), pending: map[uint64]map[string]any{}}, nil
+}
+
+func (o *Observations) word(offset int) *atomic.Uint64 {
+	return (*atomic.Uint64)(unsafe.Pointer(&o.shared[offset]))
 }
 
 func observationFiles() (reader, writer, state *os.File, err error) {
@@ -129,6 +153,7 @@ func observationFiles() (reader, writer, state *os.File, err error) {
 }
 
 func (o *Observations) read(reader *os.File) {
+	defer close(o.done)
 	defer reader.Close()
 	frame := make([]byte, observationRecordBytes)
 	for {
@@ -214,16 +239,13 @@ func (o *Observations) fail(err error) {
 // Phase returns every delivered record of phase, failing once the Host has
 // recorded a loss.
 func (o *Observations) Phase(phase string) ([]map[string]any, error) {
-	var state [8]byte
-	if _, err := o.state.ReadAt(state[:], observationLossOffset); err != nil {
-		return nil, err
-	}
+	loss := o.word(observationCountOffset).Load() & 1
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.err != nil {
 		return nil, o.err
 	}
-	if binary.LittleEndian.Uint64(state[:])&1 != 0 {
+	if loss != 0 {
 		return nil, errors.New("native observation loss invalidates evidence")
 	}
 	result := []map[string]any{}
@@ -246,7 +268,59 @@ func (o *Observations) Wait(deadline Deadline, phase string, count int) ([]map[s
 	return records, err
 }
 
-// Close releases the observation state after the Host has stopped.
-func (o *Observations) Close() error {
-	return o.state.Close()
+// Stop revokes new publications, drains those in flight, stops the Host and
+// then requires the final state to account for every record: a loss or a
+// publication cut by the stop fails the evidence.
+func (o *Observations) Stop(host *Host, allowance time.Duration) error {
+	defer syscall.Munmap(o.shared)
+	var drainErr error
+	o.word(observationActiveOffset).Or(observationSealed)
+	for drained := time.Now().Add(allowance / 2); ; time.Sleep(time.Millisecond) {
+		active, count := o.word(observationActiveOffset).Load(), o.word(observationCountOffset).Load()
+		o.mu.Lock()
+		delivered, readErr := uint64(len(o.records)), o.err
+		o.mu.Unlock()
+		if readErr != nil || count&1 != 0 || active == observationSealed && count>>1 == delivered {
+			break
+		}
+		if time.Now().After(drained) {
+			drainErr = errors.New("observation custody did not retire before Host stop")
+			break
+		}
+	}
+	stopErr := host.Stop(allowance)
+	select {
+	case <-o.done:
+	case <-time.After(3 * time.Second):
+		return errors.Join(drainErr, stopErr, errors.New("observation channel did not drain after reap"))
+	}
+	return errors.Join(drainErr, stopErr, o.validateFinal())
+}
+
+func (o *Observations) validateFinal() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.err != nil {
+		return o.err
+	}
+	version := binary.LittleEndian.Uint64(o.shared[0:])
+	process := binary.LittleEndian.Uint64(o.shared[8:])
+	run := strconv.FormatUint(binary.LittleEndian.Uint64(o.shared[16:]), 10)
+	count, active := o.word(observationCountOffset).Load(), o.word(observationActiveOffset).Load()
+	switch {
+	case version != 1 || process != uint64(o.process) || run == "0":
+		return errors.New("missing or foreign final observation state")
+	case active != observationSealed:
+		return errors.New("Host exited during observation publication")
+	case count&1 != 0:
+		return errors.New("final native observation loss invalidates evidence")
+	case count>>1 != uint64(len(o.records)) || len(o.pending) != 0:
+		return fmt.Errorf("final observation sequence %d, delivered %d", count>>1, len(o.records))
+	}
+	for _, record := range o.records {
+		if record["run"] != run || record["process"] != strconv.Itoa(o.process) {
+			return errors.New("foreign final observation record")
+		}
+	}
+	return nil
 }

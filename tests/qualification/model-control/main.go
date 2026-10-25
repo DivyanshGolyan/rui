@@ -413,6 +413,15 @@ func inspectCustodyZero(client measurement.Client, session string) (bool, error)
 	return custodyOK && scratchOK && custody == 0 && scratch == 0, nil
 }
 
+// stopHost stops an observed Host through its observations, which validate
+// the final channel state.
+func stopHost(host *measurement.Host, observations *measurement.Observations) error {
+	if observations != nil {
+		return observations.Stop(host, measurement.TeardownAllowance)
+	}
+	return host.Stop(measurement.TeardownAllowance)
+}
+
 // The Host refuses ordinary clients only at reduced intake, so scenarios
 // that saturate it restart the Host at the descriptor limit that leaves the
 // ten-client floor. The probe launches the same way, so it inherits the same
@@ -425,11 +434,7 @@ func startTenClientHost(plan, binary, directory, store, url string, capacity int
 	}
 	required, requiredErr := strconv.Atoi(probe.Ready["descriptor_requirement"])
 	intake, intakeErr := strconv.Atoi(probe.Ready["intake_capacity"])
-	err = errors.Join(requiredErr, intakeErr, probe.Stop(measurement.TeardownAllowance))
-	if observations != nil {
-		err = errors.Join(err, observations.Close())
-	}
-	if err != nil {
+	if err := errors.Join(requiredErr, intakeErr, stopHost(probe, observations)); err != nil {
 		return nil, nil, err
 	}
 	launch.DescriptorLimit = required - 4*(intake-ordinaryClients)
@@ -438,11 +443,7 @@ func startTenClientHost(plan, binary, directory, store, url string, capacity int
 		return nil, nil, err
 	}
 	if host.Ready["intake_capacity"] != strconv.Itoa(ordinaryClients) {
-		err = errors.Join(fmt.Errorf("descriptor limit %d gave intake %s, want %d", launch.DescriptorLimit, host.Ready["intake_capacity"], ordinaryClients), host.Stop(measurement.TeardownAllowance))
-		if observations != nil {
-			err = errors.Join(err, observations.Close())
-		}
-		return nil, nil, err
+		return nil, nil, errors.Join(fmt.Errorf("descriptor limit %d gave intake %s, want %d", launch.DescriptorLimit, host.Ready["intake_capacity"], ordinaryClients), stopHost(host, observations))
 	}
 	return host, observations, nil
 }
@@ -1078,7 +1079,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		return nil, err
 	}
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return errors.Join(host.Stop(measurement.TeardownAllowance), observations.Close()) })
+		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	sessions := make([]string, controlHeadroom)
@@ -1236,7 +1237,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		return nil, err
 	}
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return errors.Join(host.Stop(measurement.TeardownAllowance), observations.Close()) })
+		measurement.JoinCleanup(&resultError, func() error { return stopHost(host, observations) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	session, err := client.Submit("real-settlement-message", "", "large committed output")
