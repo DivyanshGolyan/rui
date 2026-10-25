@@ -222,17 +222,6 @@ fn pingOutstanding(facts: LivenessFacts) ?u64 {
     return if (facts.last_inbound_ns > sent) null else sent;
 }
 
-/// The earliest of the timer list's head deadline and the given connection
-/// deadlines. Every stream shares one inactivity interval, so the least
-/// recently active stream holds the earliest stream deadline.
-pub fn nextDeadline(timer_head_activity_ns: ?u64, inactivity_ns: u64, connection_deadlines: []const u64) ?u64 {
-    var earliest: ?u64 = if (timer_head_activity_ns) |activity| activity +| inactivity_ns else null;
-    for (connection_deadlines) |deadline| {
-        earliest = if (earliest) |current| @min(current, deadline) else deadline;
-    }
-    return earliest;
-}
-
 // ------------------------------------------------------------------- tests
 
 fn connection(ready: bool, draining: bool, streams: u32, peer_max_streams: u32) ConnectionView {
@@ -363,12 +352,4 @@ test "one PING per quiet connection, a missed PING is fatal, idle connections cl
         try std.testing.expectEqual(row.action, liveness(row.facts, config));
         try std.testing.expectEqual(row.deadline, livenessDeadline(row.facts, config));
     }
-}
-
-test "the next deadline is the earliest stream or connection deadline" {
-    try std.testing.expectEqual(@as(?u64, null), nextDeadline(null, 300, &.{}));
-    try std.testing.expectEqual(@as(?u64, 310), nextDeadline(10, 300, &.{}));
-    try std.testing.expectEqual(@as(?u64, 200), nextDeadline(10, 300, &.{ 400, 200 }));
-    try std.testing.expectEqual(@as(?u64, 50), nextDeadline(null, 300, &.{50}));
-    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), nextDeadline(std.math.maxInt(u64) - 1, 300, &.{}));
 }

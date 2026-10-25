@@ -45,6 +45,9 @@ pub const Options = struct {
     ignore_ping: bool = false,
     /// Largest DATA payload the peer sends; 0 for nghttp2's default.
     data_chunk_bytes: usize = 0,
+    /// Interleave responses frame by frame (RFC 9218 incremental), instead
+    /// of finishing one stream before the next.
+    interleave: bool = false,
     /// Runs when a request has fully arrived; null answers 200 "ok".
     on_request: ?*const fn (*Peer, *Stream) void = null,
     context: ?*anyopaque = null,
@@ -287,6 +290,7 @@ pub fn pump(self: *Peer) !void {
             connection.session = session;
             const settings = [_]c.nghttp2_settings_entry{
                 .{ .settings_id = c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, .value = self.options.max_concurrent_streams },
+                .{ .settings_id = c.NGHTTP2_SETTINGS_NO_RFC7540_PRIORITIES, .value = 1 },
             };
             _ = c.nghttp2_submit_settings(session, c.NGHTTP2_FLAG_NONE, &settings, settings.len);
         }
@@ -404,6 +408,10 @@ pub fn respondWith(self: *Peer, stream: *Stream, status: u16, body: []const u8, 
     stream.trailers = trailers;
     const provider: c.nghttp2_data_provider2 = .{ .source = .{ .ptr = stream }, .read_callback = readResponse };
     _ = c.nghttp2_submit_response2(stream.connection.session, stream.id, &headers, headers.len, if (body.len > 0 or trailers) &provider else null);
+    if (stream.connection.peer.options.interleave) {
+        const incremental: c.nghttp2_extpri = .{ .urgency = 3, .inc = 1 };
+        _ = c.nghttp2_session_change_extpri_stream_priority(stream.connection.session, stream.id, &incremental, 1);
+    }
 }
 
 /// Sends the response head and then nothing more on the stream.

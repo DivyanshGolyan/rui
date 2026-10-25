@@ -356,6 +356,71 @@ test "small DATA frames decoded from one read reach the sink in one write" {
     stream.deinit();
 }
 
+test "a stream that closes mid-read leaves its siblings one write each" {
+    const Both = struct {
+        const long: [200]u8 = @splat('l');
+        const short: [20]u8 = @splat('s');
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            if (stream.index != 1) return;
+            // Both bodies go out in one flush, their DATA frames interleaved,
+            // so the short stream ends inside the read that carries the long.
+            peer.respond(peer.streams.items[0], 200, &long);
+            peer.respond(stream, 200, &short);
+        }
+    };
+    const harness = try Harness.create(.{ .peer = .{ .data_chunk_bytes = 10, .interleave = true, .on_request = Both.handle } });
+    defer harness.destroy();
+    var long: h2.Stream = .idle;
+    var short: h2.Stream = .idle;
+    var long_sink: [256]u8 = undefined;
+    var short_sink: [32]u8 = undefined;
+    try harness.launch(&long, bytesRequest(harness.endpoint, "x", &long_sink));
+    try harness.launch(&short, bytesRequest(harness.endpoint, "x", &short_sink));
+    try harness.runUntilFinished(2);
+    while (harness.client.nextFinished()) |stream| {
+        try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, stream.end().?);
+    }
+    try std.testing.expectEqualSlices(u8, &Both.long, long_sink[0..@intCast(long.responseLength())]);
+    try std.testing.expectEqualSlices(u8, &Both.short, short_sink[0..@intCast(short.responseLength())]);
+    try std.testing.expectEqual(@as(u32, 2), harness.receiver.bodies);
+}
+
+test "a refused sink returns connection credit, so siblings keep flowing" {
+    const Both = struct {
+        var big: [64 * 1024]u8 = @splat('b');
+        fn handle(peer: *Peer, stream: *Peer.Stream) void {
+            peer.respond(stream, 200, &big);
+        }
+    };
+    const harness = try Harness.create(.{ .peer = .{ .on_request = Both.handle } });
+    defer harness.destroy();
+    var small: h2.Stream = .idle;
+    var large: h2.Stream = .idle;
+    var small_sink: [8]u8 = undefined;
+    var large_sink: [64 * 1024]u8 = undefined;
+    try harness.launch(&small, bytesRequest(harness.endpoint, "x", &small_sink));
+    try harness.launch(&large, bytesRequest(harness.endpoint, "x", &large_sink));
+    try harness.runUntilFinished(2);
+    try std.testing.expectEqual(h2.End{ .cause = .sink_refused, .request_sent = true }, try harness.collect(&small));
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&large));
+    try std.testing.expectEqual(@as(u64, Both.big.len), large.responseLength());
+}
+
+test "a peer allowing 100 streams gets a second connection for the 101st" {
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold }, .capacity = 101 });
+    defer harness.destroy();
+    var streams: [101]h2.Stream = @splat(.idle);
+    var sinks: [101][8]u8 = undefined;
+    for (&streams, &sinks) |*stream, *sink| try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
+    try harness.runUntilPeerStreams(101);
+    try std.testing.expectEqual(@as(u32, 2), harness.peer.seen.connections);
+    for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, "ok");
+    try harness.runUntilFinished(101);
+    while (harness.client.nextFinished()) |stream| {
+        try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, stream.end().?);
+    }
+}
+
 test "trailers arrive as their own block" {
     const Trailed = struct {
         fn handle(peer: *Peer, stream: *Peer.Stream) void {
@@ -551,11 +616,20 @@ test "a refused connection fails its streams as never sent" {
         .connect_timeout_ns = std.time.ns_per_s,
     });
     defer client.deinit();
-    // A port that was free a moment ago and has no listener now.
-    const peer = try Peer.start(std.testing.allocator, .{});
+    // A port held by a bound socket that never listens refuses connects,
+    // and nothing else can take it while the test runs.
+    const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    var address = std.mem.zeroes(std.c.sockaddr.in);
+    address.family = std.c.AF.INET;
+    address.addr = std.mem.nativeToBig(u32, 0x7f00_0001);
+    if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)));
+    var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.getsockname(fd, @ptrCast(&address), &length));
     var url_buffer: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buffer, "{s}", .{peer.url()});
-    peer.stop();
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/v1", .{std.mem.bigToNative(u16, address.port)});
     const endpoint = try client.addEndpoint(url);
     var stream: h2.Stream = .idle;
     var sink: [8]u8 = undefined;
@@ -608,7 +682,17 @@ test "requests the client cannot send are refused before anything opens" {
             .sink = .{ .buffer = &sink },
         }));
     }
+    // Never dereferenced: prepare refuses a sink its record cannot describe.
+    const huge = @as([*]u8, &sink)[0 .. @as(usize, std.math.maxInt(u32)) + 1];
+    try std.testing.expectError(error.InvalidRequest, harness.client.prepare(&stream, bytesRequest(harness.endpoint, "", huge)));
     try std.testing.expectError(error.CleartextNotLoopback, harness.client.addEndpoint("http://example.com/"));
+}
+
+test "a wait with the largest timeout still returns on wake" {
+    const harness = try Harness.create(.{});
+    defer harness.destroy();
+    harness.client.wake();
+    try harness.client.wait(std.math.maxInt(u32));
 }
 
 // ---------------------------------------------------------------------- TLS

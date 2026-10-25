@@ -37,6 +37,10 @@ received_any: bool,
 read_capped: bool,
 /// The session ended through a protocol error on either side.
 protocol_failure: bool,
+/// An nghttp2 call that adjusts credit or queues a reset failed (out of
+/// memory). Streams would stall, so the connection fails at the next
+/// receive or send, outside nghttp2's callbacks.
+local_failure: bool,
 /// Index into the Engine's poll array for the current pass, 0 for none.
 poll_slot: u32,
 revents: i16,
@@ -91,6 +95,7 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .received_any = false,
         .read_capped = false,
         .protocol_failure = false,
+        .local_failure = false,
         .poll_slot = 0,
         .revents = 0,
         .socket = -1,
@@ -214,7 +219,7 @@ fn stopUsingLookup(self: *Connection) void {
 fn connectNext(self: *Connection) void {
     const engine = self.engine;
     if (self.socket >= 0) {
-        _ = std.c.close(self.socket);
+        closeSocket(self.socket);
         self.socket = -1;
     }
     self.state = .connecting;
@@ -232,10 +237,16 @@ fn connectNext(self: *Connection) void {
                 else => break,
             }
         }
-        _ = std.c.close(fd);
+        closeSocket(fd);
         self.socket = -1;
     }
     engine.setupFailed(self, .connect_failed);
+}
+
+/// A failed close leaves nothing to retry or report: the descriptor is
+/// released either way, and no write of ours is awaiting its result.
+fn closeSocket(fd: std.posix.fd_t) void {
+    _ = std.c.close(fd);
 }
 
 fn configureSocket(fd: std.posix.fd_t) bool {
@@ -308,11 +319,15 @@ fn becomeReady(self: *Connection) void {
     self.state = .ready;
     self.idle_since_ns = time;
     self.last_inbound_ns = time;
-    // Enough for every stream this connection may carry to have its full
-    // window outstanding, so the connection never throttles one stream.
-    const carried: u64 = @min(self.peer_max_streams, engine.options.stream_capacity);
+}
+
+/// Enough for every stream this connection may carry to have its full
+/// window outstanding, so the connection never throttles one stream. Set
+/// again whenever the peer's SETTINGS change its stream limit.
+fn sizeWindow(self: *Connection) void {
+    const carried: u64 = @min(self.peer_max_streams, self.engine.options.stream_capacity);
     const window: i32 = @intCast(@min(@as(u64, h2.stream_window_bytes) * @max(carried, 1), std.math.maxInt(i32)));
-    _ = c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window);
+    self.check(c.nghttp2_session_set_local_window_size(self.session, c.NGHTTP2_FLAG_NONE, 0, window));
 }
 
 // ------------------------------------------------------------- streaming
@@ -378,7 +393,7 @@ fn nv(name: []const u8, value: []const u8, flags: u8) c.nghttp2_nv {
 pub fn detach(self: *Connection, record: *Record) void {
     const stream_id = record.route.open.stream_id;
     if (stream_id != self.closing_stream_id) {
-        _ = c.nghttp2_submit_rst_stream(self.session, c.NGHTTP2_FLAG_NONE, stream_id, c.NGHTTP2_CANCEL);
+        self.check(c.nghttp2_submit_rst_stream(self.session, c.NGHTTP2_FLAG_NONE, stream_id, c.NGHTTP2_CANCEL));
     }
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.head.record = null;
@@ -393,7 +408,17 @@ pub fn endOpen(self: *Connection, record: *Record, cause: policy.Cause) void {
 /// Returns `bytes` of credit to the stream and the connection. For a stream
 /// nghttp2 already closed, only the connection's.
 pub fn consume(self: *Connection, stream_id: i32, bytes: usize) void {
-    _ = c.nghttp2_session_consume(self.session, stream_id, bytes);
+    self.check(c.nghttp2_session_consume(self.session, stream_id, bytes));
+}
+
+/// Returns credit to the connection only, for bytes a stream will never
+/// take: that stream's window stays shut.
+pub fn consumeConnection(self: *Connection, bytes: usize) void {
+    self.check(c.nghttp2_session_consume_connection(self.session, bytes));
+}
+
+fn check(self: *Connection, result: c_int) void {
+    if (result != 0) self.local_failure = true;
 }
 
 pub fn ping(self: *Connection, time: u64) void {
@@ -431,10 +456,14 @@ pub fn receive(self: *Connection) ReadOutcome {
             }
         }
         const decoded = c.nghttp2_session_mem_recv2(self.session, bytes.ptr, bytes.len);
-        engine.flush(self);
+        engine.flush(self, null);
         if (decoded < 0) {
             self.protocol_failure = true;
             self.fail(.protocol_error);
+            return .closed;
+        }
+        if (self.local_failure) {
+            self.fail(.local_failure);
             return .closed;
         }
         total += bytes.len;
@@ -445,6 +474,7 @@ pub fn receive(self: *Connection) ReadOutcome {
 /// Writes what nghttp2 has packed until it has nothing or the socket would
 /// block. nghttp2 coalesces all pending frames into each buffer.
 pub fn send(self: *Connection) void {
+    if (self.local_failure) return self.fail(.local_failure);
     while (true) {
         if (self.unsent.len == 0) {
             var data: [*c]const u8 = undefined;
@@ -561,7 +591,7 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     }
     if (self.ssl) |ssl| c.SSL_free(ssl);
     self.stopUsingLookup();
-    if (self.socket >= 0) _ = std.c.close(self.socket);
+    if (self.socket >= 0) closeSocket(self.socket);
     self.releaseHead();
     self.head.fields.deinit(self.engine.allocator);
     self.head.refs.deinit(self.engine.allocator);
@@ -697,6 +727,7 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
             self.peer_max_streams = c.nghttp2_session_get_remote_settings(self.session, c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
             self.engine.origins[self.origin].learned_max_streams = self.peer_max_streams;
             if (self.state == .awaiting_settings) self.becomeReady();
+            self.sizeWindow();
         },
         c.NGHTTP2_GOAWAY => {
             // nghttp2 closes the streams above `last_stream_id` as
@@ -758,10 +789,10 @@ fn onStreamClose(_: ?*c.nghttp2_session, stream_id: i32, error_code: u32, user_d
     const engine = self.engine;
     self.streams -= 1;
     if (self.streams == 0) self.idle_since_ns = engine.now();
-    if (self.recordOf(stream_id) == null) return 0;
+    const closing = self.recordOf(stream_id) orelse return 0;
     self.closing_stream_id = stream_id;
     defer self.closing_stream_id = 0;
-    engine.flush(self);
+    engine.flush(self, closing);
     const record = self.recordOf(stream_id) orelse return 0;
     _ = c.nghttp2_session_set_stream_user_data(self.session, stream_id, null);
     if (self.head.record == record) self.releaseHead();

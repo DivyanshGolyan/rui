@@ -215,6 +215,8 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     std.debug.assert(record.state == .idle);
     if (@backingInt(request.endpoint) >= self.endpoint_count) return error.InvalidRequest;
     if (request.fields.len > h2.max_fields) return error.InvalidRequest;
+    // The record keeps a buffer sink's capacity in 32 bits.
+    if (request.sink == .buffer and request.sink.buffer.len > std.math.maxInt(u32)) return error.InvalidRequest;
     var block_len: usize = 0;
     for (request.fields) |field| {
         if (!validFieldName(field.name) or !validFieldValue(field.value)) return error.InvalidRequest;
@@ -335,7 +337,7 @@ pub fn requeue(self: *Engine, record: *Record, replay: bool) void {
     record.state = .pending;
     record.body_offset = 0;
     record.flags.body_done = false;
-    self.originOf(record).pending.pushHead(record);
+    self.originOf(record).pending.putBack(record);
 }
 
 /// Emits `body_retired` once, and never after a cancel.
@@ -556,12 +558,17 @@ fn expireInactive(self: *Engine) void {
 
 /// The batch write: for each stream, everything this read decoded for it
 /// in one write, then its window reopens for exactly what was written.
-pub fn flush(self: *Engine, connection: *Connection) void {
+/// `only` flushes one stream, which is closing mid-read; the others keep
+/// their chunks for the one write after the read.
+pub fn flush(self: *Engine, connection: *Connection, only: ?*Record) void {
     const scratch = self.scratch;
-    defer scratch.chunk_count = 0;
+    defer if (only == null) {
+        scratch.chunk_count = 0;
+    };
     const chunks = scratch.chunks[0..scratch.chunk_count];
     for (chunks, 0..) |*first, start| {
         const record = first.record orelse continue;
+        if (only != null and only != record) continue;
         var total: usize = 0;
         var iovec_count: usize = 0;
         for (chunks[start..]) |*chunk| {
@@ -577,13 +584,15 @@ pub fn flush(self: *Engine, connection: *Connection) void {
             connection.consume(stream_id, total);
             continue;
         }
+        // A stream that takes no more bytes never gets its window back;
+        // only the connection's credit returns.
         if (self.observe(record, .{ .body = total }) == .refuse) {
-            connection.consume(stream_id, total);
+            connection.consumeConnection(total);
             connection.endOpen(record, .sink_refused);
             continue;
         }
         if (!self.writeSink(record, scratch.iovecs[0..iovec_count], total)) {
-            connection.consume(stream_id, total);
+            connection.consumeConnection(total);
             connection.endOpen(record, if (record.flags.sink_is_buffer) .sink_refused else .sink_failed);
             continue;
         }
@@ -634,7 +643,7 @@ fn writeSink(self: *Engine, record: *Record, iovecs: []std.posix.iovec_const, to
 /// Called from the DATA chunk callback.
 pub fn gather(self: *Engine, connection: *Connection, record: *Record, bytes: []const u8) void {
     const scratch = self.scratch;
-    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection);
+    if (scratch.chunk_count == Scratch.max_chunks) self.flush(connection, null);
     scratch.chunks[scratch.chunk_count] = .{ .record = record, .bytes = bytes };
     scratch.chunk_count += 1;
 }
@@ -654,7 +663,7 @@ pub fn wait(self: *Engine, timeout_ms: u32) h2.DriveError!void {
         const until = std.math.divCeil(u64, deadline -| time, std.time.ns_per_ms) catch unreachable;
         timeout = @intCast(@min(timeout, until));
     }
-    const result = std.c.poll(self.pollfds.ptr, @intCast(count + 1), @intCast(timeout));
+    const result = std.c.poll(self.pollfds.ptr, @intCast(count + 1), @intCast(@min(timeout, std.math.maxInt(c_int))));
     if (result < 0 and std.posix.errno(result) != .INTR) return error.PollFailed;
     if (result > 0 and self.pollfds[0].revents != 0) self.waker.drain();
 }
