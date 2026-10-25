@@ -839,12 +839,22 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     return false;
 }
 
+/// The Host's Bash io, scratch directory and scratch view. Bash captures sit
+/// in execution slots, so they keep none of it.
+fn bashScratch(host: *Host) bash.Scratch {
+    return .{
+        .io = host.io,
+        .path = host.lease.paths.scratch.slice(),
+        .budget = host.retention.sharedBudget().narrowed(host.limits.bash_scratch_limit_bytes),
+    };
+}
+
 fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
             const was_running = active.execution.lifecycle.process == .running;
-            const service = active.execution.service(window);
+            const service = active.execution.service(bashScratch(host), window);
             if (was_running and active.execution.lifecycle.process != .running) {
                 host.store.revokeActionSender(active.binding) catch |err| {
                     _ = failBash(host, active, "Bash sender retirement", err);
@@ -913,19 +923,16 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    const bash_budget = host.retention.sharedBudget().narrowed(host.limits.bash_scratch_limit_bytes);
     const started = bash.startPreparation(
-        host.io,
+        bashScratch(host),
         host.allocator,
         arguments,
         input.arguments.length,
         input.session,
         host.lease.paths.store.slice(),
         input.workspace,
-        host.lease.paths.scratch.slice(),
         host.bash_path,
         input.timeout_ms,
-        bash_budget,
         action_binding.action_id,
         action_binding.attempt_ordinal,
         .{
@@ -1019,7 +1026,7 @@ fn finishBashPreparationFailure(
     } else if (!canonical_failure) {
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
     }
-    failure.cleanup.cleanup() catch |cleanup_err| {
+    failure.cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
@@ -1038,7 +1045,7 @@ fn discardBashResources(
     resources: bash.PreparedCleanup,
 ) void {
     var cleanup = resources;
-    cleanup.cleanup() catch |err| {
+    cleanup.cleanup(bashScratch(host)) catch |err| {
         retainBashPreparedCleanup(host, slot, token, cleanup, err);
         return;
     };
@@ -1116,7 +1123,7 @@ fn stopSupersededBash(
             var cleanup = preparation.*.?.cancel();
             preparation.* = null;
             settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
-            cleanup.cleanup() catch |cleanup_err| {
+            cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
                 retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
                 continue;
             };
@@ -1157,7 +1164,7 @@ fn completeBash(host: *Host, active: *BashSlot) void {
         _ = failBash(host, active, "Bash output reservation", err);
         return;
     };
-    const outcome = active.execution.outcome(include_paths) catch |err| {
+    const outcome = active.execution.outcome(bashScratch(host), include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
         _ = failBash(host, active, "Bash outcome materialization", err);
         return;
@@ -1215,7 +1222,7 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
         if (!active.delivery.closed.reclaim_failed)
             traceAction(host, "cleanup_release_observed", active.binding);
     }
-    active.execution.reclaim(host.retention) catch |err| {
+    active.execution.reclaim(bashScratch(host), host.retention) catch |err| {
         const first_failure = !active.delivery.closed.reclaim_failed;
         active.delivery.closed.reclaim_failed = true;
         active.delivery.closed.reclaim_at = now.addDuration(.{
@@ -1940,7 +1947,7 @@ fn advanceRetainedCleanup(
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash_prepared_cleanup => |*retained| {
-            retained.cleanup.cleanup() catch continue;
+            retained.cleanup.cleanup(bashScratch(host)) catch continue;
             host.custody.cleanupComplete(retained.token) catch unreachable;
             slot.* = .free;
             made_progress = true;
@@ -2457,20 +2464,28 @@ test "cleanup publication follows complete execution retirement" {
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     host.retention = &retention;
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    host.lease = &lease;
+    // This Host's io observes owner facts at each clock read, so the Bash
+    // calls this test drives directly read the plain test clock.
+    var scratch = bashScratch(&host);
+    scratch.io = std.testing.io;
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");
-    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, session, root, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
+    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, 2, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
             var failure = initial;
-            try failure.cleanup.cleanup();
+            try failure.cleanup.cleanup(scratch);
             return failure.cause;
         },
     };
     var preparation_owned = true;
     defer if (preparation_owned) {
         var cleanup = preparation.cancel();
-        cleanup.cleanup() catch unreachable;
+        cleanup.cleanup(scratch) catch unreachable;
     };
     var prepared = while (true) {
         switch (preparation.advance()) {
@@ -2482,7 +2497,7 @@ test "cleanup publication follows complete execution retirement" {
             .failed => |initial| {
                 preparation_owned = false;
                 var failure = initial;
-                try failure.cleanup.cleanup();
+                try failure.cleanup.cleanup(scratch);
                 return failure.cause;
             },
         }
@@ -2511,19 +2526,19 @@ test "cleanup publication follows complete execution retirement" {
         });
         while (!slot.bash.execution.retired()) {
             std.debug.assert(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < cleanup_deadline.raw.nanoseconds);
-            _ = slot.bash.execution.service(&window);
+            _ = slot.bash.execution.service(scratch, &window);
             std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
         }
-        slot.bash.execution.reclaim(&retention) catch unreachable;
+        slot.bash.execution.reclaim(scratch, &retention) catch unreachable;
     };
     while (!slot.bash.execution.retired()) {
         try std.testing.expect(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < deadline.raw.nanoseconds);
-        const progress = slot.bash.execution.service(&window);
+        const progress = slot.bash.execution.service(scratch, &window);
         try std.testing.expect(progress.fault == null);
         if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try slot.bash.execution.checkRetired();
-    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(false)).code);
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(scratch, false)).code);
     // One captured stdout byte remains owned.
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
@@ -3130,19 +3145,17 @@ test "preparing slots belong to their live preparations" {
 
     // Bash correspondence uses only the facts its preparation owns.
     var bash_preparation = bash.Preparation{
-        .io = std.testing.io,
+        .scratch = .{ .io = std.testing.io, .path = root, .budget = undefined },
         .allocator = std.testing.allocator,
         .session = .{},
         .store_selector = root,
         .workspace = .{},
-        .scratch_path = root,
         .bash_path = default_bash_path,
         .timeout_ms = 1,
         .action_id = 7,
         .attempt_ordinal = 1,
         .faults = .{},
         .source = undefined,
-        .cleanup = .{ .scratch_path = root },
     };
     var bash_matched = [_]ExecutionSlot{
         .{ .bash_preparing = .{ .token = retoken, .binding = .{
@@ -3448,27 +3461,26 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             var name: protocol.Bounded(96) = .{};
             try name.set("suppressed-bash");
             host.scratch_used.store(7, .release);
+            var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 7 }, &.{});
+            host.retention = &retention;
             if (fail_cleanup) {
                 const gate = try tmp.dir.createFile(std.testing.io, bash.fault_gate_name, .{});
                 gate.close(std.testing.io);
             }
             var prepared = bash.Prepared{
-                .io = std.testing.io,
+                .scratch = bashScratch(&host),
                 .allocator = std.testing.allocator,
                 .session = .{},
                 .store_selector = "",
                 .workspace = .{},
-                .scratch_path = root,
                 .bash_path = undefined, // Native construction must not run.
                 .timeout_ms = 1,
                 .faults = .{},
                 .command = try std.testing.allocator.dupeSentinel(u8, "exit 0", 0),
                 .stdout_capture = .{
-                    .io = std.testing.io,
                     .file = file,
                     .name = name,
                     .charged = 7,
-                    .budget = .{ .used = &host.scratch_used, .limit = 7 },
                     .cleanup_fault = if (fail_cleanup) .gated else .none,
                 },
                 .stderr_capture = null,

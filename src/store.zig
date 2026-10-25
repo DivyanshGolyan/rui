@@ -12911,18 +12911,19 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
         try workspace.set(storage.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
-        var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, storage.selector.slice(), "/bin/bash", 1000, .{ .used = &used, .limit = 4096 }, 11, 2, .{})) {
+        const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
+        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, 2, .{})) {
             .preparing => |value| value,
             .failed => |initial| {
                 var failure = initial;
-                try failure.cleanup.cleanup();
+                try failure.cleanup.cleanup(scratch);
                 return failure.cause;
             },
         };
         var owned = true;
         defer if (owned) {
             var cleanup = preparation.cancel();
-            cleanup.cleanup() catch unreachable;
+            cleanup.cleanup(scratch) catch unreachable;
         };
         try std.testing.expect(preparation.advance() == .pending);
         _ = try configureTestSession(&storage, "bash-checkpoint");
@@ -12940,7 +12941,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
                 .failed => |initial| {
                     owned = false;
                     var failure = initial;
-                    try failure.cleanup.cleanup();
+                    try failure.cleanup.cleanup(scratch);
                     return failure.cause;
                 },
             }
