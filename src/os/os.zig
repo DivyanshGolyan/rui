@@ -21,9 +21,13 @@ pub const full_fsync = tag == .macos;
 /// is conventional.
 pub const native_trust_store = tag == .macos;
 
-/// Linux's sysfs is read-only to every user, which tests use as a read-only
-/// ancestor that no privilege can write.
-pub const read_only_sysfs = tag == .linux;
+/// A directory on a read-only filesystem, which tests use as an ancestor that
+/// no privilege can write: Linux's sysfs and Darwin's sealed system volume.
+pub const read_only_directory = switch (tag) {
+    .linux => "/sys",
+    .macos => "/System",
+    else => @compileError("no read-only directory for this OS"),
+};
 
 /// Linux queues a connect beyond a full listen backlog until it times out;
 /// Darwin refuses it at once.
