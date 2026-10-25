@@ -41,11 +41,16 @@ fn map() std.posix.MMapError!Stack {
 
 fn install(stack: Stack) void {
     if (stack.len == 0) return;
-    std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = @intCast(stack.len) }, null) catch unreachable; // A sized stack outside any signal handler.
+    // A sized stack outside any signal handler.
+    std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = @intCast(stack.len) }, null) catch |err|
+        std.debug.panic("sigaltstack install failed: {t} (size {d})", .{ err, stack.len });
 }
 
 fn release(stack: Stack) void {
     if (stack.len == 0) return;
-    std.posix.sigaltstack(&.{ .sp = undefined, .flags = std.c.SS.DISABLE, .size = 0 }, null) catch unreachable; // Not inside a signal handler.
+    // Not inside a signal handler. Disabling ignores sp and size; pass the
+    // real region anyway in case a platform checks size first.
+    std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = std.c.SS.DISABLE, .size = @intCast(stack.len) }, null) catch |err|
+        std.debug.panic("sigaltstack release failed: {t} (size {d})", .{ err, stack.len });
     std.posix.munmap(stack);
 }
