@@ -72,7 +72,7 @@ pub const Origin = struct {
     /// The address an IP-literal host names; null for a DNS name.
     literal: ?Resolver.Address,
     /// The one lookup of a DNS name, shared by the setups that use it.
-    lookup: ?*Resolver,
+    lookup: ?*Resolver.Job,
     lookup_users: u32,
 };
 
@@ -161,6 +161,7 @@ pub fn deinit(self: *Engine) void {
     std.debug.assert(self.timers.head == null and self.finished.head == null);
     for (self.connections) |*connection| {
         if (connection.state != .free) connection.close(.goaway);
+        connection.releaseVerification();
     }
     for (self.origins[0..self.origin_count]) |origin| {
         if (origin.lookup) |lookup| lookup.release();
@@ -420,6 +421,7 @@ fn advanceSetups(self: *Engine) void {
             .resolving => connection.finishLookup(),
             .connecting => if (connection.revents != 0) connection.finishConnect(),
             .handshaking => if (connection.revents != 0) connection.continueHandshake(),
+            .verifying => connection.finishVerification(),
             else => {},
         }
         if (connection.settingUp() and time >= connection.setup_deadline_ns)
@@ -489,7 +491,7 @@ fn route(self: *Engine, origin_index: u8) ?usize {
 /// connection always holds an empty one.
 fn freeConnection(self: *Engine) ?*Connection {
     for (self.connections) |*connection| {
-        if (connection.state == .free) return connection;
+        if (connection.available()) return connection;
     }
     for (self.connections) |*connection| {
         if ((connection.state == .ready or connection.state == .draining) and connection.streams == 0) {
