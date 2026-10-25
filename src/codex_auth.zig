@@ -3,7 +3,7 @@ const credentials = @import("codex_credentials.zig");
 const policy = @import("codex_credential_policy.zig");
 const wire = @import("codex_token_wire.zig");
 
-const c = @import("curl");
+const h2 = @import("h2");
 
 pub const issuer = wire.issuer;
 pub const client_id = wire.client_id;
@@ -122,134 +122,145 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
 const Response = struct {
     bytes: [response_limit]u8 = undefined,
     len: usize = 0,
-    overflow: bool = false,
     request_not_sent: bool = true,
 };
 
-// Curl credits only successful writes. A zero count alone cannot prove that
-// a failed send or timeout did not transmit part of the refresh request.
-fn requestNotSent(result: c.CURLcode, request_size: ?c_long) bool {
-    return request_size == 0 and switch (result) {
-        c.CURLE_UNSUPPORTED_PROTOCOL,
-        c.CURLE_URL_MALFORMAT,
-        c.CURLE_COULDNT_RESOLVE_PROXY,
-        c.CURLE_COULDNT_RESOLVE_HOST,
-        c.CURLE_COULDNT_CONNECT,
-        c.CURLE_SSL_CONNECT_ERROR,
-        c.CURLE_PEER_FAILED_VERIFICATION,
-        c.CURLE_SSL_CERTPROBLEM,
-        c.CURLE_SSL_CACERT_BADFILE,
-        => true,
-        else => false,
-    };
-}
-
-fn writeCallback(data: [*c]u8, size: usize, count: usize, context: ?*anyopaque) callconv(.c) usize {
-    const length = std.math.mul(usize, size, count) catch return 0;
-    const response: *Response = @ptrCast(@alignCast(context orelse return 0));
-    if (length > response.bytes.len - response.len) {
-        response.overflow = true;
-        return 0;
-    }
-    @memcpy(response.bytes[response.len..][0..length], data[0..length]);
-    response.len += length;
-    return length;
-}
-
-fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
+fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
     response.* = .{};
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
-    const easy = c.curl_easy_init() orelse return error.TransportInitializationFailed;
-    defer c.curl_easy_cleanup(easy);
-    var headers: ?*c.curl_slist = null;
-    headers = c.curl_slist_append(headers, request.content_type) orelse return error.TransportInitializationFailed;
-    defer c.curl_slist_free_all(headers);
-    try opt(easy, c.CURLOPT_URL, request.url.ptr);
-    try opt(easy, c.CURLOPT_POST, @as(c_long, 1));
-    try opt(easy, c.CURLOPT_POSTFIELDS, request.body.ptr);
-    try opt(easy, c.CURLOPT_POSTFIELDSIZE_LARGE, @as(c.curl_off_t, @intCast(request.body.len)));
-    try opt(easy, c.CURLOPT_HTTPHEADER, headers);
-    try opt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
-    try opt(easy, c.CURLOPT_WRITEDATA, response);
-    try opt(easy, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
-    try opt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
-    try opt(easy, c.CURLOPT_SSL_VERIFYPEER, @as(c_long, 1));
-    try opt(easy, c.CURLOPT_SSL_VERIFYHOST, @as(c_long, 2));
-    if (@import("os/os.zig").native_trust_store)
-        try opt(easy, c.CURLOPT_SSL_OPTIONS, @as(c_long, c.CURLSSLOPT_NATIVE_CA));
-    try opt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, @as(c_long, 15_000));
-    try opt(easy, c.CURLOPT_TIMEOUT_MS, @as(c_long, 60_000));
-    try opt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
-    if (cancelled != null) {
-        try opt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
-        try opt(easy, c.CURLOPT_XFERINFOFUNCTION, loginProgress);
-        try opt(easy, c.CURLOPT_XFERINFODATA, &cancelled);
+    const fields = [_]h2.Field{.{ .name = "content-type", .value = request.content_type }};
+    const outcome = h2.exchange(io, .{
+        .url = request.url,
+        .fields = &fields,
+        .body = request.body,
+        .response = &response.bytes,
+        // The issuer is verified by the system's trust; --provider-ca-file
+        // is the model provider's alone.
+        .trust = .system,
+        .connect_timeout_ns = 15 * std.time.ns_per_s,
+        .total_timeout_ns = 60 * std.time.ns_per_s,
+        .cancelled = cancelled,
+    }) catch |err| switch (err) {
+        // Before the request was launched: nothing can have been sent.
+        error.InvalidUrl, error.CleartextNotLoopback => return error.TransportFailed,
+        error.OutOfMemory, error.SystemResources, error.TooManyEndpoints, error.TrustUnavailable, error.InvalidCaFile, error.InvalidRequest => return error.TransportInitializationFailed,
+        // While it was in flight: no evidence either way.
+        error.Interrupted => {
+            response.request_not_sent = false;
+            return error.LoginInterrupted;
+        },
+        error.PollFailed => {
+            response.request_not_sent = false;
+            return error.TransportFailed;
+        },
+    };
+    switch (outcome) {
+        .answered => |answer| {
+            response.request_not_sent = false;
+            response.len = answer.body.len;
+            // A login cancelled while its answer arrived still stops here.
+            if (cancelled) |check| if (check()) return error.LoginInterrupted;
+            return answer.status;
+        },
+        .failed => |end| {
+            response.request_not_sent = !end.request_sent;
+            return if (end.cause == .sink_refused) error.ResponseTooLong else error.TransportFailed;
+        },
+        .timed_out => |timed_out| {
+            response.request_not_sent = !timed_out.request_sent;
+            return error.TransportFailed;
+        },
     }
-    response.request_not_sent = false;
-    const result = c.curl_easy_perform(easy);
-    var request_size: c_long = -1;
-    const size_known = c.curl_easy_getinfo(easy, c.CURLINFO_REQUEST_SIZE, &request_size) == c.CURLE_OK;
-    response.request_not_sent = requestNotSent(result, if (size_known) request_size else null);
-    if (cancelled) |check| if (check()) return error.LoginInterrupted;
-    if (result != c.CURLE_OK) return if (response.overflow) error.ResponseTooLong else error.TransportFailed;
-    var status: c_long = 0;
-    if (c.curl_easy_getinfo(easy, c.CURLINFO_RESPONSE_CODE, &status) != c.CURLE_OK)
-        return error.TransportFailed;
-    return @intCast(status);
 }
 
-fn loginProgress(context: ?*anyopaque, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t) callconv(.c) c_int {
-    const cancelled: *const ?*const fn () bool = @ptrCast(@alignCast(context orelse return 1));
-    return if (cancelled.*) |check| @intFromBool(check()) else 0;
+const json_request = wire.Request{ .url = "", .content_type = "application/json", .body = "synthetic" };
+
+fn testUrl(buffer: []u8, port: u16) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/oauth/token", .{port});
 }
 
 test "refresh transport requires positive evidence that no request was sent" {
+    const io = std.testing.io;
     var answer: Response = .{};
-    try std.testing.expectError(error.TransportFailed, post(.{ .url = "://", .content_type = "Content-Type: application/json", .body = "synthetic" }, &answer, null));
+    var request = json_request;
+    request.url = "://";
+    try std.testing.expectError(error.TransportFailed, post(io, request, &answer, null));
     try std.testing.expect(answer.request_not_sent);
-    for ([_]?c_long{ null, -1, 1 }) |size| {
-        try std.testing.expect(!requestNotSent(c.CURLE_COULDNT_CONNECT, size));
+
+    // A port whose listener just closed refuses the connection.
+    var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
+    const port = listener.socket.address.getPort();
+    listener.deinit(io);
+    var url: [64]u8 = undefined;
+    request.url = try testUrl(&url, port);
+    answer.request_not_sent = false;
+    try std.testing.expectError(error.TransportFailed, post(io, request, &answer, null));
+    try std.testing.expect(answer.request_not_sent);
+}
+
+/// A raw h2c server: it writes `reply`, then reads the client's bytes
+/// until `until` appears, and closes.
+const RawPeer = struct {
+    fn run(server: *std.Io.net.Server, reply: []const u8, until: []const u8) bool {
+        const io = std.testing.io;
+        const peer = server.accept(io) catch return false;
+        defer peer.close(io);
+        var writer = peer.writer(io, &.{});
+        writer.interface.writeAll(reply) catch return false;
+        var received: [4096]u8 = undefined;
+        var used: usize = 0;
+        while (used < received.len) {
+            var data = [_][]u8{received[used..]};
+            const count = (peer.readWithControl(io, &data, &.{}) catch return false).data_len;
+            if (count == 0) return false;
+            used += count;
+            if (std.mem.indexOf(u8, received[0..used], until) != null) return true;
+        }
+        return false;
     }
-    for ([_]c.CURLcode{ c.CURLE_COULDNT_CONNECT, c.CURLE_COULDNT_RESOLVE_HOST, c.CURLE_SSL_CONNECT_ERROR, c.CURLE_PEER_FAILED_VERIFICATION }) |result| {
-        try std.testing.expect(requestNotSent(result, 0));
+
+    /// Posts against a RawPeer and reports whether the peer saw `until`.
+    /// The peer is cancelled after the post, so a post that never connects
+    /// fails the test instead of leaving `accept` blocked.
+    fn exchangeWith(reply: []const u8, until: []const u8, answer: *Response) !struct { anyerror!u16, bool } {
+        const io = std.testing.io;
+        var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
+        defer listener.deinit(io);
+        var url: [64]u8 = undefined;
+        var request = json_request;
+        request.url = try testUrl(&url, listener.socket.address.getPort());
+        var peer = try std.Io.concurrent(io, run, .{ &listener, reply, until });
+        const outcome = post(io, request, answer, null);
+        return .{ outcome, peer.cancel(io) };
     }
-    for ([_]c.CURLcode{ c.CURLE_OK, c.CURLE_SEND_ERROR, c.CURLE_RECV_ERROR, c.CURLE_OPERATION_TIMEDOUT, c.CURLE_HTTP2_STREAM }) |result| {
-        try std.testing.expect(!requestNotSent(result, 0));
-    }
+};
+
+const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+/// An empty SETTINGS frame, which makes the client's connection ready.
+const empty_settings = [_]u8{ 0, 0, 0, 4, 0, 0, 0, 0, 0 };
+
+test "refresh transport keeps not-sent evidence when the peer goes before it is ready" {
+    var answer: Response = .{};
+    // The peer closes after the client's preface, without its own SETTINGS.
+    const outcome, const saw = try RawPeer.exchangeWith("", preface, &answer);
+    try std.testing.expect(saw);
+    try std.testing.expectError(error.TransportFailed, outcome);
+    try std.testing.expect(answer.request_not_sent);
+}
+
+test "refresh transport keeps not-sent evidence when the peer does not speak HTTP/2" {
+    var answer: Response = .{};
+    const outcome, const saw = try RawPeer.exchangeWith("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n", preface, &answer);
+    try std.testing.expect(saw);
+    try std.testing.expectError(error.TransportFailed, outcome);
+    try std.testing.expect(answer.request_not_sent);
 }
 
 test "refresh transport retains sent evidence when the peer loses its reply" {
-    const io = std.testing.io;
-    var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
-    defer listener.deinit(io);
-    const Peer = struct {
-        fn run(server: *std.Io.net.Server) bool {
-            const peer = server.accept(std.testing.io) catch return false;
-            defer peer.close(std.testing.io);
-            var received: [4096]u8 = undefined;
-            var used: usize = 0;
-            while (used < received.len) {
-                var data = [_][]u8{received[used..]};
-                const count = (peer.readWithControl(std.testing.io, &data, &.{}) catch return false).data_len;
-                if (count == 0) return false;
-                used += count;
-                if (std.mem.indexOf(u8, received[0..used], "\r\n\r\nsynthetic")) |_| {
-                    return true;
-                }
-            }
-            return false;
-        }
-    };
-    // Retire accept even when no client connects; shutdown on an unconnected
-    // listening socket is not a portable cancellation mechanism.
-    var unconnected = try std.Io.concurrent(io, Peer.run, .{&listener});
-    try std.testing.expect(!unconnected.cancel(io));
-    var url: [128]u8 = undefined;
-    const endpoint = try std.fmt.bufPrintSentinel(&url, "http://127.0.0.1:{d}/", .{listener.socket.address.getPort()}, 0);
-    var peer = try std.Io.concurrent(io, Peer.run, .{&listener});
     var answer: Response = .{};
-    const outcome = post(.{ .url = endpoint, .content_type = "Content-Type: application/json", .body = "synthetic" }, &answer, null);
-    try std.testing.expect(peer.cancel(io));
+    // DATA payloads are plain bytes on h2c, so the body shows on the wire.
+    const outcome, const saw = try RawPeer.exchangeWith(&empty_settings, "synthetic", &answer);
+    try std.testing.expect(saw);
     try std.testing.expectError(error.TransportFailed, outcome);
     try std.testing.expect(!answer.request_not_sent);
 }
@@ -263,18 +274,12 @@ test "device login cancellation rejects before a provider request" {
     try std.testing.expectError(error.LoginInterrupted, login(std.testing.io, struct {
         fn display(_: []const u8) !void {}
     }.display, cancelled));
-    var callback: ?*const fn () bool = cancelled;
-    try std.testing.expectEqual(@as(c_int, 1), loginProgress(@ptrCast(&callback), 0, 0, 0, 0));
-}
-
-fn opt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
-    if (c.curl_easy_setopt(easy, option, value) != c.CURLE_OK) return error.TransportConfigurationFailed;
 }
 
 pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Tokens {
     var begin: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&begin));
-    const begin_status = try post(wire.device_start, &begin, cancelled);
+    const begin_status = try post(io, wire.device_start, &begin, cancelled);
     var device: wire.DeviceStart = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&device));
     try wire.parseDeviceStart(begin_status, begin.bytes[0..begin.len], &device);
@@ -288,7 +293,7 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
         if (elapsed >= deadline_ns) return error.LoginExpired;
         var answer: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-        const answer_status = try post(device.pollRequest(), &answer, cancelled);
+        const answer_status = try post(io, device.pollRequest(), &answer, cancelled);
         if (try wire.classifyPoll(answer_status, answer.bytes[0..answer.len]) == .pending) {
             const remaining = deadline_ns - started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
             if (remaining <= 0) return error.LoginExpired;
@@ -309,7 +314,7 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
         const exchange = try wire.grantExchangeRequest(answer.bytes[0..answer.len], &form);
         var exchanged: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&exchanged));
-        const exchange_status = try post(exchange, &exchanged, cancelled);
+        const exchange_status = try post(io, exchange, &exchanged, cancelled);
         return wire.parseTokenResponse(exchange_status, exchanged.bytes[0..exchanged.len]);
     }
 }
@@ -321,7 +326,7 @@ fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credent
     var answer: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
     const request = wire.refreshRequest(current, &body) catch return error.RefreshRequestNotSent;
-    const status = post(request, &answer, null) catch |err| {
+    const status = post(io, request, &answer, null) catch |err| {
         if (answer.request_not_sent) return error.RefreshRequestNotSent;
         return err;
     };
