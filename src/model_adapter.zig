@@ -561,9 +561,11 @@ pub const TurnStates = struct {
         self.* = undefined;
     }
 
+    /// An emptied entry also forgets its recency, so capture fills it
+    /// before evicting any held Turn.
     fn release(entry: *Entry) void {
         std.heap.c_allocator.free(entry.held.?.value);
-        entry.held = null;
+        entry.* = .{};
     }
 
     fn find(self: *TurnStates, turn_id: u64) ?*Entry {
@@ -616,6 +618,15 @@ test "Codex turn state replays one Turn's first value and never another Turn's" 
     try std.testing.expectEqualStrings("", states.replay(8, account).value);
     try std.testing.expectEqualStrings("first", states.replay(7, account).value);
     try std.testing.expectEqualStrings("nine", states.replay(9, account).value);
+
+    // After a binding change the emptied entries take new Turns before any
+    // held Turn is evicted, whatever their recency before the change.
+    const other = TurnStates.owner(&try testRecord("other", false, "token-1", 3));
+    const rebound = states.replay(10, other);
+    states.capture(10, rebound.epoch, "ten");
+    states.capture(11, rebound.epoch, "eleven");
+    try std.testing.expectEqualStrings("ten", states.replay(10, other).value);
+    try std.testing.expectEqualStrings("eleven", states.replay(11, other).value);
 
     // Another account or FedRAMP binding never receives the value, and the
     // original account does not regain it after the change.
