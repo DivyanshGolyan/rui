@@ -69,6 +69,7 @@ pub const Origin = struct {
     scheme: h2.Scheme,
     /// Slices of the first endpoint's owned URL with this origin.
     host: []const u8,
+    server_name: []const u8,
     authority: []const u8,
     port: u16,
     /// From the first SETTINGS seen on this origin; until then at most one
@@ -229,6 +230,7 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
         self.origins[self.origin_count] = .{
             .scheme = parsed.scheme,
             .host = parsed.host,
+            .server_name = parsed.server_name,
             .authority = parsed.authority,
             .port = parsed.port,
             .learned_max_streams = null,
@@ -306,7 +308,7 @@ fn validFieldName(name: []const u8) bool {
         'a'...'z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
         else => return false,
     };
-    for ([_][]const u8{ "content-length", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" }) |owned| {
+    for ([_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" }) |owned| {
         if (std.mem.eql(u8, name, owned)) return false;
     }
     return true;

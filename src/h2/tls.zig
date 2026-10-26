@@ -76,8 +76,9 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    /// A client session on `fd`, verifying `host`: SNI and the name check
-    /// for a DNS name, the IP check (and no SNI) for an IP literal.
+    /// A client session on `fd`, verifying `host` (`Url.server_name`): SNI
+    /// and the name check for a DNS name, the IP check (and no SNI) for an
+    /// IP literal.
     pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, kind: HostKind) ?*c.SSL {
         var host_z: [h2.max_host_bytes + 1]u8 = undefined;
         @memcpy(host_z[0..host.len], host);
