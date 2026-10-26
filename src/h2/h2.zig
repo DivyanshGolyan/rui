@@ -185,6 +185,11 @@ pub const Field = struct {
     value: []const u8,
     /// Never enters the HPACK dynamic table (NGHTTP2_NV_FLAG_NO_INDEX).
     sensitive: bool = false,
+    /// `prepare` keeps the name's and value's addresses instead of a copy,
+    /// for bytes many streams share, such as a credential or a literal.
+    /// They must stay valid until the stream's first `.head` event or its
+    /// end (collected or cancelled): h2 never reads them after either.
+    borrowed: bool = false,
 };
 
 pub const Body = union(enum) {
@@ -207,8 +212,9 @@ pub const Sink = union(enum) {
 pub const Request = struct {
     endpoint: Endpoint,
     /// Copied by `prepare` into one owned block of exact length, so the
-    /// caller may wipe its own copies (credentials) once it returns. The
-    /// block is kept while a resend is possible, then zeroed and freed.
+    /// caller may wipe its own copies (credentials) once it returns; a
+    /// borrowed field leaves only its two addresses there. The block is
+    /// kept while a resend is possible, then zeroed and freed.
     fields: []const Field,
     body: Body,
     sink: Sink,

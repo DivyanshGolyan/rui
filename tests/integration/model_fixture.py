@@ -295,9 +295,12 @@ class SuccessEndpoint(TestHTTPServer):
         self.responses = list(responses)
         self.responses_by_input = responses_by_input
         self.chunk_sizes = (1, 2, 5, 3, 7, 4, 1, 6) if chunk_sizes is None else chunk_sizes
-        # Default chunking fragments the first 64 KiB of each response; h2c
-        # makes every write a DATA frame, and Python frames cost ~15 us each.
-        self.fragmented_bytes = 64 * 1024 if chunk_sizes is None else None
+        # Default chunking fragments the first 8 KiB of each response, which
+        # splits its first events at every offset. h2c makes every write a
+        # DATA frame, which costs both sides a send, a receive and a capture
+        # write: ~35 us per frame on Linux and roughly ten times that on the
+        # macOS runners, where a 64 KiB prefix (18,000 frames) timed out.
+        self.fragmented_bytes = 8 * 1024 if chunk_sizes is None else None
         self.requests = []
         self.request_times = []
         self.lock = threading.Lock()

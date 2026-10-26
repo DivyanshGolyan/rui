@@ -400,15 +400,20 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
 }
 
 pub const Headers = struct {
-    bearer: [codex_credentials.max_token_bytes + 8]u8 = undefined,
     session: [32]u8 = undefined,
     entries: [8]h2.Field = undefined,
     length: usize = 0,
+    credentials: *provider.Credentials = undefined,
+    /// A use of the Reactor's copy of this credential, owned until
+    /// `takeCredential` hands it to the Transfer.
+    credential: ?*provider.SharedCredential = null,
 
     /// Initialize in final stack storage. The fields are borrowed only until
-    /// Transfer.start, whose stream copies them. A nonempty turn state comes
-    /// from TurnStates.replay for this Attempt's Turn, and is borrowed too.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8, turn_state: []const u8) !void {
+    /// Transfer.start, whose stream copies the per-request ones; h2 borrows
+    /// the credential (its Transfer then holds the use) and the literals.
+    /// A nonempty turn state comes from TurnStates.replay for this Attempt's
+    /// Turn, and is borrowed too.
+    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials, affinity: [16]u8, turn_state: []const u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
         if (authentication.fixture) {
@@ -421,19 +426,22 @@ pub const Headers = struct {
             return error.InvalidCredentialHeader;
         for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
         for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
-        const bearer = try std.fmt.bufPrint(&self.bearer, "Bearer {s}", .{access});
+        const shared = try shared_credentials.share(access, account_id);
+        self.credentials = shared_credentials;
+        self.credential = shared;
         self.session = std.fmt.bytesToHex(affinity, .lower);
         self.entries[0..6].* = .{
-            .{ .name = "accept", .value = "text/event-stream" },
-            .{ .name = "authorization", .value = bearer, .sensitive = true },
-            .{ .name = "chatgpt-account-id", .value = account_id, .sensitive = true },
+            .{ .name = "accept", .value = "text/event-stream", .borrowed = true },
+            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
+            .{ .name = "chatgpt-account-id", .value = shared.accountId(), .sensitive = true, .borrowed = true },
             .{ .name = "session-id", .value = &self.session },
+            // Borrowed where two addresses (16 bytes) are smaller than a copy.
             .{ .name = "originator", .value = "rui" },
-            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision },
+            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
         };
         self.length = 6;
         if (credential.record.fedramp) {
-            self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true" };
+            self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true", .borrowed = true };
             self.length += 1;
         }
         if (turn_state.len != 0) {
@@ -446,8 +454,13 @@ pub const Headers = struct {
         return self.entries[0..self.length];
     }
 
+    pub fn takeCredential(self: *Headers) ?*provider.SharedCredential {
+        defer self.credential = null;
+        return self.credential;
+    }
+
     pub fn deinit(self: *Headers) void {
-        std.crypto.secureZero(u8, &self.bearer);
+        if (self.credential) |shared| self.credentials.release(shared);
         self.* = undefined;
     }
 };
@@ -642,12 +655,13 @@ test "Codex turn state owner changes invalidate paused Turns and stale completio
 
 test "Codex headers carry turn state only when the Turn has one" {
     var credential: Credential = undefined;
+    var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
     for ([_]bool{ false, true }) |fedramp| {
         credential.record = try testRecord(codex_auth.fixture_account_id, fedramp, codex_auth.fixture_access_token, 1);
         for ([_][]const u8{ "", "sticky value", &@as([provider.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
             var headers: Headers = .{};
             defer headers.deinit();
-            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, @splat(0xab), turn_state);
+            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials, @splat(0xab), turn_state);
             const entries = headers.fields();
             var found: ?[]const u8 = null;
             var fedramp_found = false;
@@ -666,6 +680,14 @@ test "Codex headers carry turn state only when the Turn has one" {
                 if (std.mem.eql(u8, entry.name, "session-id"))
                     try std.testing.expectEqualStrings("abababababababababababababababab", entry.value);
             }
+            // The credential is the Reactor's one copy, which h2 borrows;
+            // only the per-request values are copied into each stream.
+            for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16 and
+                !std.mem.eql(u8, entry.name, "session-id") and
+                !std.mem.eql(u8, entry.name, "x-codex-turn-state"), entry.borrowed);
+            const shared = headers.credential.?;
+            try std.testing.expectEqual(shared.authorization().ptr, entries[1].value.ptr);
+            try std.testing.expectEqual(shared.accountId().ptr, entries[2].value.ptr);
             try std.testing.expectEqual(fedramp, fedramp_found);
             try std.testing.expectEqual(@as(usize, 6) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
             try std.testing.expectEqualStrings(turn_state, found orelse "");

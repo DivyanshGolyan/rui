@@ -254,16 +254,20 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     if (request.fields.len > h2.max_fields) return error.InvalidRequest;
     // The record keeps a buffer sink's capacity in 32 bits.
     if (request.sink == .buffer and request.sink.buffer.len > std.math.maxInt(u32)) return error.InvalidRequest;
+    // The cap is on the block a copy of every field would take, so it
+    // bounds what is sent whether or not a field is borrowed.
+    var copied_len: usize = 0;
     var block_len: usize = 0;
     for (request.fields) |field| {
         if (!validFieldName(field.name) or !validFieldValue(field.value)) return error.InvalidRequest;
-        block_len += Record.FieldBlock.header_bytes + field.name.len + field.value.len;
+        copied_len += Record.FieldBlock.entryBytes(.{ .name = field.name, .value = field.value });
+        block_len += Record.FieldBlock.entryBytes(field);
     }
-    if (block_len > h2.max_field_block_bytes) return error.InvalidRequest;
+    if (copied_len > h2.max_field_block_bytes) return error.InvalidRequest;
     const block = try self.allocator.alloc(u8, block_len);
     var written: usize = 0;
     for (request.fields) |field| {
-        written += Record.FieldBlock.put(block[written..], .{ .name = field.name, .value = field.value, .sensitive = field.sensitive });
+        written += Record.FieldBlock.put(block[written..], field);
     }
     record.* = std.mem.zeroes(Record);
     record.fields = if (block_len == 0) blk: {

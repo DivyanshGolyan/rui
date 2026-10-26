@@ -1499,7 +1499,7 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, request.session_affinity, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
@@ -1517,6 +1517,7 @@ fn launchPreparedRequest(
     const write_once = host.faults.response_write_once;
     active.transfer.start(reactor, request.*, binding, .{
         .fields = headers.fields(),
+        .credential = headers.takeCredential(),
         .turn_state = turn_state,
         .faults = .{
             .request_read = host.faults.request_read,
