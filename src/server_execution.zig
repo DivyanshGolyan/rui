@@ -64,7 +64,8 @@ const NamedScratchSlot = struct {
 const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
-    execution: bash.Execution,
+    /// In this slot's custody record entry of `Host.bash_work`.
+    execution: *bash.Execution,
     stop_accepted: bool = false,
     delivery: union(enum) {
         open,
@@ -77,7 +78,8 @@ const BashSlot = struct {
 
 const BashPreparedCleanupSlot = struct {
     token: execution.CustodyToken,
-    cleanup: bash.PreparedCleanup,
+    /// In this slot's custody record entry of `Host.bash_work`.
+    cleanup: *bash.PreparedCleanup,
 };
 
 const BashPreparingSlot = struct {
@@ -275,8 +277,18 @@ pub fn executionMain(host: *Host) void {
     };
     host.turn_states = .{ .entries = turn_states };
     defer {
+        host.turn_states.deinit();
         host.turn_states = .{};
         unmapZeroed(turn_states);
+    }
+    const bash_work = mapZeroed(server_host.BashWork, slots.len) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    host.bash_work = bash_work;
+    defer {
+        host.bash_work = &.{};
+        unmapZeroed(bash_work);
     }
     const budget = host.retention.sharedBudget().narrowed(
         if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
@@ -633,18 +645,20 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
     return slot;
 }
 
-/// Connections without a Transfer only need their timers and peer bytes
-/// served, at the idle cadence, unless Bash still needs its own.
+/// The Client's wait already ends at socket readiness and at its own
+/// earliest timer, so Transfers need no tick of their own. The loop still
+/// wakes at the idle cadence, which bounds new-work discovery and the control
+/// fallback, unless Bash needs its 25 ms service.
 fn transportWaitMs(slots: []const ExecutionSlot) u32 {
-    return if (slotsHaveTransport(slots) or slotsHaveBash(slots)) 25 else 100;
+    return if (slotsHaveBash(slots)) 25 else 100;
 }
 
-test "an idle connection waits at the idle cadence only when no Bash runs" {
+test "transport waits at the idle cadence unless Bash runs" {
     var slots = [_]ExecutionSlot{ .free, .free };
     try std.testing.expectEqual(@as(u32, 100), transportWaitMs(&slots));
+    slots[0] = .{ .provider = .{ .owner = .{} } };
+    try std.testing.expectEqual(@as(u32, 100), transportWaitMs(&slots));
     slots[1] = .{ .bash_preparing = undefined };
-    try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
-    slots[1] = .{ .provider = .{ .owner = .{} } };
     try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
 }
 
@@ -716,19 +730,27 @@ fn cancelSupersededTransfers(
     };
 }
 
+test "an execution slot is sized for a model Attempt, not for Bash" {
+    // Bash keeps its large state in Host.bash_work, so no arm outgrows the
+    // provider arm every held model agent occupies.
+    try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
+}
+
 test "zeroed pages are free slots and empty Turn entries" {
     const slots = try mapZeroed(ExecutionSlot, 3);
     defer unmapZeroed(slots);
     for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
     try std.testing.expectEqual(slots.len, countFreeSlots(slots));
+    // A value is held at its real length, so an entry is a few words.
+    try std.testing.expect(@sizeOf(model_adapter.TurnStates.Entry) < 64);
     const entries = try mapZeroed(model_adapter.TurnStates.Entry, 2);
     defer unmapZeroed(entries);
     for (entries) |entry| {
-        try std.testing.expectEqual(@as(?u64, null), entry.turn_id);
-        try std.testing.expectEqualStrings("", entry.value.slice());
+        try std.testing.expectEqual(@as(?model_adapter.TurnStates.Held, null), entry.held);
         try std.testing.expectEqual(@as(u64, 0), entry.used);
     }
     var states: model_adapter.TurnStates = .{ .entries = entries };
+    defer states.deinit();
     try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
     try std.testing.expectEqual(@as(usize, 0), (try mapZeroed(ExecutionSlot, 0)).len);
 }
@@ -1029,10 +1051,12 @@ fn launchPreparedBash(
         discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
+    const work = &host.bash_work[token.index];
+    work.* = .{ .execution = launched.? };
     slot.* = .{ .bash = .{
         .token = token,
         .binding = action_binding,
-        .execution = launched.?,
+        .execution = &work.execution,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
@@ -1180,9 +1204,11 @@ fn retainBashPreparedCleanup(
     err: anyerror,
 ) void {
     host.custody.detach(token) catch unreachable;
+    const work = &host.bash_work[token.index];
+    work.* = .{ .prepared_cleanup = cleanup };
     slot.* = .{ .bash_prepared_cleanup = .{
         .token = token,
-        .cleanup = cleanup,
+        .cleanup = &work.prepared_cleanup,
     } };
     retainDispatchFence(host, "Bash preparation cleanup", err);
 }
@@ -2434,7 +2460,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(&bash.empty_environment), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    var launched = try prepared.launch(&bash.empty_environment);
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     defer if (slot == .bash) {
         slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
@@ -3405,6 +3432,8 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .token = token,
                 .binding = binding,
             } }};
+            var work: [1]server_host.BashWork = undefined;
+            host.bash_work = &work;
             @field(host, flag).store(true, .release);
             launchPreparedBash(&host, &slots[0], token, binding, &prepared);
             try std.testing.expect(prepared.stdout_capture == null);

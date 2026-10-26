@@ -22,6 +22,9 @@ pub const Outcome = union(enum) {
 };
 
 const ActionRecoveryKey = struct { generation: u64, free_slots: usize };
+/// Every fact the Bash, message and tool-continuation scans depend on
+/// besides Store rows; the rows move the commit generation.
+const AdmissionKey = struct { generation: u64, free_slots: usize, bash_open: bool, model_open: bool };
 
 pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
@@ -33,6 +36,11 @@ pub const State = struct {
     /// Generation and free slots before the last scan found nothing; only a
     /// commit or a released slot can make an uncertain Action eligible.
     idle_action_recovery: ?ActionRecoveryKey = null,
+    /// Admission facts before the last pass whose Bash, message and
+    /// tool-continuation scans all found nothing. Those scans read only
+    /// Store rows, so they rerun only once a fact changes. Retry admission
+    /// is due by time instead and keeps its own poll.
+    idle_admission: ?AdmissionKey = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
 };
@@ -89,8 +97,20 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
             state.last_retry_poll = now;
         }
     }
+    const admission_key: AdmissionKey = .{
+        .generation = context.commitGeneration(),
+        .free_slots = context.freeSlots(),
+        .bash_open = context.bashPreparationOpen(),
+        .model_open = context.modelPreparationOpen(),
+    };
+    const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
+    var found_nothing = true;
     for (state.preference, 0..) |kind, index| {
-        if (context.dispatchFenced() or context.freeSlots() == 0) break;
+        if (context.dispatchFenced() or context.freeSlots() == 0) {
+            found_nothing = false;
+            break;
+        }
+        if (scanned and kind != .retry) continue;
         const admission = switch (kind) {
             .bash => if (context.bashPreparationOpen()) context.admitBash() else continue,
             .retry, .message, .tool_continuation => blk: {
@@ -104,14 +124,17 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
             },
         };
         if (kind == .retry) state.retry_admission_due = admission != .no_work;
+        if (kind != .retry and admission != .no_work) found_nothing = false;
         if (admission == .admitted) {
             // Only a committed winner moves. Skipped kinds keep their place,
             // including while their shared preparation owner is occupied.
             std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
             state.preference[state.preference.len - 1] = kind;
+            state.idle_admission = null;
             return true;
         }
     }
+    state.idle_admission = if (found_nothing) admission_key else null;
     return made_progress;
 }
 
@@ -194,12 +217,12 @@ const Recording = struct {
     bash_prep_count: usize = 0,
     retained_cleanup_count: usize = 0,
     drive_count: usize = 0,
-    now_samples: [32]i96 = undefined,
+    now_samples: [128]i96 = undefined,
     now_count: usize = 0,
-    order: [128]Phase = undefined,
+    order: [512]Phase = undefined,
     order_len: usize = 0,
-    lifecycle_now: [32]i96 = undefined,
-    live_bash_now: [32]i96 = undefined,
+    lifecycle_now: [64]i96 = undefined,
+    live_bash_now: [64]i96 = undefined,
 
     fn record(self: *Recording, phase: Phase) void {
         self.order[self.order_len] = phase;
@@ -654,4 +677,65 @@ test "a fenced recover does not launch later work in the same turn" {
     try std.testing.expectEqual(@as(usize, 0), context.count(.completion));
     try std.testing.expectEqual(@as(usize, 0), context.drive_count);
     try std.testing.expectEqual(@as(usize, 1), context.lifecycle_count);
+}
+
+test "admission scans rerun only after a commit, a released slot or a reopened preparation" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_continuation));
+    context.generation += 1;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.free = 2;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    // A shared preparation owner reopening needs no commit.
+    context.model_prep_open = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    context.model_prep_open = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 5), context.count(.admit_bash));
+    context.bash_prep_open = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 5), context.count(.admit_new));
+    context.bash_prep_open = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 6), context.count(.admit_bash));
+}
+
+test "an admission that must retry later keeps scanning without a commit" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .continuation_admission = .retry_later };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.continuation_admission = .no_work;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+}
+
+test "retry admission keeps its own poll while the commit-gated scans wait" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
 }
