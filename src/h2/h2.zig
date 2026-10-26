@@ -80,8 +80,11 @@ pub const Scheme = enum(u8) { https, http };
 
 pub const Url = struct {
     scheme: Scheme,
-    /// Without brackets for an IPv6 literal.
+    /// Without brackets for an IPv6 literal. Name lookup uses it as written.
     host: []const u8,
+    /// What SNI carries and the certificate must match: `host` without a
+    /// fully qualified name's trailing dot (RFC 6066 section 3).
+    server_name: []const u8,
     port: u16,
     /// `host[:port]` as written, for `:authority`.
     authority: []const u8,
@@ -141,7 +144,8 @@ pub fn parseUrl(url: []const u8) UrlError!Url {
     };
     if (scheme == .http and !std.mem.eql(u8, host, "127.0.0.1") and !std.mem.eql(u8, host, "::1"))
         return error.CleartextNotLoopback;
-    return .{ .scheme = scheme, .host = host, .port = port, .authority = authority, .path = path };
+    const server_name = if (host.len > 1 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
+    return .{ .scheme = scheme, .host = host, .server_name = server_name, .port = port, .authority = authority, .path = path };
 }
 
 /// A registered URL. Requests name one; the Client keeps the parsed origin
@@ -503,6 +507,11 @@ test "URLs: https anywhere, cleartext only to loopback literals" {
     try std.testing.expectEqual(@as(u16, 443), parsed.port);
     try std.testing.expectEqualStrings("chatgpt.com", parsed.authority);
     try std.testing.expectEqualStrings("/backend-api/codex/responses", parsed.path);
+    try std.testing.expectEqualStrings("chatgpt.com", parsed.server_name);
+    const qualified = try parseUrl("https://chatgpt.com./x");
+    try std.testing.expectEqualStrings("chatgpt.com.", qualified.host);
+    try std.testing.expectEqualStrings("chatgpt.com", qualified.server_name);
+    try std.testing.expectEqualStrings("chatgpt.com.", qualified.authority);
 
     const loopback = try parseUrl("http://127.0.0.1:8080/v1?x=1");
     try std.testing.expectEqual(@as(u16, 8080), loopback.port);

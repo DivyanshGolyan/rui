@@ -37,13 +37,6 @@ const no_renegotiation: u64 = 1 << 30;
 
 pub const HostKind = enum { dns_name, ip_literal };
 
-/// The name SNI carries and the certificate must match: the host without
-/// a fully qualified name's trailing dot (RFC 6066 section 3), which only
-/// name lookup keeps.
-pub fn serverName(host: []const u8) []const u8 {
-    return if (host.len > 1 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
-}
-
 /// For a socket send that must not raise SIGPIPE.
 pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
@@ -83,11 +76,10 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    /// A client session on `fd`, verifying `host`: SNI and the name check
-    /// for a DNS name (as `serverName`), the IP check (and no SNI) for an
+    /// A client session on `fd`, verifying `host` (`Url.server_name`): SNI
+    /// and the name check for a DNS name, the IP check (and no SNI) for an
     /// IP literal.
-    pub fn newSession(self: *const Context, fd: std.posix.fd_t, written_host: []const u8, kind: HostKind) ?*c.SSL {
-        const host = serverName(written_host);
+    pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, kind: HostKind) ?*c.SSL {
         var host_z: [h2.max_host_bytes + 1]u8 = undefined;
         @memcpy(host_z[0..host.len], host);
         host_z[host.len] = 0;
@@ -271,17 +263,6 @@ test "contexts offer only AEAD suites on TLS 1.2 and refuse renegotiation" {
         const cipher: *const c.SSL_CIPHER = @ptrCast(c.OPENSSL_sk_value(@ptrCast(ciphers), @intCast(index)).?);
         try std.testing.expect(c.SSL_CIPHER_is_aead(cipher) == 1);
     }
-}
-
-test "a fully qualified name's trailing dot is left out of SNI and the name check" {
-    var context = try Context.init(.system);
-    defer context.deinit();
-    const ssl = context.newSession(0, "example.com.", .dns_name).?;
-    defer c.SSL_free(ssl);
-    try std.testing.expectEqualStrings("example.com", std.mem.span(c.SSL_get_servername(ssl, c.TLSEXT_NAMETYPE_host_name).?));
-    if (!context.deferred) try std.testing.expectEqualStrings("example.com", std.mem.span(c.X509_VERIFY_PARAM_get0_host(c.SSL_get0_param(ssl), 0).?));
-    try std.testing.expectEqualStrings(".", serverName("."));
-    try std.testing.expectEqualStrings("example.com", serverName("example.com"));
 }
 
 test "sessions checked by OpenSSL refuse partial-label wildcards" {

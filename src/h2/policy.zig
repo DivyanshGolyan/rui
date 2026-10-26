@@ -54,6 +54,18 @@ pub const Cause = enum(u8) {
     local_failure,
 };
 
+/// Whether a `content-encoding` value names no coding but `identity`, the
+/// only one the request accepted. Empty list elements are ignored (RFC
+/// 9110 section 5.6.1).
+pub fn identityOnly(content_encoding: []const u8) bool {
+    var codings = std.mem.tokenizeScalar(u8, content_encoding, ',');
+    while (codings.next()) |element| {
+        const coding = std.mem.trim(u8, element, " \t");
+        if (coding.len > 0 and !std.ascii.eqlIgnoreCase(coding, "identity")) return false;
+    }
+    return true;
+}
+
 /// The only in-client resend: a stream the server proved it did not
 /// process (REFUSED_STREAM, or above a GOAWAY's last stream id) is sent
 /// again from byte 0, at most this many times.
@@ -229,6 +241,18 @@ fn pingOutstanding(facts: LivenessFacts) ?u64 {
 
 fn connection(ready: bool, draining: bool, streams: u32, peer_max_streams: u32) ConnectionView {
     return .{ .ready = ready, .draining = draining, .streams = streams, .peer_max_streams = peer_max_streams };
+}
+
+test "only identity, in any case or list shape, is an accepted coding" {
+    for ([_]struct { value: []const u8, accepted: bool }{
+        .{ .value = "identity", .accepted = true },
+        .{ .value = "IDENTITY", .accepted = true },
+        .{ .value = "", .accepted = true },
+        .{ .value = "identity, ,\tidentity,", .accepted = true },
+        .{ .value = "gzip", .accepted = false },
+        .{ .value = "identity, br", .accepted = false },
+        .{ .value = " , x-gzip", .accepted = false },
+    }) |case| try std.testing.expectEqual(case.accepted, identityOnly(case.value));
 }
 
 test "route packs streams onto the first connection with room" {

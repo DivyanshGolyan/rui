@@ -284,7 +284,7 @@ fn connected(self: *Connection) void {
     const origin = &self.engine.origins[self.origin];
     if (origin.scheme == .http) return self.startSession();
     const context = &self.engine.tls_context.?;
-    self.ssl = context.newSession(self.socket, origin.host, if (origin.literal != null) .ip_literal else .dns_name) orelse
+    self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .handshaking;
     self.continueHandshake();
@@ -307,8 +307,8 @@ pub fn continueHandshake(self: *Connection) void {
 
 fn startVerification(self: *Connection) void {
     std.debug.assert(self.verification == null);
-    const host = self.engine.origins[self.origin].host;
-    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, tls.serverName(host)) orelse
+    const server_name = self.engine.origins[self.origin].server_name;
+    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, server_name) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .verifying;
 }
@@ -333,7 +333,9 @@ fn startTrustedSession(self: *Connection) void {
 }
 
 /// Our SETTINGS refuse push, grant each stream `stream_window_bytes` and
-/// tell the peer the header block limit `onHeader` enforces; the
+/// advertise a header list limit of `max_field_block_bytes`. RFC 9113
+/// counts 32 bytes more per field than `onHeader`'s check, so a peer that
+/// keeps to it never trips that check. The
 /// connection window is set once the peer's stream limit is known.
 fn startSession(self: *Connection) void {
     const engine = self.engine;
@@ -824,7 +826,10 @@ fn emitHead(self: *Connection, record: *Record) void {
     if (kind == .final) {
         record.status = status;
         record.flags.final_seen = true;
-        if (!identityCoded(self.head.fields.items)) return self.endOpen(record, .encoded_response);
+        for (self.head.fields.items) |field| {
+            if (std.mem.eql(u8, field.name, "content-encoding") and !policy.identityOnly(field.value))
+                return self.endOpen(record, .encoded_response);
+        }
     }
     const verdict = self.engine.observe(record, .{ .head = .{
         .kind = kind,
@@ -832,19 +837,6 @@ fn emitHead(self: *Connection, record: *Record) void {
         .fields = self.head.fields.items,
     } });
     if (verdict == .refuse) self.endOpen(record, .rejected_headers);
-}
-
-/// Whether every `content-encoding` value names only `identity`, which
-/// `accept-encoding` asked for.
-fn identityCoded(fields: []const h2.Field) bool {
-    for (fields) |field| {
-        if (!std.mem.eql(u8, field.name, "content-encoding")) continue;
-        var codings = std.mem.tokenizeScalar(u8, field.value, ',');
-        while (codings.next()) |coding| {
-            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, coding, " \t"), "identity")) return false;
-        }
-    }
-    return true;
 }
 
 fn onDataChunk(_: ?*c.nghttp2_session, _: u8, stream_id: i32, data: [*c]const u8, length: usize, user_data: ?*anyopaque) callconv(.c) c_int {

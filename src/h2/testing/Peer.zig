@@ -451,16 +451,16 @@ pub fn respond(self: *Peer, stream: *Stream, status: u16, body: []const u8) void
 
 /// Responds, then sends a trailer block after the body.
 pub fn respondWith(self: *Peer, stream: *Stream, status: u16, body: []const u8, trailers: bool) void {
-    _ = self;
     var status_text: [3]u8 = undefined;
     _ = std.fmt.bufPrint(&status_text, "{d}", .{status}) catch unreachable;
-    const content_encoding = stream.connection.peer.options.content_encoding;
-    const headers = [_]c.nghttp2_nv{
-        nv(":status", &status_text),
-        nv("content-type", "text/event-stream"),
-        nv("content-encoding", content_encoding orelse ""),
-    };
-    const count: usize = if (content_encoding == null) 2 else 3;
+    var headers: [3]c.nghttp2_nv = undefined;
+    headers[0] = nv(":status", &status_text);
+    headers[1] = nv("content-type", "text/event-stream");
+    var count: usize = 2;
+    if (self.options.content_encoding) |coding| {
+        headers[count] = nv("content-encoding", coding);
+        count += 1;
+    }
     stream.response = body;
     stream.response_offset = 0;
     stream.trailers = trailers;
