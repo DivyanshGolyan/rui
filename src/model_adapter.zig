@@ -488,10 +488,16 @@ pub const TurnStates = struct {
         /// Borrowed until the next mutation of this TurnStates owner.
         value: []const u8,
     };
+    /// Zero bytes are an empty entry. A held value is malloc'd at its real
+    /// length, so the table costs a few words per unit of capacity and a
+    /// Turn's value costs its own bytes.
     pub const Entry = struct {
-        turn_id: ?u64 = null,
-        value: protocol.Bounded(provider.max_turn_state_bytes) = .{},
+        held: ?Held = null,
         used: u64 = 0,
+    };
+    pub const Held = struct {
+        turn_id: u64,
+        value: []const u8,
     };
 
     /// Every managed transfer's header callback delivers its value straight
@@ -517,9 +523,7 @@ pub const TurnStates = struct {
     pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) Replay {
         if (self.account == null or !std.mem.eql(u8, &self.account.?, &account)) {
             // Only occupied entries are reset, so an unused entry stays untouched.
-            for (self.entries) |*entry| if (entry.turn_id != null) {
-                entry.* = .{};
-            };
+            for (self.entries) |*entry| if (entry.held != null) release(entry);
             self.account = account;
             self.epoch += 1;
             self.uses = 0;
@@ -527,7 +531,7 @@ pub const TurnStates = struct {
         const entry = self.find(turn_id) orelse return .{ .epoch = self.epoch, .value = "" };
         self.uses += 1;
         entry.used = self.uses;
-        return .{ .epoch = self.epoch, .value = entry.value.slice() };
+        return .{ .epoch = self.epoch, .value = entry.held.?.value };
     }
 
     /// Record a transport-validated value from the selected launch epoch;
@@ -542,14 +546,28 @@ pub const TurnStates = struct {
             };
             break :lru oldest;
         };
-        if (target.turn_id != null and target.turn_id.? == turn_id) return;
+        if (target.held != null and target.held.?.turn_id == turn_id) return;
+        std.debug.assert(value.len <= provider.max_turn_state_bytes);
+        // Without memory the value is dropped, which only loses stickiness.
+        const owned = std.heap.c_allocator.dupe(u8, value) catch return;
+        if (target.held != null) release(target);
         self.uses += 1;
-        target.* = .{ .turn_id = turn_id, .used = self.uses };
-        target.value.set(value) catch unreachable;
+        target.held = .{ .turn_id = turn_id, .value = owned };
+        target.used = self.uses;
+    }
+
+    pub fn deinit(self: *TurnStates) void {
+        for (self.entries) |*entry| if (entry.held != null) release(entry);
+        self.* = undefined;
+    }
+
+    fn release(entry: *Entry) void {
+        std.heap.c_allocator.free(entry.held.?.value);
+        entry.held = null;
     }
 
     fn find(self: *TurnStates, turn_id: u64) ?*Entry {
-        for (self.entries) |*entry| if (entry.turn_id != null and entry.turn_id.? == turn_id) return entry;
+        for (self.entries) |*entry| if (entry.held != null and entry.held.?.turn_id == turn_id) return entry;
         return null;
     }
 };
@@ -573,6 +591,7 @@ fn testRecord(account_id: []const u8, fedramp: bool, access: []const u8, generat
 test "Codex turn state replays one Turn's first value and never another Turn's" {
     var storage: [2]TurnStates.Entry = @splat(.{});
     var states: TurnStates = .{ .entries = &storage };
+    defer states.deinit();
     const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
     // A refresh changes token and generation, not the account binding.
     const refreshed = TurnStates.owner(&try testRecord("acct", false, "token-2", 2));
@@ -603,6 +622,7 @@ test "Codex turn state replays one Turn's first value and never another Turn's" 
     for ([_]codex_credentials.Record{ try testRecord("other", false, "token-1", 3), try testRecord("acct", true, "token-1", 3) }) |record| {
         var owned: [1]TurnStates.Entry = @splat(.{});
         var isolated: TurnStates = .{ .entries = &owned };
+        defer isolated.deinit();
         const original = isolated.replay(5, account);
         isolated.capture(5, original.epoch, "acct-value");
         const changed = TurnStates.owner(&record);
@@ -616,6 +636,7 @@ test "Codex turn state replays one Turn's first value and never another Turn's" 
     }
 
     var unused: TurnStates = .{};
+    defer unused.deinit();
     const ignored = unused.replay(1, account);
     unused.capture(1, ignored.epoch, "value");
     try std.testing.expectEqualStrings("", unused.replay(1, account).value);
@@ -628,6 +649,7 @@ test "Codex turn state owner changes invalidate paused Turns and stale completio
         for ([_]bool{ false, true }) |late_completion| {
             var storage: [2]TurnStates.Entry = @splat(.{});
             var states: TurnStates = .{ .entries = &storage };
+            defer states.deinit();
             const original = states.replay(1, account);
             try std.testing.expectEqualStrings("", original.value);
             if (!late_completion) states.capture(1, original.epoch, "paused-a");

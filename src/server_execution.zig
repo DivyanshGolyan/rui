@@ -275,6 +275,7 @@ pub fn executionMain(host: *Host) void {
     };
     host.turn_states = .{ .entries = turn_states };
     defer {
+        host.turn_states.deinit();
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
@@ -721,14 +722,16 @@ test "zeroed pages are free slots and empty Turn entries" {
     defer unmapZeroed(slots);
     for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
     try std.testing.expectEqual(slots.len, countFreeSlots(slots));
+    // A value is held at its real length, so an entry is a few words.
+    try std.testing.expect(@sizeOf(model_adapter.TurnStates.Entry) < 64);
     const entries = try mapZeroed(model_adapter.TurnStates.Entry, 2);
     defer unmapZeroed(entries);
     for (entries) |entry| {
-        try std.testing.expectEqual(@as(?u64, null), entry.turn_id);
-        try std.testing.expectEqualStrings("", entry.value.slice());
+        try std.testing.expectEqual(@as(?model_adapter.TurnStates.Held, null), entry.held);
         try std.testing.expectEqual(@as(u64, 0), entry.used);
     }
     var states: model_adapter.TurnStates = .{ .entries = entries };
+    defer states.deinit();
     try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
     try std.testing.expectEqual(@as(usize, 0), (try mapZeroed(ExecutionSlot, 0)).len);
 }
