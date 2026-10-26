@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
+const Proxy = @import("testing/Proxy.zig");
 const Engine = @import("Engine.zig");
 const Connection = @import("Connection.zig");
 const Resolver = @import("Resolver.zig");
@@ -1212,6 +1213,18 @@ fn systemTrustExchange(peer: ?*PeerThread) !h2.ExchangeOutcome {
     return outcome;
 }
 
+/// One exchange to `url` through a proxy at `proxy_url`, trusting the
+/// peer's CA when there is a peer.
+fn proxiedExchange(peer: ?*PeerThread, url: []const u8, proxy_url: []const u8, no_proxy: []const u8) !h2.ExchangeOutcome {
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest(url, &response);
+    if (peer) |running| request.trust = .{ .ca_file = running.peer.caPath() };
+    request.proxy = .{ .url = proxy_url, .no_proxy = no_proxy };
+    const outcome = h2.exchange(std.testing.io, request);
+    if (peer) |running| try running.join();
+    return outcome;
+}
+
 test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle probe" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var variables = try TrustVariables.isolate();
@@ -1282,6 +1295,81 @@ test "exchange: macOS trusts SecTrust and ignores SSL_CERT_FILE and SSL_CERT_DIR
     try client.init(std.testing.allocator, std.testing.io, .{ .stream_capacity = 1, .inactivity_ns = std.time.ns_per_s, .connect_timeout_ns = std.time.ns_per_s });
     defer client.deinit();
     _ = try client.addEndpoint("https://127.0.0.1:9/v1");
+}
+
+const proxied_names = "DNS:proxied.test";
+
+test "exchange: https through a proxy's CONNECT tunnel, with its credentials" {
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .tls = .h2, .leaf_names = proxied_names, .url_host = "proxied.test" });
+    defer peer.stop();
+    const proxy = try Proxy.start(std.testing.allocator, .{ .target_port = peer.peer.port });
+    defer proxy.stop();
+    var proxy_url: [96]u8 = undefined;
+    // The tunnel reaches the peer though nothing resolves proxied.test.
+    const outcome = try proxiedExchange(&peer, peer.peer.url(), try proxy.url(&proxy_url, "us%40er:p%3Ass"), "");
+    try std.testing.expectEqual(@as(u16, 200), outcome.answered.status);
+    var expected: [256]u8 = undefined;
+    // base64("us@er:p:ss")
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "CONNECT proxied.test:{d} HTTP/1.1\r\nHost: proxied.test:{d}\r\nProxy-Authorization: Basic dXNAZXI6cDpzcw==\r\n\r\n", .{ peer.peer.port, peer.peer.port }), proxy.firstRequest().?);
+}
+
+test "exchange: a proxy's 407, 403 or other refusal ends the setup before any request byte" {
+    const Case = struct { status: u16, cause: h2.Cause };
+    for ([_]Case{
+        .{ .status = 407, .cause = .proxy_auth_required },
+        .{ .status = 403, .cause = .proxy_refused },
+        .{ .status = 502, .cause = .proxy_failed },
+    }) |case| {
+        const proxy = try Proxy.start(std.testing.allocator, .{ .status = case.status });
+        defer proxy.stop();
+        var proxy_url: [96]u8 = undefined;
+        const outcome = try proxiedExchange(null, "https://proxied.test/v1", try proxy.url(&proxy_url, ""), "");
+        try std.testing.expectEqual(h2.End{ .cause = case.cause, .request_sent = false }, outcome.failed);
+        try std.testing.expectEqualStrings("CONNECT proxied.test:443 HTTP/1.1\r\nHost: proxied.test:443\r\n\r\n", proxy.firstRequest().?);
+    }
+}
+
+test "exchange: bytes after the proxy's answer fail the tunnel" {
+    // The origin speaks only after the client's ClientHello, so these are
+    // the proxy's own, and TLS must not read them as the server's.
+    const proxy = try Proxy.start(std.testing.allocator, .{ .after_answer = "\x16\x03\x03" });
+    defer proxy.stop();
+    var proxy_url: [96]u8 = undefined;
+    const outcome = try proxiedExchange(null, "https://proxied.test/v1", try proxy.url(&proxy_url, ""), "");
+    try std.testing.expectEqual(h2.End{ .cause = .proxy_failed, .request_sent = false }, outcome.failed);
+}
+
+test "exchange: loopback and NO_PROXY hosts connect directly" {
+    const proxy = try Proxy.start(std.testing.allocator, .{ .status = 502 });
+    defer proxy.stop();
+    var proxy_url: [96]u8 = undefined;
+    const url = try proxy.url(&proxy_url, "");
+    {
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2 });
+        defer peer.stop();
+        try std.testing.expectEqual(@as(u16, 200), (try proxiedExchange(&peer, peer.peer.url(), url, "")).answered.status);
+    }
+    {
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2, .url_host = "localhost" });
+        defer peer.stop();
+        try std.testing.expectEqual(@as(u16, 200), (try proxiedExchange(&peer, peer.peer.url(), url, "")).answered.status);
+    }
+    // Bypassed, proxied.test is looked up directly, and .test names no host.
+    const outcome = try proxiedExchange(null, "https://proxied.test/v1", url, "example.com, .test");
+    try std.testing.expectEqual(h2.Cause.resolve_failed, outcome.failed.cause);
+    try std.testing.expectEqual(@as(?[]const u8, null), proxy.firstRequest());
+}
+
+test "exchange: a proxy URL Rui cannot use fails Client init" {
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest("https://proxied.test/v1", &response);
+    request.proxy = .{ .url = "https://proxy.example:443" };
+    try std.testing.expectError(error.HttpsProxySchemeUnsupported, h2.exchange(std.testing.io, request));
+    request.proxy = .{ .url = "http://proxy.example:0" };
+    try std.testing.expectError(error.HttpsProxyInvalid, h2.exchange(std.testing.io, request));
 }
 
 test "exchange: an answer longer than the buffer is refused, as sent" {

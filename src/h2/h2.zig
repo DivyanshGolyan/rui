@@ -19,6 +19,8 @@
 //!   by prior knowledge for loopback `http://`;
 //! - name lookup, and SecTrust's evaluation, on short-lived threads, and
 //!   the found addresses raced by family (Happy Eyeballs, RFC 8305);
+//! - `https://` through an `http://` proxy's CONNECT tunnel, when
+//!   `Options.proxy` names one;
 //! - request bodies read from the caller's file within the peer's window,
 //!   never copied into a buffer per request;
 //! - response bodies written from the one shared read buffer straight to
@@ -112,6 +114,20 @@ pub fn parseUrl(url: []const u8) UrlError!Url {
     if (path[0] != '/') return error.InvalidUrl;
     if (authority.len == 0 or std.mem.indexOfScalar(u8, authority, '@') != null) return error.InvalidUrl;
 
+    const host, const port = try parseHostPort(authority, switch (scheme) {
+        .https => 443,
+        .http => 80,
+    });
+    if (scheme == .http and !std.mem.eql(u8, host, "127.0.0.1") and !std.mem.eql(u8, host, "::1"))
+        return error.CleartextNotLoopback;
+    const server_name = if (host.len > 1 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
+    return .{ .scheme = scheme, .host = host, .server_name = server_name, .port = port, .authority = authority, .path = path };
+}
+
+/// `host[:port]`, or `[ipv6][:port]`, with `default_port` when it names
+/// none. The host is a slice of `authority`, without brackets.
+pub fn parseHostPort(authority: []const u8, default_port: u16) UrlError!struct { []const u8, u16 } {
+    if (authority.len == 0) return error.InvalidUrl;
     var host: []const u8 = authority;
     var port_text: ?[]const u8 = null;
     if (authority[0] == '[') {
@@ -139,14 +155,8 @@ pub fn parseUrl(url: []const u8) UrlError!Url {
         const value = std.fmt.parseInt(u16, text, 10) catch return error.InvalidUrl;
         if (value == 0) return error.InvalidUrl;
         break :blk value;
-    } else switch (scheme) {
-        .https => 443,
-        .http => 80,
-    };
-    if (scheme == .http and !std.mem.eql(u8, host, "127.0.0.1") and !std.mem.eql(u8, host, "::1"))
-        return error.CleartextNotLoopback;
-    const server_name = if (host.len > 1 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
-    return .{ .scheme = scheme, .host = host, .server_name = server_name, .port = port, .authority = authority, .path = path };
+    } else default_port;
+    return .{ host, port };
 }
 
 /// A registered URL. Requests name one; the Client keeps the parsed origin
@@ -182,7 +192,71 @@ pub const Options = struct {
     /// Loaded once, by the first `https://` `addEndpoint`, which fails when
     /// the bundle or file cannot be loaded.
     trust: Trust = .system,
+    /// Read once, by `init`, which fails when the URL cannot be used.
+    proxy: ?Proxy = null,
 };
+
+/// An `http://` proxy that `https://` origins tunnel through with CONNECT.
+/// Loopback hosts never use it.
+pub const Proxy = struct {
+    /// `[http://][user[:password]@]host[:port][/]`, the port 80 by
+    /// default; the user and password percent-encoded. Credentials go as
+    /// `Proxy-Authorization: Basic`. An `https://` or other scheme fails
+    /// `init` with `HttpsProxySchemeUnsupported`, any other unusable URL
+    /// with `HttpsProxyInvalid`.
+    url: []const u8,
+    /// Hosts that connect directly, comma-separated: `*` for all, names
+    /// with the names below them (`example.com` or `.example.com`), IP
+    /// addresses and CIDR ranges. An entry with a port exempts nothing.
+    no_proxy: []const u8 = "",
+};
+
+/// The proxy the environment names: `https_proxy` (or `HTTPS_PROXY`) and
+/// `no_proxy` (or `NO_PROXY`). A lowercase name that is set decides, even
+/// when empty, so `https_proxy=` turns a system-wide `HTTPS_PROXY` off for
+/// one command. Null when no proxy is set. The slices are the
+/// environment's.
+pub fn proxyFromEnvironment() ?Proxy {
+    return proxyFrom(std.c.getenv);
+}
+
+fn proxyFrom(comptime lookup: fn ([*:0]const u8) callconv(.c) ?[*:0]u8) ?Proxy {
+    return .{
+        .url = environmentSetting(lookup, "https_proxy", "HTTPS_PROXY") orelse return null,
+        .no_proxy = environmentSetting(lookup, "no_proxy", "NO_PROXY") orelse "",
+    };
+}
+
+fn environmentSetting(comptime lookup: anytype, lowercase: [*:0]const u8, uppercase: [*:0]const u8) ?[]const u8 {
+    const value = std.mem.span(lookup(lowercase) orelse lookup(uppercase) orelse return null);
+    return if (value.len > 0) value else null;
+}
+
+test "a set lowercase proxy variable decides, even empty" {
+    const Environment = struct {
+        var https_proxy: ?[:0]const u8 = null;
+        var no_proxy: ?[:0]const u8 = null;
+        fn lookup(name: [*:0]const u8) callconv(.c) ?[*:0]u8 {
+            const value = if (std.mem.eql(u8, std.mem.span(name), "https_proxy"))
+                https_proxy
+            else if (std.mem.eql(u8, std.mem.span(name), "HTTPS_PROXY"))
+                "http://upper:1"
+            else if (std.mem.eql(u8, std.mem.span(name), "no_proxy"))
+                no_proxy
+            else
+                "upper.example";
+            return @constCast(if (value) |text| text.ptr else null);
+        }
+    };
+    try std.testing.expectEqualStrings("http://upper:1", proxyFrom(Environment.lookup).?.url);
+    try std.testing.expectEqualStrings("upper.example", proxyFrom(Environment.lookup).?.no_proxy);
+    Environment.https_proxy = "http://lower:1";
+    Environment.no_proxy = "";
+    try std.testing.expectEqualStrings("http://lower:1", proxyFrom(Environment.lookup).?.url);
+    try std.testing.expectEqualStrings("", proxyFrom(Environment.lookup).?.no_proxy);
+    Environment.https_proxy = "";
+    try std.testing.expectEqual(@as(?Proxy, null), proxyFrom(Environment.lookup));
+}
 
 // ----------------------------------------------------------------- requests
 
@@ -323,7 +397,7 @@ pub const Stream = extern struct {
 
 // ------------------------------------------------------------------- Client
 
-pub const InitError = error{ OutOfMemory, SystemResources };
+pub const InitError = error{ OutOfMemory, SystemResources, HttpsProxyInvalid, HttpsProxySchemeUnsupported };
 pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
@@ -425,6 +499,7 @@ pub const Exchange = struct {
     /// The response body lands here; a longer one ends `.sink_refused`.
     response: []u8,
     trust: Trust = .system,
+    proxy: ?Proxy = null,
     connect_timeout_ns: u64,
     /// From the call until the stream ends, whatever arrives meanwhile.
     total_timeout_ns: u64,
@@ -459,6 +534,7 @@ pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
         .inactivity_ns = request.total_timeout_ns +| std.time.ns_per_s,
         .connect_timeout_ns = request.connect_timeout_ns,
         .trust = request.trust,
+        .proxy = request.proxy,
     });
     defer client.deinit();
     const endpoint = try client.addEndpoint(request.url);
@@ -554,6 +630,7 @@ test {
     _ = Engine;
     _ = @import("Waker.zig");
     _ = @import("Resolver.zig");
+    _ = @import("proxy.zig");
     _ = @import("tls.zig");
     _ = @import("tests.zig");
 }

@@ -1,8 +1,8 @@
 //! One HTTP/2 connection: its socket and nghttp2 session. Internal.
 //!
-//!   free -> [resolving] -> connecting -> [handshaking] -> [verifying] -> awaiting_settings
-//!        (DNS names)   (addresses       (https)         (macOS system  (preface and our
-//!                       raced, RFC 8305) trust)         SETTINGS sent)
+//!   free -> [resolving] -> connecting -> [tunneling] -> [handshaking] -> [verifying] -> awaiting_settings
+//!        (DNS names)   (addresses       (CONNECT      (https)         (macOS system  (preface and our
+//!                       raced, RFC 8305) via proxy)                    trust)         SETTINGS sent)
 //!   -> ready -> draining -> free
 //!      (streams  (GOAWAY seen:
 //!       submitted) no submits)
@@ -21,10 +21,11 @@ const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
+const proxy = @import("proxy.zig");
 const sec_trust = @import("sec_trust.zig");
 const Connection = @This();
 
-pub const State = enum(u8) { free = 0, resolving, connecting, handshaking, verifying, awaiting_settings, ready, draining };
+pub const State = enum(u8) { free = 0, resolving, connecting, tunneling, handshaking, verifying, awaiting_settings, ready, draining };
 
 engine: *Engine,
 index: u32,
@@ -54,6 +55,10 @@ earlier_revents: i16,
 /// While connecting, when the next address's attempt is due; 0 when no
 /// address is left.
 next_attempt_ns: u64,
+/// While tunneling: CONNECT request bytes sent, of `tunnel_request_len`.
+tunnel_sent: u16,
+tunnel_request_len: u16,
+tunnel_answer: proxy.Answer,
 /// For an https origin, from the TCP connect on.
 ssl: ?*c.SSL,
 /// Counted among its origin's lookup users until a connect succeeds.
@@ -116,6 +121,9 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .earlier = -1,
         .earlier_revents = 0,
         .next_attempt_ns = 0,
+        .tunnel_sent = 0,
+        .tunnel_request_len = 0,
+        .tunnel_answer = .{},
         .ssl = null,
         .uses_lookup = false,
         .address_index = 0,
@@ -142,7 +150,7 @@ pub fn hasSession(self: *const Connection) bool {
 
 pub fn settingUp(self: *const Connection) bool {
     return switch (self.state) {
-        .resolving, .connecting, .handshaking, .verifying, .awaiting_settings => true,
+        .resolving, .connecting, .tunneling, .handshaking, .verifying, .awaiting_settings => true,
         .free, .ready, .draining => false,
     };
 }
@@ -172,6 +180,7 @@ pub fn pollEvents(self: *const Connection) ?i16 {
         // Nothing is read or written until SecTrust answers.
         .free, .resolving, .verifying => null,
         .connecting => std.c.POLL.OUT,
+        .tunneling => if (self.tunnel_sent < self.tunnel_request_len) std.c.POLL.OUT else std.c.POLL.IN,
         .handshaking => if (self.tls_wants_write) std.c.POLL.OUT else std.c.POLL.IN,
         .awaiting_settings, .ready, .draining => blk: {
             const write = self.tls_wants_write or self.unsent.len > 0 or c.nghttp2_session_want_write(self.session) != 0;
@@ -190,7 +199,8 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
     self.origin = origin_index;
     self.serial = serial;
     self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    if (origin.literal != null) return self.advanceAttempts(false, engine.now());
+    const dial = engine.dial(origin);
+    if (dial.literal != null) return self.advanceAttempts(false, engine.now());
     self.state = .resolving;
     // Setups of one origin share its lookup; a finished one nobody uses is
     // stale, so a new setup looks the name up again.
@@ -198,7 +208,7 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
         lookup.release();
         origin.lookup = null;
     };
-    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, origin.host, origin.port) orelse
+    if (origin.lookup == null) origin.lookup = Resolver.start(&engine.waker, dial.host, dial.port) orelse
         return engine.setupFailed(self, .local_failure);
     origin.lookup_users += 1;
     self.uses_lookup = true;
@@ -213,7 +223,7 @@ pub fn finishLookup(self: *Connection) void {
 
 fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
     const origin = &self.engine.origins[self.origin];
-    if (origin.literal) |literal| return if (index == 0) literal else null;
+    if (self.engine.dial(origin).literal) |literal| return if (index == 0) literal else null;
     const addresses = origin.lookup.?.result().?.found();
     return if (index < addresses.len) addresses[index] else null;
 }
@@ -350,13 +360,70 @@ fn configureSocket(fd: std.posix.fd_t) bool {
 }
 
 /// `socket` connected: the race and the addresses are done with; https
-/// goes on to its handshake.
+/// goes on to its handshake, through the proxy's tunnel first if it has
+/// one.
 fn connected(self: *Connection) void {
     self.dropEarlier();
     self.next_attempt_ns = 0;
     self.stopUsingLookup();
     const origin = &self.engine.origins[self.origin];
     if (origin.scheme == .http) return self.startSession();
+    if (origin.tunneled) return self.startTunnel();
+    self.startTls();
+}
+
+/// connecting -> tunneling: asks the proxy for a tunnel to the origin.
+fn startTunnel(self: *Connection) void {
+    var request: [proxy.max_request_bytes]u8 = undefined;
+    // The request may carry credentials.
+    defer std.crypto.secureZero(u8, &request);
+    self.tunnel_request_len = @intCast(self.tunnelRequest(&request).len);
+    self.tunnel_sent = 0;
+    self.tunnel_answer = .{};
+    self.state = .tunneling;
+    self.continueTunnel();
+}
+
+fn tunnelRequest(self: *const Connection, buffer: *[proxy.max_request_bytes]u8) []const u8 {
+    const origin = &self.engine.origins[self.origin];
+    return proxy.connectRequest(buffer, origin.host, origin.port, self.engine.proxy_route.?.credentials);
+}
+
+/// tunneling -> handshaking once the proxy's answer opened the tunnel.
+/// Nothing may follow that answer: the origin speaks only after our TLS
+/// ClientHello.
+pub fn continueTunnel(self: *Connection) void {
+    if (self.tunnel_sent < self.tunnel_request_len) {
+        var request: [proxy.max_request_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &request);
+        switch (self.writeSome(self.tunnelRequest(&request)[self.tunnel_sent..])) {
+            .bytes => |count| self.tunnel_sent += @intCast(count),
+            .again => return,
+            .closed => return self.engine.setupFailed(self, .proxy_failed),
+        }
+        if (self.tunnel_sent < self.tunnel_request_len) return;
+    }
+    var buffer: [512]u8 = undefined;
+    while (true) {
+        const count = switch (self.readSome(&buffer)) {
+            .bytes => |count| count,
+            .again => return,
+            .closed => return self.engine.setupFailed(self, .proxy_failed),
+        };
+        switch (self.tunnel_answer.feed(buffer[0..count])) {
+            .more => {},
+            .malformed => return self.engine.setupFailed(self, .proxy_failed),
+            .done => |answer| {
+                if (policy.tunnelRefusal(answer.status)) |cause| return self.engine.setupFailed(self, cause);
+                if (answer.used != count) return self.engine.setupFailed(self, .proxy_failed);
+                return self.startTls();
+            },
+        }
+    }
+}
+
+fn startTls(self: *Connection) void {
+    const origin = &self.engine.origins[self.origin];
     const context = &self.engine.tls_context.?;
     self.ssl = context.newSession(self.socket, origin.server_name, if (origin.literal != null) .ip_literal else .dns_name) orelse
         return self.engine.setupFailed(self, .local_failure);

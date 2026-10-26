@@ -32,6 +32,14 @@ pub const Cause = enum(u8) {
     h2_refused,
     /// Certificate verification failed.
     untrusted_peer,
+    /// The proxy asked for credentials (407): the proxy URL carried none,
+    /// or ones it refused.
+    proxy_auth_required,
+    /// The proxy refused the tunnel (403).
+    proxy_refused,
+    /// The proxy did not open the tunnel: another status, or an answer
+    /// that was not HTTP/1, too long, or followed by bytes of its own.
+    proxy_failed,
     resolve_failed,
     connect_failed,
     /// Resolve, connect, TLS and the peer's first SETTINGS took longer than
@@ -112,6 +120,17 @@ pub fn pendingAfterSetupFailure(other_setting_up: u32, other_ready_with_room: u3
 }
 
 // -------------------------------------------------------------- settlement
+
+/// How a proxy's answer to CONNECT ends the setup, or null when the tunnel
+/// is open: any 2xx (RFC 9110 section 9.3.6).
+pub fn tunnelRefusal(status: u16) ?Cause {
+    return switch (status) {
+        200...299 => null,
+        407 => .proxy_auth_required,
+        403 => .proxy_refused,
+        else => .proxy_failed,
+    };
+}
 
 /// Connect attempts one connection keeps in flight at once.
 pub const max_attempts = 2;
@@ -331,6 +350,13 @@ fn with(base: anytype, comptime field: []const u8, value: anytype) @TypeOf(base)
     var facts = base;
     @field(facts, field) = value;
     return facts;
+}
+
+test "any 2xx opens the tunnel; 407 and 403 are their own causes" {
+    for ([_]u16{ 200, 204, 299 }) |status| try std.testing.expectEqual(@as(?Cause, null), tunnelRefusal(status));
+    try std.testing.expectEqual(@as(?Cause, .proxy_auth_required), tunnelRefusal(407));
+    try std.testing.expectEqual(@as(?Cause, .proxy_refused), tunnelRefusal(403));
+    for ([_]u16{ 100, 301, 400, 404, 502, 503 }) |status| try std.testing.expectEqual(@as(?Cause, .proxy_failed), tunnelRefusal(status));
 }
 
 test "the next address starts on a failure or after the delay, the oldest of two giving way" {

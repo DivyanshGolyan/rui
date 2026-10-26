@@ -137,12 +137,15 @@ fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*con
         // The issuer is verified by the system's trust; --provider-ca-file
         // is the model provider's alone.
         .trust = .system,
+        .proxy = h2.proxyFromEnvironment(),
         .connect_timeout_ns = 15 * std.time.ns_per_s,
         .total_timeout_ns = 60 * std.time.ns_per_s,
         .cancelled = cancelled,
     }) catch |err| switch (err) {
         // Before the request was launched: nothing can have been sent.
         error.InvalidUrl, error.CleartextNotLoopback => return error.TransportFailed,
+        // A login reports these by name, for the setting to fix.
+        error.HttpsProxyInvalid, error.HttpsProxySchemeUnsupported => |proxy| return proxy,
         error.OutOfMemory, error.SystemResources, error.TooManyEndpoints, error.TrustUnavailable, error.InvalidCaFile, error.InvalidRequest => return error.TransportInitializationFailed,
         // Named for the variable to fix: SSL_CERT_FILE or SSL_CERT_DIR.
         error.InvalidSslCertFile, error.InvalidSslCertDir => |trust| return trust,
