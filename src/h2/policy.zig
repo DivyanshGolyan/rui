@@ -169,7 +169,8 @@ pub const Liveness = struct {
     ping_after_quiet_ns: u64 = 45 * ns_per_s,
     /// No inbound bytes for this long after that PING: the connection is dead.
     ping_timeout_ns: u64 = 15 * ns_per_s,
-    /// A connection with no streams closes after this long.
+    /// A connection with no streams closes after this long: the earlier
+    /// transport's default, so reuse behaviour is unchanged.
     idle_close_ns: u64 = 118 * ns_per_s,
 };
 

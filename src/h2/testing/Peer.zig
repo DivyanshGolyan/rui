@@ -323,9 +323,10 @@ pub fn pump(self: *Peer) !void {
     }
 }
 
-/// Waits until the client's socket holds every byte this peer has sent:
+/// Waits until the client's socket holds every byte this peer has sent.
 /// Darwin delivers loopback segments asynchronously, so a client read
-/// right after `pump` can find only some of them.
+/// right after `pump` can find only some of them; Linux delivers them
+/// within the send, so there it returns at once.
 pub fn awaitDelivery(self: *Peer) !void {
     // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
     const siocoutq = 0x5411;

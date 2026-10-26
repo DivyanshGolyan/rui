@@ -1046,15 +1046,6 @@ fn configureTransport(
     compile.root_module.addOptions("transport_options", options);
     const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned) orelse return;
     compile.root_module.addImport("h2", h2);
-    const pinned = maybe_pinned orelse return;
-    if (target.result.os.tag == .macos) {
-        // The selected transport build discovers the active CLT/Xcode SDK and
-        // exposes these paths lazily. Constructing dormant macOS cross steps
-        // therefore requires no Apple tooling on a Linux build host.
-        compile.root_module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        compile.root_module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        compile.root_module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
-    }
 }
 
 /// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
