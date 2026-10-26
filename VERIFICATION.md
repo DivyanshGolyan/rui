@@ -431,6 +431,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Repeat-work footprint | `transport_h2_integration.py zig-out/bin/rui --observed-shape-churn` | macOS ReleaseSmall, opt-in; fails above 25,000,000 bytes. Not the Go repeat-work profile |
 | Original result and release deadlines: one deadline per population, forwarded through reads and global release | `transport_h2_integration_test.py`, `host_process_test.py` | A clean reply at or after the deadline fails. Held cleanup must refuse through the deadline |
 | Transfer finalization | `'HTTP error capture retires before execution custody'`, `'a completed Transfer finds its own slot and nothing else'` | None |
+| Address racing (RFC 8305): families alternate, the next attempt starts on a failure or after 250 ms, at most two sockets | `'the next address starts on a failure or after the delay, the oldest of two giving way'`, `'families alternate, the first answer's family leading, and both fit'`, `'https by name: an address that never answers does not keep the next from connecting'`, `'https by name: two addresses that never answer do not keep the third from its turn'` (`test-h2`) | A never-answering address is a loopback listener with a full accept queue. Name resolution itself is not raced (RFC 8305 section 3) |
 
 ### Scratch and cleanup
 

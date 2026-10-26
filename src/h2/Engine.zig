@@ -39,7 +39,8 @@ connections: []Connection,
 connections_len: u32,
 /// One entry per walked connection, rebuilt for each routing decision.
 views: []policy.ConnectionView,
-/// The waker first, then one entry per walked connection.
+/// The waker first, then one entry per walked connection, two while it
+/// connects with an earlier attempt in flight.
 pollfds: []std.c.pollfd,
 timers: Record.List,
 finished: Record.List,
@@ -129,7 +130,9 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     errdefer freeUnwritten(allocator, Connection, connections);
     const views = try allocUnwritten(allocator, policy.ConnectionView, capacity);
     errdefer freeUnwritten(allocator, policy.ConnectionView, views);
-    const pollfds = try allocUnwritten(allocator, std.c.pollfd, capacity + 1);
+    // The waker, then each connection's socket, or its attempts while it
+    // connects. Unwritten until connections need it.
+    const pollfds = try allocUnwritten(allocator, std.c.pollfd, policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
     const scratch = try allocator.create(Scratch);
     errdefer allocator.destroy(scratch);
@@ -437,7 +440,9 @@ fn pollReadiness(self: *Engine) h2.DriveError!void {
         if (std.posix.errno(result) != .INTR) return error.PollFailed;
     }
     for (self.active()) |*connection| {
-        if (connection.poll_slot != 0) connection.revents = self.pollfds[connection.poll_slot].revents;
+        if (connection.poll_slot == 0) continue;
+        connection.revents = self.pollfds[connection.poll_slot].revents;
+        if (connection.earlierAttempt() != null) connection.earlier_revents = self.pollfds[connection.poll_slot + 1].revents;
     }
 }
 
@@ -447,11 +452,15 @@ fn fillPollfds(self: *Engine) usize {
     var count: usize = 0;
     for (self.active()) |*connection| {
         connection.revents = 0;
+        connection.earlier_revents = 0;
         connection.poll_slot = 0;
         const events = connection.pollEvents() orelse continue;
         count += 1;
         self.pollfds[count] = .{ .fd = connection.socket, .events = events, .revents = 0 };
         connection.poll_slot = @intCast(count);
+        const earlier = connection.earlierAttempt() orelse continue;
+        count += 1;
+        self.pollfds[count] = .{ .fd = earlier, .events = std.c.POLL.OUT, .revents = 0 };
     }
     return count;
 }
@@ -462,7 +471,7 @@ fn advanceSetups(self: *Engine) void {
         if (!connection.settingUp()) continue;
         switch (connection.state) {
             .resolving => connection.finishLookup(),
-            .connecting => if (connection.revents != 0) connection.finishConnect(),
+            .connecting => connection.advanceConnect(time),
             .handshaking => if (connection.revents != 0) connection.continueHandshake(),
             .verifying => connection.finishVerification(),
             else => {},
@@ -727,7 +736,7 @@ fn nextDeadline(self: *Engine) ?u64 {
         const deadline: ?u64 = switch (connection.state) {
             .free => null,
             .ready, .draining => policy.livenessDeadline(self.livenessFacts(connection, time), self.options.liveness),
-            else => connection.setup_deadline_ns,
+            else => connection.setupDeadline(),
         };
         if (deadline) |value| earliest = if (earliest) |current| @min(current, value) else value;
     }
