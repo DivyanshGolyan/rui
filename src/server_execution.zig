@@ -645,18 +645,20 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
     return slot;
 }
 
-/// Connections without a Transfer only need their timers and peer bytes
-/// served, at the idle cadence, unless Bash still needs its own.
+/// The Client's wait already ends at socket readiness and at its own
+/// earliest timer, so Transfers need no tick of their own. The loop still
+/// wakes at the idle cadence, which bounds new-work discovery and the control
+/// fallback, unless Bash needs its 25 ms service.
 fn transportWaitMs(slots: []const ExecutionSlot) u32 {
-    return if (slotsHaveTransport(slots) or slotsHaveBash(slots)) 25 else 100;
+    return if (slotsHaveBash(slots)) 25 else 100;
 }
 
-test "an idle connection waits at the idle cadence only when no Bash runs" {
+test "transport waits at the idle cadence unless Bash runs" {
     var slots = [_]ExecutionSlot{ .free, .free };
     try std.testing.expectEqual(@as(u32, 100), transportWaitMs(&slots));
+    slots[0] = .{ .provider = .{ .owner = .{} } };
+    try std.testing.expectEqual(@as(u32, 100), transportWaitMs(&slots));
     slots[1] = .{ .bash_preparing = undefined };
-    try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
-    slots[1] = .{ .provider = .{ .owner = .{} } };
     try std.testing.expectEqual(@as(u32, 25), transportWaitMs(&slots));
 }
 
