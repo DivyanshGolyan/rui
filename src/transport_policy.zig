@@ -76,6 +76,7 @@ pub const Cause = enum {
     sink_failed,
     body_failed,
     rejected_headers,
+    encoded_response,
     h2_refused,
     untrusted_peer,
     resolve_failed,
@@ -112,6 +113,7 @@ pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
         .body_failed => return .request_source_failed,
         .complete => return .{ .transport_finished = try answered(finished) },
         .rejected_headers => if (finished.headers_local_failure) .permanent_transport else .invalid_headers,
+        .encoded_response => .invalid_headers,
         .h2_refused => .unsupported_http_version,
         .untrusted_peer => .tls_verification_failure,
         .resolve_failed,
@@ -299,6 +301,7 @@ test "h2 endings retry only temporary connection loss and keep their Retry-After
         // provider's contradiction.
         .{ .cause = .rejected_headers, .local = true, .expected = .permanent_transport },
         .{ .cause = .local_failure, .expected = .permanent_transport },
+        .{ .cause = .encoded_response, .expected = .invalid_headers },
     };
     for (cases) |case| {
         const result = try outcome(.{

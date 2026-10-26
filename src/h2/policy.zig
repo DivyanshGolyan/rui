@@ -24,6 +24,9 @@ pub const Cause = enum(u8) {
     body_failed,
     /// The receiver refused a header block.
     rejected_headers,
+    /// The final head named a content coding other than `identity`, which
+    /// the request's `accept-encoding` excluded.
+    encoded_response,
     /// The peer does not speak HTTP/2: ALPN chose something else, or an h2c
     /// peer answered in HTTP/1. Always before any request byte.
     h2_refused,

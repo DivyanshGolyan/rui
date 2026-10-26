@@ -30,7 +30,8 @@
 //! - positive evidence that no request byte was sent (`End.request_sent`).
 //!
 //! It does not do HTTP/1.1, redirects, proxies, cookies, decompression,
-//! server push, priorities, or resends for any other reason. The caller's
+//! server push, priorities, or resends for any other reason. Requests ask
+//! for `identity`, and a coded response ends `.encoded_response`. The caller's
 //! receiver decides what the response headers mean.
 const std = @import("std");
 const c = @import("h2_c");
@@ -47,8 +48,8 @@ pub const max_url_bytes = 2048;
 /// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = 253;
 pub const max_endpoints = 4;
-/// Request fields a caller may set; pseudo-headers and content-length are
-/// the client's own.
+/// Request fields a caller may set; pseudo-headers, content-length and
+/// accept-encoding are the client's own.
 pub const max_fields = 16;
 pub const max_field_block_bytes = 64 * 1024;
 /// Receive credit granted to each stream: the most response bytes the peer

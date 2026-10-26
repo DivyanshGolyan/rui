@@ -169,6 +169,41 @@ test "a request and its response round trip" {
     stream.deinit();
 }
 
+test "requests accept only identity, and the peer is told the header limit" {
+    const harness = try Harness.create(.{});
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+    stream.deinit();
+    try std.testing.expectEqualStrings("identity", harness.peer.streams.items[0].accept_encoding.items);
+    const session = harness.peer.connections.items[0].session;
+    try std.testing.expectEqual(@as(u32, h2.max_field_block_bytes), c.nghttp2_session_get_remote_settings(session, c.NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE));
+}
+
+test "a response in any content coding but identity is refused at its head" {
+    for ([_]struct { coding: []const u8, cause: h2.Cause }{
+        .{ .coding = "gzip", .cause = .encoded_response },
+        .{ .coding = "identity, br", .cause = .encoded_response },
+        .{ .coding = "Identity", .cause = .complete },
+        .{ .coding = "identity, identity", .cause = .complete },
+    }) |case| {
+        const harness = try Harness.create(.{ .peer = .{ .content_encoding = case.coding } });
+        defer harness.destroy();
+        var stream: h2.Stream = .idle;
+        var sink: [8]u8 = undefined;
+        try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+        try harness.runUntilFinished(1);
+        try std.testing.expectEqual(h2.End{ .cause = case.cause, .request_sent = true }, try harness.collect(&stream));
+        // A refused head reaches neither the receiver nor the sink.
+        try std.testing.expectEqual(@as(u32, if (case.cause == .complete) 1 else 0), harness.receiver.heads);
+        try std.testing.expectEqual(@as(u64, if (case.cause == .complete) 2 else 0), stream.responseLength());
+        stream.deinit();
+    }
+}
+
 test "a borrowed field is sent from the caller's bytes and a copied one from prepare's copy" {
     const harness = try Harness.create(.{});
     defer harness.destroy();
@@ -731,6 +766,7 @@ test "requests the client cannot send are refused before anything opens" {
         .{ .name = "Authorization", .value = "x" },
         .{ .name = ":path", .value = "/" },
         .{ .name = "content-length", .value = "1" },
+        .{ .name = "accept-encoding", .value = "gzip" },
         .{ .name = "x-value", .value = "a\r\nb" },
     }) |field| {
         try std.testing.expectError(error.InvalidRequest, harness.client.prepare(&stream, .{

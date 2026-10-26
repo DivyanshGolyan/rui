@@ -306,7 +306,7 @@ fn validFieldName(name: []const u8) bool {
         'a'...'z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
         else => return false,
     };
-    for ([_][]const u8{ "content-length", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" }) |owned| {
+    for ([_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" }) |owned| {
         if (std.mem.eql(u8, name, owned)) return false;
     }
     return true;

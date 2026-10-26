@@ -48,6 +48,8 @@ pub const Options = struct {
     /// Interleave responses frame by frame (RFC 9218 incremental), instead
     /// of finishing one stream before the next.
     interleave: bool = false,
+    /// Sent as the response's `content-encoding`.
+    content_encoding: ?[]const u8 = null,
     /// Runs when a request has fully arrived; null answers 200 "ok".
     on_request: ?*const fn (*Peer, *Stream) void = null,
     context: ?*anyopaque = null,
@@ -76,6 +78,7 @@ pub const Stream = struct {
     index: u32,
     path: std.ArrayList(u8),
     authorization: std.ArrayList(u8),
+    accept_encoding: std.ArrayList(u8),
     body: std.ArrayList(u8),
     complete: bool,
     closed: bool,
@@ -250,6 +253,7 @@ pub fn stop(self: *Peer) void {
     for (self.streams.items) |stream| {
         stream.path.deinit(self.allocator);
         stream.authorization.deinit(self.allocator);
+        stream.accept_encoding.deinit(self.allocator);
         stream.body.deinit(self.allocator);
         self.allocator.destroy(stream);
     }
@@ -450,15 +454,18 @@ pub fn respondWith(self: *Peer, stream: *Stream, status: u16, body: []const u8, 
     _ = self;
     var status_text: [3]u8 = undefined;
     _ = std.fmt.bufPrint(&status_text, "{d}", .{status}) catch unreachable;
+    const content_encoding = stream.connection.peer.options.content_encoding;
     const headers = [_]c.nghttp2_nv{
         nv(":status", &status_text),
         nv("content-type", "text/event-stream"),
+        nv("content-encoding", content_encoding orelse ""),
     };
+    const count: usize = if (content_encoding == null) 2 else 3;
     stream.response = body;
     stream.response_offset = 0;
     stream.trailers = trailers;
     const provider: c.nghttp2_data_provider2 = .{ .source = .{ .ptr = stream }, .read_callback = readResponse };
-    _ = c.nghttp2_submit_response2(stream.connection.session, stream.id, &headers, headers.len, if (body.len > 0 or trailers) &provider else null);
+    _ = c.nghttp2_submit_response2(stream.connection.session, stream.id, &headers, count, if (body.len > 0 or trailers) &provider else null);
     if (stream.connection.peer.options.interleave) {
         const incremental: c.nghttp2_extpri = .{ .urgency = 3, .inc = 1 };
         _ = c.nghttp2_session_change_extpri_stream_priority(stream.connection.session, stream.id, &incremental, 1);
@@ -512,6 +519,7 @@ fn onBeginHeaders(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame
         .index = @intCast(peer.streams.items.len),
         .path = .empty,
         .authorization = .empty,
+        .accept_encoding = .empty,
         .body = .empty,
         .complete = false,
         .closed = false,
@@ -532,7 +540,14 @@ fn onHeader(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, name
     const name_vec = c.nghttp2_rcbuf_get_buf(name);
     const value_vec = c.nghttp2_rcbuf_get_buf(value);
     const field = name_vec.base[0..name_vec.len];
-    const target = if (std.mem.eql(u8, field, ":path")) &stream.path else if (std.mem.eql(u8, field, "authorization")) &stream.authorization else return 0;
+    const target = if (std.mem.eql(u8, field, ":path"))
+        &stream.path
+    else if (std.mem.eql(u8, field, "authorization"))
+        &stream.authorization
+    else if (std.mem.eql(u8, field, "accept-encoding"))
+        &stream.accept_encoding
+    else
+        return 0;
     target.appendSlice(allocator, value_vec.base[0..value_vec.len]) catch return c.NGHTTP2_ERR_CALLBACK_FAILURE;
     return 0;
 }

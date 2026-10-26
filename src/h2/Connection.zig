@@ -308,7 +308,7 @@ pub fn continueHandshake(self: *Connection) void {
 fn startVerification(self: *Connection) void {
     std.debug.assert(self.verification == null);
     const host = self.engine.origins[self.origin].host;
-    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, host) orelse
+    self.verification = sec_trust.Verification.start(&self.engine.waker, self.ssl.?, tls.serverName(host)) orelse
         return self.engine.setupFailed(self, .local_failure);
     self.state = .verifying;
 }
@@ -332,8 +332,9 @@ fn startTrustedSession(self: *Connection) void {
     self.startSession();
 }
 
-/// Our SETTINGS refuse push and grant each stream `stream_window_bytes`;
-/// the connection window is set once the peer's stream limit is known.
+/// Our SETTINGS refuse push, grant each stream `stream_window_bytes` and
+/// tell the peer the header block limit `onHeader` enforces; the
+/// connection window is set once the peer's stream limit is known.
 fn startSession(self: *Connection) void {
     const engine = self.engine;
     var session: ?*c.nghttp2_session = null;
@@ -343,6 +344,7 @@ fn startSession(self: *Connection) void {
     const settings = [_]c.nghttp2_settings_entry{
         .{ .settings_id = c.NGHTTP2_SETTINGS_ENABLE_PUSH, .value = 0 },
         .{ .settings_id = c.NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, .value = h2.stream_window_bytes },
+        .{ .settings_id = c.NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, .value = h2.max_field_block_bytes },
     };
     if (c.nghttp2_submit_settings(session, c.NGHTTP2_FLAG_NONE, &settings, settings.len) != 0)
         return engine.setupFailed(self, .local_failure);
@@ -373,7 +375,7 @@ fn sizeWindow(self: *Connection) void {
 /// the stream id, or null when nghttp2 refused the submit.
 pub fn submit(self: *Connection, record: *Record, origin: *const Engine.Origin, path: []const u8) ?i32 {
     std.debug.assert(self.hasRoom());
-    var nva: [h2.max_fields + 5]c.nghttp2_nv = undefined;
+    var nva: [h2.max_fields + 6]c.nghttp2_nv = undefined;
     // Names and values outlive the HEADERS frame: the origin and path are
     // the endpoint's, the fields are the record's block, kept while a
     // resend is possible.
@@ -388,7 +390,10 @@ pub fn submit(self: *Connection, record: *Record, origin: *const Engine.Origin, 
     var length_text: [20]u8 = undefined;
     // nghttp2 copies this value at submit.
     nva[4] = nv("content-length", std.fmt.bufPrint(&length_text, "{d}", .{record.body_length}) catch unreachable, c.NGHTTP2_NV_FLAG_NO_COPY_NAME);
-    var count: usize = 5;
+    // No content coding is decoded here, so none is accepted (RFC 9110
+    // 12.5.3: a request without accept-encoding accepts any).
+    nva[5] = nv("accept-encoding", "identity", borrowed);
+    var count: usize = 6;
     var entries = record.fieldEntries();
     while (entries.next()) |entry| : (count += 1) {
         nva[count] = nv(entry.name, entry.value, borrowed | if (entry.sensitive) @as(u8, c.NGHTTP2_NV_FLAG_NO_INDEX) else 0);
@@ -819,6 +824,7 @@ fn emitHead(self: *Connection, record: *Record) void {
     if (kind == .final) {
         record.status = status;
         record.flags.final_seen = true;
+        if (!identityCoded(self.head.fields.items)) return self.endOpen(record, .encoded_response);
     }
     const verdict = self.engine.observe(record, .{ .head = .{
         .kind = kind,
@@ -826,6 +832,19 @@ fn emitHead(self: *Connection, record: *Record) void {
         .fields = self.head.fields.items,
     } });
     if (verdict == .refuse) self.endOpen(record, .rejected_headers);
+}
+
+/// Whether every `content-encoding` value names only `identity`, which
+/// `accept-encoding` asked for.
+fn identityCoded(fields: []const h2.Field) bool {
+    for (fields) |field| {
+        if (!std.mem.eql(u8, field.name, "content-encoding")) continue;
+        var codings = std.mem.tokenizeScalar(u8, field.value, ',');
+        while (codings.next()) |coding| {
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, coding, " \t"), "identity")) return false;
+        }
+    }
+    return true;
 }
 
 fn onDataChunk(_: ?*c.nghttp2_session, _: u8, stream_id: i32, data: [*c]const u8, length: usize, user_data: ?*anyopaque) callconv(.c) c_int {
