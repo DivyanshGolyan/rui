@@ -48,13 +48,12 @@ pub fn basicCredentials(allocator: std.mem.Allocator, user_info: []const u8) (Ur
     const user = percentDecode(user_info[0 .. colon orelse user_info.len], &decoded) orelse return error.HttpsProxyInvalid;
     // RFC 7617: the user-id cannot carry the separator.
     if (std.mem.indexOfScalar(u8, user, ':') != null) return error.HttpsProxyInvalid;
+    // The separator comes even when the URL has no password.
     var len = user.len;
-    if (colon) |at| {
-        if (len == decoded.len) return error.HttpsProxyInvalid;
-        decoded[len] = ':';
-        len += 1;
-        len += (percentDecode(user_info[at + 1 ..], decoded[len..]) orelse return error.HttpsProxyInvalid).len;
-    }
+    if (len == decoded.len) return error.HttpsProxyInvalid;
+    decoded[len] = ':';
+    len += 1;
+    if (colon) |at| len += (percentDecode(user_info[at + 1 ..], decoded[len..]) orelse return error.HttpsProxyInvalid).len;
     const encoder = std.base64.standard.Encoder;
     const prefix = "Basic ";
     const value = try allocator.alloc(u8, prefix.len + encoder.calcSize(len));
@@ -378,7 +377,8 @@ test "credentials are Basic over the decoded user and password" {
     try std.testing.expectEqualStrings("Basic dXNAZXI6cDpzcw==", value);
     const user_only = try basicCredentials(allocator, "user");
     defer allocator.free(user_only);
-    try std.testing.expectEqualStrings("Basic dXNlcg==", user_only);
+    // base64("user:"): RFC 7617 keeps the separator with no password.
+    try std.testing.expectEqualStrings("Basic dXNlcjo=", user_only);
     try std.testing.expectError(error.HttpsProxyInvalid, basicCredentials(allocator, "a%3Ab:c"));
     try std.testing.expectError(error.HttpsProxyInvalid, basicCredentials(allocator, "user:%0d%0a"));
     try std.testing.expectError(error.HttpsProxyInvalid, basicCredentials(allocator, "user:%4"));
@@ -435,8 +435,8 @@ test "the CONNECT request names the target twice, bracketing IPv6, with any cred
         connectRequest(&buffer, "api.openai.com", 443, null),
     );
     try std.testing.expectEqualStrings(
-        "CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\nProxy-Authorization: Basic dXNlcg==\r\n\r\n",
-        connectRequest(&buffer, "2001:db8::1", 8443, "Basic dXNlcg=="),
+        "CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\nProxy-Authorization: Basic dXNlcjo=\r\n\r\n",
+        connectRequest(&buffer, "2001:db8::1", 8443, "Basic dXNlcjo="),
     );
     var longest: [max_host_bytes]u8 = @splat('a');
     const credentials: [6 + std.base64.standard.Encoder.calcSize(max_user_info_bytes)]u8 = @splat('b');
