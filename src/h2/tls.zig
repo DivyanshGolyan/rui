@@ -115,6 +115,20 @@ fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
             if (c.SSL_CTX_load_verify_file(ctx, &path_z) != 1) return error.InvalidCaFile;
         },
         .system => {
+            // OpenSSL's documented overrides. Either one replaces the probe,
+            // and a path that cannot be loaded fails instead of falling
+            // back, so a wrong setting is never silently ignored.
+            const file = setting("SSL_CERT_FILE");
+            const dirs = setting("SSL_CERT_DIR");
+            if (file != null or dirs != null) {
+                if (file) |path| if (c.SSL_CTX_load_verify_file(ctx, path) != 1) return error.InvalidSslCertFile;
+                if (dirs) |list| {
+                    if (!allDirectories(std.mem.span(list))) return error.InvalidSslCertDir;
+                    // Looked up by subject hash at verification time.
+                    if (c.SSL_CTX_load_verify_dir(ctx, list) != 1) return error.InvalidSslCertDir;
+                }
+                return;
+            }
             for (system_bundles) |path| {
                 if (std.c.access(path, std.c.R_OK) != 0) continue;
                 if (c.SSL_CTX_load_verify_file(ctx, path) == 1) return;
@@ -122,6 +136,28 @@ fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
             return error.TrustUnavailable;
         },
     }
+}
+
+/// An environment variable's value, or null when unset or empty.
+fn setting(name: [*:0]const u8) ?[*:0]const u8 {
+    const value = std.c.getenv(name) orelse return null;
+    return if (value[0] == 0) null else value;
+}
+
+/// Whether every element of a colon-separated list, as OpenSSL splits
+/// SSL_CERT_DIR, is a directory this process can open. Empty elements are
+/// skipped, as OpenSSL skips them.
+fn allDirectories(list: []const u8) bool {
+    var paths = std.mem.tokenizeScalar(u8, list, ':');
+    while (paths.next()) |path| {
+        var path_z: [std.posix.PATH_MAX]u8 = undefined;
+        if (path.len >= path_z.len) return false;
+        @memcpy(path_z[0..path.len], path);
+        path_z[path.len] = 0;
+        const dir = std.c.opendir(@ptrCast(&path_z)) orelse return false;
+        _ = std.c.closedir(dir);
+    }
+    return true;
 }
 
 // ------------------------------------------------------------ handshake

@@ -146,6 +146,13 @@ pub fn caPath(self: *const Peer) []const u8 {
     return self.ca_path_buffer[0..self.ca_path_len];
 }
 
+/// The directory holding `caPath()`'s CA under its subject hash, as
+/// OpenSSL's directory lookup (`SSL_CERT_DIR`) expects.
+pub fn caDirectory(self: *const Peer, buffer: []u8) ![:0]const u8 {
+    const dir = std.fs.path.dirname(self.caPath()).?;
+    return std.fmt.bufPrintSentinel(buffer, "{s}/certs", .{dir}, 0);
+}
+
 // --------------------------------------------------------------------- TLS
 
 fn setUpTls(self: *Peer) !void {
@@ -178,6 +185,13 @@ fn setUpTls(self: *Peer) !void {
     const file = c.BIO_new_file(&path_z, "w") orelse return error.TlsSetupFailed;
     defer _ = c.BIO_free(file);
     if (c.PEM_write_bio_X509(file, ca) != 1) return error.TlsSetupFailed;
+    // The same CA in an OpenSSL hashed directory, `caDirectory()`.
+    try tmp.dir.createDir(std.testing.io, "certs", .default_dir);
+    var hashed_z: [@sizeOf(@TypeOf(self.ca_path_buffer)) + 16]u8 = undefined;
+    const hashed = try std.fmt.bufPrintSentinel(&hashed_z, ".zig-cache/tmp/{s}/certs/{x:0>8}.0", .{ tmp.sub_path, c.X509_subject_name_hash(ca) }, 0);
+    const hashed_file = c.BIO_new_file(hashed.ptr, "w") orelse return error.TlsSetupFailed;
+    defer _ = c.BIO_free(hashed_file);
+    if (c.PEM_write_bio_X509(hashed_file, ca) != 1) return error.TlsSetupFailed;
     self.tmp = tmp;
 
     const ctx = c.SSL_CTX_new(c.TLS_server_method()) orelse return error.TlsSetupFailed;

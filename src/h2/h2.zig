@@ -158,8 +158,10 @@ pub const Liveness = policy.Liveness;
 
 /// What verifies an `https://` peer. Verification is never off.
 pub const Trust = union(enum) {
-    /// Apple SecTrust on macOS; on Linux the first readable bundle among
-    /// the host's usual CA bundle paths.
+    /// Apple SecTrust on macOS. On Linux, OpenSSL's `SSL_CERT_FILE` (a
+    /// PEM bundle) and `SSL_CERT_DIR` (colon-separated hashed directories)
+    /// when either is set and not empty, read when trust loads; otherwise
+    /// the first readable bundle among the host's usual CA bundle paths.
     system,
     /// Only the certificates in this PEM file (`--provider-ca-file`).
     ca_file: []const u8,
@@ -321,7 +323,7 @@ pub const Stream = extern struct {
 // ------------------------------------------------------------------- Client
 
 pub const InitError = error{ OutOfMemory, SystemResources };
-pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile };
+pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 
