@@ -848,7 +848,8 @@ test "https by name: the lookup runs, every address is tried, and the name is ve
 }
 
 /// A loopback listener whose accept queue is full, so a further connect to
-/// it is never answered: an address on a path that drops packets.
+/// it is never answered: an address on a path that drops packets. The
+/// backlog is 1, not 0: macOS reads 0 as the system maximum.
 const BlackHole = struct {
     listener: std.posix.fd_t,
     fillers: [16]std.posix.fd_t = @splat(-1),
@@ -859,7 +860,7 @@ const BlackHole = struct {
         if (self.listener < 0) return error.SocketFailed;
         errdefer self.close();
         if (std.c.bind(self.listener, @ptrCast(&self.address.storage), self.address.length) != 0) return error.BindFailed;
-        if (std.c.listen(self.listener, 0) != 0) return error.ListenFailed;
+        if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
         var length = self.address.length;
         if (std.c.getsockname(self.listener, @ptrCast(&self.address.storage), &length) != 0) return error.SocketFailed;
         // Connect until one is not answered: the queue is full.
