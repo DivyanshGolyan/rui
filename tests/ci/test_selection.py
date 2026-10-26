@@ -292,7 +292,7 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
-        for path in ("src/build_transport.sh", "src/curl-post-retry.patch", "build.zig.zon",
+        for path in ("src/build_transport.sh", "build.zig.zon",
                      "tests/integration/codex_h2_integration.py", "tests/integration/codex_integration.py",
                      "tests/integration/transport_h2_integration.py", "tests/integration/transport_h2_integration_test.py"):
             result = select([path], "review", AVAILABLE)

@@ -991,15 +991,12 @@ const PinnedTransport = struct {
 
 fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTransport {
     const openssl = b.dependency("openssl", .{});
-    const curl = b.dependency("curl", .{});
     const nghttp2 = b.dependency("nghttp2", .{});
     const build_transport = b.addSystemCommand(&.{"sh"});
     build_transport.addFileArg(b.path("src/build_transport.sh"));
     // Configure scripts change cwd and embed the installation prefix in Makefiles.
     build_transport.addDirectoryArg2(openssl.path("."), .{ .make_absolute = true });
-    build_transport.addDirectoryArg2(curl.path("."), .{ .make_absolute = true });
     build_transport.addDirectoryArg2(nghttp2.path("."), .{ .make_absolute = true });
-    build_transport.addFileArg2(b.path("src/curl-post-retry.patch"), .{ .make_absolute = true });
     const target_name = b.fmt("{s}-{s}", .{
         @tagName(target.result.cpu.arch),
         @tagName(target.result.os.tag),
@@ -1039,30 +1036,17 @@ fn configureTransport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
-    /// Null type-checks without the built transport: curl's source headers, no link.
+    /// Null type-checks without the built transport: headers only, no link.
     maybe_pinned: ?PinnedTransport,
 ) void {
-    const enabled = transportEnabled(target);
     const options = b.addOptions();
-    options.addOption(bool, "enabled", enabled);
+    options.addOption(bool, "enabled", transportEnabled(target));
     options.addOption([]const u8, "revision", buildRevision(b));
     options.addOption([]const u8, "version", buildVersion(b));
     compile.root_module.addOptions("transport_options", options);
-    if (addH2(b, target, compile.root_module.optimize.?, maybe_pinned)) |h2| compile.root_module.addImport("h2", h2);
-    const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
-    const pinned = maybe_pinned orelse {
-        bindings.addIncludePath(b.dependency("curl", .{}).path("include"));
-        return;
-    };
-    bindings.addIncludePath(if (enabled)
-        pinned.output.path(b, "include")
-    else
-        b.dependency("curl", .{}).path("include"));
-    if (!enabled) return;
-    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcurl.a"));
-    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
-    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
-    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
+    const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned) orelse return;
+    compile.root_module.addImport("h2", h2);
+    const pinned = maybe_pinned orelse return;
     if (target.result.os.tag == .macos) {
         // The selected transport build discovers the active CLT/Xcode SDK and
         // exposes these paths lazily. Constructing dormant macOS cross steps
@@ -1070,15 +1054,6 @@ fn configureTransport(
         compile.root_module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
         compile.root_module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
         compile.root_module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
-        bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        compile.root_module.linkFramework("Security", .{});
-        compile.root_module.linkFramework("CoreFoundation", .{});
-        compile.root_module.linkFramework("CoreServices", .{});
-        compile.root_module.linkFramework("SystemConfiguration", .{});
-    } else {
-        compile.root_module.linkSystemLibrary("pthread", .{});
-        compile.root_module.linkSystemLibrary("dl", .{});
     }
 }
 

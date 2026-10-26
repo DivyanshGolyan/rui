@@ -431,7 +431,7 @@ func main() {
 	result := map[string]any{
 		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
 		"artifacts":            root,
-		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
+		"transport":            map[string]string{"h2": "rui", "nghttp2": "1.70.0", "openssl": "3.6.3", "resolver": "getaddrinfo-thread"},
 		"idle_capacity_growth": idle, "request_growth_and_saved_failure": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
 		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "idle and request-growth cases use loopback H1; overlapping transport uses trusted local TLS/H2, not a live provider", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},

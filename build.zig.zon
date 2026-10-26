@@ -12,10 +12,6 @@
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
-        .curl = .{
-            .url = "https://curl.se/download/curl-8.22.0.tar.xz",
-            .hash = "N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM",
-        },
         .nghttp2 = .{
             .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
             .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",

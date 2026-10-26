@@ -42,7 +42,7 @@ class PlatformBoundaryTest(unittest.TestCase):
 
     def test_mac_specific_paths(self):
         for path in ("src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
-                     "src/evaluator_policy.h", "src/evaluator_policy.inc", "src/curl-post-retry.patch",
+                     "src/evaluator_policy.h", "src/evaluator_policy.inc",
                      "src/build_transport.sh", "tests/integration/evaluator_driver.c", "build.zig", "build.zig.zon",
                      ".github/actions/setup/action.yml", ".github/workflows/daily-macos.yml",
                      ".github/workflows/qualify-macos.yml", "tests/ci/qualification.py", "install.sh",
