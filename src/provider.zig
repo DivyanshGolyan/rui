@@ -223,6 +223,7 @@ pub const Reactor = struct {
             .inactivity_ns = interval_ns,
             .connect_timeout_ns = interval_ns,
             .trust = if (options.ca_file) |path| .{ .ca_file = path } else .system,
+            .proxy = h2.proxyFromEnvironment(),
         });
         errdefer self.client.deinit();
         self.endpoint = try self.client.addEndpoint(options.endpoint);

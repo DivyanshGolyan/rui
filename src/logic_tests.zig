@@ -59,6 +59,14 @@ test "functional cores stay within the core boundary" {
     }
 }
 
+test "the HTTP/2 client's proxy logic stays within the core boundary" {
+    // A core of the self-contained h2 module, as its policy is.
+    if (core_boundary.check(@embedFile("h2/proxy.zig"), &.{})) |violation| {
+        std.debug.print("h2/proxy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
 test "the HTTP/2 client's policy stays within the core boundary" {
     // A core of the self-contained h2 module: test-h2 runs its tests, and it
     // may import no Rui core.

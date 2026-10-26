@@ -79,6 +79,9 @@ pub const Cause = enum {
     encoded_response,
     h2_refused,
     untrusted_peer,
+    proxy_auth_required,
+    proxy_refused,
+    proxy_failed,
     resolve_failed,
     connect_failed,
     connect_timeout,
@@ -116,6 +119,9 @@ pub fn outcome(finished: Finished) error{InvalidHttpEvidence}!TransferOutcome {
         .encoded_response => .invalid_headers,
         .h2_refused => .unsupported_http_version,
         .untrusted_peer => .tls_verification_failure,
+        // Proxy credentials or policy: unchanged until its settings are.
+        .proxy_auth_required, .proxy_refused => .permanent_transport,
+        .proxy_failed,
         .resolve_failed,
         .connect_failed,
         .connect_timeout,
@@ -302,6 +308,9 @@ test "h2 endings retry only temporary connection loss and keep their Retry-After
         .{ .cause = .rejected_headers, .local = true, .expected = .permanent_transport },
         .{ .cause = .local_failure, .expected = .permanent_transport },
         .{ .cause = .encoded_response, .expected = .invalid_headers },
+        .{ .cause = .proxy_auth_required, .expected = .permanent_transport },
+        .{ .cause = .proxy_refused, .expected = .permanent_transport },
+        .{ .cause = .proxy_failed, .expected = .temporary_connection },
     };
     for (cases) |case| {
         const result = try outcome(.{

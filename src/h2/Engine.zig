@@ -18,6 +18,7 @@ const Connection = @import("Connection.zig");
 const Waker = @import("Waker.zig");
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
+const proxy = @import("proxy.zig");
 const Engine = @This();
 
 allocator: std.mem.Allocator,
@@ -57,6 +58,8 @@ waker: Waker,
 /// Built by the first `https://` endpoint, so a cleartext-only Client
 /// loads no trust store.
 tls_context: ?tls.Context,
+/// The proxy tunneled origins connect through, from `Options.proxy`.
+proxy_route: ?ProxyRoute,
 
 pub const size = @sizeOf(Engine);
 pub const alignment = @alignOf(Engine);
@@ -79,10 +82,69 @@ pub const Origin = struct {
     pending: Record.Queue,
     /// The address an IP-literal host names; null for a DNS name.
     literal: ?Resolver.Address,
-    /// The one lookup of a DNS name, shared by the setups that use it.
+    /// Connections go through the proxy's CONNECT tunnel.
+    tunneled: bool,
+    /// The one lookup of the name connections dial, shared by the setups
+    /// that use it.
     lookup: ?*Resolver.Job,
     lookup_users: u32,
 };
+
+/// An `http://` proxy, read once at `init`.
+pub const ProxyRoute = struct {
+    /// Owned copy of the proxy URL and NO_PROXY, which `host` and
+    /// `no_proxy` slice.
+    settings_copy: []u8,
+    host: []const u8,
+    port: u16,
+    /// The address an IP-literal proxy host names; null for a DNS name.
+    literal: ?Resolver.Address,
+    no_proxy: []const u8,
+    /// `Proxy-Authorization`'s value, owned.
+    credentials: ?[]u8,
+
+    fn init(allocator: std.mem.Allocator, settings: h2.Proxy) h2.InitError!ProxyRoute {
+        const text = try allocator.alloc(u8, settings.url.len + settings.no_proxy.len);
+        errdefer {
+            std.crypto.secureZero(u8, text);
+            allocator.free(text);
+        }
+        @memcpy(text[0..settings.url.len], settings.url);
+        @memcpy(text[settings.url.len..], settings.no_proxy);
+        const url = try proxy.splitUrl(text[0..settings.url.len]);
+        const host, const port = h2.parseHostPort(url.authority, 80) catch return error.HttpsProxyInvalid;
+        return .{
+            .settings_copy = text,
+            .host = host,
+            .port = port,
+            .literal = Resolver.Address.literal(host, port),
+            .no_proxy = text[settings.url.len..],
+            .credentials = if (url.user_info) |user_info| try proxy.basicCredentials(allocator, user_info) else null,
+        };
+    }
+
+    fn deinit(self: *ProxyRoute, allocator: std.mem.Allocator) void {
+        if (self.credentials) |credentials| {
+            std.crypto.secureZero(u8, credentials);
+            allocator.free(credentials);
+        }
+        // The URL's user info is the encoded password.
+        std.crypto.secureZero(u8, self.settings_copy);
+        allocator.free(self.settings_copy);
+    }
+};
+
+/// Where an origin's TCP connections go: the proxy for a tunneled origin,
+/// else the origin itself.
+pub const Dial = struct { host: []const u8, port: u16, literal: ?Resolver.Address };
+
+pub fn dial(self: *const Engine, origin: *const Origin) Dial {
+    if (origin.tunneled) {
+        const via = &self.proxy_route.?;
+        return .{ .host = via.host, .port = via.port, .literal = via.literal };
+    }
+    return .{ .host = origin.host, .port = origin.port, .literal = origin.literal };
+}
 
 pub const Endpoint = struct {
     /// Owned exact-length copy of the URL.
@@ -115,6 +177,8 @@ pub fn ofConst(client: *const h2.Client) *const Engine {
 
 pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2.Options) h2.InitError!void {
     std.debug.assert(options.stream_capacity > 0 and options.inactivity_ns > 0 and options.connect_timeout_ns > 0);
+    var proxy_route: ?ProxyRoute = if (options.proxy) |settings| try ProxyRoute.init(allocator, settings) else null;
+    errdefer if (proxy_route) |*value| value.deinit(allocator);
     var callbacks: ?*c.nghttp2_session_callbacks = null;
     if (c.nghttp2_session_callbacks_new(&callbacks) != 0) return error.OutOfMemory;
     errdefer c.nghttp2_session_callbacks_del(callbacks);
@@ -143,7 +207,12 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     self.* = .{
         .allocator = allocator,
         .io = io,
-        .options = options,
+        // The proxy settings' slices are the caller's; `route` keeps a copy.
+        .options = blk: {
+            var kept = options;
+            kept.proxy = null;
+            break :blk kept;
+        },
         .callbacks = callbacks.?,
         .session_options = session_options.?,
         .origins = undefined,
@@ -163,6 +232,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         .connection_serial = 0,
         .waker = waker,
         .tls_context = null,
+        .proxy_route = proxy_route,
     };
 }
 
@@ -208,6 +278,7 @@ pub fn deinit(self: *Engine) void {
     }
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
+    if (self.proxy_route) |*via| via.deinit(self.allocator);
     self.allocator.destroy(self.scratch);
     freeUnwritten(self.allocator, std.c.pollfd, self.pollfds);
     freeUnwritten(self.allocator, policy.ConnectionView, self.views);
@@ -239,6 +310,8 @@ pub fn addEndpoint(self: *Engine, url: []const u8) h2.EndpointError!h2.Endpoint 
             .learned_max_streams = null,
             .pending = .{},
             .literal = Resolver.Address.literal(parsed.host, parsed.port),
+            .tunneled = if (self.proxy_route) |via| parsed.scheme == .https and
+                !proxy.isLoopback(parsed.server_name) and !proxy.bypasses(via.no_proxy, parsed.server_name) else false,
             .lookup = null,
             .lookup_users = 0,
         };
@@ -472,6 +545,7 @@ fn advanceSetups(self: *Engine) void {
         switch (connection.state) {
             .resolving => connection.finishLookup(),
             .connecting => connection.advanceConnect(time),
+            .tunneling => if (connection.revents != 0) connection.continueTunnel(),
             .handshaking => if (connection.revents != 0) connection.continueHandshake(),
             .verifying => connection.finishVerification(),
             else => {},
