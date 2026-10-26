@@ -1076,6 +1076,131 @@ test "exchange: https against a CA file" {
     try std.testing.expectEqualStrings("ok", outcome.answered.body);
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+/// The OpenSSL trust variables as a test found them, restored by `restore`
+/// so other tests in this process keep their ambient trust.
+const TrustVariables = struct {
+    const names = [_][*:0]const u8{ "SSL_CERT_FILE", "SSL_CERT_DIR" };
+    saved: [names.len]?[std.posix.PATH_MAX:0]u8 = .{ null, null },
+
+    /// Saves both variables and clears them.
+    fn isolate() !TrustVariables {
+        var self: TrustVariables = .{};
+        for (names, &self.saved) |name, *slot| {
+            const value = std.mem.span(std.c.getenv(name) orelse continue);
+            var copy: [std.posix.PATH_MAX:0]u8 = undefined;
+            _ = try std.fmt.bufPrintSentinel(&copy, "{s}", .{value}, 0);
+            slot.* = copy;
+            try clear(name);
+        }
+        return self;
+    }
+
+    fn restore(self: *TrustVariables) void {
+        for (names, &self.saved) |name, *slot| {
+            // A failed restore surfaces as later test failures. Unset only
+            // what the process started without; see `clear`.
+            if (slot.*) |*value| _ = setenv(name, value, 1) else _ = unsetenv(name);
+        }
+    }
+
+    fn set(name: [*:0]const u8, value: []const u8) !void {
+        var value_z: [std.posix.PATH_MAX]u8 = undefined;
+        if (setenv(name, try std.fmt.bufPrintSentinel(&value_z, "{s}", .{value}, 0), 1) != 0) return error.SetenvFailed;
+    }
+
+    /// Empty, which trust reads as unset. `unsetenv` of a variable the
+    /// process started with would shift the environment array that std's
+    /// stderr setup later walks, and a failing test could not report.
+    fn clear(name: [*:0]const u8) !void {
+        try set(name, "");
+    }
+};
+
+/// One exchange under system trust to a TLS peer whose CA the variables
+/// name, or to nowhere when `peer` is null.
+fn systemTrustExchange(peer: ?*PeerThread) !h2.ExchangeOutcome {
+    var response: [64]u8 = undefined;
+    const request = exchangeRequest(if (peer) |running| running.peer.url() else "https://127.0.0.1:9/v1", &response);
+    const outcome = h2.exchange(std.testing.io, request);
+    if (peer) |running| try running.join();
+    return outcome;
+}
+
+test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle probe" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var variables = try TrustVariables.isolate();
+    defer variables.restore();
+    {
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2 });
+        defer peer.stop();
+        try TrustVariables.set("SSL_CERT_FILE", peer.peer.caPath());
+        try std.testing.expectEqual(@as(u16, 200), (try systemTrustExchange(&peer)).answered.status);
+        try TrustVariables.clear("SSL_CERT_FILE");
+    }
+    var directory_z: [std.posix.PATH_MAX]u8 = undefined;
+    {
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2 });
+        defer peer.stop();
+        try TrustVariables.set("SSL_CERT_DIR", try peer.peer.caDirectory(&directory_z));
+        try std.testing.expectEqual(@as(u16, 200), (try systemTrustExchange(&peer)).answered.status);
+        try TrustVariables.clear("SSL_CERT_DIR");
+    }
+    {
+        // Empty is unset: the host bundle probe, which does not know this
+        // CA, or finds no bundle at all on a host without one.
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2 });
+        defer peer.stop();
+        try TrustVariables.set("SSL_CERT_FILE", "");
+        try TrustVariables.set("SSL_CERT_DIR", "");
+        if (systemTrustExchange(&peer)) |outcome| {
+            try std.testing.expectEqual(h2.Cause.untrusted_peer, outcome.failed.cause);
+        } else |err| {
+            try std.testing.expectEqual(error.TrustUnavailable, err);
+        }
+        try TrustVariables.clear("SSL_CERT_FILE");
+        try TrustVariables.clear("SSL_CERT_DIR");
+    }
+    // A path that cannot be loaded fails trust; there is no fallback.
+    try TrustVariables.set("SSL_CERT_FILE", "/nonexistent/h2-ca.pem");
+    try std.testing.expectError(error.InvalidSslCertFile, systemTrustExchange(null));
+    try TrustVariables.set("SSL_CERT_FILE", "/dev/null");
+    try std.testing.expectError(error.InvalidSslCertFile, systemTrustExchange(null));
+    try TrustVariables.clear("SSL_CERT_FILE");
+    {
+        var peer: PeerThread = undefined;
+        try peer.start(.{ .tls = .h2 });
+        defer peer.stop();
+        var list: [std.posix.PATH_MAX]u8 = undefined;
+        const directory = try peer.peer.caDirectory(&directory_z);
+        try TrustVariables.set("SSL_CERT_DIR", try std.fmt.bufPrint(&list, "{s}:/nonexistent/h2-certs", .{directory}));
+        try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
+        // A file is not a directory.
+        try TrustVariables.set("SSL_CERT_DIR", peer.peer.caPath());
+        try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
+        // A list of only separators names no directory.
+        try TrustVariables.set("SSL_CERT_DIR", "::");
+        try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
+    }
+}
+
+test "exchange: macOS trusts SecTrust and ignores SSL_CERT_FILE and SSL_CERT_DIR" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var variables = try TrustVariables.isolate();
+    defer variables.restore();
+    try TrustVariables.set("SSL_CERT_FILE", "/nonexistent/h2-ca.pem");
+    try TrustVariables.set("SSL_CERT_DIR", "/nonexistent/h2-certs");
+    var client: h2.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .{ .stream_capacity = 1, .inactivity_ns = std.time.ns_per_s, .connect_timeout_ns = std.time.ns_per_s });
+    defer client.deinit();
+    _ = try client.addEndpoint("https://127.0.0.1:9/v1");
+}
+
 test "exchange: an answer longer than the buffer is refused, as sent" {
     const Respond = struct {
         fn handle(peer: *Peer, stream: *Peer.Stream) void {

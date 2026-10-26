@@ -144,6 +144,8 @@ fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*con
         // Before the request was launched: nothing can have been sent.
         error.InvalidUrl, error.CleartextNotLoopback => return error.TransportFailed,
         error.OutOfMemory, error.SystemResources, error.TooManyEndpoints, error.TrustUnavailable, error.InvalidCaFile, error.InvalidRequest => return error.TransportInitializationFailed,
+        // Named for the variable to fix: SSL_CERT_FILE or SSL_CERT_DIR.
+        error.InvalidSslCertFile, error.InvalidSslCertDir => |trust| return trust,
         // While it was in flight: no evidence either way.
         error.Interrupted => {
             response.request_not_sent = false;
