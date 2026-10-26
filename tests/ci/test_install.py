@@ -63,7 +63,7 @@ class InstallTest(unittest.TestCase):
         (self.repo / "src").mkdir()
         shutil.copy2(ROOT / "src/fetch_dependencies.sh", self.repo / "src/fetch_dependencies.sh")
         self.manifest = '.{\n    .minimum_zig_version = "0.17.0",\n    .dependencies = .{\n'
-        for name in ("openssl", "sqlite", "curl", "nghttp2", "utf8proc", "quickjs"):
+        for name in ("openssl", "sqlite", "nghttp2", "utf8proc", "quickjs"):
             self.manifest += f'''        .{name} = .{{
             .url = "https://example.invalid/{name}.tar.gz",
             .hash = "test-{name}-hash",

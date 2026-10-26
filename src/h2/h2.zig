@@ -437,7 +437,7 @@ pub const ExchangeOutcome = union(enum) {
 pub const ExchangeError = InitError || EndpointError || PrepareError || DriveError || error{Interrupted};
 
 /// One request on a private Client and connection, blocking the calling
-/// thread until it ends: no pool and no reuse, as a curl easy handle.
+/// thread until it ends: no pool and no reuse.
 /// Allocates from the page allocator, since its callers (token refresh,
 /// device login) have none and run a few times an hour at most.
 pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {

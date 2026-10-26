@@ -323,6 +323,32 @@ pub fn pump(self: *Peer) !void {
     }
 }
 
+/// Waits until the client's socket holds every byte this peer has sent.
+/// Darwin delivers loopback segments asynchronously, so a client read
+/// right after `pump` can find only some of them; Linux delivers them
+/// within the send, so there it returns at once.
+pub fn awaitDelivery(self: *Peer) !void {
+    // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
+    const siocoutq = 0x5411;
+    const so_nwrite = 0x1024;
+    for (self.connections.items) |connection| {
+        if (connection.closed) continue;
+        var waited_ms: u32 = 0;
+        while (true) : (waited_ms += 1) {
+            var unacknowledged: c_int = 0;
+            var size: std.c.socklen_t = @sizeOf(c_int);
+            const status = if (builtin.os.tag.isDarwin())
+                std.c.getsockopt(connection.socket, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
+            else
+                std.c.ioctl(connection.socket, siocoutq, &unacknowledged);
+            if (status != 0) return error.Unexpected;
+            if (unacknowledged == 0) break;
+            if (waited_ms == 2000) return error.Timeout;
+            _ = std.c.poll(&[_]std.c.pollfd{}, 0, 1);
+        }
+    }
+}
+
 const Transfer = union(enum) { bytes: usize, again, closed };
 
 /// Over TLS the first reads also run the server handshake.

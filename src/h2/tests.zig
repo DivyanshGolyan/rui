@@ -614,6 +614,7 @@ test "a read cap defers expiry only for streams on that connection" {
     @memset(&response, 'r');
     for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, &response);
     try harness.peer.pump();
+    try harness.peer.awaitDelivery();
     try harness.client.drive(&harness.receiver);
     // The silent stream's connection was drained, so it expires; the busy
     // connection stopped at its allowance, so none of its streams do.

@@ -1,5 +1,4 @@
-//! System trust on macOS: Apple SecTrust verifies the peer, as curl 8.22
-//! does with `--ca-native`. Internal.
+//! System trust on macOS: Apple SecTrust verifies the peer. Internal.
 //!
 //! The OpenSSL store stays empty and the handshake accepts the chain for
 //! now. After the handshake, before any application byte, the connection

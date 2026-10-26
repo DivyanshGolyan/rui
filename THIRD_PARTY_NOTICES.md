@@ -263,27 +263,10 @@ Unicode and the Unicode logo are trademarks of Unicode, Inc., and may be
 registered in some jurisdictions. All other trademarks and registered
 trademarks mentioned herein are the property of their respective owners.
 
-## curl 8.22.0
-
-Rui builds a pinned static curl 8.22.0 with HTTP/2 via nghttp2, OpenSSL, Apple
-SecTrust on macOS and the supported threaded asynchronous resolver. The build
-patches curl's automatic zero-response reused-connection POST retry and POST
-HTTP/2-to-HTTP/1.1 downgrade so an ambiguous POST is not silently replayed. It
-also caps H2 per-stream receive credit at 16 KiB to limit paused-capture buffering.
-
-- Source: `https://curl.se/download/curl-8.22.0.tar.xz`
-- Zig package content hash: `N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM`
-- License: curl license, reproduced in the source archive's `COPYING` file
-
-Copyright (c) Daniel Stenberg and contributors. Permission to use, copy,
-modify and distribute the software for any purpose with or without fee is
-granted under the conditions in that notice. The software is provided
-without warranty.
-
 ## nghttp2 1.70.0
 
-Rui links the pinned static nghttp2 library for HTTP/2 framing; HTTP/3/QUIC is
-not built.
+Rui links the pinned static nghttp2 library for its HTTP/2 client's framing;
+HTTP/3/QUIC is not built.
 
 - Source: `https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz`
 - Archive SHA-256: `e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2`
@@ -298,7 +281,7 @@ without warranty.
 
 ## OpenSSL 3.6.3
 
-Rui builds pinned static OpenSSL 3.6.3 as curl's TLS implementation.
+Rui builds pinned static OpenSSL 3.6.3 as its HTTP/2 client's TLS implementation.
 
 - Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz`
 - Zig package content hash: `N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM`

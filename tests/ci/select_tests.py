@@ -158,7 +158,7 @@ RULES = (
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      "Build, dependency or bootstrap inputs"),
-    (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_transport.sh", "src/curl*.patch", ".agents/setup",
+    (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_transport.sh", ".agents/setup",
       ".github/actions/setup/action.yml"),
      ("transport-h2-integration", "codex-h2-integration"),
      ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
