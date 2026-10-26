@@ -119,6 +119,8 @@ pub const Host = struct {
     scratch_budget: ?provider.ScratchBudget = null,
     /// Execution-thread-owned Codex sticky routing; in memory only.
     turn_states: model_adapter.TurnStates = .{},
+    /// Execution-thread-owned, one per custody record and zero-mapped.
+    bash_work: []BashWork = &.{},
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
@@ -288,6 +290,15 @@ pub const AuthWorker = struct {
         self.state = .failed;
         self.condition.broadcast(self.io);
     }
+};
+
+/// The Bash state too large for an execution slot, kept in its custody
+/// record's entry of `Host.bash_work`: only records that ever held Bash make
+/// theirs resident, and a slot stays sized for model work. The slot's arm
+/// says which field is live.
+pub const BashWork = union {
+    execution: bash.Execution,
+    prepared_cleanup: bash.PreparedCleanup,
 };
 
 /// Returns `count` items in fresh anonymous pages: every byte is zero and no

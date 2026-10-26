@@ -64,7 +64,8 @@ const NamedScratchSlot = struct {
 const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
-    execution: bash.Execution,
+    /// In this slot's custody record entry of `Host.bash_work`.
+    execution: *bash.Execution,
     stop_accepted: bool = false,
     delivery: union(enum) {
         open,
@@ -77,7 +78,8 @@ const BashSlot = struct {
 
 const BashPreparedCleanupSlot = struct {
     token: execution.CustodyToken,
-    cleanup: bash.PreparedCleanup,
+    /// In this slot's custody record entry of `Host.bash_work`.
+    cleanup: *bash.PreparedCleanup,
 };
 
 const BashPreparingSlot = struct {
@@ -278,6 +280,15 @@ pub fn executionMain(host: *Host) void {
         host.turn_states.deinit();
         host.turn_states = .{};
         unmapZeroed(turn_states);
+    }
+    const bash_work = mapZeroed(server_host.BashWork, slots.len) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    host.bash_work = bash_work;
+    defer {
+        host.bash_work = &.{};
+        unmapZeroed(bash_work);
     }
     const budget = host.retention.sharedBudget().narrowed(
         if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
@@ -717,6 +728,12 @@ fn cancelSupersededTransfers(
     };
 }
 
+test "an execution slot is sized for a model Attempt, not for Bash" {
+    // Bash keeps its large state in Host.bash_work, so no arm outgrows the
+    // provider arm every held model agent occupies.
+    try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
+}
+
 test "zeroed pages are free slots and empty Turn entries" {
     const slots = try mapZeroed(ExecutionSlot, 3);
     defer unmapZeroed(slots);
@@ -1032,10 +1049,12 @@ fn launchPreparedBash(
         discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
+    const work = &host.bash_work[token.index];
+    work.* = .{ .execution = launched.? };
     slot.* = .{ .bash = .{
         .token = token,
         .binding = action_binding,
-        .execution = launched.?,
+        .execution = &work.execution,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
@@ -1183,9 +1202,11 @@ fn retainBashPreparedCleanup(
     err: anyerror,
 ) void {
     host.custody.detach(token) catch unreachable;
+    const work = &host.bash_work[token.index];
+    work.* = .{ .prepared_cleanup = cleanup };
     slot.* = .{ .bash_prepared_cleanup = .{
         .token = token,
-        .cleanup = cleanup,
+        .cleanup = &work.prepared_cleanup,
     } };
     retainDispatchFence(host, "Bash preparation cleanup", err);
 }
@@ -2437,7 +2458,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(&bash.empty_environment), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    var launched = try prepared.launch(&bash.empty_environment);
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     defer if (slot == .bash) {
         slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
@@ -3408,6 +3430,8 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .token = token,
                 .binding = binding,
             } }};
+            var work: [1]server_host.BashWork = undefined;
+            host.bash_work = &work;
             @field(host, flag).store(true, .release);
             launchPreparedBash(&host, &slots[0], token, binding, &prepared);
             try std.testing.expect(prepared.stdout_capture == null);
