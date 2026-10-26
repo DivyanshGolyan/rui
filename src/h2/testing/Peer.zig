@@ -149,11 +149,16 @@ pub fn caPath(self: *const Peer) []const u8 {
 /// The directory holding `caPath()`'s CA under its subject hash, as
 /// OpenSSL's directory lookup (`SSL_CERT_DIR`) expects.
 pub fn caDirectory(self: *const Peer, buffer: []u8) ![:0]const u8 {
-    const dir = std.fs.path.dirname(self.caPath()).?;
-    return std.fmt.bufPrintSentinel(buffer, "{s}/certs", .{dir}, 0);
+    return std.fmt.bufPrintSentinel(buffer, "{s}/certs", .{std.fs.path.dirname(self.caPath()).?}, 0);
 }
 
 // --------------------------------------------------------------------- TLS
+
+fn writeCertificate(path: [:0]const u8, cert: *c.X509) !void {
+    const file = c.BIO_new_file(path.ptr, "w") orelse return error.TlsSetupFailed;
+    defer _ = c.BIO_free(file);
+    if (c.PEM_write_bio_X509(file, cert) != 1) return error.TlsSetupFailed;
+}
 
 fn setUpTls(self: *Peer) !void {
     const ca_key = try generateKey();
@@ -179,19 +184,13 @@ fn setUpTls(self: *Peer) !void {
     var tmp = std.testing.tmpDir(.{});
     errdefer tmp.cleanup();
     self.ca_path_len = (try std.fmt.bufPrint(&self.ca_path_buffer, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path})).len;
-    var path_z: [@sizeOf(@TypeOf(self.ca_path_buffer)) + 1]u8 = undefined;
-    @memcpy(path_z[0..self.ca_path_len], self.caPath());
-    path_z[self.ca_path_len] = 0;
-    const file = c.BIO_new_file(&path_z, "w") orelse return error.TlsSetupFailed;
-    defer _ = c.BIO_free(file);
-    if (c.PEM_write_bio_X509(file, ca) != 1) return error.TlsSetupFailed;
-    // The same CA in an OpenSSL hashed directory, `caDirectory()`.
+    var path_z: [std.posix.PATH_MAX]u8 = undefined;
+    try writeCertificate(try std.fmt.bufPrintSentinel(&path_z, "{s}", .{self.caPath()}, 0), ca);
+    // The same CA in an OpenSSL hashed directory, named by subject hash.
     try tmp.dir.createDir(std.testing.io, "certs", .default_dir);
-    var hashed_z: [@sizeOf(@TypeOf(self.ca_path_buffer)) + 16]u8 = undefined;
-    const hashed = try std.fmt.bufPrintSentinel(&hashed_z, ".zig-cache/tmp/{s}/certs/{x:0>8}.0", .{ tmp.sub_path, c.X509_subject_name_hash(ca) }, 0);
-    const hashed_file = c.BIO_new_file(hashed.ptr, "w") orelse return error.TlsSetupFailed;
-    defer _ = c.BIO_free(hashed_file);
-    if (c.PEM_write_bio_X509(hashed_file, ca) != 1) return error.TlsSetupFailed;
+    var directory_z: [std.posix.PATH_MAX]u8 = undefined;
+    const directory = try self.caDirectory(&directory_z);
+    try writeCertificate(try std.fmt.bufPrintSentinel(&path_z, "{s}/{x:0>8}.0", .{ directory, c.X509_subject_name_hash(ca) }, 0), ca);
     self.tmp = tmp;
 
     const ctx = c.SSL_CTX_new(c.TLS_server_method()) orelse return error.TlsSetupFailed;

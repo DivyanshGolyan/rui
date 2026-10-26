@@ -109,17 +109,15 @@ fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
     switch (trust) {
         .ca_file => |path| {
             var path_z: [std.posix.PATH_MAX]u8 = undefined;
-            if (path.len >= path_z.len) return error.InvalidCaFile;
-            @memcpy(path_z[0..path.len], path);
-            path_z[path.len] = 0;
-            if (c.SSL_CTX_load_verify_file(ctx, &path_z) != 1) return error.InvalidCaFile;
+            const terminated = std.fmt.bufPrintSentinel(&path_z, "{s}", .{path}, 0) catch return error.InvalidCaFile;
+            if (c.SSL_CTX_load_verify_file(ctx, terminated) != 1) return error.InvalidCaFile;
         },
         .system => {
             // OpenSSL's documented overrides. Either one replaces the probe,
             // and a path that cannot be loaded fails instead of falling
             // back, so a wrong setting is never silently ignored.
-            const file = setting("SSL_CERT_FILE");
-            const dirs = setting("SSL_CERT_DIR");
+            const file = opensslTrustVariable("SSL_CERT_FILE");
+            const dirs = opensslTrustVariable("SSL_CERT_DIR");
             if (file != null or dirs != null) {
                 if (file) |path| if (c.SSL_CTX_load_verify_file(ctx, path) != 1) return error.InvalidSslCertFile;
                 if (dirs) |list| {
@@ -138,26 +136,26 @@ fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
     }
 }
 
-/// An environment variable's value, or null when unset or empty.
-fn setting(name: [*:0]const u8) ?[*:0]const u8 {
+/// An OpenSSL trust variable's value, or null when unset or empty.
+fn opensslTrustVariable(name: [*:0]const u8) ?[*:0]const u8 {
     const value = std.c.getenv(name) orelse return null;
     return if (value[0] == 0) null else value;
 }
 
-/// Whether every element of a colon-separated list, as OpenSSL splits
-/// SSL_CERT_DIR, is a directory this process can open. Empty elements are
-/// skipped, as OpenSSL skips them.
+/// Whether a colon-separated list, as OpenSSL splits SSL_CERT_DIR, names at
+/// least one directory and every element is a directory this process can
+/// search, which is all OpenSSL's lookup needs. Empty elements are skipped,
+/// as OpenSSL skips them.
 fn allDirectories(list: []const u8) bool {
     var paths = std.mem.tokenizeScalar(u8, list, ':');
-    while (paths.next()) |path| {
+    var count: usize = 0;
+    while (paths.next()) |path| : (count += 1) {
         var path_z: [std.posix.PATH_MAX]u8 = undefined;
-        if (path.len >= path_z.len) return false;
-        @memcpy(path_z[0..path.len], path);
-        path_z[path.len] = 0;
-        const dir = std.c.opendir(@ptrCast(&path_z)) orelse return false;
-        _ = std.c.closedir(dir);
+        // "<path>/." resolves only for a directory, and X_OK is search.
+        const dot = std.fmt.bufPrintSentinel(&path_z, "{s}/.", .{path}, 0) catch return false;
+        if (std.c.access(dot, std.c.X_OK) != 0) return false;
     }
-    return true;
+    return count > 0;
 }
 
 // ------------------------------------------------------------ handshake
