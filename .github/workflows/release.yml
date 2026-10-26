@@ -81,10 +81,21 @@ jobs:
           git tag "v$VERSION"
           name="rui-$VERSION-$PLATFORM"
           zig build -Doptimize=ReleaseSafe "-Dtarget=$TARGET" --prefix "$RUNNER_TEMP/$name" --summary all
+          mkdir dist
+          if [ "$(uname -s)" = Linux ]; then
+            # Debug info is most of a Linux executable, so it ships as a separate archive.
+            # Extracted beside the executables, Zig crash traces find it through .gnu_debuglink.
+            mkdir -p "$RUNNER_TEMP/debug/$name/bin"
+            for executable in rui rui-evaluator; do
+              debug_file="$RUNNER_TEMP/debug/$name/bin/$executable.debug"
+              objcopy --only-keep-debug "$RUNNER_TEMP/$name/bin/$executable" "$debug_file"
+              objcopy --strip-all "--add-gnu-debuglink=$debug_file" "$RUNNER_TEMP/$name/bin/$executable"
+            done
+            tar -czf "dist/$name-debug.tar.gz" -C "$RUNNER_TEMP/debug" "$name"
+          fi
           test "$("$RUNNER_TEMP/$name/bin/rui" --version)" = "rui $VERSION ($SHA)"
           test -x "$RUNNER_TEMP/$name/bin/rui-evaluator"
           if [ "$(uname -s)" = Darwin ]; then otool -L "$RUNNER_TEMP/$name/bin/rui"; else ldd "$RUNNER_TEMP/$name/bin/rui"; fi
-          mkdir dist
           tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -127,6 +138,14 @@ jobs:
             echo '```'
             echo
             echo "Releases 0.$schema.x open the same Stores. A different middle number needs a fresh Store."
+            echo
+            echo "The Linux executables ship without debug info. For readable crash traces, add it"
+            echo "to the installed build (again after each update, which installs a new build):"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/rui-$VERSION-linux-x86_64-debug.tar.gz |"
+            echo "  tar -xz --strip-components=1 -C \"\$(dirname \"\$(dirname \"\$(readlink -f ~/.local/bin/rui)\")\")\""
+            echo '```'
           } > notes.md
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$SHA" \
             --title "Rui $VERSION" --notes-file notes.md --latest dist/*
