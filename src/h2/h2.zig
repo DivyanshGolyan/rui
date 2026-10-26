@@ -17,7 +17,8 @@
 //! - TLS with ALPN `h2` only, verified by the system's trust (the host's CA
 //!   bundle on Linux, SecTrust on macOS) or against one CA file, and h2c
 //!   by prior knowledge for loopback `http://`;
-//! - name lookup, and SecTrust's evaluation, on short-lived threads;
+//! - name lookup, and SecTrust's evaluation, on short-lived threads, and
+//!   the found addresses raced by family (Happy Eyeballs, RFC 8305);
 //! - request bodies read from the caller's file within the peer's window,
 //!   never copied into a buffer per request;
 //! - response bodies written from the one shared read buffer straight to

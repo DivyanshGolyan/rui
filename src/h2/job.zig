@@ -45,6 +45,14 @@ pub fn Job(comptime Work: type) type {
             return self;
         }
 
+        /// A job whose `work` is already done, with no thread: the owner's
+        /// reference alone. A test's stand-in for work it controls.
+        pub fn finished(waker: *Waker, work: Work) ?*Self {
+            const self = std.heap.c_allocator.create(Self) catch return null;
+            self.* = .{ .mutex = .{}, .references = 1, .state = .done, .waker = waker, .work = work };
+            return self;
+        }
+
         /// Owner thread: the finished work, null while it runs.
         pub fn result(self: *Self) ?*const Work {
             self.lock();

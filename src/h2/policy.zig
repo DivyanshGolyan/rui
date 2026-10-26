@@ -113,6 +113,36 @@ pub fn pendingAfterSetupFailure(other_setting_up: u32, other_ready_with_room: u3
 
 // -------------------------------------------------------------- settlement
 
+/// Connect attempts one connection keeps in flight at once.
+pub const max_attempts = 2;
+
+/// How long an attempt runs before the next address's starts (RFC 8305
+/// section 5).
+pub const attempt_delay_ns = 250_000_000;
+
+pub const AttemptFacts = struct {
+    /// Attempts connecting now, after any that just failed were dropped.
+    in_flight: u8,
+    /// An address not yet tried remains.
+    more_addresses: bool,
+    /// An attempt failed since the last decision.
+    failed: bool,
+    /// The attempt delay passed since the newest attempt started.
+    delay_passed: bool,
+};
+
+/// What a connecting connection does with its addresses. The next address
+/// starts as soon as an attempt fails or the delay passed; with two in
+/// flight the oldest gives way, so every address gets its turn and a
+/// connection never holds more than two sockets.
+pub fn nextAttempt(facts: AttemptFacts) enum { wait, start, replace_oldest, fail } {
+    std.debug.assert(facts.in_flight <= max_attempts);
+    if (!facts.more_addresses) return if (facts.in_flight == 0) .fail else .wait;
+    if (facts.in_flight == 0 or facts.failed) return .start;
+    if (!facts.delay_passed) return .wait;
+    return if (facts.in_flight < max_attempts) .start else .replace_oldest;
+}
+
 pub const StreamFacts = struct {
     /// The stream's HEADERS frame was packed for sending on some connection.
     /// Sticky across replays: once true, "nothing was sent" is never claimed.
@@ -301,6 +331,31 @@ fn with(base: anytype, comptime field: []const u8, value: anytype) @TypeOf(base)
     var facts = base;
     @field(facts, field) = value;
     return facts;
+}
+
+test "the next address starts on a failure or after the delay, the oldest of two giving way" {
+    const Case = struct { in_flight: u8, more: bool, failed: bool, delay_passed: bool, step: @TypeOf(nextAttempt(undefined)) };
+    const cases = [_]Case{
+        // No address left: wait on what runs, or fail with nothing running.
+        .{ .in_flight = 0, .more = false, .failed = true, .delay_passed = true, .step = .fail },
+        .{ .in_flight = 1, .more = false, .failed = true, .delay_passed = true, .step = .wait },
+        .{ .in_flight = 2, .more = false, .failed = false, .delay_passed = true, .step = .wait },
+        // The first attempt, and the next one at once after a failure.
+        .{ .in_flight = 0, .more = true, .failed = false, .delay_passed = false, .step = .start },
+        .{ .in_flight = 1, .more = true, .failed = true, .delay_passed = false, .step = .start },
+        // One running: the next only after the delay.
+        .{ .in_flight = 1, .more = true, .failed = false, .delay_passed = false, .step = .wait },
+        .{ .in_flight = 1, .more = true, .failed = false, .delay_passed = true, .step = .start },
+        // Two running: the oldest gives way when the delay passed.
+        .{ .in_flight = 2, .more = true, .failed = false, .delay_passed = false, .step = .wait },
+        .{ .in_flight = 2, .more = true, .failed = false, .delay_passed = true, .step = .replace_oldest },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.step, nextAttempt(.{
+        .in_flight = case.in_flight,
+        .more_addresses = case.more,
+        .failed = case.failed,
+        .delay_passed = case.delay_passed,
+    }));
 }
 
 test "a stream closes as complete, a replay, a reroute or a failure" {

@@ -6,6 +6,9 @@ const builtin = @import("builtin");
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
+const Engine = @import("Engine.zig");
+const Connection = @import("Connection.zig");
+const Resolver = @import("Resolver.zig");
 const c = @import("h2_c");
 
 const ns_per_ms = std.time.ns_per_ms;
@@ -840,6 +843,85 @@ test "https by name: the lookup runs, every address is tried, and the name is ve
     var stream: h2.Stream = .idle;
     var sink: [64]u8 = undefined;
     try harness.launch(&stream, bytesRequest(harness.endpoint, "x", &sink));
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+}
+
+/// A loopback listener whose accept queue is full, so a further connect to
+/// it is never answered: an address on a path that drops packets.
+const BlackHole = struct {
+    listener: std.posix.fd_t,
+    fillers: [16]std.posix.fd_t = @splat(-1),
+    address: Resolver.Address,
+
+    fn open() !BlackHole {
+        var self: BlackHole = .{ .listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0), .address = Resolver.Address.literal("127.0.0.1", 0).? };
+        if (self.listener < 0) return error.SocketFailed;
+        errdefer self.close();
+        if (std.c.bind(self.listener, @ptrCast(&self.address.storage), self.address.length) != 0) return error.BindFailed;
+        if (std.c.listen(self.listener, 0) != 0) return error.ListenFailed;
+        var length = self.address.length;
+        if (std.c.getsockname(self.listener, @ptrCast(&self.address.storage), &length) != 0) return error.SocketFailed;
+        // Connect until one is not answered: the queue is full.
+        for (&self.fillers) |*filler| {
+            filler.* = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
+            if (filler.* < 0) return error.SocketFailed;
+            const flags = std.c.fcntl(filler.*, std.c.F.GETFL);
+            if (flags < 0 or std.c.fcntl(filler.*, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true }))) < 0) return error.SocketFailed;
+            _ = std.c.connect(filler.*, @ptrCast(&self.address.storage), self.address.length);
+            var poll = [_]std.c.pollfd{.{ .fd = filler.*, .events = std.c.POLL.OUT, .revents = 0 }};
+            if (std.c.poll(&poll, 1, 200) == 0) return self;
+        }
+        return error.QueueNeverFilled;
+    }
+
+    fn close(self: *BlackHole) void {
+        for (self.fillers) |fd| if (fd >= 0) {
+            _ = std.c.close(fd);
+        };
+        _ = std.c.close(self.listener);
+    }
+};
+
+/// A request to a peer by name, whose lookup finds `before_peer` and then
+/// the peer's own address. Replaces the lookup the first drive started.
+fn launchRacing(harness: *Harness, stream: *h2.Stream, sink: []u8, before_peer: []const Resolver.Address) !void {
+    try harness.launch(stream, bytesRequest(harness.endpoint, "x", sink));
+    try harness.client.drive(&harness.receiver);
+    const engine = Engine.of(&harness.client);
+    try std.testing.expectEqual(Connection.State.resolving, engine.connections[0].state);
+    var addresses: [Resolver.max_addresses]Resolver.Address = undefined;
+    @memcpy(addresses[0..before_peer.len], before_peer);
+    addresses[before_peer.len] = Resolver.Address.literal("127.0.0.1", harness.peer.port).?;
+    const origin = &engine.origins[0];
+    origin.lookup.?.release();
+    origin.lookup = Resolver.answered(&engine.waker, addresses[0 .. before_peer.len + 1]) orelse return error.OutOfMemory;
+}
+
+test "https by name: an address that never answers does not keep the next from connecting" {
+    var hole = try BlackHole.open();
+    defer hole.close();
+    // Trying one address at a time would spend the whole timeout on the hole.
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" }, .connect_timeout_ns = 3 * std.time.ns_per_s });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try launchRacing(harness, &stream, &sink, &.{hole.address});
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+}
+
+test "https by name: two addresses that never answer do not keep the third from its turn" {
+    var holes: [2]BlackHole = .{ try BlackHole.open(), undefined };
+    defer holes[0].close();
+    holes[1] = try BlackHole.open();
+    defer holes[1].close();
+    // Two stuck attempts must give way, within two sockets, before the timeout.
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2, .url_host = "localhost" }, .connect_timeout_ns = 3 * std.time.ns_per_s });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [64]u8 = undefined;
+    try launchRacing(harness, &stream, &sink, &.{ holes[0].address, holes[1].address });
     try harness.runUntilFinished(1);
     try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
 }

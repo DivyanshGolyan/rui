@@ -1,8 +1,8 @@
 //! One HTTP/2 connection: its socket and nghttp2 session. Internal.
 //!
 //!   free -> [resolving] -> connecting -> [handshaking] -> [verifying] -> awaiting_settings
-//!        (DNS names)   (one address     (https)         (macOS system  (preface and our
-//!                       at a time)                       trust)         SETTINGS sent)
+//!        (DNS names)   (addresses       (https)         (macOS system  (preface and our
+//!                       raced, RFC 8305) trust)         SETTINGS sent)
 //!   -> ready -> draining -> free
 //!      (streams  (GOAWAY seen:
 //!       submitted) no submits)
@@ -46,6 +46,14 @@ local_failure: bool,
 poll_slot: u32,
 revents: i16,
 socket: std.posix.fd_t,
+/// While connecting, `socket` is the newest attempt and this the one
+/// before it, still in flight; -1 otherwise. Polled in the slot after
+/// `poll_slot`.
+earlier: std.posix.fd_t,
+earlier_revents: i16,
+/// While connecting, when the next address's attempt is due; 0 when no
+/// address is left.
+next_attempt_ns: u64,
 /// For an https origin, from the TCP connect on.
 ssl: ?*c.SSL,
 /// Counted among its origin's lookup users until a connect succeeds.
@@ -105,6 +113,9 @@ pub fn free(engine: *Engine, index: u32) Connection {
         .poll_slot = 0,
         .revents = 0,
         .socket = -1,
+        .earlier = -1,
+        .earlier_revents = 0,
+        .next_attempt_ns = 0,
         .ssl = null,
         .uses_lookup = false,
         .address_index = 0,
@@ -179,7 +190,7 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
     self.origin = origin_index;
     self.serial = serial;
     self.setup_deadline_ns = engine.now() +| engine.options.connect_timeout_ns;
-    if (origin.literal != null) return self.connectNext();
+    if (origin.literal != null) return self.advanceAttempts(false, engine.now());
     self.state = .resolving;
     // Setups of one origin share its lookup; a finished one nobody uses is
     // stale, so a new setup looks the name up again.
@@ -197,7 +208,7 @@ pub fn open(self: *Connection, origin_index: u8, serial: u64) void {
 pub fn finishLookup(self: *Connection) void {
     const lookup = self.engine.origins[self.origin].lookup.?.result() orelse return;
     if (lookup.found().len == 0) return self.engine.setupFailed(self, .resolve_failed);
-    self.connectNext();
+    self.advanceAttempts(false, self.engine.now());
 }
 
 fn addressAt(self: *Connection, index: u8) ?Resolver.Address {
@@ -222,33 +233,101 @@ fn stopUsingLookup(self: *Connection) void {
     }
 }
 
-/// Connects to the next address, after any earlier one failed. One attempt
-/// at a time; the connect timeout bounds them all.
-fn connectNext(self: *Connection) void {
-    const engine = self.engine;
-    if (self.socket >= 0) {
-        closeSocket(self.socket);
-        self.socket = -1;
-    }
-    self.state = .connecting;
-    while (self.addressAt(self.address_index)) |address| {
-        self.address_index += 1;
-        const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
-        if (fd < 0) return engine.setupFailed(self, .local_failure);
-        self.socket = fd;
-        if (!configureSocket(fd)) return engine.setupFailed(self, .local_failure);
-        while (true) {
-            switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
-                .SUCCESS => return self.connected(),
-                .INTR => continue,
-                .INPROGRESS => return,
-                else => break,
-            }
+/// While connecting: ends attempts the socket answered, then starts the
+/// next address's as `policy.nextAttempt` decides.
+pub fn advanceConnect(self: *Connection, time: u64) void {
+    var failed = false;
+    if (self.earlier >= 0 and self.earlier_revents != 0) {
+        if (connectSucceeded(self.earlier)) {
+            std.mem.swap(std.posix.fd_t, &self.socket, &self.earlier);
+            return self.connected();
         }
-        closeSocket(fd);
-        self.socket = -1;
+        self.dropEarlier();
+        failed = true;
     }
-    engine.setupFailed(self, .connect_failed);
+    if (self.revents != 0) {
+        if (connectSucceeded(self.socket)) return self.connected();
+        self.dropNewest();
+        failed = true;
+    }
+    self.advanceAttempts(failed, time);
+}
+
+/// The earlier attempt's socket while connecting, polled beside `socket`.
+pub fn earlierAttempt(self: *const Connection) ?std.posix.fd_t {
+    return if (self.state == .connecting and self.earlier >= 0) self.earlier else null;
+}
+
+/// The setup deadline, or the next attempt's if that comes first.
+pub fn setupDeadline(self: *const Connection) u64 {
+    if (self.next_attempt_ns == 0) return self.setup_deadline_ns;
+    return @min(self.next_attempt_ns, self.setup_deadline_ns);
+}
+
+fn advanceAttempts(self: *Connection, failed: bool, time: u64) void {
+    self.state = .connecting;
+    var failure = failed;
+    while (true) {
+        switch (policy.nextAttempt(.{
+            .in_flight = @as(u8, @intFromBool(self.socket >= 0)) + @intFromBool(self.earlier >= 0),
+            .more_addresses = self.addressAt(self.address_index) != null,
+            .failed = failure,
+            .delay_passed = self.next_attempt_ns != 0 and time >= self.next_attempt_ns,
+        })) {
+            .wait => return,
+            .fail => return self.engine.setupFailed(self, .connect_failed),
+            .replace_oldest => self.dropEarlier(),
+            .start => {},
+        }
+        switch (self.attempt(time)) {
+            .connected => return self.connected(),
+            .in_flight => return,
+            .refused => failure = true,
+            .local_failure => return self.engine.setupFailed(self, .local_failure),
+        }
+    }
+}
+
+/// Connects a new socket to the next address as `socket`, the attempt
+/// before it becoming `earlier`.
+fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, local_failure } {
+    std.debug.assert(self.earlier < 0);
+    const address = self.addressAt(self.address_index).?;
+    self.address_index += 1;
+    self.next_attempt_ns = if (self.addressAt(self.address_index) != null) time +| policy.attempt_delay_ns else 0;
+    const fd = std.c.socket(address.family, std.c.SOCK.STREAM, 0);
+    if (fd < 0) return .local_failure;
+    self.earlier = self.socket;
+    self.socket = fd;
+    if (!configureSocket(fd)) return .local_failure;
+    while (true) {
+        switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
+            .SUCCESS => return .connected,
+            .INTR => continue,
+            .INPROGRESS => return .in_flight,
+            else => {
+                self.dropNewest();
+                return .refused;
+            },
+        }
+    }
+}
+
+fn dropEarlier(self: *Connection) void {
+    if (self.earlier >= 0) closeSocket(self.earlier);
+    self.earlier = -1;
+}
+
+fn dropNewest(self: *Connection) void {
+    closeSocket(self.socket);
+    self.socket = self.earlier;
+    self.earlier = -1;
+}
+
+fn connectSucceeded(fd: std.posix.fd_t) bool {
+    var result: c_int = 0;
+    var result_len: std.c.socklen_t = @sizeOf(c_int);
+    return std.c.getsockopt(fd, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) == 0 and result == 0;
 }
 
 /// A failed close leaves nothing to retry or report: the descriptor is
@@ -270,16 +349,11 @@ fn configureSocket(fd: std.posix.fd_t) bool {
     return true;
 }
 
-pub fn finishConnect(self: *Connection) void {
-    var result: c_int = 0;
-    var result_len: std.c.socklen_t = @sizeOf(c_int);
-    if (std.c.getsockopt(self.socket, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) != 0 or result != 0)
-        return self.connectNext();
-    self.connected();
-}
-
-/// The addresses are done with; https goes on to its handshake.
+/// `socket` connected: the race and the addresses are done with; https
+/// goes on to its handshake.
 fn connected(self: *Connection) void {
+    self.dropEarlier();
+    self.next_attempt_ns = 0;
     self.stopUsingLookup();
     const origin = &self.engine.origins[self.origin];
     if (origin.scheme == .http) return self.startSession();
@@ -636,6 +710,7 @@ pub fn close(self: *Connection, mode: enum { goaway, abrupt }) void {
     if (self.ssl) |ssl| c.SSL_free(ssl);
     self.stopUsingLookup();
     if (self.socket >= 0) closeSocket(self.socket);
+    self.dropEarlier();
     self.releaseHead();
     self.head.fields.deinit(self.engine.allocator);
     self.head.refs.deinit(self.engine.allocator);
