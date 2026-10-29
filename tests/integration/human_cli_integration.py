@@ -5145,6 +5145,9 @@ def renderer_cases():
 
 
 def main(selected="all"):
+    # Callers inherit this environment; an explicit credential path would
+    # take precedence over the synthetic HOME credential this fixture owns.
+    os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process

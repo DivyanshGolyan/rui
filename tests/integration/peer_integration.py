@@ -211,6 +211,36 @@ def wait_for(predicate, description, timeout=20):
     raise AssertionError(f"timed out waiting for {description}")
 
 
+def processes_executing(executable):
+    """Live processes running this fixture-owned copy, mapped to their argv.
+
+    A name is not ownership: unrelated processes may also be called rui.
+    """
+    listing = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout
+    # Bash launches peers through PATH, so their argv begins with bare `rui`.
+    named = {int(pid): args for pid, args in (line.split(None, 1) for line in listing.splitlines())
+             if args.startswith(str(executable)) or args == "rui" or args.startswith("rui ")}
+    images = {}
+    if pathlib.Path("/proc/self/exe").exists():
+        for pid in named:
+            try:
+                images[pid] = {os.readlink(f"/proc/{pid}/exe")}
+            except (FileNotFoundError, PermissionError):
+                pass
+    elif named:
+        # macOS has no /proc; a process's text mappings include its executed file.
+        mapped = subprocess.run(["/usr/sbin/lsof", "-n", "-P", "-a", "-d", "txt", "-Fpn",
+                                 "-p", ",".join(map(str, named))], capture_output=True, text=True, timeout=10)
+        # lsof exits 1 when a listed process exited before it was read.
+        assert mapped.returncode in (0, 1), mapped
+        for field in mapped.stdout.splitlines():
+            if field.startswith("p"):
+                pid = int(field[1:])
+            elif field.startswith("n"):
+                images.setdefault(pid, set()).add(field[1:])
+    return {pid: args for pid, args in named.items() if str(executable) in images.get(pid, ())}
+
+
 def main(report_source):
     # Rui reports resolved paths (its executable's directory on PATH, the
     # canonical Store); macOS temporary roots are symlinks under /private.
@@ -439,13 +469,23 @@ def main(report_source):
         assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
+        # The census's own controls: a same-named unrelated process is not
+        # owned, and an extra owned copy launched as bare `rui` is.
+        (state / "leak-home").mkdir()
+        controls = []
+        try:
+            controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
+            controls.append(subprocess.Popen(["rui", "host", "serve", "--store", str(state / "leak-store")],
+                executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            observed = processes_executing(installed)
+            assert controls[0].pid not in observed and controls[1].pid in observed, (controls[1].pid, observed)
+        finally:
+            dispose_all(*(lambda process=process: stop_process(process) for process in controls))
         # Peers left nothing running beside the Host, and nobody signed in or
         # changed the deliberately conflicting saved defaults.
-        processes = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout.splitlines()
-        # Bash launches peers through PATH, so their argv begins with bare `rui`.
-        running = {int(pid) for pid, args in (line.split(None, 1) for line in processes)
-                   if args.startswith(str(installed)) or args == "rui" or args.startswith("rui ")}
-        assert running == {host.pid, foreign_host.pid}, processes
+        running = processes_executing(installed)
+        assert running.keys() == {host.pid, foreign_host.pid}, running
         assert list(unrelated_store.iterdir()) == [], "peer followed HOME preferences instead of its sender Store"
         assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == [".preferences.lock", "preferences", "requests"]
