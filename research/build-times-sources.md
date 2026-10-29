@@ -144,3 +144,13 @@ Median **2.31 s** is a small warm help-text edit on this machine, not a clean bu
 `zig build -Doptimize=Debug -fincremental --watch --seed=0 --summary all -j2` failed on its initial build: 35/38 steps, undefined `OPENSSL_ia32cap_P`. The unchanged pinned `libcrypto.a` defines it as a common symbol, verified with `nm`. No watched edit completed; a watcher panic during termination is also retained. A linker-override control failed because the stock build CLI rejects `-flld`; no build options, compiler patches or native-library flags were added to bypass either result. Incremental mode is therefore **not recommended for this Rui configuration**, and no incremental speedup is claimed. Ordinary compilation, supported targets and qualification remain unchanged.
 
 Source assessment found no production `ArrayList` whose element address needs a new pointer-stability lock: current production occurrences calculate capacities or use fixed allocators. No `BufferFirstAllocator` fallback was introduced; the existing fixed-buffer hard bounds remain hard bounds. The [migration evidence](https://github.com/DivyanshGolyan/rui/blob/61cfcd9c4af0f03c8f855520badb6d7db9284fc7/VERIFICATION.md#zig-017-migration-2026-10-14) retains raw measurements, failures and source identity alongside the separate cold-build results.
+
+## CI compile profile (2026-10-29)
+
+Measured in a 4 vCPU, 15 GiB Linux x86-64 container with stock Zig 0.17.0, warm packages and C objects, and a one-line `src/protocol.zig` edit before each compile. Each of the 15 Rui compiles of the 10-target CI landing selection ran alone from its exact `zig build --verbose` command.
+
+- The whole `ci-build` took 465 to 516 s. Summed compile CPU was 778 s. Rerunning each compile with `-fno-emit-bin` took a few seconds, so nearly all of the time is LLVM.
+- The unit test binary (`src/tests.zig`) took 243 CPU-s on one core. In Debug it compiled in 18 s, but its tests ran in 206 s instead of 72 s.
+- A hello-world in ReleaseSafe with LLVM costs about 28 CPU-s with a warm global cache, or 10.5 s with `-fstrip`. With `-fno-llvm` it costs 1.3 s. Each small ReleaseSafe test actor binary cost 25 to 33 s, which is almost all floor.
+- Building the seven test actors with Zig's own backend (`use_llvm = false`, ReleaseSafe unchanged) brought the whole `ci-build` from 516/497 s to 401/372 s, alternating two runs each. In hosted CI, over three interleaved runs per arm, the rest producer's compile median went from 267 s to 109 s.
+- Cross-compiling the same actors for `aarch64-macos` with Zig's own backend ran out of memory (about 14 GB), so Apple Silicon keeps LLVM.
