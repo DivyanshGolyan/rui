@@ -27,17 +27,17 @@ pub const Step = enum {
 
 /// A capture or send result that names the step a failure stopped in. A
 /// cancellation seen before any step begins names none.
-pub fn Attempt(comptime T: type) type {
+pub fn Stepped(comptime E: type, comptime T: type) type {
     return union(enum) {
         done: T,
-        failed: struct { step: ?Step, err: anyerror },
+        failed: struct { step: ?Step, err: E },
 
-        fn fail(step: ?Step, err: anyerror) @This() {
+        fn fail(step: ?Step, err: E) @This() {
             return .{ .failed = .{ .step = step, .err = err } };
         }
 
         /// For callers that report only the error.
-        pub fn get(self: @This()) anyerror!T {
+        pub fn get(self: @This()) E!T {
             return switch (self) {
                 .done => |value| value,
                 .failed => |failure| failure.err,
@@ -86,7 +86,7 @@ pub const Requests = struct {
         if (self.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
     }
 
-    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) Attempt(protocol_reply.MutationReply) {
+    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) Stepped(MutationSendError, protocol_reply.MutationReply) {
         reply_buffer.len = 0;
         self.check() catch |err| return .fail(null, err);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
@@ -925,10 +925,22 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     return identity;
 }
 
-pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) Attempt(CapturedRecord) {
+/// The error set a function returns.
+fn ErrorOf(comptime function: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
+}
+
+pub const CaptureError = ErrorOf(platform.resolveClientPaths) || ErrorOf(writeConfigureCapture) || ErrorOf(writeMessageCapture);
+
+pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
+    return stepCapture(io, input, target, writeConfigureCapture);
+}
+
+/// Resolves the Store, then writes the capture, naming where either stopped.
+fn stepCapture(io: std.Io, input: anytype, target: CaptureTarget, comptime write: anytype) Stepped(CaptureError, CapturedRecord) {
     const paths = platform.resolveClientPaths(io, input.store) catch |err| return .fail(.store, err);
     var input_failure: ?Step = null;
-    const record = writeConfigureCapture(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
+    const record = write(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
     return .{ .done = record };
 }
 
@@ -955,11 +967,8 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
 }
 
-pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) Attempt(CapturedRecord) {
-    const paths = platform.resolveClientPaths(io, input.store) catch |err| return .fail(.store, err);
-    var input_failure: ?Step = null;
-    const record = writeMessageCapture(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
-    return .{ .done = record };
+pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
+    return stepCapture(io, input, target, writeMessageCapture);
 }
 
 fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageInput, target: CaptureTarget, input_failure: *?Step) !CapturedRecord {
@@ -1327,6 +1336,9 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
     return fd;
 }
 
+pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponseRequest);
+pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{Cancelled};
+
 fn sendSource(
     requests: Requests,
     paths: *const platform.Paths,
@@ -1338,7 +1350,7 @@ fn sendSource(
     instance: ?*const protocol.InstanceId,
     reply_buffer: *ReplyBuffer,
     until: ?i128,
-) Attempt(protocol_reply.CommandReply) {
+) Stepped(SendError, protocol_reply.CommandReply) {
     const address = std.Io.net.UnixAddress.init(paths.socket.slice()) catch |err| return .fail(.endpoint, err);
     const fd = connectRequest(requests, address, until) catch |err| return .fail(.connect, err);
     defer closeSocket(requests.io, fd);
@@ -2368,11 +2380,11 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const attempt = (Requests{ .io = connected_io }).sendCaptured(&captured, &buffer);
-        const result = attempt.get();
+        const sent = (Requests{ .io = connected_io }).sendCaptured(&captured, &buffer);
+        const result = sent.get();
         peer.join();
         if (Peer.failure) |err| return err;
-        if (response != .reply) try std.testing.expectEqual(@as(?Step, .admission_response), attempt.failed.step);
+        if (response != .reply) try std.testing.expectEqual(@as(?Step, .admission_response), sent.failed.step);
         switch (response) {
             .closed => try std.testing.expectError(error.TruncatedResponse, result),
             .silent => try std.testing.expectError(error.ResponseInactive, result),
