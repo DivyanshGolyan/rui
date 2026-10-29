@@ -896,14 +896,136 @@ const peer_parts = blk: {
     break :blk result;
 };
 
-/// A peer Message's leading input part. The Host recorded its sender; the
-/// adapter renders that saved fact, never text a peer wrote.
-const PeerPart = union(enum) { text: []const u8, sender };
-const peer_rule = [_]PeerPart{
-    .{ .text = peer_parts[0] },
-    .sender,
-    .{ .text = peer_parts[1] },
+/// One element of a model request, read from the Operation's historical
+/// view in request order. Each item is a value; the provider's writer alone
+/// turns it into wire bytes.
+const RequestItem = union(enum) {
+    /// Model, tool-call policy and reasoning effort.
+    settings,
+    /// Rui's runtime context, the Workspace, the Session's own address and
+    /// the saved baseline instructions.
+    instructions,
+    /// The history span an earlier request of this Session encoded.
+    history_memo,
+    /// A User Message or an instruction update.
+    message: store.HistoricalEntry,
+    /// One accepted output item, replayed.
+    replayed_output: store.HistoricalContent,
+    tool_result: store.HistoricalToolResult,
+    compaction_trigger,
+    tools,
+    /// Verbosity and the optional output schema.
+    text,
 };
+
+/// A stretch of wire bytes: literal syntax, a string's contents, or
+/// canonical content streamed from the view.
+const Piece = union(enum) {
+    fixed: []const u8,
+    text: []const u8,
+    /// A JSON string literal inside the enclosing string, escaped twice.
+    /// Its enclosing quotes belong to the caller.
+    nested_text: []const u8,
+    content: store.HistoricalContent,
+    raw: store.HistoricalContent,
+    replay: store.HistoricalContent,
+    history_memo,
+};
+
+/// One item's pieces, written in order.
+const Pieces = struct {
+    list: [8]Piece = undefined,
+    length: u8 = 0,
+    next_index: u8 = 0,
+
+    fn add(self: *Pieces, piece: Piece) void {
+        self.list[self.length] = piece;
+        self.length += 1;
+    }
+
+    fn next(self: *Pieces) ?Piece {
+        if (self.next_index == self.length) return null;
+        defer self.next_index += 1;
+        return self.list[self.next_index];
+    }
+};
+
+/// The Codex Responses encoding of one item. Its pieces borrow from `item`
+/// and `settings`. `input_comma` is the only syntax state carried
+/// between items: an input item after another takes a comma.
+fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool) Pieces {
+    var pieces: Pieces = .{};
+    switch (item.*) {
+        .message, .replayed_output, .tool_result, .compaction_trigger => {
+            if (input_comma.*) pieces.add(.{ .fixed = "," });
+            input_comma.* = true;
+        },
+        // A memo is the span's first bytes and records its own comma state.
+        .history_memo, .settings, .instructions, .tools, .text => {},
+    }
+    switch (item.*) {
+        .settings => {
+            pieces.add(.{ .fixed = "{\"model\":\"" });
+            pieces.add(.{ .text = settings.model.slice() });
+            pieces.add(.{ .fixed = if (@import("model_capability.zig").parallelToolCalls(settings.model.slice()))
+                "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]"
+            else
+                "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]" });
+            if (settings.reasoning_effort) |effort| pieces.add(.{ .fixed = switch (effort) {
+                inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
+            } });
+        },
+        .instructions => {
+            pieces.add(.{ .fixed = ",\"instructions\":\"" });
+            pieces.add(.{ .text = context_parts[0] });
+            pieces.add(.{ .nested_text = settings.workspace.slice() });
+            // The originating Operation's ID, rebuilt on every Attempt.
+            pieces.add(.{ .text = context_parts[1] });
+            pieces.add(.{ .nested_text = settings.session.slice() });
+            pieces.add(.{ .text = context_parts[2] });
+            pieces.add(.{ .content = settings.baseline_instructions });
+            pieces.add(.{ .fixed = "\",\"input\":[" });
+        },
+        .history_memo => pieces.add(.history_memo),
+        .message => |*entry| {
+            pieces.add(.{ .fixed = if (entry.kind == .user)
+                "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
+            else
+                "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"" });
+            // A peer Message's sender is its own leading part, separate from
+            // the text the peer wrote. The Host recorded that sender; the
+            // adapter renders the saved fact, never text a peer wrote.
+            if (entry.sender) |*sender| {
+                pieces.add(.{ .text = peer_parts[0] });
+                pieces.add(.{ .nested_text = sender.slice() });
+                pieces.add(.{ .text = peer_parts[1] });
+                pieces.add(.{ .fixed = "\"},{\"type\":\"input_text\",\"text\":\"" });
+            }
+            pieces.add(.{ .content = entry.content.? });
+            pieces.add(.{ .fixed = "\"}]}" });
+        },
+        .replayed_output => |content| pieces.add(.{ .replay = content }),
+        .tool_result => |result| {
+            pieces.add(.{ .fixed = "{\"type\":\"function_call_output\",\"call_id\":\"" });
+            pieces.add(.{ .content = result.call_id });
+            pieces.add(.{ .fixed = "\",\"output\":\"" });
+            pieces.add(.{ .content = result.output });
+            pieces.add(.{ .fixed = "\"}" });
+        },
+        .compaction_trigger => pieces.add(.{ .fixed = "{\"type\":\"compaction_trigger\"}" }),
+        .tools => {
+            pieces.add(.{ .fixed = "],\"tools\":[" });
+            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .fixed = tools.bash_definition_json });
+            pieces.add(.{ .fixed = "]" });
+        },
+        .text => if (settings.output_schema) |schema| {
+            pieces.add(.{ .fixed = ",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":" });
+            pieces.add(.{ .raw = schema });
+            pieces.add(.{ .fixed = "}}}" });
+        } else pieces.add(.{ .fixed = ",\"text\":{\"verbosity\":\"low\"}}" }),
+    }
+    return pieces;
+}
 
 pub const Preparation = struct {
     view: store.HistoricalView,
@@ -912,16 +1034,15 @@ pub const Preparation = struct {
     writer: RequestWriter,
     readonly: std.Io.File,
     faults: PreparationFaults,
-    phase: Phase = .settings,
-    next_phase: Phase = .settings,
+    /// Where the next item comes from.
+    stage: Stage = .settings,
+    /// The item being written; its pieces borrow from it.
+    item: RequestItem = .settings,
+    pieces: Pieces = .{},
     emission: Emission = .none,
     input_comma: bool = false,
     continuation_unavailable: bool = false,
     history_position: u64 = 0,
-    selected_anchor: ?u64 = null,
-    current_entry: ?store.HistoricalEntry = null,
-    current_tool_result: ?store.HistoricalToolResult = null,
-    peer_part: usize = 0,
     active: bool = true,
     last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
     /// The Host's history memos, borrowed for the preparation's life. Null
@@ -954,48 +1075,27 @@ pub const Preparation = struct {
         hasher: history_memo.Hasher = history_memo.newHasher(),
     };
 
-    const Phase = enum {
+    const Stage = enum {
         settings,
         history_validation,
-        model_prefix,
-        model,
-        envelope,
-        reasoning,
-        instructions_prefix,
-        runtime_instructions,
-        workspace,
-        address_prefix,
-        address_session,
-        instructions_separator,
-        instructions_content,
-        input_prefix,
-        history_resume,
-        history_copy,
-        history_next,
-        covered_tool_result_next,
+        instructions,
+        history_start,
+        history,
+        tool_results,
+        covered_tool_results,
         compaction_trigger,
-        entry_comma,
-        entry_prefix,
-        peer_part,
-        entry_content,
-        entry_suffix,
-        tool_result_next,
-        tool_result_prefix,
-        tool_call_id,
-        tool_result_middle,
-        tool_output,
-        tool_result_suffix,
-        tools_prefix,
-        bash_tool,
-        tools_suffix,
-        schema_prefix,
-        schema,
-        schema_suffix,
-        request_suffix,
-        seal,
+        tools,
+        text,
+        end,
         history_store,
-        emitting,
         complete,
+    };
+
+    const Next = union(enum) {
+        /// No item yet: the stage moved on or waits for allowance.
+        pending,
+        item: RequestItem,
+        end,
     };
 
     const JsonEmission = struct {
@@ -1027,6 +1127,7 @@ pub const Preparation = struct {
         json: JsonEmission,
         raw: RawEmission,
         replay: ReplayEmission,
+        history_memo,
     };
 
     pub fn init(
@@ -1081,6 +1182,9 @@ pub const Preparation = struct {
         };
     }
 
+    /// Write the request one item at a time: take the next item from the
+    /// view, turn it into pieces with the provider's writer, and stream each
+    /// piece under the allowance.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.active and byte_allowance != 0 and item_allowance != 0);
         var bytes_left = byte_allowance;
@@ -1092,244 +1196,138 @@ pub const Preparation = struct {
         };
         self.view.checkAttempt() catch |err| return .{ .failed = err };
         while (bytes_left != 0 and items_left != 0) {
-            if (self.phase == .emitting) {
+            if (self.emission != .none) {
                 const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };
                 if (!finished) return self.flushAndYield();
-                self.phase = self.next_phase;
                 continue;
             }
             items_left -= 1;
-            switch (self.phase) {
-                .settings => {
-                    self.settings = self.view.settings() catch |err| return .{ .failed = err };
-                    if (self.route == .managed and self.settings.?.output_schema != null)
-                        return .{ .failed = error.UnsupportedCodexConfiguration };
-                    self.phase = .history_validation;
-                },
-                .history_validation => {
-                    if (!(self.view.validateOutputsStep() catch |err| return .{ .failed = err })) continue;
-                    self.selected_anchor = self.view.contextAnchor() catch |err| return .{ .failed = err };
-                    self.phase = switch (self.settings.?.provider) {
-                        .codex => .model_prefix,
-                    };
-                },
-                .model_prefix => self.emitFixed("{\"model\":\"", .model),
-                .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
-                .envelope => self.emitFixed(if (@import("model_capability.zig").parallelToolCalls(self.settings.?.model.slice()))
-                    "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]"
-                else
-                    "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]", .reasoning),
-                .reasoning => {
-                    if (self.settings.?.reasoning_effort) |effort| switch (effort) {
-                        inline else => |value| self.emitFixed(",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}", .instructions_prefix),
-                    } else self.phase = .instructions_prefix;
-                },
-                .instructions_prefix => self.emitFixed(",\"instructions\":\"", .runtime_instructions),
-                .runtime_instructions => self.emitJsonBytes(context_parts[0], .workspace),
-                .workspace => {
-                    self.emitJsonBytes(self.settings.?.workspace.slice(), .address_prefix);
-                    self.emission.json.cursor.nested_string = true;
-                },
-                // The originating Operation's ID, rebuilt on every Attempt.
-                .address_prefix => self.emitJsonBytes(context_parts[1], .address_session),
-                .address_session => {
-                    self.emitJsonBytes(self.settings.?.session.slice(), .instructions_separator);
-                    self.emission.json.cursor.nested_string = true;
-                },
-                .instructions_separator => self.emitJsonBytes(context_parts[2], .instructions_content),
-                .instructions_content => {
-                    const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .input_prefix);
-                },
-                .input_prefix => self.emitFixed("\",\"input\":[", .history_resume),
-                // The history span starts here. A memo of this Session's
-                // previous span that this view contains replaces encoding
-                // that prefix; anything else rebuilds it from the Store.
-                .history_resume => {
-                    self.phase = .history_next;
-                    const memos = self.memos orelse continue;
-                    self.span = .{ .start = self.writer.offset };
-                    const memo = memos.held(self.settings.?.session.slice()) orelse continue;
-                    const key = self.memoKey();
-                    if (!memo.serves(&key, self.view.admissionPosition())) continue;
-                    self.writer.flush() catch |err| return .{ .failed = err };
-                    const file = memos.open(self.writer.io, &memo) orelse continue;
-                    self.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
-                    self.phase = .history_copy;
-                },
-                .history_copy => {
-                    const copy = &self.span.?.copy.?;
-                    if (copy.copied == copy.memo.length) {
-                        if (copy.hasher.final() == copy.memo.digest) self.finishMemoCopy() else self.abandonMemoCopy();
-                        continue;
-                    }
-                    const destination = self.writer.reserve(@intCast(@min(bytes_left, copy.memo.length - copy.copied))) catch |err| return .{ .failed = err };
-                    const count = self.readMemo(copy, destination) catch {
-                        self.abandonMemoCopy();
-                        continue;
-                    };
-                    copy.hasher.update(destination[0..count]);
-                    self.writer.commit(count) catch |err| return .{ .failed = err };
-                    copy.copied += count;
-                    bytes_left -= count;
-                },
-                .history_next => {
-                    items_left += 1; // The semantic cursor charges discovery or parser work.
-                    const progress = self.view.nextEntryStep(self.history_position, &bytes_left, &items_left) catch |err| return .{ .failed = err };
-                    const entry = switch (progress) {
-                        .pending => continue,
-                        .ready => |entry| entry,
-                    };
-                    if (entry) |item| {
-                        self.history_position = item.position;
-                        if (self.selected_anchor) |anchor| {
-                            if (item.position < anchor and (item.kind == .provider_output or item.kind == .tool_results)) {
-                                if (item.kind == .tool_results) self.phase = .covered_tool_result_next;
-                                continue;
-                            }
-                        }
-                        if (item.requested_model) |model| {
-                            validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch {
-                                self.continuation_unavailable = true;
-                            };
-                        }
-                    }
-                    self.current_entry = entry;
-                    if (entry == null) {
-                        self.endSpan();
-                        self.phase = .compaction_trigger;
-                    } else if (entry.?.kind == .tool_results) {
-                        self.phase = .tool_result_next;
-                    } else self.phase = .entry_comma;
-                },
-                .covered_tool_result_next => {
-                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
-                    if (result == null) self.phase = .history_next;
-                },
-                .compaction_trigger => {
-                    if (self.settings.?.operation == .compaction) {
-                        self.emitFixed(if (self.input_comma)
-                            ",{\"type\":\"compaction_trigger\"}"
-                        else
-                            "{\"type\":\"compaction_trigger\"}", .tools_prefix);
-                    } else self.phase = .tools_prefix;
-                },
-                .entry_comma => {
-                    if (self.input_comma) self.emitFixed(",", .entry_prefix) else self.phase = .entry_prefix;
-                },
-                .entry_prefix => {
-                    const entry = self.current_entry.?;
-                    if (entry.kind == .provider_output) {
-                        const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
-                        self.emitReplay(reader, .entry_suffix);
-                    } else {
-                        const prefix = if (entry.kind == .user)
-                            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
-                        else
-                            "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
-                        self.peer_part = 0;
-                        self.emitFixed(prefix, if (entry.sender != null) .peer_part else .entry_content);
-                    }
-                },
-                // A peer Message's sender is its own leading part, separate
-                // from the text the peer wrote.
-                .peer_part => {
-                    if (self.peer_part == peer_rule.len) {
-                        self.emitFixed("\"},{\"type\":\"input_text\",\"text\":\"", .entry_content);
-                        continue;
-                    }
-                    const part = peer_rule[self.peer_part];
-                    self.peer_part += 1;
-                    switch (part) {
-                        .text => |text| self.emitJsonBytes(text, .peer_part),
-                        .sender => {
-                            self.emitJsonBytes(self.current_entry.?.sender.?.slice(), .peer_part);
-                            self.emission.json.cursor.nested_string = true;
-                        },
-                    }
-                },
-                .entry_content => {
-                    const reader = self.view.openContent(self.current_entry.?.content.?) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .entry_suffix);
-                },
-                .entry_suffix => {
-                    const entry = self.current_entry.?;
-                    self.input_comma = true;
-                    self.current_entry = null;
-                    if (entry.kind == .provider_output) self.phase = .history_next else self.emitFixed("\"}]}", .history_next);
-                },
-                .tool_result_next => {
-                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
-                    self.current_tool_result = result;
-                    if (result == null) {
-                        self.current_entry = null;
-                        self.phase = .history_next;
-                    } else self.phase = .tool_result_prefix;
-                },
-                .tool_result_prefix => {
-                    const prefix = if (self.input_comma)
-                        ",{\"type\":\"function_call_output\",\"call_id\":\""
-                    else
-                        "{\"type\":\"function_call_output\",\"call_id\":\"";
-                    self.emitFixed(prefix, .tool_call_id);
-                },
-                .tool_call_id => {
-                    const reader = self.view.openContent(self.current_tool_result.?.call_id) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .tool_result_middle);
-                },
-                .tool_result_middle => self.emitFixed("\",\"output\":\"", .tool_output),
-                .tool_output => {
-                    const reader = self.view.openContent(self.current_tool_result.?.output) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .tool_result_suffix);
-                },
-                .tool_result_suffix => {
-                    self.input_comma = true;
-                    self.current_tool_result = null;
-                    self.emitFixed("\"}", .tool_result_next);
-                },
-                .tools_prefix => self.emitFixed("],\"tools\":[", .bash_tool),
-                .bash_tool => {
-                    if (self.settings.?.tools_mask & tools.toolBit(.bash) != 0) {
-                        self.emitFixed(tools.bash_definition_json, .tools_suffix);
-                    } else self.phase = .tools_suffix;
-                },
-                .tools_suffix => {
-                    if (self.settings.?.output_schema != null) self.emitFixed("]", .schema_prefix) else self.emitFixed("],\"text\":{\"verbosity\":\"low\"}", .request_suffix);
-                },
-                .schema_prefix => self.emitFixed(",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":", .schema),
-                .schema => {
-                    const reader = self.view.openContent(self.settings.?.output_schema.?) catch |err| return .{ .failed = err };
-                    self.emitRawReader(reader, .schema_suffix);
-                },
-                .schema_suffix => self.emitFixed("}}", .request_suffix),
-                .request_suffix => self.emitFixed("}", .seal),
-                .seal => self.seal() catch |err| return .{ .failed = err },
-                // The sealed request is the memo's source, copied under the
-                // allowance; a failure loses only the memo.
-                .history_store => {
-                    const write = &(self.memo_write orelse return self.finish());
-                    const memos = self.memos.?;
-                    bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left) catch {
-                        self.abandonMemoWrite();
-                        return self.finish();
-                    };
-                    if (!write.done()) continue;
-                    memos.commit(self.writer.io, write);
-                    self.memo_write = null;
+            if (self.pieces.next()) |piece| {
+                self.startPiece(piece) catch |err| return .{ .failed = err };
+                continue;
+            }
+            // The sealed request is the memo's source, copied under the
+            // allowance; a failure loses only the memo.
+            if (self.stage == .history_store) {
+                const write = &(self.memo_write orelse return self.finish());
+                const memos = self.memos.?;
+                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left) catch {
+                    self.abandonMemoWrite();
                     return self.finish();
+                };
+                if (!write.done()) continue;
+                memos.commit(self.writer.io, write);
+                self.memo_write = null;
+                return self.finish();
+            }
+            switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
+                .pending => {},
+                .item => |item| {
+                    self.item = item;
+                    self.pieces = switch (self.settings.?.provider) {
+                        .codex => codexPieces(&self.item, &self.settings.?, &self.input_comma),
+                    };
                 },
-                .complete => unreachable,
-                .emitting => unreachable,
+                .end => self.seal() catch |err| return .{ .failed = err },
             }
         }
         return self.flushAndYield();
+    }
+
+    /// The request's next item, read from the view. History decisions live
+    /// here: which output a compaction base covers, where the history memo
+    /// resumes, and whether a compaction trigger ends the input.
+    fn nextItem(self: *Preparation, bytes_left: *usize, items_left: *usize) !Next {
+        switch (self.stage) {
+            .settings => {
+                self.settings = try self.view.settings();
+                if (self.route == .managed and self.settings.?.output_schema != null)
+                    return error.UnsupportedCodexConfiguration;
+                self.stage = .history_validation;
+            },
+            .history_validation => {
+                if (!try self.view.validateOutputsStep()) return .pending;
+                self.stage = .instructions;
+                return .{ .item = .settings };
+            },
+            .instructions => {
+                self.stage = .history_start;
+                return .{ .item = .instructions };
+            },
+            // The history span starts here. A memo of this Session's
+            // previous span that this view contains replaces encoding that
+            // prefix; anything else rebuilds it from the Store.
+            .history_start => {
+                self.stage = .history;
+                const memos = self.memos orelse return .pending;
+                self.span = .{ .start = self.writer.offset };
+                const memo = memos.held(self.settings.?.session.slice()) orelse return .pending;
+                const key = self.memoKey();
+                if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
+                try self.writer.flush();
+                const file = memos.open(self.writer.io, &memo) orelse return .pending;
+                self.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
+                return .{ .item = .history_memo };
+            },
+            .history => {
+                items_left.* += 1; // The semantic cursor charges discovery or parser work.
+                const entry = switch (try self.view.nextEntryStep(self.history_position, bytes_left, items_left)) {
+                    .pending => return .pending,
+                    .ready => |entry| entry orelse {
+                        self.endSpan();
+                        self.stage = .compaction_trigger;
+                        return .pending;
+                    },
+                };
+                self.history_position = entry.position;
+                // Codex keeps every host input the selected base covers and
+                // replays only the output after its anchor.
+                const covered = self.view.selectedCoverage().coversOutput(entry.position);
+                switch (entry.kind) {
+                    .user, .instruction => return .{ .item = .{ .message = entry } },
+                    .tool_results => self.stage = if (covered) .covered_tool_results else .tool_results,
+                    .provider_output => {
+                        if (covered) return .pending;
+                        validateRequestedBinding(entry.requested_model.?.slice(), self.settings.?.model.slice()) catch {
+                            self.continuation_unavailable = true;
+                        };
+                        return .{ .item = .{ .replayed_output = entry.content.? } };
+                    },
+                }
+            },
+            .tool_results => {
+                const result = try self.view.nextToolResult() orelse {
+                    self.stage = .history;
+                    return .pending;
+                };
+                return .{ .item = .{ .tool_result = result } };
+            },
+            .covered_tool_results => {
+                if (try self.view.nextToolResult() == null) self.stage = .history;
+            },
+            .compaction_trigger => {
+                self.stage = .tools;
+                if (self.settings.?.operation == .compaction) return .{ .item = .compaction_trigger };
+            },
+            .tools => {
+                self.stage = .text;
+                return .{ .item = .tools };
+            },
+            .text => {
+                self.stage = .end;
+                return .{ .item = .text };
+            },
+            .end => return .end,
+            .history_store, .complete => unreachable,
+        }
+        return .pending;
     }
 
     fn memoKey(self: *const Preparation) history_memo.Key {
         return .{
             .session = self.settings.?.session,
             .model = self.settings.?.model,
-            .anchor = self.selected_anchor,
+            .anchor = self.view.selectedCoverage().anchor,
         };
     }
 
@@ -1344,6 +1342,26 @@ pub const Preparation = struct {
         return count;
     }
 
+    /// Copy the memo's bytes into the request, hashing as they go. Returns
+    /// true once the copy ends, matched or lost.
+    fn advanceMemoCopy(self: *Preparation, bytes_left: *usize) !bool {
+        const copy = &self.span.?.copy.?;
+        while (copy.copied != copy.memo.length) {
+            if (bytes_left.* == 0) return false;
+            const destination = try self.writer.reserve(@intCast(@min(bytes_left.*, copy.memo.length - copy.copied)));
+            const count = self.readMemo(copy, destination) catch {
+                self.abandonMemoCopy();
+                return true;
+            };
+            copy.hasher.update(destination[0..count]);
+            try self.writer.commit(count);
+            copy.copied += count;
+            bytes_left.* -= count;
+        }
+        if (copy.hasher.final() == copy.memo.digest) self.finishMemoCopy() else self.abandonMemoCopy();
+        return true;
+    }
+
     /// The copied bytes match the memo's digest: resume encoding exactly as
     /// the producing request's encoder stood after its last entry.
     fn finishMemoCopy(self: *Preparation) void {
@@ -1352,7 +1370,6 @@ pub const Preparation = struct {
         self.history_position = memo.history_position;
         self.input_comma = memo.input_comma;
         self.view.resumeToolGroups(memo.tool_group_cursor);
-        self.phase = .history_next;
     }
 
     /// A failed read or a digest mismatch loses only the memo that was
@@ -1365,7 +1382,6 @@ pub const Preparation = struct {
         span.copy = null;
         self.writer.rewind(span.start, copy.charged);
         self.memos.?.forget(self.writer.io, &copy.memo);
-        self.phase = .history_next;
     }
 
     fn closeMemoFile(self: *Preparation) void {
@@ -1406,34 +1422,16 @@ pub const Preparation = struct {
         return self.last_advance;
     }
 
-    fn emitFixed(self: *Preparation, bytes: []const u8, next: Phase) void {
-        self.emission = .{ .fixed = .{ .bytes = bytes } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitJsonBytes(self: *Preparation, bytes: []const u8, next: Phase) void {
-        self.emission = .{ .json = .{ .bytes = bytes } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitJsonReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .json = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitRawReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .raw = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitReplay(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .replay = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
+    fn startPiece(self: *Preparation, piece: Piece) !void {
+        switch (piece) {
+            .fixed => |bytes| self.emission = .{ .fixed = .{ .bytes = bytes } },
+            .text => |bytes| self.emission = .{ .json = .{ .bytes = bytes } },
+            .nested_text => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
+            .content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
+            .raw => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
+            .replay => |content| self.emission = .{ .replay = .{ .reader = try self.view.openContent(content) } },
+            .history_memo => self.emission = .{ .history_memo = {} },
+        }
     }
 
     fn advanceEmission(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
@@ -1484,6 +1482,7 @@ pub const Preparation = struct {
                 }
                 replay.reader.close();
             },
+            .history_memo => if (!try self.advanceMemoCopy(bytes_left)) return false,
         }
         // Naming the void field stores only the tag; `.none` lowers to a
         // memset of the whole union, replay validation window included.
@@ -1509,7 +1508,7 @@ pub const Preparation = struct {
         self.closeEmission();
         // The writer closes before a memo file opens.
         self.writer.close();
-        self.phase = .history_store;
+        self.stage = .history_store;
         const span = &(self.span orelse return);
         const next = span.next orelse return;
         const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
@@ -1532,7 +1531,7 @@ pub const Preparation = struct {
             .session_affinity = self.settings.?.session_affinity,
         };
         self.active = false;
-        self.phase = .complete;
+        self.stage = .complete;
         return .{ .prepared = request };
     }
 
@@ -1565,7 +1564,7 @@ pub const Preparation = struct {
         }
         var expected_readers: usize = 0;
         switch (self.emission) {
-            .none, .fixed => {},
+            .none, .fixed, .history_memo => {},
             .json => |*json| {
                 if (json.reader) |*reader| {
                     expected_readers = 1;
@@ -1589,7 +1588,7 @@ pub const Preparation = struct {
             .json => |*json| json.close(),
             .raw => |*raw| raw.reader.close(),
             .replay => |*replay| replay.reader.close(),
-            .none, .fixed => {},
+            .none, .fixed, .history_memo => {},
         }
         self.emission = .{ .none = {} };
     }
@@ -3373,7 +3372,7 @@ test "request preparation cancellation yields inside canonical proposal authenti
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.phase == .history_next and preparation.writer.offset == before) {
+        if (preparation.stage == .history and preparation.pieces.next_index == preparation.pieces.length and preparation.writer.offset == before) {
             pending_turns += 1;
             if (pending_turns == 12) break;
         }
