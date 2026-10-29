@@ -35,7 +35,8 @@ class HandoffTest(unittest.TestCase):
         self.inputs = dict(format=3, tree='same-tree', targets=['test'], system='Linux', machine='x86_64',
                            compiler='b' * 64)
         self.enterContext(patch.object(build_artifact, 'git', return_value='source'))
-        self.enterContext(patch.object(build_artifact, 'identity', side_effect=lambda _: copy.deepcopy(self.inputs)))
+        self.enterContext(patch.object(build_artifact, 'identity',
+                                       side_effect=lambda _, part: dict(copy.deepcopy(self.inputs), part=part)))
         binary = build_artifact.roots()['binaries'] / 'test-tests'
         binary.parent.mkdir(parents=True)
         binary.write_text('#!/bin/sh\necho producer >> "$GATE_LOG"\nexit "$GATE_EXIT"\n')
@@ -81,7 +82,8 @@ else:
         zig.chmod(0o755)
         self.real_run = subprocess.run
         self.enterContext(patch.object(build_artifact.subprocess, 'run', side_effect=self.download_or_run))
-        self.enterContext(patch.object(build_artifact, 'api', side_effect=lambda _: self.metadata))
+        self.enterContext(patch.object(build_artifact, 'api',
+                                       side_effect=lambda path: self.downloads[path.split('/')[-1]][1]))
         self.refresh_download()
 
     def refresh_download(self):
@@ -92,10 +94,11 @@ else:
         self.download = output.getvalue()
         self.metadata = dict(expired=False, workflow_run=dict(id=123),
                              digest='sha256:' + hashlib.sha256(self.download).hexdigest())
+        self.downloads = {'101': (self.download, self.metadata)}
 
     def download_or_run(self, command, **kwargs):
         if command[:2] == ['gh', 'api']:
-            kwargs['stdout'].write(self.download)
+            kwargs['stdout'].write(self.downloads[command[2].split('/')[-2]][0])
             return subprocess.CompletedProcess(command, 0)
         return self.real_run(command, **kwargs)
 
@@ -107,7 +110,7 @@ else:
         return (self.root / 'gates').read_text().splitlines()
 
     def test_matching_identity_executes_the_exact_producer_across_image_rollouts(self):
-        build_artifact.restore('101', ['test'])
+        build_artifact.restore(['101'], ['test'])
         self.assertEqual(self.gates(), ['producer'])
         self.assertFalse((self.root / 'compiled').exists())
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
@@ -126,7 +129,7 @@ else:
                 (self.receipt['inputs'] if scope else self.receipt)[field] = value
                 self.refresh_download()
                 (self.root / 'compiled').unlink(missing_ok=True)
-                build_artifact.restore('101', ['test'])
+                build_artifact.restore(['101'], ['test'])
                 self.assertIn('-Dci-targets=test', (self.root / 'compiled').read_text())
                 self.assertEqual(self.gates(), ['consumer'])
                 self.assertIn('differs from this worker: Compiled', (self.root / 'summary').read_text())
@@ -147,7 +150,7 @@ else:
             with self.subTest(name=name):
                 self.receipt, self.archive = receipt, archive or self.archive
                 self.refresh_download()
-                build_artifact.restore('101', ['test'])
+                build_artifact.restore(['101'], ['test'])
                 self.assertEqual(self.gates(), ['consumer'])
                 self.assertIn('was rejected', (self.root / 'summary').read_text())
         self.assertFalse((self.root.parent / 'escaped').exists())
@@ -155,8 +158,43 @@ else:
                                ('foreign run', dict(self.metadata, workflow_run=dict(id=999))),
                                ('expired', dict(self.metadata, expired=True))]:
             with self.subTest(name=name):
-                self.metadata = metadata
-                build_artifact.restore('101', ['test'])
+                self.downloads['101'] = (self.download, metadata)
+                build_artifact.restore(['101'], ['test'])
+                self.assertEqual(self.gates(), ['consumer'])
+
+    def split_downloads(self):
+        # Two producers: the unit binary alone, and everything else with packages.
+        downloads = {}
+        unit_root = self.root / 'unit-bin'
+        unit_root.mkdir()
+        (build_artifact.roots()['binaries'] / 'test-tests').rename(unit_root / 'test-tests')
+        rest = build_artifact.roots()['binaries'] / 'ci-cpu.json'
+        rest.write_text('{}')
+        (build_artifact.roots()['binaries'] / 'test-logic_tests').write_text('#!/bin/sh\n')
+        (build_artifact.roots()['binaries'] / 'test-logic_tests').chmod(0o755)
+        for artifact, part, binaries in (('201', 'unit', unit_root), ('202', 'rest', None)):
+            build_artifact.package(['test'], self.root / part, binaries, part)
+            self.receipt = json.loads((self.root / part / 'compiled.json').read_text())
+            self.archive = (self.root / part / 'compiled.tar.gz').read_bytes()
+            self.refresh_download()
+            downloads[artifact] = (self.download, self.metadata)
+        self.downloads = downloads
+
+    def test_split_producers_merge_into_one_verified_selection(self):
+        self.split_downloads()
+        build_artifact.restore(['202', '201'], ['test'])
+        self.assertEqual(self.gates(), ['producer'])
+        self.assertFalse((self.root / 'compiled').exists())
+        self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
+        self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+
+    def test_a_missing_or_repeated_part_rebuilds_locally(self):
+        self.split_downloads()
+        for ids in (['202'], ['201'], ['201', '201']):
+            with self.subTest(ids=ids):
+                (self.root / 'compiled').unlink(missing_ok=True)
+                build_artifact.restore(ids, ['test'])
+                self.assertIn('-Dci-part=all', (self.root / 'compiled').read_text())
                 self.assertEqual(self.gates(), ['consumer'])
 
     def test_failed_local_compilation_stops_with_its_exit_and_executes_nothing(self):
@@ -171,7 +209,7 @@ else:
         self.assertFalse((self.root / 'gates').exists())
 
     def test_one_retry_only_when_requested(self):
-        build_artifact.restore('101', ['test'])
+        build_artifact.restore(['101'], ['test'])
         # A retryable shard reports its failure, reruns once and passes.
         (self.root / 'flaky').touch()
         # Capture the retry's ::warning so this job does not annotate a fake failure.

@@ -36,12 +36,12 @@ def roots():
             "packages": Path("zig-pkg").resolve()}
 
 
-def identity(targets):
+def identity(targets, part):
     # Everything the transferred executables depend on that can differ inside
     # one run. Runner image versions and tool listings are logged, not compared:
     # a rollout that keeps these fields still executes the producer's binaries.
     # build.zig rejects a foreign baseline-CPU manifest before any gate runs.
-    return dict(format=3, tree=git("rev-parse", "HEAD^{tree}"), targets=targets,
+    return dict(format=4, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
                 system=platform.system(), machine=platform.machine(),
                 compiler=digest(shutil.which("zig")))
 
@@ -50,24 +50,27 @@ def runner():
     return [os.environ.get("ImageOS"), os.environ.get("ImageVersion")]
 
 
-def build(targets):
+def build(targets, part="all"):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
     # A prior failed build must not supply extra or stale installed binaries.
     if prefix.exists():
         shutil.rmtree(prefix)
-    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets),
+    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part,
                     "--prefix", str(prefix), "--summary", "all"], check=True)
     return prefix / "bin"
 
 
-def package(targets, destination, binaries=None):
+def package(targets, destination, binaries=None, part="all"):
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / "compiled.tar.gz"
-    inputs = identity(targets)
+    inputs = identity(targets, part)
     executables = {}
     sources = roots()
     if binaries is not None:
         sources["binaries"] = binaries
+    if part == "unit":
+        # The rest producer carries the package sources, once.
+        del sources["packages"]
     with tarfile.open(archive, "w:gz", compresslevel=1) as output:
         for label, root in sources.items():
             for directory, children, files in os.walk(root, followlinks=False):
@@ -96,11 +99,12 @@ def package(targets, destination, binaries=None):
           f"{len(executables)} executable files")
 
 
-def unpack(archive, receipt, inputs):
+def unpack(archive, receipt, targets):
     if (receipt["run_id"], receipt["run_attempt"], receipt["source_sha"]) != (
             int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
             git("rev-parse", "HEAD")):
         raise Mismatch("Compiled origin differs: run, attempt or source SHA")
+    inputs = identity(targets, receipt["inputs"].get("part"))
     if receipt["inputs"] != inputs:
         changed = sorted(key for key in receipt["inputs"].keys() | inputs.keys()
                          if receipt["inputs"].get(key) != inputs.get(key))
@@ -108,6 +112,8 @@ def unpack(archive, receipt, inputs):
     if digest(archive) != receipt["archive"]:
         raise ValueError("Compiled archive digest mismatch")
     destinations = roots()
+    present = {str(PurePosixPath(label, path.relative_to(root)))
+               for label, root in destinations.items() for path in root.rglob("*")}
     seen = set()
     with tarfile.open(archive, "r:gz") as source:
         # Validate the entire inventory before writing, and never extract through
@@ -115,20 +121,14 @@ def unpack(archive, receipt, inputs):
         for member in source:
             path = PurePosixPath(member.name)
             if (path.is_absolute() or ".." in path.parts or len(path.parts) < 2
-                    or path.parts[0] not in destinations or member.name in seen):
+                    or path.parts[0] not in destinations or member.name in seen | present):
                 raise ValueError("Unsafe compiled path")
             seen.add(member.name)
             if not member.isfile():
                 raise ValueError("Unsafe compiled file")
         for name in seen:
-            if any(str(parent) in seen for parent in PurePosixPath(name).parents):
+            if any(str(parent) in seen | present for parent in PurePosixPath(name).parents):
                 raise ValueError("Compiled file used as parent")
-        for root in destinations.values():
-            if root.is_symlink():
-                raise ValueError("Compiled root is a symlink")
-            if root.exists():
-                shutil.rmtree(root)
-            root.mkdir(parents=True)
         # A second streaming pass avoids retaining archive payloads in RAM.
     with tarfile.open(archive, "r:gz") as source:
         for member in source:
@@ -138,15 +138,33 @@ def unpack(archive, receipt, inputs):
             with source.extractfile(member) as incoming, destination.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
             destination.chmod(member.mode & 0o777)
+
+
+def clear():
+    for root in roots().values():
+        if root.is_symlink():
+            raise ValueError("Compiled root is a symlink")
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+
+def verify(receipts):
+    parts = sorted(receipt["inputs"].get("part") for receipt in receipts)
+    if parts not in (["all"], ["rest", "unit"]):
+        raise ValueError(f"Compiled parts do not cover the selection: {parts}")
+    expected = {}
+    for receipt in receipts:
+        expected.update(receipt["executables"])
     actual = {}
-    for label, root in destinations.items():
+    for label, root in roots().items():
         for directory, _, files in os.walk(root, followlinks=False):
             for name in files:
                 path = Path(directory) / name
                 if not path.is_symlink() and path.stat().st_mode & 0o111:
                     actual[str(PurePosixPath(label, path.relative_to(root)))] = [
                         digest(path), stat.S_IMODE(path.stat().st_mode)]
-    if not actual or actual != receipt["executables"]:
+    if not actual or actual != expected:
         raise ValueError("Compiled executable identity mismatch")
 
 
@@ -173,7 +191,8 @@ def fetch(artifact_id, targets):
             archive = Path(directory) / "compiled.tar.gz"
             with zipped.open("compiled.tar.gz") as incoming, archive.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
-        unpack(archive, receipt, identity(targets))
+        unpack(archive, receipt, targets)
+    return receipt
 
 
 def rebuild(targets):
@@ -188,9 +207,11 @@ def rebuild(targets):
     shutil.copytree(build(targets), roots()["binaries"])
 
 
-def restore(artifact_id, targets):
+def restore(artifact_ids, targets):
+    artifact_id = ", ".join(artifact_ids)
     try:
-        fetch(artifact_id, targets)
+        clear()
+        verify([fetch(one, targets) for one in artifact_ids])
         message = f"Using verified producer artifact {artifact_id}; compiled only, gate acceptance not yet established"
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
             zipfile.BadZipFile, tarfile.TarError) as error:
@@ -209,14 +230,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("build", "restore"))
     parser.add_argument("targets", help="Complete platform selection, JSON array")
-    parser.add_argument("--artifact-id")
+    parser.add_argument("--part", choices=("all", "unit", "rest"), default="all")
+    parser.add_argument("--artifact-id", action="append", default=[],
+                        help="A producer artifact; an empty value (an unsplit build) is ignored")
     args = parser.parse_args()
     targets = json.loads(args.targets)
     try:
         if args.operation == "build":
-            package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets))
+            package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets, args.part), args.part)
         else:
-            restore(args.artifact_id, targets)
+            restore([one for one in args.artifact_id if one], targets)
     except subprocess.CalledProcessError as error:
         # A failed local fetch or compile stops before gates with its own status.
         print(f"{' '.join(map(str, error.cmd))} failed with exit {error.returncode}; no gates executed.",

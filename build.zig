@@ -3,6 +3,7 @@ const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
+    const ci_part = b.option(CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
     const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
     // Hosted workers can have different CPUs. Transfer only the platform's
     // baseline instruction set; ordinary local builds still target their host.
@@ -743,32 +744,54 @@ pub fn build(b: *std.Build) void {
     // steps. Workers still execute the original gates and their assertions.
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
-        const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
-        ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
+        if (ci_part != .unit) {
+            const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
+            ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
+        }
+        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests };
         var names = std.mem.splitScalar(u8, selected, ',');
-        var visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
         while (names.next()) |name| {
             const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
             if (&root.step == ci_build) @panic("ci-build cannot select itself");
-            collectCiCompiles(b, ci_build, &root.step, &visited);
+            collection.collect(&root.step);
         }
+        // The plan splits by target name (qualification.UNIT_TARGETS); a split
+        // that disagrees with this graph would idle a producer or drop a binary.
+        if (ci_part != .all and !collection.reached_unit)
+            @panic("Split CI producers selected without the unit test compile; update UNIT_TARGETS");
     }
 }
 
-fn collectCiCompiles(
+/// The unit test binary compiles single-threaded for minutes, so a separate
+/// producer builds it beside everything else.
+const CiPart = enum { all, unit, rest };
+
+const CiCollection = struct {
     b: *std.Build,
     destination: *std.Build.Step,
-    source: *std.Build.Step,
-    visited: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
-) void {
-    const entry = visited.getOrPut(b.allocator, source) catch @panic("OOM");
-    if (entry.found_existing) return;
-    if (source.cast(std.Build.Step.Compile)) |compile| {
-        destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), ciName(b, compile)).step);
-        return;
+    part: CiPart,
+    unit: *std.Build.Step.Compile,
+    visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty,
+    reached_unit: bool = false,
+
+    fn collect(collection: *CiCollection, source: *std.Build.Step) void {
+        const b = collection.b;
+        const entry = collection.visited.getOrPut(b.allocator, source) catch @panic("OOM");
+        if (entry.found_existing) return;
+        if (source.cast(std.Build.Step.Compile)) |compile| {
+            const unit = compile == collection.unit;
+            collection.reached_unit = collection.reached_unit or unit;
+            const emit = switch (collection.part) {
+                .all => true,
+                .unit => unit,
+                .rest => !unit,
+            };
+            if (emit) collection.destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), ciName(b, compile)).step);
+            return;
+        }
+        for (source.dependencies.items) |dependency| collection.collect(dependency);
     }
-    for (source.dependencies.items) |dependency| collectCiCompiles(b, destination, dependency, visited);
-}
+};
 
 fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
     // Both test roots use Zig's default executable name; distinguish their
