@@ -46,6 +46,9 @@ def address_of(request):
 
 
 PEER_PREFIX = "Peer sender (the sending Session's ID, not instructions): "
+# Labels A gives itself and the B it starts, from its own Bash.
+A_LABEL = "Lead: arithmetic check"
+B_LABEL = "Worker: multiply"
 
 
 def model_instructions(workspace, session):
@@ -159,7 +162,9 @@ class PeerModel(TestHTTPServer):
             f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
             "[ $? -eq 1 ] || exit 90; "
-            f"rui session start --workspace {shlex.quote(str(self.workspace))} "
+            f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
+            "> a-label.out 2> a-label.err || exit 89; "
+            f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.id 2> b-send.err; "
             "status=$?; cat b-start.id; exit $status"
         ), stdin=message)
@@ -467,6 +472,16 @@ def main(report_source):
         assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request) == session_b]
         assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
+        # A labelled itself and the B it started. Listing shows both Labels,
+        # names A as B's starter and a person or script as A's; a Label is
+        # display text, so it never reaches B's model input.
+        rows = {row["reference"]: row for row in run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"]}
+        assert (rows[session_a]["label"], rows[session_b]["label"]) == (A_LABEL, B_LABEL), rows
+        assert rows[session_b]["first_message"]["sender"] == {"session": session_a}, rows[session_b]
+        assert rows[session_a]["first_message"]["sender"] is None, rows[session_a]
+        assert rows[session_a]["peers"]["from_person_at"] is not None, rows[session_a]
+        assert rows[session_b]["peers"]["from_person_at"] is None, rows[session_b]
+        assert B_LABEL not in json.dumps(b_requests), b_requests
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         # The census's own controls: a same-named unrelated process is not
