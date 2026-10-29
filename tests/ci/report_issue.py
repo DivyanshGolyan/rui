@@ -116,11 +116,13 @@ def case_output(log, records, index):
     return after, log[records[index - 1].end():record.start()]
 
 
-def fixture_cause(name, path, spans):
+def fixture_cause(path, spans):
+    """The fixture's raising statement, signed by its path so check.sh's case
+    name and a direct build.zig run of the same script share one issue."""
     for span in spans:
         if raised := raising_line(list(tracebacks(span)), path):
             code, error = raised
-            return Cause(f"{name}: {code} raised {error.split(':', 1)[0]}", [path], error)
+            return Cause(f"{path}: {code} raised {error.split(':', 1)[0]}", [path], error)
     return None
 
 
@@ -137,19 +139,17 @@ def failure_causes(log, cases):
         after, before = case_output(log, records, index)
         neighbour = cases.get(records[index - 1][1]) if index else None
         spans = (after,) if neighbour == path else (after, before)
-        cause = fixture_cause(name, path, spans) if path else None
+        cause = fixture_cause(path, spans) if path else None
         if cause:
             found.append(cause)
         else:
-            unparsed.append(Cause(f"{name}: exit without a parsed traceback", [path] if path else []))
+            unparsed.append(Cause(f"{path or name}: exit without a parsed traceback", [path] if path else []))
     # A gate build.zig runs directly, without check.sh's records.
     for command in COMMAND.findall(log):
         if "check.sh" in command or not (script := SCRIPT.search(command)):
             continue
         path = script[0]
-        name = Path(path).stem
-        cause = fixture_cause(name, path, (log,))
-        found.append(cause or Cause(f"{name}: exit without a parsed traceback", [path]))
+        found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
     for crash in ZIG_CRASH.finditer(log):
         test, how = crash.groups()
         # The test's stderr follows, indented: the failed expectation, then the panic.

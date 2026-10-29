@@ -87,12 +87,12 @@ class CauseTest(unittest.TestCase):
 
     def test_a_fixture_is_named_by_its_raising_line_not_by_neighbouring_tracebacks(self):
         [cause] = report_issue.failure_causes(HOST_STOP, self.cases)
-        self.assertEqual(cause.signature, 'host-stop: upload.sendall(header[:-2] if phase == "header" '
+        self.assertEqual(cause.signature, 'tests/integration/host_stop_integration.py: upload.sendall(header[:-2] if phase == "header" '
                                           'else header + body[:-3]) raised BrokenPipeError')
         self.assertEqual(cause.paths, ['tests/integration/host_stop_integration.py'])
         self.assertEqual(cause.detail, 'BrokenPipeError: [Errno 32] Broken pipe')
         [cause] = report_issue.failure_causes(BASH, self.cases)
-        self.assertEqual(cause.signature, 'bash: assert process_exists(child_pid) raised AssertionError')
+        self.assertEqual(cause.signature, 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
 
     def test_a_multi_line_raising_statement_keeps_the_whole_statement(self):
         log = logged(
@@ -106,7 +106,7 @@ class CauseTest(unittest.TestCase):
             "bash failed: exit=1 elapsed=2.000s",
         )
         [cause] = report_issue.failure_causes(log, self.cases)
-        self.assertEqual(cause.signature, 'bash: assert states == { "running": 1, }, states raised AssertionError')
+        self.assertEqual(cause.signature, 'tests/integration/bash_integration.py: assert states == { "running": 1, }, states raised AssertionError')
         self.assertEqual(cause.detail, "AssertionError: {'running': 0}")
         # Two assertions sharing a first line keep separate signatures.
         other = log.replace('"running": 1,', '"held": 1,')
@@ -137,13 +137,13 @@ class CauseTest(unittest.TestCase):
                     "AssertionError"]
         log = logged(*case("human-cli", "assert caller_ok"), *case("human-cli-renderer", "assert frame_ok"))
         self.assertEqual([cause.signature for cause in report_issue.failure_causes(log, self.cases)],
-                         ["human-cli: assert caller_ok raised AssertionError",
-                          "human-cli-renderer: assert frame_ok raised AssertionError"])
+                         ["tests/integration/human_cli_integration.py: assert caller_ok raised AssertionError",
+                          "tests/integration/human_cli_integration.py: assert frame_ok raised AssertionError"])
         # A failed case without its own traceback never borrows its same-file neighbour's.
         log = logged(*case("human-cli", "assert caller_ok"), "human-cli-renderer failed: exit=1 elapsed=1s")
         self.assertEqual([cause.signature for cause in report_issue.failure_causes(log, self.cases)],
-                         ["human-cli: assert caller_ok raised AssertionError",
-                          "human-cli-renderer: exit without a parsed traceback"])
+                         ["tests/integration/human_cli_integration.py: assert caller_ok raised AssertionError",
+                          "tests/integration/human_cli_integration.py: exit without a parsed traceback"])
 
     def test_a_standalone_gate_is_named_by_its_script_and_raising_line(self):
         def gate(statement):
@@ -157,9 +157,18 @@ class CauseTest(unittest.TestCase):
         signatures = [report_issue.failure_causes(gate(statement), self.cases)
                       for statement in ("assert stream_reset", "assert goaway_sent")]
         self.assertEqual([[cause.signature for cause in causes] for causes in signatures],
-                         [["codex_h2_integration: assert stream_reset raised AssertionError"],
-                          ["codex_h2_integration: assert goaway_sent raised AssertionError"]])
+                         [["tests/integration/codex_h2_integration.py: assert stream_reset raised AssertionError"],
+                          ["tests/integration/codex_h2_integration.py: assert goaway_sent raised AssertionError"]])
         self.assertEqual(signatures[0][0].paths, ["tests/integration/codex_h2_integration.py"])
+        # The same assertion through check.sh's case record files under the same signature.
+        recorded = logged("Traceback (most recent call last):",
+                          '  File "/w/rui/tests/integration/codex_h2_integration.py", line 50, in main',
+                          "    assert stream_reset",
+                          "AssertionError: mismatch",
+                          "codex-h2 failed: exit=1 elapsed=1s")
+        cases = dict(self.cases, **{"codex-h2": "tests/integration/codex_h2_integration.py"})
+        self.assertEqual([cause.signature for cause in report_issue.failure_causes(recorded, cases)],
+                         [signatures[0][0].signature])
         # A passing step's stderr also ends in "failed command:", without an exit line.
         passing = logged("renderer allocation wide: retained=1",
                          "failed command: python3 /w/rui/tests/integration/codex_h2_integration.py")
@@ -180,7 +189,7 @@ class CauseTest(unittest.TestCase):
 
     def test_a_record_without_a_traceback_still_names_its_fixture(self):
         [cause] = report_issue.failure_causes(logged('host-stop failed: exit=124 elapsed=60.000s'), self.cases)
-        self.assertEqual(cause.signature, 'host-stop: exit without a parsed traceback')
+        self.assertEqual(cause.signature, 'tests/integration/host_stop_integration.py: exit without a parsed traceback')
         self.assertEqual(cause.paths, ['tests/integration/host_stop_integration.py'])
         self.assertEqual(report_issue.failure_causes(logged('all good'), self.cases), [])
 
@@ -229,13 +238,13 @@ class ReportTest(unittest.TestCase):
         fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH})
         self.run_main(fake, '--label', 'stable-red')
         [create] = fake.made('create')
-        self.assertIn('CI red: bash: assert process_exists(child_pid) raised AssertionError', create)
+        self.assertIn('CI red: tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError', create)
         self.assertEqual([create[i + 1] for i, arg in enumerate(create) if arg == '--label'],
                          ['ci-red', 'stable-red'])
         state = report_issue.signature_state(create[create.index('--body') + 1])
         self.assertEqual(state['paths'], ['tests/integration/bash_integration.py'])
 
-        signature = 'bash: assert process_exists(child_pid) raised AssertionError'
+        signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
         fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH},
                           [issue(5, signature, state['paths'], ['Stable qualification'], 'a' * 40)])
         self.run_main(fake)
@@ -249,7 +258,7 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn('--add-label', edit)
 
     def test_a_stable_red_labels_an_issue_another_workflow_filed(self):
-        signature = 'bash: assert process_exists(child_pid) raised AssertionError'
+        signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
         fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH},
                           [issue(5, signature, [], ['Daily macOS qualification'], 'a' * 40, state='CLOSED')])
         self.run_main(fake, '--label', 'stable-red')
@@ -266,7 +275,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("job 'macos / resources' failed; cause not parsed", create[create.index('--title') + 1])
 
     def test_a_recurrence_after_a_claimed_fix_reopens_the_issue(self):
-        signature = 'bash: assert process_exists(child_pid) raised AssertionError'
+        signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
         fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH},
                           [issue(4, signature, [], ['W'], 'a' * 40, state='CLOSED'),
                            issue(6, signature, [], ['W'], 'b' * 40, state='CLOSED')])
@@ -288,7 +297,7 @@ class ReportTest(unittest.TestCase):
         titles = [call[call.index('--title') + 1] for call in fake.made('create')]
         # Both retried batches are filed, however many retries the job made.
         self.assertEqual(len(titles), 2)
-        self.assertIn('bash: assert process_exists', titles[0])
+        self.assertIn('tests/integration/bash_integration.py: assert process_exists', titles[0])
         self.assertIn('read cap defers expiry', titles[1])
         body = fake.made('create')[0]
         self.assertIn('passed only on its automatic retry', body[body.index('--body') + 1])
@@ -309,7 +318,7 @@ class ReportTest(unittest.TestCase):
         fake = FakeGitHub(jobs, {1: BASH, 2: logged('test "$NATIVE_RESULT" = success')})
         self.run_main(fake)
         [create] = fake.made('create')
-        self.assertIn('bash: assert process_exists', create[create.index('--title') + 1])
+        self.assertIn('tests/integration/bash_integration.py: assert process_exists', create[create.index('--title') + 1])
         self.assertNotIn(('api', 'repos/o/r/actions/jobs/2/logs'), fake.calls)
         # Every aggregate step check.yml runs carries the name the reporter skips.
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
