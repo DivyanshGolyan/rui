@@ -535,7 +535,7 @@ pub const HistoricalView = struct {
     active_tool_group_after_ordinal: ?u64 = null,
     active_tool_group_count: u64 = 0,
     outputs_validated: bool = false,
-    output_frontier: ?u64 = null,
+    coverage: ?Coverage = null,
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
@@ -553,6 +553,19 @@ pub const HistoricalView = struct {
     entries_end: usize = 0,
 
     const entry_batch = 16;
+
+    /// The view's selected Compaction Base, decided once by its first
+    /// validation step. Accepted output is validated from the base's
+    /// admission position, and the base covers output before its anchor.
+    pub const Coverage = struct {
+        frontier: u64,
+        anchor: ?u64,
+
+        pub fn coversOutput(self: Coverage, position: u64) bool {
+            const anchor = self.anchor orelse return false;
+            return position < anchor;
+        }
+    };
 
     // One population cursor and one private-item validator, independent of
     // group/call counts. No statement, blob handle or transaction survives a step.
@@ -622,7 +635,13 @@ pub const HistoricalView = struct {
     pub fn contextAnchor(self: *HistoricalView) !?u64 {
         std.debug.assert(self.active);
         while (!try self.validateOutputsStep()) {}
-        return self.store.selectedContextAnchor(self.binding);
+        return self.selectedCoverage().anchor;
+    }
+
+    /// The selected base's coverage. Known once output validation completes.
+    pub fn selectedCoverage(self: *const HistoricalView) Coverage {
+        std.debug.assert(self.active and self.outputs_validated);
+        return self.coverage.?;
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -5362,35 +5381,6 @@ pub const Store = struct {
         };
     }
 
-    fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
-        const access = try self.enter(.none);
-        defer access.release();
-        return access.finish(Ordinary.none, self.selectedContextAnchorLocked(binding));
-    }
-
-    fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
-        const statement = try self.cached("SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
-            "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
-            "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position " ++
-            "ORDER BY base.admission_position DESC LIMIT 1");
-        defer resetCached(statement);
-        try bindU64(statement, 1, binding.operation_id);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return error.CorruptStore;
-        const base_id = c.sqlite3_column_int64(statement, 0);
-        const anchor = try self.cached("SELECT session_position,content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
-        defer resetCached(anchor);
-        try bindI64(anchor, 1, base_id);
-        if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
-        const position = c.sqlite3_column_int64(anchor, 0);
-        const content_id = c.sqlite3_column_int64(anchor, 1);
-        if (position <= 0 or content_id <= 0) return error.CorruptStore;
-        _ = try self.readContentMetadata(content_id);
-        if (c.sqlite3_step(anchor) != c.SQLITE_DONE) return error.CorruptStore;
-        return @intCast(position);
-    }
-
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
         const statement = try self.cached(
             "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
@@ -5476,20 +5466,40 @@ pub const Store = struct {
         return access.finish(Ordinary.none, self.validateHistoricalOutputsStepLocked(view));
     }
 
+    /// The newest compacted base admitted before the view's Operation, and
+    /// the position of its one compaction item, with the view's boundary.
+    fn readHistoricalCoverage(self: *Store, view: *HistoricalView) !HistoricalView.Coverage {
+        const boundary = try self.cached("SELECT current.admission_position,(SELECT base.operation_id " ++
+            "FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 " ++
+            "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1) " ++
+            "FROM model_operation current WHERE current.operation_id=?1");
+        defer resetCached(boundary);
+        try bindU64(boundary, 1, view.binding.operation_id);
+        if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
+        view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
+        if (c.sqlite3_column_type(boundary, 1) == c.SQLITE_NULL) return .{ .frontier = 0, .anchor = null };
+        const base_id = c.sqlite3_column_int64(boundary, 1);
+        const anchor = try self.cached("SELECT base.admission_position,anchor.session_position,anchor.content_id FROM model_operation base " ++
+            "JOIN model_output_item anchor INDEXED BY model_output_compaction_anchor ON anchor.operation_id=base.operation_id AND anchor.item_kind=4 " ++
+            "WHERE base.operation_id=?1 ORDER BY anchor.item_ordinal");
+        defer resetCached(anchor);
+        try bindI64(anchor, 1, base_id);
+        if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
+        const frontier = try readNullableTokens(anchor, 0, true) orelse return error.CorruptStore;
+        const position = c.sqlite3_column_int64(anchor, 1);
+        const content_id = c.sqlite3_column_int64(anchor, 2);
+        if (position <= 0 or content_id <= 0) return error.CorruptStore;
+        _ = try self.readContentMetadata(content_id);
+        if (c.sqlite3_step(anchor) != c.SQLITE_DONE) return error.CorruptStore;
+        return .{ .frontier = frontier, .anchor = @intCast(position) };
+    }
+
     // Select the producing Operation before its items, so even a completely
     // missing output is detected. No statement or lock survives this one step.
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
         if (view.outputs_validated) return true;
-        if (view.output_frontier == null) {
-            const boundary = try self.cached("SELECT current.admission_position,coalesce((SELECT base.admission_position " ++
-                "FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 " ++
-                "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1),0) " ++
-                "FROM model_operation current WHERE current.operation_id=?1");
-            defer resetCached(boundary);
-            try bindU64(boundary, 1, view.binding.operation_id);
-            if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
-            view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
-            view.output_frontier = try readNullableTokens(boundary, 1, true) orelse return error.CorruptStore;
+        if (view.coverage == null) {
+            view.coverage = try self.readHistoricalCoverage(view);
             return false;
         }
         if (view.output_source == 0) {
@@ -5500,7 +5510,7 @@ pub const Store = struct {
                 "ORDER BY source.admission_position,source.operation_id LIMIT 1");
             defer resetCached(source);
             try bindU64(source, 1, view.binding.operation_id);
-            try bindU64(source, 2, view.output_frontier.?);
+            try bindU64(source, 2, view.coverage.?.frontier);
             try bindU64(source, 3, view.output_cursor);
             try bindU64(source, 4, view.output_boundary);
             try bindU64(source, 5, view.output_cursor_id);
