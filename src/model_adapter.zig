@@ -1251,7 +1251,9 @@ pub const Preparation = struct {
                 replay.reader.close();
             },
         }
-        self.emission = .none;
+        // Naming the void field stores only the tag; `.none` lowers to a
+        // memset of the whole union, replay validation window included.
+        self.emission = .{ .none = {} };
         return true;
     }
 
@@ -1336,7 +1338,7 @@ pub const Preparation = struct {
             .replay => |*replay| replay.reader.close(),
             .none, .fixed => {},
         }
-        self.emission = .none;
+        self.emission = .{ .none = {} };
     }
 };
 
