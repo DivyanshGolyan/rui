@@ -392,7 +392,7 @@ def preserve_failure_metadata(path, collect):
 
 # The Store format fixtures expect, stated independently of src/store.zig so a
 # format change must update its fixtures deliberately.
-STORE_SCHEMA = 37
+STORE_SCHEMA = 38
 
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and

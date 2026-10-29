@@ -699,6 +699,7 @@ def check_schema(database_path):
             "selected_turn_id",
             "position",
             "admission_cutoff",
+            "stopped_at",
         ]
         assert interruption_columns == [
             "command_key",
