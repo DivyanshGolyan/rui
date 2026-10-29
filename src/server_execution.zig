@@ -1912,6 +1912,7 @@ fn shutdownExecution(
             finishCustodyNow(host, slot);
         },
     };
+    pause(host, .shutdown_signalled);
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {

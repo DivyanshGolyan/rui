@@ -1167,6 +1167,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         null;
     const transition_gate_path = parsed.get("test-transition-gate-path");
     hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
+    hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
     hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
     const control_gate_keys = parsed.get("test-control-gate-keys");
     const control_gate_path = parsed.get("test-control-gate-path");

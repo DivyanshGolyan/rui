@@ -107,6 +107,8 @@ pub const Hooks = struct {
         model_result: store_module.AttemptBinding,
         preparation_advanced,
         bash_exit_observed,
+        /// Shutdown signalled every effect; Bash grace has not been serviced.
+        shutdown_signalled,
     };
 
     pub const Hold = struct {
@@ -797,7 +799,7 @@ pub fn pause(host: *Host, point: Hooks.Pause) void {
         .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
         .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
         .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-        .preparation_advanced, .bash_exit_observed => {},
+        .preparation_advanced, .bash_exit_observed, .shutdown_signalled => {},
     }
     if (hold.gate_path) |path| waitAtTestGate(host, path);
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};

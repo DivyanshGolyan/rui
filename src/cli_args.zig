@@ -172,6 +172,7 @@ const serve_test = &[_]Option{
     hiddenValue("test-transition"),
     hiddenValue("test-transition-gate-path"),
     hiddenValue("test-bash-observed-exit-gate-path"),
+    hiddenValue("test-shutdown-signalled-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),
     hiddenValue("test-control-gate-keys"),
     hiddenValue("test-control-gate-path"),
