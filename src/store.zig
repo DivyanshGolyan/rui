@@ -1332,7 +1332,8 @@ pub const SqliteDiagnostic = struct {
 };
 
 /// How a Turn ended. `turn.outcome_code` saves `code()`; a completed Turn
-/// also saves its answer's content.
+/// also saves its answer's content. Readers `decode` the saved pair once
+/// and switch on the result, so a new outcome is handled at every reader.
 const TurnOutcome = union(enum) {
     completed: i64,
     cancelled,
@@ -1341,13 +1342,35 @@ const TurnOutcome = union(enum) {
     /// A terminal model failure, saved under its own failure code.
     failed: []const u8,
 
-    fn code(outcome: TurnOutcome) []const u8 {
-        return switch (outcome) {
+    const Tag = std.meta.Tag(TurnOutcome);
+
+    /// The saved code of every outcome but a failure, which saves its own.
+    fn fixedCode(tag: Tag) ?[]const u8 {
+        return switch (tag) {
             .completed => "completed",
             .cancelled => "cancelled",
             .retry_exhausted => "retry_exhausted",
             .resource_exceeded => "ResourceExceeded",
-            .failed => |failure| failure,
+            .failed => null,
+        };
+    }
+
+    fn code(outcome: TurnOutcome) []const u8 {
+        return fixedCode(outcome) orelse outcome.failed;
+    }
+
+    /// The inverse of `code()` with the content `closeTurn` saved beside
+    /// it. A `failed` result borrows `saved`.
+    fn decode(saved: []const u8, content_id: ?i64) error{CorruptStore}!TurnOutcome {
+        if (saved.len == 0) return error.CorruptStore;
+        const tag: Tag = for (std.enums.values(Tag)) |candidate| {
+            if (fixedCode(candidate)) |fixed| if (std.mem.eql(u8, fixed, saved)) break candidate;
+        } else .failed;
+        if ((tag == .completed) != (content_id != null)) return error.CorruptStore;
+        return switch (tag) {
+            .completed => .{ .completed = content_id.? },
+            .failed => .{ .failed = saved },
+            inline .cancelled, .retry_exhausted, .resource_exceeded => |fixed| fixed,
         };
     }
 };
@@ -2575,18 +2598,17 @@ pub const Store = struct {
             .applied => |applied| blk: {
                 const outcome = applied.outcome_code orelse
                     break :blk .{ .admission_id = projection.admission_id, .state = .{ .processing = applied.binding } };
-                if (outcome.eql("completed")) {
-                    const answer = try self.readContentMetadata(applied.outcome_content_id orelse return error.CorruptStore);
-                    break :blk .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
-                        .binding = applied.binding,
-                        .answer = .{ .length = answer.length, .digest = answer.digest },
-                    } } };
-                }
-                if (applied.outcome_content_id != null) return error.CorruptStore;
-                break :blk if (outcome.eql("cancelled"))
-                    .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } }
-                else
-                    .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } };
+                break :blk switch (try TurnOutcome.decode(outcome.slice(), applied.outcome_content_id)) {
+                    .completed => |answer_id| completed: {
+                        const answer = try self.readContentMetadata(answer_id);
+                        break :completed .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
+                            .binding = applied.binding,
+                            .answer = .{ .length = answer.length, .digest = answer.digest },
+                        } } };
+                    },
+                    .cancelled => .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } },
+                    .retry_exhausted, .resource_exceeded, .failed => .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } },
+                };
             },
         };
     }
@@ -2664,10 +2686,13 @@ pub const Store = struct {
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return error.ResultNotReady;
         var outcome: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 0, &outcome);
-        if (!outcome.eql("completed")) return error.ResultFailed;
-        const content_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-        const metadata = try self.readContentMetadata(content_id);
-        return .{ .length = metadata.length, .digest = metadata.digest };
+        switch (try TurnOutcome.decode(outcome.slice(), try readNullablePositiveI64(statement, 1))) {
+            .completed => |content_id| {
+                const metadata = try self.readContentMetadata(content_id);
+                return .{ .length = metadata.length, .digest = metadata.digest };
+            },
+            .cancelled, .retry_exhausted, .resource_exceeded, .failed => return error.ResultFailed,
+        }
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8) !SessionObservation {
@@ -3202,8 +3227,7 @@ pub const Store = struct {
             },
             6 => {
                 const select = try self.cached("SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
-                    "AND o.resolution_code IS NOT NULL AND ((t.outcome_code='completed' AND t.outcome_content_id=o.resolution_content_id) OR " ++
-                    "(t.outcome_code!='completed' AND t.outcome_content_id IS NULL)) FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
+                    "AND o.resolution_code IS NOT NULL,o.resolution_content_id FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
                 defer resetCached(select);
                 try bindText(select, 1, session);
                 try bindU64(select, 2, position);
@@ -3211,6 +3235,11 @@ pub const Store = struct {
                 var outcome: protocol.ActivityItem.Outcome = .{ .turn = @intCast(try readNullablePositiveI64(select, 0) orelse return error.CorruptStore), .operation = @intCast(try readNullablePositiveI64(select, 1) orelse return error.CorruptStore), .code = .{}, .content = null };
                 try readText(select, 2, &outcome.code);
                 result.content_id = try readNullablePositiveI64(select, 3);
+                switch (try TurnOutcome.decode(outcome.code.slice(), result.content_id)) {
+                    // A completed Turn answers with its causing Operation's Resolution.
+                    .completed => |content_id| if (try readNullablePositiveI64(select, 5) != content_id) return error.CorruptStore,
+                    .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
+                }
                 if (result.content_id) |id| {
                     const content = try self.readPublicContentMetadata(id);
                     outcome.content = .{ .length = content.length, .digest = content.digest };
@@ -3679,15 +3708,14 @@ pub const Store = struct {
         }
         var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 2, &code);
-        page.status = if (pending_messages != 0)
-            .runnable
-        else if (code.eql("completed"))
-            .completed
-        else if (code.eql("cancelled"))
-            .cancelled
-        else
-            .failed;
-        return .{ .page = page, .outcome = .{ .code = code, .content_id = try readNullablePositiveI64(statement, 3) } };
+        const content_id = try readNullablePositiveI64(statement, 3);
+        const ended: protocol.PageWork.Status = switch (try TurnOutcome.decode(code.slice(), content_id)) {
+            .completed => .completed,
+            .cancelled => .cancelled,
+            .retry_exhausted, .resource_exceeded, .failed => .failed,
+        };
+        page.status = if (pending_messages != 0) .runnable else ended;
+        return .{ .page = page, .outcome = .{ .code = code, .content_id = content_id } };
     }
 
     fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
@@ -7189,11 +7217,14 @@ pub const Store = struct {
         try readText(select, 0, &session);
         resetCached(select);
         const position = try self.claimSessionPosition(session.slice());
+        const content_id: ?i64 = if (outcome == .completed) outcome.completed else null;
+        // A failure code spelling a fixed outcome would read back as that outcome.
+        std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
         const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4 WHERE turn_id=?1 AND outcome_code IS NULL");
         defer resetCached(update);
         try bindU64(update, 1, turn_id);
         try bindText(update, 2, outcome.code());
-        try bindNullableI64(update, 3, if (outcome == .completed) outcome.completed else null);
+        try bindNullableI64(update, 3, content_id);
         try bindU64(update, 4, position);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
@@ -18164,4 +18195,27 @@ test "compaction purpose admission fences a missing latest Turn Operation" {
     try submitTestMessage(&storage, &tmp, "later", "later", session.slice(), "new input");
     try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
     try std.testing.expect(storage.isFenced());
+}
+
+test "saved Turn outcomes read back as the outcome that closed the Turn" {
+    const Saved = struct { code: []const u8, content_id: ?i64, tag: TurnOutcome.Tag };
+    // The on-disk codes are the Store format; readers branch on the tag.
+    const saved = [_]Saved{
+        .{ .code = "completed", .content_id = 7, .tag = .completed },
+        .{ .code = "cancelled", .content_id = null, .tag = .cancelled },
+        .{ .code = "retry_exhausted", .content_id = null, .tag = .retry_exhausted },
+        .{ .code = "ResourceExceeded", .content_id = null, .tag = .resource_exceeded },
+        .{ .code = "provider_http_401", .content_id = null, .tag = .failed },
+    };
+    for (saved) |row| {
+        const outcome = try TurnOutcome.decode(row.code, row.content_id);
+        try std.testing.expectEqual(row.tag, std.meta.activeTag(outcome));
+        try std.testing.expectEqualStrings(row.code, outcome.code());
+    }
+    try std.testing.expectEqual(@as(i64, 7), (try TurnOutcome.decode("completed", 7)).completed);
+    // Only a completed Turn saves content, and every outcome saves a code.
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("completed", null));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("cancelled", 7));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("provider_http_401", 7));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("", null));
 }
