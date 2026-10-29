@@ -236,10 +236,10 @@ const Intake = struct {
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
                 else => @errorName(err),
             };
-            const kind = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => "busy",
-                error.UnsupportedControl => "unsupported",
-                else => "invocation_error",
+            const kind: protocol.ErrorType = switch (err) {
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => .busy,
+                error.UnsupportedControl => .unsupported,
+                else => .invocation_error,
             };
             respondStatic(self.host.io, reply, status, kind, code);
             // Detect a disconnected predecessor before classifying another
@@ -1135,15 +1135,15 @@ const Header = struct {
 
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
-        return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
+        return respondStatic(host.io, fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
         if (!std.mem.eql(u8, &instance, &host.instance)) {
-            return respondStatic(host.io, fd, 409, "invocation_error", "host_instance_changed");
+            return respondStatic(host.io, fd, 409, .invocation_error, "host_instance_changed");
         }
     }
     if (header.route == .host_stop and header.instance == null) {
-        return respondStatic(host.io, fd, 400, "invocation_error", "host_instance_required");
+        return respondStatic(host.io, fd, 400, .invocation_error, "host_instance_required");
     }
     if (header.drop == .before_admission) return;
     if (header.drop == .during_admission and socket_os.shutdown(socket, std.c.SHUT.RDWR) == .failed) {
@@ -1152,19 +1152,9 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
 
     switch (request.*) {
         .host_info => {
-            if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, "host_unavailable", "dispatch_fenced");
+            if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, .host_unavailable, "dispatch_fenced");
             var response: protocol.ResponseBuffer = .{};
-            var digits: [20]u8 = undefined;
-            const limit_text = if (host.descriptor_soft_limit) |limit| try std.fmt.bufPrint(&digits, "{d}", .{limit}) else "unlimited";
-            try response.appendShape(protocol.host_info_reply, .{
-                host.lease.paths.store.slice(),
-                host.instance,
-                host.custody.records.len,
-                host.intake_capacity,
-                limit_text,
-                host.provider_endpoint != null,
-                host.provider_endpoint != null and host.authentication != null,
-            });
+            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
             try fd.setJson(200, response.slice());
         },
         .host_stop => {
@@ -1275,7 +1265,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
                 fenceDispatch(host, "command observation", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};
             try renderCommandObservation(&response, command.key.slice(), observation);
@@ -1283,17 +1273,17 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .read_result => |command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
-                error.ResultNotFound => return respondStatic(host.io, fd, 409, "result_unavailable", "result_not_found"),
-                error.ResultNotReady => return respondStatic(host.io, fd, 409, "result_unavailable", "result_not_ready"),
-                error.ResultFailed => return respondStatic(host.io, fd, 409, "result_unavailable", "result_failed"),
+                error.ResultNotFound => return respondStatic(host.io, fd, 409, .result_unavailable, "result_not_found"),
+                error.ResultNotReady => return respondStatic(host.io, fd, 409, .result_unavailable, "result_not_ready"),
+                error.ResultFailed => return respondStatic(host.io, fd, 409, .result_unavailable, "result_failed"),
                 else => {
                     fenceDispatch(host, "result observation", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             const reader = host.store.openContent(reference) catch |err| {
                 fenceDispatch(host, "result content read", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
             };
             try fd.setContent(reader, 0, true, false);
         },
@@ -1309,13 +1299,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 }) catch |err| {
                     if (err == error.ReportScratchCleanupFailed) {
                         fenceDispatch(host, "failed response export scratch cleanup", err);
-                        return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                        return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
                     }
                     if (host.store.isFenced()) {
                         fenceDispatch(host, "failed response identity", err);
-                        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                     }
-                    return respondStatic(host.io, fd, 409, "failed_response_unavailable", @errorName(err));
+                    return respondStatic(host.io, fd, 409, .failed_response_unavailable, @errorName(err));
                 };
                 try fd.setReport(capture);
                 try fd.prepareHeader(200, "application/octet-stream", capture.length);
@@ -1331,17 +1321,17 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "session report scratch cleanup", err);
-                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                    return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "session inspection", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 }
                 return respondStatic(
                     host.io,
                     fd,
                     if (err == error.ReportScratchExhausted) 507 else 500,
-                    "observation_error",
+                    .observation_error,
                     @errorName(err),
                 );
             };
@@ -1360,22 +1350,22 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "Session list scratch cleanup", err);
-                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                    return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "Session list", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 }
-                return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, "observation_error", @errorName(err));
+                return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
             };
             try fd.setReport(page);
         },
         .conversation_page => |command| {
             const page = host.store.publicConversationPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "conversation page", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
@@ -1385,10 +1375,10 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .conversation_content => |command| try prepareConversationContent(host, fd, command),
         .proposal_page => |command| {
             const page = host.store.proposalPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal page", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             var response: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{};
@@ -1397,30 +1387,30 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .proposal_field => |command| {
             const reader = host.store.openProposalField(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
+                error.ContentNotFound => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             try deliverPublicContent(host, fd, reader, 0, true);
         },
         .activity_page => |command| {
             const page = host.store.activityPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity page", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             try prepareActivityPage(host.io, fd, &page);
         },
         .activity_content => |command| {
             const reader = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                error.ContentNotFound => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             try deliverPublicContent(host, fd, reader, 0, true);
@@ -1448,10 +1438,10 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: protocol.ConversationContent) !void {
     const reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
+        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
-            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
     return deliverPublicContent(host, fd, reader, command.start, command.stream);
@@ -1461,7 +1451,7 @@ fn deliverPublicContent(host: *Host, fd: *Reply, reader: store_module.ContentRea
     fd.setContent(reader, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
         fd.deinit();
-        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
     };
 }
 
@@ -1472,15 +1462,15 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
     else
         host.store.actionArguments(command.session.slice(), command.action_id);
     const resolved = reference catch |err| switch (err) {
-        error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
+        error.ActionNotFound => return respondStatic(host.io, fd, 404, .action_unavailable, "action_not_found"),
         else => {
             fenceDispatch(host, phase, err);
-            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
     const reader = host.store.openContent(resolved) catch |err| {
         fenceDispatch(host, phase, err);
-        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
     };
     fd.setContent(reader, 0, true, false) catch {};
 }
@@ -1607,7 +1597,7 @@ fn renderConfigureReply(
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code }),
         .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
-        .infrastructure_failure => renderStatic(response, "invocation_error", "canonical_store_failure"),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
@@ -1765,7 +1755,7 @@ fn renderMessageReply(
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code, value.content.length, value.content.digest }),
         .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
-        .infrastructure_failure => renderStatic(response, "invocation_error", "canonical_store_failure"),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
@@ -1849,7 +1839,7 @@ fn renderSessionStopReply(
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.selection.selected_turn_id, value.selection.admission_cutoff, value.completion }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
         .conflict => response.appendShape(shapes.conflict, .{session}),
-        .infrastructure_failure => renderStatic(response, "invocation_error", "canonical_store_failure"),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
@@ -1864,7 +1854,7 @@ fn renderModelInterruptionReply(
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.turn_id, command.operation_id }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.turn_id, command.operation_id, value.code }),
         .conflict => response.appendShape(shapes.conflict, .{ session, command.turn_id, command.operation_id }),
-        .infrastructure_failure => renderStatic(response, "invocation_error", "canonical_store_failure"),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
@@ -1879,7 +1869,7 @@ fn renderPermissionDecisionReply(
         .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, command.action_id, command.decision }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, command.action_id, command.decision, value.code }),
         .conflict => response.appendShape(shapes.conflict, .{ session, command.action_id, command.decision }),
-        .infrastructure_failure => renderStatic(response, "invocation_error", "canonical_store_failure"),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
 }
 
@@ -1924,11 +1914,27 @@ fn renderCommandObservation(
     try response.appendShape(shapes.tail, .{});
 }
 
-fn renderStatic(response: *protocol.ResponseBuffer, kind: []const u8, code: []const u8) !void {
+fn renderHostInfo(
+    response: *protocol.ResponseBuffer,
+    store: []const u8,
+    instance: protocol.InstanceId,
+    active_capacity: u64,
+    intake_capacity: u64,
+    descriptor_soft_limit: ?u64,
+    model: bool,
+    managed_authentication: bool,
+) !void {
+    var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
+    const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, model, managed_authentication });
+    std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+}
+
+fn renderStatic(response: *protocol.ResponseBuffer, kind: protocol.ErrorType, code: []const u8) !void {
     try response.appendShape(protocol.error_reply, .{ kind, code });
 }
 
-fn respondStatic(io: std.Io, reply: *Reply, status: u16, kind: []const u8, code: []const u8) void {
+fn respondStatic(io: std.Io, reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
     var response: protocol.ResponseBuffer = .{};
     renderStatic(&response, kind, code) catch return;
     deliverResponse(io, reply, status, response.slice());
@@ -2577,7 +2583,7 @@ test "message observation renders every closed queue state without fabricated re
         accepted_prefix ++ ",\"queue\":{\"status\":\"completed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}}}",
     );
 
-    var code: protocol.Bounded(96) = .{};
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("provider_http_422");
     observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code } };
     try Expect.rendered(
@@ -2774,6 +2780,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_code = @as([protocol.max_code_bytes]u8, @splat(1));
+    const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const content: store_module.ContentReference = .{ .length = max, .digest = @splat(0xff) };
     const binding: store_module.AttemptBinding = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max };
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -2848,8 +2855,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     }));
 
     var failure: protocol.ResponseBuffer = .{};
-    try renderStatic(&failure, &(@as([32]u8, @splat(1))), &escaped_code);
+    try renderStatic(&failure, Worst.tag(protocol.ErrorType), &escaped_code);
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
+
+    var host_info: protocol.ResponseBuffer = .{};
+    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, false, false);
+    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
     var configured = store_module.CommandObservation{ .status = .accepted, .kind = .configure, .code = code, .revision = max, .created = false };

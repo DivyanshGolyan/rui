@@ -203,7 +203,7 @@ pub const MessageReply = union(enum) {
 
 const StoredAnswer = struct {
     accepted: bool,
-    code: protocol.Bounded(96) = .{},
+    code: protocol.Bounded(protocol.max_code_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
 };
@@ -1139,7 +1139,7 @@ const MessageProjection = struct {
         excluded: protocol.Bounded(128),
         applied: struct {
             binding: AttemptBinding,
-            outcome_code: ?protocol.Bounded(96),
+            outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
             outcome_content_id: ?i64,
         },
     },
@@ -2538,7 +2538,7 @@ pub const Store = struct {
         return switch (projection.state) {
             .pending => .{ .admission_id = projection.admission_id, .state = .queued },
             .excluded => blk: {
-                var code: protocol.Bounded(96) = .{};
+                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
                 try code.set("session_stopped");
                 break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
             },
@@ -2577,14 +2577,14 @@ pub const Store = struct {
         if (turn_id <= 0) return error.CorruptStore;
         if (state == .processing and state.processing.turn_id != @as(u64, @intCast(turn_id))) return error.CorruptStore;
         const resolution = if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL) null else blk: {
-            var code: protocol.Bounded(96) = .{};
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
             try readText(statement, 1, &code);
             break :blk code;
         };
         return self.activeMessageProgress(session_ref, resolution);
     }
 
-    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(96)) !MessageProgress {
+    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(protocol.max_code_bytes)) !MessageProgress {
         const statement = try self.cached("SELECT count(*),count(*) FILTER (WHERE action.permission_state=0)," ++
             "min(CASE WHEN action.permission_state=0 THEN action.action_id END) " ++
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
@@ -2632,7 +2632,7 @@ pub const Store = struct {
             return error.ResultFailed;
         }
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return error.ResultNotReady;
-        var outcome: protocol.Bounded(96) = .{};
+        var outcome: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 0, &outcome);
         if (!outcome.eql("completed")) return error.ResultFailed;
         const content_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
@@ -2960,7 +2960,7 @@ pub const Store = struct {
 
     fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
         const presentation = try self.toolPresentationLocked(operation, ordinal, publication_position);
-        var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+        var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         try presentation.writeJson(&writer);
         try capture.append(",\"presentation\":");
@@ -3618,7 +3618,7 @@ pub const Store = struct {
     /// activity page carries it from the same read as its items.
     fn readWorkLocked(self: *Store, session_ref: []const u8, pending_messages: u64) !struct {
         page: protocol.PageWork,
-        outcome: ?struct { code: protocol.Bounded(96), content_id: ?i64 } = null,
+        outcome: ?struct { code: protocol.Bounded(protocol.max_code_bytes), content_id: ?i64 } = null,
     } {
         const statement = try self.cached(
             "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.resolution_code " ++
@@ -3636,7 +3636,7 @@ pub const Store = struct {
         var page: protocol.PageWork = .{ .turn = @intCast(turn_id), .operation = @intCast(operation_id) };
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
             const resolution = if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) null else blk: {
-                var code: protocol.Bounded(96) = .{};
+                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
                 try readText(statement, 4, &code);
                 break :blk code;
             };
@@ -3647,7 +3647,7 @@ pub const Store = struct {
             page.first_action = progress.action_id;
             return .{ .page = page };
         }
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 2, &code);
         page.status = if (pending_messages != 0)
             .runnable
@@ -3706,7 +3706,7 @@ pub const Store = struct {
             const id = c.sqlite3_column_int64(statement, 0);
             if (id <= 0) return error.CorruptStore;
             var key: protocol.Bounded(protocol.max_key_bytes) = .{};
-            var code: protocol.Bounded(96) = .{};
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
             try readText(statement, 1, &key);
             try readText(statement, 2, &code);
             try capture.appendFmt("{{\"turn\":\"{d}\",\"message\":", .{id});
@@ -4879,7 +4879,7 @@ pub const Store = struct {
         if (result == c.SQLITE_DONE) return .assistant_response;
         if (result != c.SQLITE_ROW) return error.CorruptStore;
         _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
-        var resolution: protocol.Bounded(96) = .{};
+        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(last, 1, &resolution);
         const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
         var facts: turn_policy.CompactionFacts = .{
@@ -6753,7 +6753,7 @@ pub const Store = struct {
         target: protocol.Bounded(protocol.max_session_bytes),
         digest: [32]u8,
         accepted: bool,
-        code: protocol.Bounded(96),
+        code: protocol.Bounded(protocol.max_code_bytes),
         revision: u64,
         created: bool,
         primary_content_id: ?i64,
@@ -6809,7 +6809,7 @@ pub const Store = struct {
         const digest = try readDigest(statement, 2);
         const accepted_value = c.sqlite3_column_int(statement, 3);
         if (accepted_value != 0 and accepted_value != 1) return error.CorruptStore;
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 4, &code);
         const revision_value = c.sqlite3_column_int64(statement, 5);
         if (revision_value < 0) return error.CorruptStore;
@@ -7946,9 +7946,9 @@ fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const
     if (excluding_stop != null) return error.CorruptStore;
     const operation_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
     const attempt_ordinal = try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore;
-    var outcome_code: ?protocol.Bounded(96) = null;
+    var outcome_code: ?protocol.Bounded(protocol.max_code_bytes) = null;
     if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) {
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 7, &code);
         if (code.len == 0) return error.CorruptStore;
         outcome_code = code;
@@ -15565,7 +15565,7 @@ test "continued accepted output keeps model immutable and public projection read
         defer _ = c.sqlite3_finalize(resolution);
         try bindU64(resolution, 1, binding.operation_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(resolution));
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(resolution, 0, &code);
         try std.testing.expectEqualStrings("answer", code.slice());
     }
@@ -15813,7 +15813,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
         var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{} } };
         try failure.correlated.request_id.set(request_id);
         try storage.settleModelAttemptFailure(binding, failure, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
-        var resolution: protocol.Bounded(96) = .{};
+        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
         var recorded: protocol.Bounded(256) = .{};
         {
             const statement = try prepare(storage.database, "SELECT coalesce(resolution_code,''),coalesce(request_id,'') FROM model_operation WHERE operation_id=?1");
@@ -15977,7 +15977,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 0));
         try std.testing.expectEqual(std.math.maxInt(i64), c.sqlite3_column_int64(statement, 1));
-        var failure: protocol.Bounded(96) = .{};
+        var failure: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 2, &failure);
         try std.testing.expectEqualStrings("provider_temporary_http_429", failure.slice());
         try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 3));
@@ -16045,10 +16045,10 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(i64, 4), c.sqlite3_column_int64(statement, 0));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 1));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 2));
-    var last_failure: protocol.Bounded(96) = .{};
+    var last_failure: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(statement, 3, &last_failure);
     try std.testing.expectEqualStrings("provider_transport_failure", last_failure.slice());
-    var resolution: protocol.Bounded(96) = .{};
+    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(statement, 4, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
     try expectDenseSessionPositions(&storage, created_session_0.slice());
@@ -16640,7 +16640,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     defer _ = c.sqlite3_finalize(outcomes);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
     try std.testing.expectEqual(@as(i64, 6100), c.sqlite3_column_int64(outcomes, 0));
-    var resolution: protocol.Bounded(96) = .{};
+    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(outcomes, 1, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));

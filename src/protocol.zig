@@ -11,6 +11,7 @@ pub const max_session_bytes = 128;
 // within its compiled 512-byte pathname limit.
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
+pub const max_sender_handle_bytes = 32;
 pub const max_model_bytes = model_capability.max_model_bytes;
 // Resolution, rejection and failure codes.
 pub const max_code_bytes = 96;
@@ -169,7 +170,7 @@ pub const MessageCommand = struct {
     session: Bounded(max_session_bytes) = .{},
     // The full sending address; null when a human or script sends.
     sender: ?Address = null,
-    sender_handle: ?Bounded(32) = null,
+    sender_handle: ?Bounded(max_sender_handle_bytes) = null,
     text: ContentField = .{},
     // Non-null means create a fresh Session and admit this first Message in
     // one transaction. The requested Session must then be empty. Initial
@@ -466,8 +467,6 @@ pub const ToolPresentation = struct {
     }
 };
 
-pub const max_tool_presentation_json_bytes = ToolPresentation.max_json_bytes;
-
 /// A peer Session named on a Message, in the same Store.
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
@@ -479,8 +478,6 @@ pub const Peer = struct {
         try writeShape(out, json_shape, .{self.session.slice()});
     }
 };
-
-pub const max_peer_json_bytes = Peer.max_json_bytes;
 
 pub const ActivityItem = struct {
     position: u64,
@@ -506,33 +503,41 @@ pub const ActivityItem = struct {
     pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
     pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(max_code_bytes) };
 
-    /// Holes: position, ordinal; then the value's, then `json_end`.
-    pub fn jsonHead(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
+    /// Holes: position, ordinal; then the value's shape, then `tail`.
+    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
         return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
     }
-    pub const json_end = .{"}}"};
-    /// Each value kind's JSON, named by its tag. Holes follow field order.
+    pub const tail = .{"}}"};
+    /// Each value kind's JSON, named by its tag.
     pub const value_shapes = struct {
+        /// Holes: admission, key, turn, state, admitted at, sender, content.
         const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
         pub const admission = message;
         pub const user = message;
+        /// Hole: content.
         pub const assistant = .{Hole{ .json = Content }};
+        /// Holes: operation, turn, call ordinal, Action, rejection, the four field contents.
         pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
+        /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+        /// Holes: turn, operation, code, content.
         pub const outcome = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
+        /// Holes: admission, admitted at, target, content.
         pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = Peer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     };
     pub const max_json_bytes = blk: {
         var bytes = 0;
-        for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(jsonHead(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
-        break :blk bytes + shapeBytes(json_end);
+        for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
+        break :blk bytes + shapeBytes(tail);
     };
 
     pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
         switch (self.value) {
-            inline else => |_, kind| try writeShape(out, jsonHead(kind), .{ self.position, self.ordinal }),
+            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal }),
         }
         switch (self.value) {
             inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
@@ -552,7 +557,7 @@ pub const ActivityItem = struct {
             .outcome => |outcome| try writeShape(out, value_shapes.outcome, .{ outcome.turn, outcome.operation, outcome.code.slice(), outcome.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
-        try writeShape(out, json_end, .{});
+        try writeShape(out, tail, .{});
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
@@ -564,19 +569,19 @@ pub const CallActivity = struct {
     total: u64 = 0,
 
     /// Hole: total.
-    pub const json_head = .{ "{\"total\":\"", Hole.decimal, "\",\"entries\":[" };
+    pub const head = .{ "{\"total\":\"", Hole.decimal, "\",\"entries\":[" };
     /// Holes: operation, ordinal, presentation.
     pub const entry_shape = .{ "{\"operation\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
-    pub const json_end = .{"]}"};
-    pub const max_json_bytes = shapeBytes(json_head) + jsonListBytes(@typeInfo(@FieldType(CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(json_end);
+    pub const tail = .{"]}"};
+    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(tail);
 
     pub fn writeJson(self: *const CallActivity, out: *std.Io.Writer) !void {
-        try writeShape(out, json_head, .{self.total});
+        try writeShape(out, head, .{self.total});
         for (self.entries[0..self.count], 0..) |entry, index| {
             if (index != 0) try out.writeByte(',');
             try writeShape(out, entry_shape, .{ entry.operation, entry.ordinal, entry.presentation });
         }
-        try writeShape(out, json_end, .{});
+        try writeShape(out, tail, .{});
     }
 };
 
@@ -609,19 +614,19 @@ pub const ActivityFacts = struct {
     call_activity: CallActivity = .{},
     work: PageWork = .{},
 
-    /// Holes: end, direction; then the items, then `json_end`.
-    pub const json_head = .{ "{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
+    /// Holes: end, direction; then the items, then `tail`.
+    pub const head = .{ "{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
     /// Holes: more, call activity, work.
-    pub const json_end = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
-    pub const max_json_bytes = shapeBytes(json_head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(json_end);
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
-        try writeShape(out, json_head, .{ self.end, self.direction });
+        try writeShape(out, head, .{ self.end, self.direction });
         for (self.items[0..self.count], 0..) |*item, index| {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, json_end, .{ self.more, &self.call_activity, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.work });
     }
 };
 
@@ -1848,7 +1853,7 @@ pub const Hole = union(enum) {
     /// A `?T` for this type `T`, as `T` would render it or `null`.
     optional_json: type,
 
-    fn maxBytes(comptime hole: Hole) usize {
+    pub fn maxBytes(comptime hole: Hole) usize {
         return switch (hole) {
             .boolean => "false".len,
             .decimal => std.fmt.count("{d}", .{std.math.maxInt(u64)}),
@@ -1982,6 +1987,25 @@ pub const proposal_field_request = .{ "{\"version\":\"1\",\"kind\":\"proposal_fi
 pub const activity_page_request = .{ "{\"version\":\"1\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"1\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+/// Configure and Message carry content of unbounded size, so only their
+/// metadata has a shape. The variable parts are written between these.
+pub const configure_request = struct {
+    /// Holes: Store, key, Session. The configuration object follows.
+    pub const head = .{ "{\"version\":\"1\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
+    pub const tail = .{"}"};
+    pub const require_model_tail = .{",\"require_model\":true}"};
+};
+pub const message_request = struct {
+    /// Holes: Store, key, Session, sender handle.
+    pub const head = .{ "{\"version\":\"1\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":null,\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
+    /// Holes: Store, key, Session, sender Store, sender Session, sender handle.
+    pub const sender_head = .{ "{\"version\":\"1\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":{\"store\":", store_hole, ",\"session\":", session_hole, "},\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
+    /// The configuration object of a creating Message follows.
+    pub const configuration = .{",\"configuration\":"};
+    /// The text, as a JSON string, follows.
+    pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
+    pub const tail = .{"}}"};
+};
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
@@ -2164,7 +2188,9 @@ pub const command_observation_reply = struct {
 };
 
 /// Holes: error type and code.
-pub const error_reply = .{ "{\"version\":\"1\",\"type\":", Hole{ .string = 32 }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+/// The `type` of an error reply: what kind of failure its code names.
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, proposal_unavailable, failed_response_unavailable };
+pub const error_reply = .{ "{\"version\":\"1\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_control_response_bytes = @max(

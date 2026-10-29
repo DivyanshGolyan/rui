@@ -95,6 +95,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Responsibility | Start here |
 | --- | --- |
 | Durable admission, settings, results and recovery | `src/store.zig`: `Store` owns SQLite transactions and canonical facts. |
+| Wire vocabulary and size bounds | `src/protocol.zig`: request parsing, the reply and request vocabulary, and one JSON shape per reply and request. Each writer writes its shape and each size bound is derived from that same shape. |
 | Caller request capture and recovery | `src/client.zig`: typed capture, generated/explicit identity, durable records and original-byte transmission. `src/cli.zig` selects HOME/preferences and presentation. |
 | Interactive submission lifetime | `src/SessionSubmission.zig`: original Message or Decision, capture facts, same-original retries, joined Admission and release. `SessionInput` owns editing storage and loan tickets; `SessionFrontend` owns consent, presentation, reads and coordinated shutdown. `src/session_departure.zig` selects inspection supersession and exit policy from completed cleanup facts and freshly observed interruption. |
 | Host lifetime and effect handoffs | `src/server.zig`: Host, execution slots and native orchestration. `src/execution_turn.zig` owns the shared service-turn policy. |

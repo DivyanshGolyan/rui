@@ -502,9 +502,9 @@ pub const ActivityPage = struct {
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(96) };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
-        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
+        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
         const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
         const Items = struct {
@@ -1059,13 +1059,13 @@ pub const Current = struct {
         status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
         turn: OmittableJson(Id) = .{},
         operation: OmittableJson(Id) = .{},
-        latest_outcome: ?struct { code: JsonString(96), content: ?Reference },
+        latest_outcome: ?struct { code: JsonString(protocol.max_code_bytes), content: ?Reference },
 
         pub fn jsonStringify(self: Work, jw: anytype) !void {
             try writeObject(self, jw);
         }
     };
-    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(96) };
+    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(protocol.max_code_bytes) };
     pub const Execution = struct {
         status: JsonEnum(enum { partial, unavailable }),
         reason: OmittableJson(JsonEnum(enum { session_not_found })) = .{},
@@ -1633,13 +1633,13 @@ pub const CommandObservation = struct {
     status: enum { absent, accepted, rejected },
     kind: ?MutationKind = null,
     target: ?protocol.Bounded(protocol.max_session_bytes) = null,
-    code: ?protocol.Bounded(96) = null,
+    code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
     created: ?bool = null,
     input: ?ContentReference = null,
     queue: ?struct { status: enum { queued, processing, excluded, completed, failed, cancelled }, admission: u64 } = null,
     processing: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
-    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(96), text: ?ContentReference } = null,
+    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(protocol.max_code_bytes), text: ?ContentReference } = null,
     progress: ?Progress = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     completion: ?enum { pending, completed } = null,
@@ -1756,20 +1756,20 @@ pub const CommandObservation = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
             kind: OmittableJson(JsonEnum(MutationKind)) = .{},
             target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(96)) = .{},
+            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
             input: OmittableJson(Ref) = .{},
             queue: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "queue")).optional.child, "status")), admission: JsonString(20) }) = .{},
             processing: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
-            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(96)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
+            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
             progress: OmittableJson(struct { status: JsonEnum(@FieldType(Progress, "status")), action: ?JsonString(20) }) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(96)) = .{}, answer: OmittableJson(struct {}) = .{} };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
         const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
         var storage: [capacity]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -2025,7 +2025,7 @@ pub const MutationAnswer = struct {
             model_interruption,
             permission_decision,
         },
-        rejected: protocol.Bounded(96),
+        rejected: protocol.Bounded(protocol.max_code_bytes),
         conflict,
     },
     replayed: bool,
@@ -2033,7 +2033,7 @@ pub const MutationAnswer = struct {
 
 pub const InvocationDiagnostic = struct {
     type: protocol.Bounded(32),
-    code: protocol.Bounded(96),
+    code: protocol.Bounded(protocol.max_code_bytes),
 };
 
 /// Owned facts and original request context survive buffer reuse and capture
@@ -2167,7 +2167,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
     try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
-    var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try maximum.value.value.writeJson(&writer);
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
@@ -2286,7 +2286,7 @@ fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
-        code: JsonString(96),
+        code: JsonString(protocol.max_code_bytes),
         observation: OmittableJson(struct {}) = .{},
         answer: OmittableJson(struct {}) = .{},
     };
@@ -2321,12 +2321,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
-        code: OmittableJson(JsonString(96)) = .{},
+        code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
         answer: OmittableJson(struct {
             status: JsonString(16),
             replayed: bool,
             session: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(96)) = .{},
+            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
             admission: OmittableJson(JsonString(20)) = .{},
@@ -2792,15 +2792,12 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     var capture = try Capture.open(io, location.record, &output_buffer);
     capture.stage = input.stage;
     errdefer capture.abort();
-    try capture.writeHeader(.configure);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(session);
-    try capture.write(",\"configuration\":");
+    try capture.writeRequest(protocol.configure_request.head, .{ paths.store.slice(), location.key, session });
     try capture.writeConfiguration(input);
-    try capture.write(if (input.require_model) ",\"require_model\":true}" else "}");
+    if (input.require_model)
+        try capture.writeRequest(protocol.configure_request.require_model_tail, .{})
+    else
+        try capture.writeRequest(protocol.configure_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
 }
 
@@ -2810,7 +2807,7 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     markStage(input.stage, .capture);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    if (input.sender_handle) |handle| if (handle.len > 32) return error.InvalidSenderHandle;
+    if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     // Validate the full sender before resolving or opening any capture.
     // The Host authenticates admission, including legitimate self-sends.
     if (input.sender) |sender| {
@@ -2827,36 +2824,23 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     var capture = try Capture.open(io, location.record, &output_buffer);
     capture.stage = input.stage;
     errdefer capture.abort();
-    try capture.writeHeader(.message);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
-    try capture.write(",\"sender\":");
     if (input.sender) |sender| {
-        try capture.write("{\"store\":");
-        try capture.writeJsonString(sender.store.?);
-        try capture.write(",\"session\":");
-        try capture.writeJsonString(sender.session);
-        try capture.write("}");
-    } else try capture.write("null");
-    try capture.write(",\"sender_handle\":");
-    if (input.sender_handle) |handle| try capture.writeJsonString(handle) else try capture.write("null");
+        try capture.writeRequest(protocol.message_request.sender_head, .{ paths.store.slice(), location.key, input.session, sender.store.?, sender.session, input.sender_handle });
+    } else try capture.writeRequest(protocol.message_request.head, .{ paths.store.slice(), location.key, input.session, input.sender_handle });
     if (input.configuration) |configuration| {
         // Creation intent is visible in the bounded metadata prefix, before
         // either variable payload. Inspection never scans Message content.
-        try capture.write(",\"configuration\":");
+        try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
     }
-    try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
+    try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
         try capture.writeJsonString(value);
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
-    try capture.write("}}");
+    try capture.writeRequest(protocol.message_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
@@ -3017,18 +3001,31 @@ const Capture = struct {
             return self.writer.err orelse error.WriteFailed;
     }
 
-    /// Writes a control request from its shape. Every string argument must be UTF-8.
+    /// Writes request JSON from its shape. Every string argument must be UTF-8.
     fn writeRequest(self: *Capture, comptime shape: anytype, args: anytype) !void {
         inline for (args) |argument| {
-            if (comptime @TypeOf(argument) == []const u8) {
+            const T = @TypeOf(argument);
+            if (comptime isByteString(T)) {
                 if (!std.unicode.utf8ValidateSlice(argument)) return error.InvalidUtf8;
+            } else if (comptime @typeInfo(T) == .optional and isByteString(@typeInfo(T).optional.child)) {
+                if (argument) |value| if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+            } else switch (@typeInfo(T)) {
+                .int, .comptime_int, .bool, .@"enum", .null => {},
+                else => @compileError("writeRequest cannot check a " ++ @typeName(T) ++ " argument"),
             }
         }
         protocol.writeShape(&self.writer.interface, shape, args) catch return self.writer.err orelse error.WriteFailed;
     }
 
-    fn writeHeader(self: *Capture, comptime kind: MutationKind) !void {
-        try self.write("{\"version\":\"1\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"store\":");
+    fn isByteString(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .pointer => |pointer| switch (pointer.size) {
+                .slice => pointer.child == u8,
+                .one => @typeInfo(pointer.child) == .array and @typeInfo(pointer.child).array.child == u8,
+                else => false,
+            },
+            else => false,
+        };
     }
 
     fn writePermissionDecision(self: *Capture, store: []const u8, key: []const u8, input: PermissionDecisionInput) !void {
