@@ -26,7 +26,7 @@ pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
 const Job = reads.Job;
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+pub const Files = reads.Files;
 const Inspection = reads.Inspection;
 const ReadPhase = departure.ReadPhase;
 const ReadEnd = departure.ReadEnd;
@@ -149,7 +149,7 @@ notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.files.scratch, .action_file = self.files.action, .inspection_file = self.files.inspection, .status_file = self.files.status, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .inspection_kind = self.inspection.kind, .interrupted = &interrupted };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .inspection_kind = self.inspection.kind, .interrupted = &interrupted };
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.inspection.status_page and self.terminal.screen.view == .inspection;

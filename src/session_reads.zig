@@ -26,14 +26,14 @@ pub const Inspection = enum { status, requests, help, command };
 /// which the UI reads after join. No worker reads or writes the controller.
 /// Live output renders into the inspection scratch file and shows whole, with
 /// its footer, status and cursor, in one UI step after join.
+/// The frontend's private scratch files, which a read borrows whole.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+
 pub const Job = struct {
     init: std.process.Init = undefined,
     store: []const u8 = "",
     session: []const u8 = "",
-    scratch: std.Io.File = undefined,
-    action_file: std.Io.File = undefined,
-    inspection_file: std.Io.File = undefined,
-    status_file: std.Io.File = undefined,
+    files: Files = undefined,
     colour: bool = false,
     command: Command = undefined,
     requests: Requests = undefined,
@@ -103,8 +103,8 @@ pub const Job = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    try job.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
+    try job.files.inspection.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
     // Saved descriptors must not leak into anything the command executes.
     const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
     defer for (saved) |fd| if (fd >= 0) {
@@ -113,7 +113,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
     // Redirected descriptors are output custody: any failure now is fatal.
     job.result.rendering = true;
-    const page = job.inspection_file.handle;
+    const page = job.files.inspection.handle;
     const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else job.command(job.init, .{ .io = task.io, .cancellation = job.interrupted }, job.store, job.session, job.command_text[0..job.command_text_length]);
     const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
     job.result.command_stderr_restored = std.c.dup2(saved[1], 2) >= 0;
@@ -125,9 +125,9 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
     if (job.result.work.first_action) |action| {
-        try job.action_file.setLength(task.io, 0);
-        var output: DisplayCapture = .{ .task = task, .file = job.action_file };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.scratch, &output, job.colour);
+        try job.files.action.setLength(task.io, 0);
+        var output: DisplayCapture = .{ .task = task, .file = job.files.action };
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.files.scratch, &output, job.colour);
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -146,14 +146,14 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.work = page.facts.work;
     // Only /status reads Current, once; it may be newer than the page.
     if (job.open_status or job.watch_status) {
-        const current = try View.current(requests, job.store, job.session, job.scratch);
+        const current = try View.current(requests, job.store, job.session, job.files.scratch);
         // Before anything else reuses scratch, which holds this capture's rows.
         job.result.status_digest = try statusDigest(job, task.io, &current);
         if (job.open_status or job.result.status_digest != job.status_shown) {
-            try job.status_file.setLength(task.io, 0);
-            try task.io.vtable.fileSeekTo(task.io.userdata, job.status_file, 0);
+            try job.files.status.setLength(task.io, 0);
+            try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
             var buffer: [4096]u8 = undefined;
-            var output = job.status_file.writerStreaming(task.io, &buffer);
+            var output = job.files.status.writerStreaming(task.io, &buffer);
             try writeStatus(job, task.io, &current, &output.interface);
             try output.flush();
             job.result.status = true;
@@ -181,8 +181,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file, .messages = job.messages, .end = page.facts.end };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(&output);
@@ -211,7 +211,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 
 /// The /status page for the Current capture whose rows are in scratch.
 fn writeStatus(job: *const Job, io: std.Io, current: *const protocol_reply.Current, out: *std.Io.Writer) !void {
-    try job.status(io, job.store, job.session, current, job.scratch, out);
+    try job.status(io, job.store, job.session, current, job.files.scratch, out);
     try writeSubmission(job, out);
 }
 
@@ -234,13 +234,13 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const latest = job.phase == .details;
     if (!latest) if (job.listing) |step| return list(job, task, step);
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.scratch);
+    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
     job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
@@ -249,8 +249,8 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
 /// where the listing continues. Nothing shows until the UI prepends it.
 fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
     defer job.result.collapsed = output.blocks;
     switch (step) {
         .echo => |echo| {
@@ -775,8 +775,8 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
             if (bytes.len != 0) self.last = bytes[bytes.len - 1];
         }
     };
-    try job.scratch.setLength(task.io, 0);
-    var staging: Staging = .{ .io = task.io, .file = job.scratch };
+    try job.files.scratch.setLength(task.io, 0);
+    var staging: Staging = .{ .io = task.io, .file = job.files.scratch };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
     const failure = switch (target.source) {
         .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
@@ -785,7 +785,7 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     if (failure) |value| return requests.failRead(value);
     if (staging.offset != target.content.length) return error.ContentLengthMismatch;
     const lines = staging.newlines + @intFromBool(staging.last != '\n');
-    try writeMessagePage(task.io, job.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.inspection_file);
+    try writeMessagePage(task.io, job.files.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.files.inspection);
 }
 
 /// Writes the Message page for the `length` validated bytes in `scratch`.
@@ -909,10 +909,10 @@ const MessagePage = struct {
 
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    try job.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
+    try job.files.inspection.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
     var buffer: [4096]u8 = undefined;
-    var output = job.inspection_file.writerStreaming(task.io, &buffer);
+    var output = job.files.inspection.writerStreaming(task.io, &buffer);
     if (job.inspection_kind == .help) {
         if (job.inspection_action) |action| {
             try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
@@ -988,7 +988,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .inspection_file = page, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
