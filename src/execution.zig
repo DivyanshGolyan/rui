@@ -383,6 +383,14 @@ pub const CustodyPool = struct {
         return record.delivered.cmpxchgStrong(false, true, .acq_rel, .acquire) == null;
     }
 
+    /// An attached Action whose terminal delivery nobody claimed: detaching
+    /// it leaves the Action unsettled.
+    pub fn holdsUndeliveredAction(self: *CustodyPool, token: CustodyToken) bool {
+        const record = self.current(token) catch return false;
+        return record.state.load(.acquire) == .attached and record.binding_kind == .action and
+            !record.delivered.load(.acquire);
+    }
+
     pub fn detach(self: *CustodyPool, token: CustodyToken) !void {
         const record = try self.current(token);
         if (record.state.cmpxchgStrong(.attached, .detached, .acq_rel, .acquire) != null) {
