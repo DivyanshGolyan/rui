@@ -108,6 +108,7 @@ ZIG_LOOP = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?(?:while|for)\b")
 ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
 ZIG_EXIT = re.compile(r"\breturn\b|\bbreak\b(?:\s*:\s*(\w+))?")
 ZIG_CONTAINER = re.compile(r"\b(\w+)\s*=\s*(?:(?:extern|packed)\s+)?(?:struct|union|enum)\b[^=]*$")
+ZIG_CONDITION = re.compile(r"(?:if\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\|[^|]*\|\s*)?|else\s+)*")
 ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
 ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
@@ -166,13 +167,18 @@ def zig_sleep_ordering(path, text):
     def deepest(position):
         return max(enclosing(position), key=lambda scope: scope.start, default=None)
 
+    def loop_header(head, start):
+        """The statement text before a body, past any unbraced `if (...)` or `else` it sits under."""
+        header = code[head:start].strip()
+        return header[ZIG_CONDITION.match(header).end():]
+
     def in_fn(position, start):
         return any(start < scope.start < position < scope.end for scope in scopes if scope.kind == "fn")
 
     def in_loop(position, start):
         statement = max(code.rfind(c, start, position) for c in ";{}") + 1
-        return (ZIG_LOOP.match(code[statement:position].strip()) is not None
-                or any(start < inner < position < end and ZIG_LOOP.match(code[head:inner].strip())
+        return (ZIG_LOOP.match(loop_header(statement, position)) is not None
+                or any(start < inner < position < end and ZIG_LOOP.match(loop_header(head, inner))
                        for head, inner, end in blocks))
 
     def exits(header, start, end):
@@ -188,14 +194,14 @@ def zig_sleep_ordering(path, text):
 
     def waits(position, scope):
         statement = max(code.rfind(c, 0, position) for c in ";{}") + 1
-        header = code[statement:position].strip()
+        header = loop_header(statement, position)
         if ZIG_WHILE.match(header):
             return True
         if ZIG_FOR.match(header):
             return ZIG_RETRY.match(header) is not None and ZIG_EXIT.search(header) is not None
         for head, start, end in sorted(blocks, key=lambda block: -block[1]):
             if (scope.start if scope else -1) < start < position < end:
-                header = code[head:start].strip()
+                header = loop_header(head, start)
                 if ZIG_WHILE.match(header):
                     return True
                 if ZIG_FOR.match(header):
@@ -231,13 +237,15 @@ def zig_sleep_ordering(path, text):
             test_code[scope] = bool(users) and all(is_test_code(user) for user in users)
         return test_code[scope]
 
-    def charge(position, helpers):
+    def charge(position, helpers, callback=False):
+        # A helper passed as a callback runs on its own, so the loop that
+        # registers it does not wait on its sleeps.
         scope = innermost(position)
-        if waits(position, deepest(position)) or not is_test_code(scope):
+        if (not callback and waits(position, deepest(position))) or not is_test_code(scope):
             return
         if scope and scope.kind == "fn" and scope not in helpers and (uses := references(scope)):
             for use in uses:
-                charge(use, helpers | {scope})
+                charge(use, helpers | {scope}, not re.match(r"\s*\(", code[use + len(scope.name):use + len(scope.name) + 8]))
         else:
             offenses[(path, scope.name if scope else "<top level>")] += 1
 
@@ -524,6 +532,25 @@ const Helper = struct {
 test "a container-qualified helper call charges its test" {
     Helper.doze();
 }
+test "a poll under an unbraced condition still waits" {
+    if (enabled) while (!done()) {
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    if (enabled) while (!done()) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    if (enabled) {} else for (0..10) |_| {
+        if (done()) break;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+fn peer() void {
+    std.testing.io.sleep(.fromMilliseconds(150), .awake) catch {};
+}
+test "a callback spawned inside a poll still sleeps first" {
+    while (!done()) {
+        const thread = try std.Thread.spawn(.{}, peer, .{});
+        thread.join();
+    }
+}
 test "a labeled break from an inner loop leaves the retry" {
     outer: for (0..10) |_| {
         for (items) |item| if (item) break :outer;
@@ -540,6 +567,7 @@ test "a labeled break from an inner loop leaves the retry" {
             ("src/a.zig", "an inner loop's exit does not make its outer loop poll"): 4,
             ("src/a.zig", "an unrelated member call does not make a helper production code"): 1,
             ("src/a.zig", "a container-qualified helper call charges its test"): 1,
+            ("src/a.zig", "a callback spawned inside a poll still sleeps first"): 1,
         })
 
     def test_python_straight_line_sleeps_are_charged_to_their_function(self):
