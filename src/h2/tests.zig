@@ -59,6 +59,7 @@ const Harness = struct {
         url: ?[]const u8 = null,
         /// Overrides trusting only the peer's CA file.
         trust: ?h2.Trust = null,
+        io: std.Io = std.testing.io,
     };
 
     fn create(config: Config) !*Harness {
@@ -68,7 +69,7 @@ const Harness = struct {
         self.peer = try Peer.start(allocator, config.peer);
         errdefer self.peer.stop();
         self.receiver = .{};
-        try self.client.init(allocator, std.testing.io, .{
+        try self.client.init(allocator, config.io, .{
             .stream_capacity = config.capacity,
             .inactivity_ns = config.inactivity_ns,
             .connect_timeout_ns = config.connect_timeout_ns,
@@ -605,12 +606,31 @@ test "an inactive stream ends and is reset" {
     stream.deinit();
 }
 
-fn sleepMs(ms: c_int) void {
-    _ = std.c.poll(&[_]std.c.pollfd{}, 0, ms);
-}
+/// The client's awake clock, moved only by `advance`: a stream is overdue
+/// when the test says so, never because the runner stalled mid-step.
+const TestClock = struct {
+    var awake_ns: i96 = 0;
+    var vtable: std.Io.VTable = undefined;
+
+    fn io() std.Io {
+        awake_ns = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        vtable = std.testing.io.vtable.*;
+        vtable.now = now;
+        return .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    }
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
+        return .{ .nanoseconds = awake_ns };
+    }
+
+    fn advance(ns: u64) void {
+        awake_ns += ns;
+    }
+};
 
 test "an overdue pending stream ends before it is sent, even with room on a warm connection" {
-    const harness = try Harness.create(.{ .inactivity_ns = 100 * ns_per_ms });
+    const harness = try Harness.create(.{ .inactivity_ns = 100 * ns_per_ms, .io = TestClock.io() });
     defer harness.destroy();
     var warm: h2.Stream = .idle;
     var sink: [8]u8 = undefined;
@@ -620,7 +640,7 @@ test "an overdue pending stream ends before it is sent, even with room on a warm
 
     var late: h2.Stream = .idle;
     try harness.launch(&late, bytesRequest(harness.endpoint, "x", &sink));
-    sleepMs(150);
+    TestClock.advance(150 * ns_per_ms);
     try harness.client.drive(&harness.receiver);
     try std.testing.expectEqual(h2.End{ .cause = .inactive, .request_sent = false }, try harness.collect(&late));
     try harness.runFor(20 * ns_per_ms);
@@ -628,7 +648,7 @@ test "an overdue pending stream ends before it is sent, even with room on a warm
 }
 
 test "a read cap defers expiry only for streams on that connection" {
-    const harness = try Harness.create(.{ .peer = .{ .on_request = hold }, .inactivity_ns = 100 * ns_per_ms });
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold }, .inactivity_ns = 100 * ns_per_ms, .io = TestClock.io() });
     defer harness.destroy();
     const quiet = try Peer.start(std.testing.allocator, .{ .on_request = hold });
     defer quiet.stop();
@@ -648,7 +668,7 @@ test "a read cap defers expiry only for streams on that connection" {
         try quiet.pump();
     }
 
-    sleepMs(150);
+    TestClock.advance(150 * ns_per_ms);
     var response: [32 * 1024]u8 = undefined;
     @memset(&response, 'r');
     for (harness.peer.streams.items) |stream| harness.peer.respond(stream, 200, &response);
