@@ -8,6 +8,7 @@ const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const h2 = @import("h2");
+const model_capability = @import("model_capability.zig");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -915,19 +916,23 @@ const RequestItem = union(enum) {
     compaction_trigger,
     tools,
     /// Verbosity and the optional output schema.
-    text,
+    text_format,
 };
 
-/// A stretch of wire bytes: literal syntax, a string's contents, or
-/// canonical content streamed from the view.
+/// A stretch of wire bytes, named by how its source reaches the request.
 const Piece = union(enum) {
-    fixed: []const u8,
-    text: []const u8,
+    /// Literal JSON syntax, copied.
+    syntax: []const u8,
+    /// Bytes escaped into the enclosing JSON string.
+    escaped: []const u8,
     /// A JSON string literal inside the enclosing string, escaped twice.
     /// Its enclosing quotes belong to the caller.
-    nested_text: []const u8,
-    content: store.HistoricalContent,
-    raw: store.HistoricalContent,
+    nested: []const u8,
+    /// Canonical text escaped into the enclosing JSON string.
+    escaped_content: store.HistoricalContent,
+    /// Canonical JSON, copied.
+    verbatim_content: store.HistoricalContent,
+    /// Accepted output, validated and replayed.
     replay: store.HistoricalContent,
     history_memo,
 };
@@ -939,56 +944,63 @@ const Pieces = struct {
     next_index: u8 = 0,
 
     fn add(self: *Pieces, piece: Piece) void {
+        std.debug.assert(self.length < self.list.len);
         self.list[self.length] = piece;
         self.length += 1;
     }
 
     fn next(self: *Pieces) ?Piece {
-        if (self.next_index == self.length) return null;
+        if (self.done()) return null;
         defer self.next_index += 1;
         return self.list[self.next_index];
     }
+
+    fn done(self: *const Pieces) bool {
+        return self.next_index == self.length;
+    }
 };
 
+fn codexEnvelope(comptime parallel_tool_calls: bool) []const u8 {
+    return "\",\"parallel_tool_calls\":" ++ (if (parallel_tool_calls) "true" else "false") ++
+        ",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+}
+
+/// An input item after another takes a comma.
+fn separateInput(pieces: *Pieces, input_comma: *bool) void {
+    if (input_comma.*) pieces.add(.{ .syntax = "," });
+    input_comma.* = true;
+}
+
 /// The Codex Responses encoding of one item. Its pieces borrow from `item`
-/// and `settings`. `input_comma` is the only syntax state carried
-/// between items: an input item after another takes a comma.
+/// and `settings`. `input_comma` is the only syntax state carried between
+/// items.
 fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool) Pieces {
     var pieces: Pieces = .{};
     switch (item.*) {
-        .message, .replayed_output, .tool_result, .compaction_trigger => {
-            if (input_comma.*) pieces.add(.{ .fixed = "," });
-            input_comma.* = true;
-        },
-        // A memo is the span's first bytes and records its own comma state.
-        .history_memo, .settings, .instructions, .tools, .text => {},
-    }
-    switch (item.*) {
         .settings => {
-            pieces.add(.{ .fixed = "{\"model\":\"" });
-            pieces.add(.{ .text = settings.model.slice() });
-            pieces.add(.{ .fixed = if (@import("model_capability.zig").parallelToolCalls(settings.model.slice()))
-                "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]"
-            else
-                "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]" });
-            if (settings.reasoning_effort) |effort| pieces.add(.{ .fixed = switch (effort) {
+            pieces.add(.{ .syntax = "{\"model\":\"" });
+            pieces.add(.{ .escaped = settings.model.slice() });
+            pieces.add(.{ .syntax = if (model_capability.parallelToolCalls(settings.model.slice())) codexEnvelope(true) else codexEnvelope(false) });
+            if (settings.reasoning_effort) |effort| pieces.add(.{ .syntax = switch (effort) {
                 inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
             } });
         },
         .instructions => {
-            pieces.add(.{ .fixed = ",\"instructions\":\"" });
-            pieces.add(.{ .text = context_parts[0] });
-            pieces.add(.{ .nested_text = settings.workspace.slice() });
+            pieces.add(.{ .syntax = ",\"instructions\":\"" });
+            pieces.add(.{ .escaped = context_parts[0] });
+            pieces.add(.{ .nested = settings.workspace.slice() });
             // The originating Operation's ID, rebuilt on every Attempt.
-            pieces.add(.{ .text = context_parts[1] });
-            pieces.add(.{ .nested_text = settings.session.slice() });
-            pieces.add(.{ .text = context_parts[2] });
-            pieces.add(.{ .content = settings.baseline_instructions });
-            pieces.add(.{ .fixed = "\",\"input\":[" });
+            pieces.add(.{ .escaped = context_parts[1] });
+            pieces.add(.{ .nested = settings.session.slice() });
+            pieces.add(.{ .escaped = context_parts[2] });
+            pieces.add(.{ .escaped_content = settings.baseline_instructions });
+            pieces.add(.{ .syntax = "\",\"input\":[" });
         },
+        // A memo is the span's first bytes and records its own comma state.
         .history_memo => pieces.add(.history_memo),
         .message => |*entry| {
-            pieces.add(.{ .fixed = if (entry.kind == .user)
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = if (entry.kind == .user)
                 "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
             else
                 "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"" });
@@ -996,33 +1008,40 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             // the text the peer wrote. The Host recorded that sender; the
             // adapter renders the saved fact, never text a peer wrote.
             if (entry.sender) |*sender| {
-                pieces.add(.{ .text = peer_parts[0] });
-                pieces.add(.{ .nested_text = sender.slice() });
-                pieces.add(.{ .text = peer_parts[1] });
-                pieces.add(.{ .fixed = "\"},{\"type\":\"input_text\",\"text\":\"" });
+                pieces.add(.{ .escaped = peer_parts[0] });
+                pieces.add(.{ .nested = sender.slice() });
+                pieces.add(.{ .escaped = peer_parts[1] });
+                pieces.add(.{ .syntax = "\"},{\"type\":\"input_text\",\"text\":\"" });
             }
-            pieces.add(.{ .content = entry.content.? });
-            pieces.add(.{ .fixed = "\"}]}" });
+            pieces.add(.{ .escaped_content = entry.content.? });
+            pieces.add(.{ .syntax = "\"}]}" });
         },
-        .replayed_output => |content| pieces.add(.{ .replay = content }),
+        .replayed_output => |content| {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .replay = content });
+        },
         .tool_result => |result| {
-            pieces.add(.{ .fixed = "{\"type\":\"function_call_output\",\"call_id\":\"" });
-            pieces.add(.{ .content = result.call_id });
-            pieces.add(.{ .fixed = "\",\"output\":\"" });
-            pieces.add(.{ .content = result.output });
-            pieces.add(.{ .fixed = "\"}" });
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = "{\"type\":\"function_call_output\",\"call_id\":\"" });
+            pieces.add(.{ .escaped_content = result.call_id });
+            pieces.add(.{ .syntax = "\",\"output\":\"" });
+            pieces.add(.{ .escaped_content = result.output });
+            pieces.add(.{ .syntax = "\"}" });
         },
-        .compaction_trigger => pieces.add(.{ .fixed = "{\"type\":\"compaction_trigger\"}" }),
+        .compaction_trigger => {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = "{\"type\":\"compaction_trigger\"}" });
+        },
         .tools => {
-            pieces.add(.{ .fixed = "],\"tools\":[" });
-            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .fixed = tools.bash_definition_json });
-            pieces.add(.{ .fixed = "]" });
+            pieces.add(.{ .syntax = "],\"tools\":[" });
+            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .syntax = tools.bash_definition_json });
+            pieces.add(.{ .syntax = "]" });
         },
-        .text => if (settings.output_schema) |schema| {
-            pieces.add(.{ .fixed = ",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":" });
-            pieces.add(.{ .raw = schema });
-            pieces.add(.{ .fixed = "}}}" });
-        } else pieces.add(.{ .fixed = ",\"text\":{\"verbosity\":\"low\"}}" }),
+        .text_format => if (settings.output_schema) |schema| {
+            pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":" });
+            pieces.add(.{ .verbatim_content = schema });
+            pieces.add(.{ .syntax = "}}}" });
+        } else pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\"}}" }),
     }
     return pieces;
 }
@@ -1085,7 +1104,7 @@ pub const Preparation = struct {
         covered_tool_results,
         compaction_trigger,
         tools,
-        text,
+        text_format,
         end,
         history_store,
         complete,
@@ -1128,6 +1147,16 @@ pub const Preparation = struct {
         raw: RawEmission,
         replay: ReplayEmission,
         history_memo,
+
+        /// The content reader the emission holds open, if any.
+        fn reader(self: *Emission) ?*store.HistoricalReader {
+            return switch (self.*) {
+                .none, .fixed, .history_memo => null,
+                .json => |*json| if (json.reader) |*value| value else null,
+                .raw => |*raw| &raw.reader,
+                .replay => |*replay| &replay.reader,
+            };
+        }
     };
 
     pub fn init(
@@ -1313,12 +1342,12 @@ pub const Preparation = struct {
                 if (self.settings.?.operation == .compaction) return .{ .item = .compaction_trigger };
             },
             .tools => {
-                self.stage = .text;
+                self.stage = .text_format;
                 return .{ .item = .tools };
             },
-            .text => {
+            .text_format => {
                 self.stage = .end;
-                return .{ .item = .text };
+                return .{ .item = .text_format };
             },
             .end => return .end,
             .history_store, .complete => unreachable,
@@ -1428,11 +1457,11 @@ pub const Preparation = struct {
 
     fn startPiece(self: *Preparation, piece: Piece) !void {
         switch (piece) {
-            .fixed => |bytes| self.emission = .{ .fixed = .{ .bytes = bytes } },
-            .text => |bytes| self.emission = .{ .json = .{ .bytes = bytes } },
-            .nested_text => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
-            .content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
-            .raw => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
+            .syntax => |bytes| self.emission = .{ .fixed = .{ .bytes = bytes } },
+            .escaped => |bytes| self.emission = .{ .json = .{ .bytes = bytes } },
+            .nested => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
+            .escaped_content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
+            .verbatim_content => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
             .replay => |content| self.emission = .{ .replay = .{ .reader = try self.view.openContent(content) } },
             .history_memo => self.emission = .{ .history_memo = {} },
         }
@@ -1567,33 +1596,15 @@ pub const Preparation = struct {
             if (!self.view.ownsSettings(frozen)) return error.PreparationForeignContent;
         }
         var expected_readers: usize = 0;
-        switch (self.emission) {
-            .none, .fixed, .history_memo => {},
-            .json => |*json| {
-                if (json.reader) |*reader| {
-                    expected_readers = 1;
-                    if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-                }
-            },
-            .raw => |*raw| {
-                expected_readers = 1;
-                if (!raw.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-            },
-            .replay => |*replay| {
-                expected_readers = 1;
-                if (!replay.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-            },
+        if (self.emission.reader()) |reader| {
+            expected_readers = 1;
+            if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
         }
         if (self.view.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
     }
 
     fn closeEmission(self: *Preparation) void {
-        switch (self.emission) {
-            .json => |*json| json.close(),
-            .raw => |*raw| raw.reader.close(),
-            .replay => |*replay| replay.reader.close(),
-            .none, .fixed, .history_memo => {},
-        }
+        if (self.emission.reader()) |reader| reader.close();
         self.emission = .{ .none = {} };
     }
 };
@@ -3376,7 +3387,7 @@ test "request preparation cancellation yields inside canonical proposal authenti
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.stage == .history and preparation.pieces.next_index == preparation.pieces.length and preparation.writer.offset == before) {
+        if (preparation.stage == .history and preparation.pieces.done() and preparation.writer.offset == before) {
             pending_turns += 1;
             if (pending_turns == 12) break;
         }
