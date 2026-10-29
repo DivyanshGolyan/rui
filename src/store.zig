@@ -106,6 +106,9 @@ const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND r
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
+/// The content row columns a view handle needs, decoded by
+/// `readHistoricalContent` in this order.
+const historical_content_columns_sql = "content.byte_length,content.digest,content.private,typeof(content.payload)!='null'";
 /// Due retries one admission read keeps after sorting by operation_id. The
 /// due-time index cannot supply that order, so the literal LIMIT keeps the
 /// sort to these rows; a bound one would make the cached plan re-prepare on
@@ -437,9 +440,12 @@ pub const AttemptAdmission = struct {
 /// Borrowed from one pointer-stable preparation view. Invalid after it closes.
 pub const HistoricalContent = struct {
     view: *HistoricalView,
+    // Resolved once with the metadata, so opening needs no digest lookup and
+    // a raw row needs no Store access.
+    content_id: i64,
+    raw: bool,
     length: u64,
     digest: [32]u8,
-    private: bool = false,
     item_identity: ?struct { kind: OutputItemKind, id_digest: [32]u8 } = null,
 
     fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
@@ -682,7 +688,11 @@ pub const HistoricalView = struct {
 
     pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
         std.debug.assert(reference.belongsTo(self));
-        const reader = try self.store.openContentIdentity(.{ .length = reference.length, .digest = reference.digest }, reference.private);
+        const identity: ContentReference = .{ .length = reference.length, .digest = reference.digest };
+        const reader: ContentReader = if (reference.raw)
+            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .representation = .raw }
+        else
+            try self.store.openProjection(reference.content_id, identity);
         self.readers += 1;
         return .{ .view = self, .reference = reference, .reader = reader };
     }
@@ -5432,11 +5442,8 @@ pub const Store = struct {
         const output_schema_id = try readNullablePositiveI64(statement, 2);
         const tools = c.sqlite3_column_int(statement, 3);
         if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
-        const instructions = try self.readContentMetadata(instructions_id);
-        const output_schema = if (output_schema_id) |content_id| blk: {
-            const metadata = try self.readContentMetadata(content_id);
-            break :blk HistoricalContent{ .view = view, .length = metadata.length, .digest = metadata.digest };
-        } else null;
+        const instructions = try self.historicalContent(view, instructions_id);
+        const output_schema = if (output_schema_id) |content_id| try self.historicalContent(view, content_id) else null;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 5, &session_ref);
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
@@ -5462,7 +5469,7 @@ pub const Store = struct {
             .store = self.selector,
             .session = session_ref,
             .session_affinity = digest[0..16].*,
-            .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
+            .baseline_instructions = instructions,
             .output_schema = output_schema,
             .tools_mask = @intCast(tools),
         };
@@ -5592,13 +5599,13 @@ pub const Store = struct {
         view.entries_end = 0;
         errdefer view.entries_end = 0;
         const statement = try self.cached(
-            "SELECT e.session_position,e.entry_kind,e.content_id,content.byte_length,content.digest,NULL,NULL,NULL,NULL,NULL," ++
+            "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
                 "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "LEFT JOIN content ON content.content_id=e.content_id " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) UNION ALL " ++
-                "SELECT item.session_position,3,item.content_id,content.byte_length,content.digest,r.model,r.provider,item.item_kind,item.item_id_digest," ++
+                "SELECT item.session_position,3,item.content_id," ++ historical_content_columns_sql ++ ",r.model,r.provider,item.item_kind,item.item_id_digest," ++
                 resolutionIn("owner.resolution_code", &turn_policy.accepted) ++ " AND owner.session_ref=item.session_ref " ++
                 "AND owner_turn.session_ref=item.session_ref " ++
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
@@ -5638,41 +5645,34 @@ pub const Store = struct {
             3 => .provider_output,
             else => return error.CorruptStore,
         };
-        if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) return error.CorruptStore;
-        const length = c.sqlite3_column_int64(statement, 3);
-        if (length < 0) return error.CorruptStore;
+        var content = try readHistoricalContent(view, statement, 3, content_id, kind == .provider_output);
         var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
         if (kind == .provider_output) {
             // Keep contradictory owners visible instead of filtering their
             // output away. Accepted-population validation cannot see failed
             // owners; every selected item must independently certify one.
-            if (c.sqlite3_column_int(statement, 9) != 1) return error.CorruptStore;
+            if (c.sqlite3_column_int(statement, 11) != 1) return error.CorruptStore;
             var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-            try readText(statement, 5, &model);
+            try readText(statement, 7, &model);
             if (model.len == 0) return error.CorruptStore;
-            _ = try readProvider(statement, 6);
+            _ = try readProvider(statement, 8);
             requested_model = model;
+            content.item_identity = .{
+                .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 9)) orelse return error.CorruptStore,
+                .id_digest = try readDigest(statement, 10),
+            };
         }
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
-        if (c.sqlite3_column_type(statement, 10) != c.SQLITE_NULL) {
+        if (c.sqlite3_column_type(statement, 12) != c.SQLITE_NULL) {
             sender = .{};
-            try readText(statement, 10, &sender.?);
+            try readText(statement, 12, &sender.?);
         }
         return .{
             .position = @intCast(position),
             .kind = kind,
             .requested_model = requested_model,
             .sender = sender,
-            .content = .{
-                .view = view,
-                .length = @intCast(length),
-                .digest = try readDigest(statement, 4),
-                .private = kind == .provider_output,
-                .item_identity = if (kind == .provider_output) .{
-                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 7)) orelse return error.CorruptStore,
-                    .id_digest = try readDigest(statement, 8),
-                } else null,
-            },
+            .content = content,
         };
     }
 
@@ -5866,13 +5866,35 @@ pub const Store = struct {
             return error.CorruptStore;
         if (call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
             return error.CorruptStore;
-        const call_id = try self.readContentMetadata(call_id_content_id);
-        const output = try self.readContentMetadata(output_content_id);
+        const call_id = try self.historicalContent(view, call_id_content_id);
+        const output = try self.historicalContent(view, output_content_id);
         view.active_tool_group_after_ordinal = @intCast(call_ordinal);
         view.active_tool_group_count += 1;
+        return .{ .call_id = call_id, .output = output };
+    }
+
+    /// Public content as a view handle. Like a digest lookup of public
+    /// content, a private row cannot stand in.
+    fn historicalContent(self: *Store, view: *HistoricalView, content_id: i64) !HistoricalContent {
+        const statement = try self.cached("SELECT " ++ historical_content_columns_sql ++ " FROM content WHERE content.content_id=?1");
+        defer resetCached(statement);
+        try bindI64(statement, 1, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return readHistoricalContent(view, statement, 0, content_id, false);
+    }
+
+    /// Decodes `historical_content_columns_sql` starting at column `first`. A
+    /// row whose privacy differs from `private` cannot stand in.
+    fn readHistoricalContent(view: *HistoricalView, statement: *c.sqlite3_stmt, first: c_int, content_id: i64, private: bool) !HistoricalContent {
+        if (c.sqlite3_column_type(statement, first) == c.SQLITE_NULL) return error.CorruptStore;
+        const length = c.sqlite3_column_int64(statement, first);
+        if (length < 0 or (c.sqlite3_column_int(statement, first + 2) != 0) != private) return error.CorruptStore;
         return .{
-            .call_id = .{ .view = view, .length = call_id.length, .digest = call_id.digest },
-            .output = .{ .view = view, .length = output.length, .digest = output.digest },
+            .view = view,
+            .content_id = content_id,
+            .raw = c.sqlite3_column_int(statement, first + 3) != 0,
+            .length = @intCast(length),
+            .digest = try readDigest(statement, first + 1),
         };
     }
 
@@ -6626,6 +6648,17 @@ pub const Store = struct {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openContentIdentityLocked(reference, private));
+    }
+
+    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.openProjectionLocked(content_id, reference));
+    }
+
+    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+        if (try self.contentIsRaw(content_id, reference.length)) return error.CorruptStore;
+        return .{ .store = self, .reference = reference, .content_id = content_id, .representation = .{ .projection = .{} } };
     }
 
     fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
