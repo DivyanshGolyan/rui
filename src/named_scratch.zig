@@ -12,6 +12,7 @@ pub const NumericName = enum {
     @"bash-stderr",
     @"bash-stdin",
     report,
+    @"history-memo",
 
     pub fn format(kind: NumericName, buffer: []u8, number: u64, ordinal: u64) ![]const u8 {
         return std.fmt.bufPrint(buffer, "{s}-{d}-{d}.tmp", .{ @tagName(kind), number, ordinal });
