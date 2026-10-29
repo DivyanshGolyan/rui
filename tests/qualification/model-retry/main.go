@@ -191,7 +191,7 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
 		return nil, err
 	}
-	row, err := sql(deadline, store, "SELECT operation_id||','||attempt_ordinal||','||uncertain||','||ifnull(resolution_code,'') FROM model_operation;")
+	row, err := sql(deadline, store, "SELECT operation_id||','||attempt_ordinal||','||(resolution_code IS NULL AND retry_due_at_ms IS 0)||','||ifnull(resolution_code,'') FROM model_operation;")
 	if err != nil {
 		return nil, err
 	}

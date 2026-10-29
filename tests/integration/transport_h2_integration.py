@@ -1133,7 +1133,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed, ses
             dropped = endpoint.dropped
         with sqlite3.connect(store / "rui.sqlite3") as database:
             operations = database.execute(
-                "SELECT operation_id,attempt_ordinal,uncertain,retry_due_at_ms,"
+                "SELECT operation_id,attempt_ordinal,(resolution_code IS NULL AND retry_due_at_ms IS 0),retry_due_at_ms,"
                 "last_failure_code,resolution_code FROM model_operation ORDER BY operation_id"
             ).fetchall()
         records = diagnostics.records if diagnostics else []

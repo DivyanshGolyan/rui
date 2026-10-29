@@ -497,7 +497,7 @@ pub fn build(b: *std.Build) void {
 
     const full_check_step = b.step(
         "check-full",
-        "Run routine native tests, sanitizer and process integrations serially (long witnesses are separate)",
+        "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = b.addSystemCommand(&.{"sh"});
@@ -512,7 +512,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArg(@tagName(check_part));
     process_integrations.addFileArg(ci.path(terminal_notice));
     process_integrations.step.dependOn(&format.step);
-    // The execution part owns native tests and sanitizer work. The callers
+    // The execution part owns native tests. The callers
     // part runs on another machine, isolated from that child-process load.
     if (check_part != .callers) {
         process_integrations.step.dependOn(&run_tests.step);

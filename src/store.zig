@@ -4902,6 +4902,7 @@ pub const Store = struct {
             c.SQLITE_DONE => return,
             else => return error.TurnReadFailed,
         }
+        resetCached(ready);
         if (!try self.closeTurn(turn_id, null, .cancelled)) return error.CorruptStore;
     }
 
@@ -7108,9 +7109,9 @@ pub const Store = struct {
         return admission_id;
     }
 
-    /// The only writer of `session.next_position`. Claims `count` consecutive
-    /// positions and returns the first. Called only inside the owning write
-    /// transaction; no separate frontier.
+    /// The only code that advances `session.next_position`. Claims `count`
+    /// consecutive positions and returns the first. Called only inside the
+    /// owning write transaction; no separate frontier.
     fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
         if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
         const statement = try self.cached("UPDATE session SET next_position=next_position+?2 " ++
@@ -7144,6 +7145,7 @@ pub const Store = struct {
         }
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session);
+        resetCached(select);
         const position = try self.claimSessionPosition(session.slice());
         const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4 WHERE turn_id=?1 AND outcome_code IS NULL");
         defer resetCached(update);
@@ -9975,7 +9977,7 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     // fail on the lifecycle CHECK.
     const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
     const cases = [_]Case{
-        // An unresolved uncertain Operation needs the zero retry sentinel.
+        // An unresolved Operation needs a retry time; zero marks it uncertain.
         .{
             .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0",
             .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=NULL",
