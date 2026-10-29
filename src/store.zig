@@ -5076,6 +5076,7 @@ pub const Store = struct {
         }
         // The Store's one exclusive connection is held under its mutex, so the
         // row read above is still the selection inside the write transaction.
+        std.debug.assert(c.sqlite3_get_autocommit(self.database) != 0);
         try self.execute("BEGIN IMMEDIATE");
         const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
@@ -10257,10 +10258,11 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
+    const selection = try storage.cached(tool_continuation_selection_sql);
+    const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
-    const selection = try storage.cached(tool_continuation_selection_sql);
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0));
+    try std.testing.expectEqual(runs_before + 1, c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0));
 }
 
 test "production turn preserves skipped continuation preference through actual Store admissions" {
