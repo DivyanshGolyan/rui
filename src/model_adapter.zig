@@ -761,6 +761,8 @@ const RequestWriter = struct {
     /// Writes are positional, so the file position never matters.
     pending: [preparation_byte_allowance]u8 = undefined,
     pending_length: usize = 0,
+    /// The file closed at seal; the charge stays until `deinit`.
+    closed: bool = false,
 
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
         const next_offset = std.math.add(u64, self.offset, bytes.len) catch
@@ -826,8 +828,15 @@ const RequestWriter = struct {
         self.charged = charged;
     }
 
-    fn deinit(self: *RequestWriter) void {
+    /// Close the sealed file, whose bytes the read-only alias keeps.
+    fn close(self: *RequestWriter) void {
+        std.debug.assert(self.pending_length == 0);
         self.file.close(self.io);
+        self.closed = true;
+    }
+
+    fn deinit(self: *RequestWriter) void {
+        if (!self.closed) self.file.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -920,6 +929,8 @@ pub const Preparation = struct {
     memos: ?*history_memo.Table,
     /// This request's history span, from its start while memos are kept.
     span: ?MemoSpan = null,
+    /// The sealed span being kept as the Session's memo.
+    memo_write: ?history_memo.Write = null,
 
     const MemoSpan = struct {
         /// Request offset of the span's first byte, flushed before a copy.
@@ -982,6 +993,7 @@ pub const Preparation = struct {
         schema_suffix,
         request_suffix,
         seal,
+        history_store,
         emitting,
         complete,
     };
@@ -1291,7 +1303,21 @@ pub const Preparation = struct {
                 },
                 .schema_suffix => self.emitFixed("}}", .request_suffix),
                 .request_suffix => self.emitFixed("}", .seal),
-                .seal => return self.seal() catch |err| .{ .failed = err },
+                .seal => self.seal() catch |err| return .{ .failed = err },
+                // The sealed request is the memo's source, copied under the
+                // allowance; a failure loses only the memo.
+                .history_store => {
+                    const write = &(self.memo_write orelse return self.finish());
+                    const memos = self.memos.?;
+                    bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left) catch {
+                        self.abandonMemoWrite();
+                        return self.finish();
+                    };
+                    if (!write.done()) continue;
+                    memos.commit(self.writer.io, write);
+                    self.memo_write = null;
+                    return self.finish();
+                },
                 .complete => unreachable,
                 .emitting => unreachable,
             }
@@ -1474,21 +1500,30 @@ pub const Preparation = struct {
         return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
-    fn seal(self: *Preparation) !PreparationProgress {
+    fn seal(self: *Preparation) !void {
         if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.flush();
         try self.writer.file.sync(self.writer.io);
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
         self.closeEmission();
+        // The writer closes before a memo file opens.
+        self.writer.close();
+        self.phase = .history_store;
+        const span = &(self.span orelse return);
+        const next = span.next orelse return;
+        const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
+        self.memo_write = self.memos.?.begin(self.writer.io, next, span.start, if (prefix) |*value| value else null);
+    }
+
+    fn abandonMemoWrite(self: *Preparation) void {
+        const write = &(self.memo_write orelse return);
+        self.memos.?.abandon(self.writer.io, write);
+        self.memo_write = null;
+    }
+
+    fn finish(self: *Preparation) PreparationProgress {
         self.view.close();
-        self.writer.file.close(self.writer.io);
-        // The sealed request is the memo's source; a failure loses only the
-        // memo.
-        if (self.span) |*span| if (span.next) |next| {
-            const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
-            self.memos.?.store(self.writer.io, next, self.readonly, span.start, if (prefix) |*value| value else null);
-        };
         const request = PreparedRequest{
             .file = self.readonly,
             .length = self.writer.offset,
@@ -1504,6 +1539,7 @@ pub const Preparation = struct {
     pub fn cancel(self: *Preparation) void {
         std.debug.assert(self.active);
         self.closeMemoFile();
+        self.abandonMemoWrite();
         self.closeEmission();
         self.view.close();
         self.readonly.close(self.writer.io);
@@ -1515,8 +1551,9 @@ pub const Preparation = struct {
     /// preparation without mutating it. The legal checkpoint is a stable
     /// point between synchronous advances, while the preparation remains
     /// in its final storage under the existing single-owner discipline.
-    /// Must not be called after cancellation or sealing: the writer is
-    /// consumed and an inactive preparation owns no request resources.
+    /// Must not be called after cancellation or completion: an inactive
+    /// preparation owns no request resources. While a sealed request's span
+    /// is kept as a memo the writer is closed and the view still open.
     /// Reuses the view's reader count, borrowed-reference ownership, and
     /// reader-active facts; no outstanding-reader registry is added.
     pub fn checkIntegrity(self: *Preparation, expected: store.AttemptBinding) !void {
@@ -3794,4 +3831,121 @@ test "a history memo file that changed on disk is dropped and rebuilt in full" {
         const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
         try std.testing.expectError(error.FileNotFound, setup.tmp.dir.access(std.testing.io, name, .{}));
     }
+}
+
+test "a cold history memo build yields under the preparation allowance" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    const text = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    try setup.submit("memo-large", "memo-large", session.slice(), text);
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var requests: [2][]u8 = undefined;
+    var copied: [2]u64 = undefined;
+    for (&requests, &copied, 0..) |*bytes, *count, attempt| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        // Advances after the request reached its final length copy the
+        // span into the memo file, each within the byte allowance.
+        var final_advances: usize = 0;
+        var final_work: usize = 0;
+        var last_request: u64 = 0;
+        var steps: usize = 0;
+        var request = while (true) : (steps += 1) {
+            try std.testing.expect(steps < 1 << 12);
+            const progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
+            const stats = preparation.advanceStats();
+            try std.testing.expect(stats.work_bytes <= preparation_byte_allowance);
+            if (stats.request_bytes != last_request) {
+                final_advances = 0;
+                final_work = 0;
+                last_request = stats.request_bytes;
+            }
+            final_advances += 1;
+            final_work += stats.work_bytes;
+            switch (progress) {
+                .pending => {},
+                .prepared => |value| break value,
+                .failed => |err| return err,
+            }
+        };
+        defer request.deinit(std.testing.io, preparation.writer.budget);
+        bytes.* = try std.testing.allocator.alloc(u8, @intCast(request.length));
+        try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes.*, 0));
+        count.* = preparation.memoCopied();
+        if (attempt == 0) {
+            const held = heldMemoLength(&memos, session.slice());
+            try std.testing.expect(held > text.len);
+            try std.testing.expect(final_work >= held);
+            try std.testing.expect(final_advances >= held / preparation_byte_allowance);
+        }
+    }
+    defer for (requests) |bytes| std.testing.allocator.free(bytes);
+    // A replacement Attempt copies the whole kept span and writes the same
+    // request.
+    try std.testing.expectEqual(@as(u64, 0), copied[0]);
+    try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), copied[1]);
+    try std.testing.expectEqualStrings(requests[0], requests[1]);
+}
+
+/// Cancel a preparation through `memos` while it is keeping its span, then
+/// require that the table kept nothing of it and the next request rebuilds
+/// in full and keeps its memo.
+fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []const u8, binding: store.AttemptBinding, memos: *history_memo.Table) !void {
+    const full = try prepareMemoForTesting(setup, binding, null, .{});
+    defer std.testing.allocator.free(full.bytes);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, .{}, &retained);
+    defer if (preparation.active) preparation.cancel();
+    var final_advances: usize = 0;
+    var steps: usize = 0;
+    while (final_advances < 3) : (steps += 1) {
+        try std.testing.expect(steps < 1 << 16);
+        try std.testing.expect(preparation.advance(7, 3) == .pending);
+        if (preparation.advanceStats().request_bytes == full.bytes.len) final_advances += 1;
+    }
+    // Mid-store: the table counts the span's file bytes but holds no memo.
+    try std.testing.expect(memos.held(session) == null);
+    try std.testing.expect(memos.bytes != 0);
+    preparation.cancel();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(memos.held(session) == null);
+    try std.testing.expectEqual(@as(u64, 0), memos.bytes);
+    var name_buffer: [64]u8 = undefined;
+    for (0..memos.entries.len) |slot| {
+        const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+        try std.testing.expectError(error.FileNotFound, setup.tmp.dir.access(std.testing.io, name, .{}));
+    }
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(setup, binding, memos, .{}));
+    try std.testing.expect(heldMemoLength(memos, session) != 0);
+}
+
+test "a preparation cancelled while keeping its memo keeps nothing of it" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // A cold build, then an append after a copied prefix, which rewrites the
+    // held memo's file.
+    try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
 }

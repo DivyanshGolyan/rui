@@ -7,8 +7,9 @@
 //! position never changes, so a later Operation of the same Session with the
 //! same anchor and model encodes the same bytes for that prefix. When a
 //! request seals, the span is copied from the request into the Session's
-//! memo file with its digest; the next request reads it back, checks the
-//! digest, and skips re-reading and re-encoding every covered entry.
+//! memo file with its digest, in chunks under the preparation's allowance;
+//! the next request reads it back, checks the digest, and skips re-reading
+//! and re-encoding every covered entry.
 //!
 //! Memory holds only a fixed-size index entry per Session, in entries the
 //! owner preallocates; the bytes live in one scratch file per table slot,
@@ -63,7 +64,7 @@ pub const Memo = struct {
     input_comma: bool,
     /// Exact span length; the file must have exactly this length.
     length: u64,
-    /// `Hasher` digest of the span's bytes, set by `Table.store`.
+    /// `Hasher` digest of the span's bytes, set by `Table.commit`.
     digest: u64,
 
     /// The memo reproduces the prefix of a request with this key whose view
@@ -90,6 +91,27 @@ pub const Memo = struct {
 pub const Prefix = struct {
     memo: Memo,
     hasher: Hasher,
+};
+
+/// A span being written into its slot's file by `Table.begin`, one bounded
+/// chunk at a time. It owns the open file until `commit` or `abandon`.
+pub const Write = struct {
+    slot: usize,
+    file: std.Io.File,
+    /// The memo kept once the whole span is written; its digest is set then.
+    memo: Memo,
+    /// Request offset of the span's first byte.
+    span_start: u64,
+    /// Span bytes already in the file, starting with any kept prefix.
+    written: u64,
+    /// The slot's counted file bytes while it is rewritten.
+    peak: u64,
+    /// Digest state of the span's first `written` bytes.
+    hasher: Hasher,
+
+    pub fn done(self: *const Write) bool {
+        return self.written == self.memo.length;
+    }
 };
 
 /// Where a new span's file write starts: after the held memo's bytes when
@@ -185,13 +207,16 @@ pub const Table = struct {
         if (self.slotOf(memo)) |slot| _ = self.drop(io, slot);
     }
 
-    /// Keep `next` for the Session whose span is `request[span_start..]`,
-    /// computing its digest. When `prefix` names the memo this request
-    /// copied and the table still holds it, its file keeps those bytes and
-    /// only the rest is appended. Any failure loses the memo and never the
-    /// request.
-    pub fn store(self: *Table, io: std.Io, next: Memo, request: std.Io.File, span_start: u64, prefix: ?*const Prefix) void {
-        if (self.entries.len == 0) return;
+    /// Start keeping `next` for the Session whose span is
+    /// `request[span_start..]`: reserve its slot and bytes and open its file.
+    /// When `prefix` names the memo this request copied and the table still
+    /// holds it, its file keeps those bytes and only the rest is appended.
+    /// The caller then writes the span with `writeChunk` under its own
+    /// allowance and ends with `commit` or `abandon`; until then the slot
+    /// holds no memo and counts the larger of its old and new file lengths.
+    /// Null keeps nothing. Any failure loses the memo and never the request.
+    pub fn begin(self: *Table, io: std.Io, next: Memo, span_start: u64, prefix: ?*const Prefix) ?Write {
+        if (self.entries.len == 0) return null;
         // Retry unconfirmed removals; a confirmed one releases its bytes.
         for (self.entries, 0..) |entry, slot| if (entry.memo == null and entry.file_bytes != 0) {
             _ = self.drop(io, slot);
@@ -204,7 +229,7 @@ pub const Table = struct {
         const append = appendOffset(held_memo, if (prefix) |value| &value.memo else null);
         if (next.length > self.byte_limit) {
             if (current) |slot| _ = self.drop(io, slot);
-            return;
+            return null;
         }
         const slot = chooseSlot(self.entries, next.key.session.slice());
         const entry = &self.entries[slot];
@@ -218,22 +243,57 @@ pub const Table = struct {
             if (victim == null or self.entries[victim.?].file_bytes != 0) {
                 // Only unconfirmed removals remain: keep the bound.
                 _ = self.drop(io, slot);
-                return;
+                return null;
             }
         }
         self.bytes = self.bytes - old + peak;
         entry.file_bytes = peak;
-        var hasher = if (append != 0) prefix.?.hasher else newHasher();
-        const digest = self.write(io, slot, request, span_start, next.length, append, &hasher) catch {
-            _ = self.drop(io, slot);
-            return;
+        var write: Write = .{
+            .slot = slot,
+            .file = undefined,
+            .memo = next,
+            .span_start = span_start,
+            .written = append,
+            .peak = peak,
+            .hasher = if (append != 0) prefix.?.hasher else newHasher(),
         };
-        self.bytes -= peak - next.length;
-        entry.file_bytes = next.length;
+        write.file = self.openWrite(io, &write) catch {
+            _ = self.drop(io, slot);
+            return null;
+        };
+        return write;
+    }
+
+    /// Copy the span's next bytes, at most `limit`, from `request` to the
+    /// same offsets of the memo file, hashing them. Returns how many it
+    /// copied; `write.done()` tells when the span is complete.
+    pub fn writeChunk(_: *const Table, io: std.Io, write: *Write, request: std.Io.File, limit: usize) !usize {
+        var buffer: [16 * 1024]u8 = undefined;
+        const count: usize = @intCast(@min(write.memo.length - write.written, limit, buffer.len));
+        if (try request.readPositionalAll(io, buffer[0..count], write.span_start + write.written) != count) return error.EndOfStream;
+        write.hasher.update(buffer[0..count]);
+        try write.file.writePositionalAll(io, buffer[0..count], write.written);
+        write.written += count;
+        return count;
+    }
+
+    /// Keep the completely written span as its Session's memo.
+    pub fn commit(self: *Table, io: std.Io, write: *Write) void {
+        std.debug.assert(write.done());
+        write.file.close(io);
+        const entry = &self.entries[write.slot];
+        self.bytes -= write.peak - write.memo.length;
+        entry.file_bytes = write.memo.length;
         self.uses += 1;
         entry.used = self.uses;
-        entry.memo = next;
-        entry.memo.?.digest = digest;
+        entry.memo = write.memo;
+        entry.memo.?.digest = write.hasher.final();
+    }
+
+    /// Keep nothing of an unfinished span and reclaim its file.
+    pub fn abandon(self: *Table, io: std.Io, write: *Write) void {
+        write.file.close(io);
+        _ = self.drop(io, write.slot);
     }
 
     /// Remove every memo file; the Host is stopping. A file whose removal
@@ -256,33 +316,22 @@ pub const Table = struct {
         return std.fmt.bufPrint(buffer, "{s}/{s}", .{ self.scratch_path, name });
     }
 
-    /// Write `request[span_start + append..][0..length - append]` at the
-    /// same offsets of the slot's file, hashing it after the prefix state in
-    /// `hasher`. A file that no longer has the prefix's length is rewritten
-    /// whole. Returns the span's digest.
-    fn write(self: *Table, io: std.Io, slot: usize, request: std.Io.File, span_start: u64, length: u64, append: u64, hasher: *Hasher) !u64 {
+    /// Open the slot's file for `write`, keeping its first `written` bytes.
+    /// A file that no longer has the prefix's length is rewritten whole.
+    fn openWrite(self: *Table, io: std.Io, write: *Write) !std.Io.File {
         var path_buffer: [path_capacity]u8 = undefined;
-        const file = try std.Io.Dir.cwd().createFile(io, try self.filePath(&path_buffer, slot), .{
+        const file = try std.Io.Dir.cwd().createFile(io, try self.filePath(&path_buffer, write.slot), .{
             .truncate = false,
             .exclusive = false,
             .permissions = .fromMode(0o600),
         });
-        defer file.close(io);
-        var from = append;
-        if (from != 0 and try file.length(io) != from) {
-            from = 0;
-            hasher.* = newHasher();
+        errdefer file.close(io);
+        if (write.written != 0 and try file.length(io) != write.written) {
+            write.written = 0;
+            write.hasher = newHasher();
         }
-        try file.setLength(io, from);
-        var buffer: [16 * 1024]u8 = undefined;
-        while (from < length) {
-            const count: usize = @intCast(@min(length - from, buffer.len));
-            if (try request.readPositionalAll(io, buffer[0..count], span_start + from) != count) return error.EndOfStream;
-            hasher.update(buffer[0..count]);
-            try file.writePositionalAll(io, buffer[0..count], from);
-            from += count;
-        }
-        return hasher.final();
+        try file.setLength(io, write.written);
+        return file;
     }
 
     /// Drop the slot's memo and reclaim its file. Confirmed removal or
@@ -399,8 +448,14 @@ fn testFileBytes(table: *Table, session: []const u8, buffer: []u8) ![]const u8 {
     return bytes;
 }
 
-fn testStore(table: *Table, memo: Memo, request: std.Io.File, span_start: u64) void {
-    table.store(std.testing.io, memo, request, span_start, null);
+/// Keep `memo` through bounded chunks, as a preparation does.
+fn testKeep(table: *Table, memo: Memo, request: std.Io.File, span_start: u64, prefix: ?*const Prefix) !void {
+    var write = table.begin(std.testing.io, memo, span_start, prefix) orelse return;
+    while (!write.done()) _ = table.writeChunk(std.testing.io, &write, request, 3) catch |err| {
+        table.abandon(std.testing.io, &write);
+        return err;
+    };
+    table.commit(std.testing.io, &write);
 }
 
 test "the table keeps span files bounded by capacity and bytes and removes them" {
@@ -415,27 +470,27 @@ test "the table keeps span files bounded by capacity and bytes and removes them"
     var table: Table = .{ .entries = &entries, .byte_limit = 10, .scratch_path = root };
     defer table.deinit(std.testing.io);
     try std.testing.expect(table.held("a") == null);
-    testStore(&table, try testMemo("a", "m", null, 2, 4), request, 1);
-    testStore(&table, try testMemo("b", "m", null, 2, 4), request, 5);
+    try testKeep(&table, try testMemo("a", "m", null, 2, 4), request, 1, null);
+    try testKeep(&table, try testMemo("b", "m", null, 2, 4), request, 5, null);
     // Capacity replaces the least recently used Session, a.
-    testStore(&table, try testMemo("c", "m", null, 2, 2), request, 9);
+    try testKeep(&table, try testMemo("c", "m", null, 2, 2), request, 9, null);
     try std.testing.expect(table.held("a") == null);
     try std.testing.expectEqual(@as(u64, 6), table.bytes);
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqualStrings("cc", try testFileBytes(&table, "c", &buffer));
     // Byte pressure evicts the oldest other Session, b.
-    testStore(&table, try testMemo("d", "m", null, 2, 6), request, 11);
+    try testKeep(&table, try testMemo("d", "m", null, 2, 6), request, 11, null);
     try std.testing.expect(table.held("b") == null);
     try std.testing.expectEqualStrings("dddddd", try testFileBytes(&table, "d", &buffer));
     // A span larger than the whole bound is not kept.
-    testStore(&table, try testMemo("e", "m", null, 2, 11), request, 1);
+    try testKeep(&table, try testMemo("e", "m", null, 2, 11), request, 1, null);
     try std.testing.expect(table.held("e") == null);
     // A memo that supplied the span's prefix gains only the appended rest,
     // and the digest continues from the prefix's state.
     try request.writePositionalAll(std.testing.io, "ccXY", 20);
     var prefix: Prefix = .{ .memo = table.held("c").?, .hasher = newHasher() };
     prefix.hasher.update("cc");
-    table.store(std.testing.io, try testMemo("c", "m", null, 3, 4), request, 20, &prefix);
+    try testKeep(&table, try testMemo("c", "m", null, 3, 4), request, 20, &prefix);
     try std.testing.expectEqualStrings("ccXY", try testFileBytes(&table, "c", &buffer));
     try std.testing.expectEqual(@as(u64, 10), table.bytes);
     // A file that lost its recorded length loses the memo and its file.
@@ -453,7 +508,7 @@ test "the table keeps span files bounded by capacity and bytes and removes them"
     while (try iterator.next(std.testing.io)) |entry| try std.testing.expectEqualStrings("request", entry.name);
     // A Host without execution capacity keeps nothing.
     var empty: Table = .{ .scratch_path = root };
-    testStore(&empty, try testMemo("a", "m", null, 2, 1), request, 1);
+    try testKeep(&empty, try testMemo("a", "m", null, 2, 1), request, 1, null);
     try std.testing.expect(empty.held("a") == null);
 }
 
@@ -468,7 +523,7 @@ test "an unconfirmed removal stays counted until a retry confirms it" {
     var entries: [2]Table.Entry = @splat(.{});
     var table: Table = .{ .entries = &entries, .byte_limit = 10, .scratch_path = root };
     defer table.deinit(std.testing.io);
-    testStore(&table, try testMemo("a", "m", null, 2, 4), request, 0);
+    try testKeep(&table, try testMemo("a", "m", null, 2, 4), request, 0, null);
     const memo = table.held("a").?;
     // A nonempty directory in place of the file cannot be removed: the
     // memo is lost but its slot's bytes stay counted.
@@ -485,13 +540,51 @@ test "an unconfirmed removal stays counted until a retry confirms it" {
     try std.testing.expectEqual(@as(u64, 4), entries[0].file_bytes);
     // The next store retries it; still unconfirmed and with no memo left to
     // evict, the new memo is not kept and the bound holds.
-    testStore(&table, try testMemo("b", "m", null, 2, 7), request, 0);
+    try testKeep(&table, try testMemo("b", "m", null, 2, 7), request, 0, null);
     try std.testing.expect(table.held("b") == null);
     try std.testing.expectEqual(@as(u64, 4), table.bytes);
     // Once removable, the next retry confirms it and releases its bytes once.
     try tmp.dir.deleteFile(std.testing.io, inner);
     try tmp.dir.deleteDir(std.testing.io, name);
-    testStore(&table, try testMemo("b", "m", null, 2, 7), request, 0);
+    try testKeep(&table, try testMemo("b", "m", null, 2, 7), request, 0, null);
     try std.testing.expectEqual(@as(u64, 7), table.held("b").?.length);
     try std.testing.expectEqual(@as(u64, 7), table.bytes);
+}
+
+test "an abandoned span keeps no memo and releases its bytes" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const request = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
+    defer request.close(std.testing.io);
+    try request.writePositionalAll(std.testing.io, "aaaabbbbbbbbbb", 0);
+    var entries: [2]Table.Entry = @splat(.{});
+    var table: Table = .{ .entries = &entries, .byte_limit = 16, .scratch_path = root };
+    defer table.deinit(std.testing.io);
+    try testKeep(&table, try testMemo("a", "m", null, 2, 4), request, 0, null);
+    try testKeep(&table, try testMemo("b", "m", null, 2, 4), request, 4, null);
+    // A new span for a cold Session, which replaces the oldest memo a, and a
+    // rewrite of a held one, each abandoned midway, keep no memo and count
+    // no bytes of their own.
+    var cold = table.begin(std.testing.io, try testMemo("c", "m", null, 2, 8), 4, null).?;
+    try std.testing.expectEqual(@as(usize, 3), try table.writeChunk(std.testing.io, &cold, request, 3));
+    try std.testing.expectEqual(@as(u64, 4 + 8), table.bytes);
+    table.abandon(std.testing.io, &cold);
+    try std.testing.expect(table.held("a") == null);
+    try std.testing.expect(table.held("c") == null);
+    try std.testing.expectEqual(@as(u64, 4), table.held("b").?.length);
+    try std.testing.expectEqual(@as(u64, 4), table.bytes);
+    var rewrite = table.begin(std.testing.io, try testMemo("b", "m", null, 3, 10), 4, null).?;
+    _ = try table.writeChunk(std.testing.io, &rewrite, request, 5);
+    table.abandon(std.testing.io, &rewrite);
+    try std.testing.expect(table.held("b") == null);
+    try std.testing.expectEqual(@as(u64, 0), table.bytes);
+    var iterator = tmp.dir.iterate();
+    while (try iterator.next(std.testing.io)) |entry| try std.testing.expectEqualStrings("request", entry.name);
+    // The table keeps the next span as usual.
+    try testKeep(&table, try testMemo("b", "m", null, 3, 10), request, 4, null);
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("bbbbbbbbbb", try testFileBytes(&table, "b", &buffer));
+    try std.testing.expectEqual(@as(u64, 10), table.bytes);
 }
