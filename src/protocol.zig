@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_capability = @import("model_capability.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
@@ -10,10 +11,10 @@ pub const max_session_bytes = 128;
 // within its compiled 512-byte pathname limit.
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
-pub const max_model_bytes = 256;
+pub const max_model_bytes = model_capability.max_model_bytes;
 pub const max_tool_description_bytes = 100;
 pub const Provider = enum { codex };
-pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
+pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.
 pub const max_provider_bytes = 16;

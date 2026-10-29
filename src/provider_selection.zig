@@ -15,7 +15,7 @@ pub const Readiness = enum {
 pub const Capability = struct {
     name: []const u8,
     recommended_model: []const u8,
-    valid_model: *const fn ([]const u8) bool,
+    admits_model: *const fn ([]const u8) bool,
     readiness: Readiness,
 };
 
@@ -43,7 +43,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     for (capabilities) |capability| {
         if (!std.mem.eql(u8, name, capability.name)) continue;
         const model = explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null) orelse capability.recommended_model;
-        if (!capability.valid_model(model)) return error.UnsupportedSelectionModel;
+        if (!capability.admits_model(model)) return error.UnsupportedSelectionModel;
         return .{ .selected = .{
             .provider = capability.name,
             .model = model,
@@ -63,8 +63,8 @@ test "prospective selection does not fall back from a stale or unavailable prefe
         }
     };
     const capabilities = [_]Capability{
-        .{ .name = "codex", .recommended_model = "luna", .valid_model = Policy.valid, .readiness = .configured },
-        .{ .name = "synthetic", .recommended_model = "small", .valid_model = Policy.small, .readiness = .configured },
+        .{ .name = "codex", .recommended_model = "luna", .admits_model = Policy.valid, .readiness = .configured },
+        .{ .name = "synthetic", .recommended_model = "small", .admits_model = Policy.small, .readiness = .configured },
     };
     try std.testing.expectEqual(Selection.chooser, try resolve(&.{}, null, null, null, null));
     try std.testing.expectEqual(Selection.chooser, try resolve(&capabilities, null, null, null, null));
@@ -76,7 +76,7 @@ test "prospective selection does not fall back from a stale or unavailable prefe
     try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&capabilities, "synthetic", "luna", null, null));
     const only = capabilities[0..1];
     try std.testing.expectEqualStrings("luna", (try resolve(only, null, null, null, null)).selected.model);
-    const missing = [_]Capability{.{ .name = "codex", .recommended_model = "luna", .valid_model = Policy.valid, .readiness = .missing }};
+    const missing = [_]Capability{.{ .name = "codex", .recommended_model = "luna", .admits_model = Policy.valid, .readiness = .missing }};
     try std.testing.expectEqual(Selection.chooser, try resolve(&missing, null, null, null, null));
     try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, null, null, "codex", null)).selected.readiness);
     try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, "codex", null, null, null)).selected.readiness);

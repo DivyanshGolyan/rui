@@ -19,10 +19,6 @@ const PreparedRequest = provider.PreparedRequest;
 // The sole V1 model adapter owns Codex wire grammar, output interpretation,
 // and managed-route authentication. The Host owns only effect scheduling and
 // the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
-pub const provider_label = @import("model_capability.zig").provider_label;
-pub const validModel = @import("model_capability.zig").validModel;
-pub const capability = @import("model_capability.zig").capability;
-
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 pub const observation_names: provider.ObservationNames = .{
     .request_id = "x-request-id",

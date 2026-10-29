@@ -7,6 +7,7 @@ const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const product_defaults = @import("product_defaults.zig");
+const model_capability = @import("model_capability.zig");
 const descriptor_limit = @import("os/descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
@@ -805,14 +806,14 @@ pub fn serve(
     if (home) |absolute_home| {
         const saved = @import("preferences.zig").load(absolute_home) catch null;
         if (saved) |values| {
-            if (values.model.len != 0 and !product_defaults.supportsModel(values.model.slice())) {
-                var bytes: [4 * protocol.max_model_bytes + product_defaults.model_help.len + 384]u8 = undefined;
+            if (values.model.len != 0 and !model_capability.supportsModel(values.model.slice())) {
+                var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
                 var out = std.Io.Writer.fixed(&bytes);
                 try out.writeAll("rui: saved new-Session default model \"");
                 var text: TerminalText = .{ .mode = .line };
                 try text.feed(&out, values.model.slice());
                 try text.finish(&out);
-                try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ product_defaults.model_help ++
+                try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
                     "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
                 _ = stderr.writeHeld(out.buffered());
             }
