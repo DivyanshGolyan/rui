@@ -594,6 +594,13 @@ pub const HistoricalView = struct {
     group_scan: GroupScan = .{},
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
+    // Ordinary entries copied from one ranged read. Plain values, never a
+    // statement: history below the admission boundary is immutable.
+    entries: [entry_batch]HistoricalEntry = undefined,
+    entries_next: usize = 0,
+    entries_end: usize = 0,
+
+    const entry_batch = 16;
 
     // One population cursor and one private-item validator, independent of
     // group/call counts. No statement, blob handle or transaction survives a step.
@@ -5537,6 +5544,7 @@ pub const Store = struct {
         std.debug.assert(view.outputs_validated);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
+            view.entries_end = 0;
             view.tool_group_source_cursor = 0;
             view.next_tool_group = null;
             view.next_tool_group_source_id = null;
@@ -5560,33 +5568,59 @@ pub const Store = struct {
             view.tool_group_initialized = true;
         }
         view.tool_group_scan_after = after_position;
+        const ordinary = try self.nextOrdinaryHistoricalEntry(view, after_position) orelse return self.activateHistoricalToolGroup(view);
+        if (view.next_tool_group) |group| {
+            if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
+        }
+        return ordinary;
+    }
+
+    /// The next host input or output item after `after_position`, served from
+    /// the view's read-ahead and refilled by one ranged query.
+    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+        while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
+            if (view.entries[view.entries_next].position > after_position) return view.entries[view.entries_next];
+        }
+        view.entries_next = 0;
+        view.entries_end = 0;
+        errdefer view.entries_end = 0;
         const statement = try self.cached(
-            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner,sender FROM (" ++
-                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner," ++
-                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender " ++
+            "SELECT e.session_position,e.entry_kind,e.content_id,content.byte_length,content.digest,NULL,NULL,NULL,NULL,NULL," ++
+                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
+                "LEFT JOIN content ON content.content_id=e.content_id " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-                "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
-                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest," ++
+                "AND e.entry_kind IN (1,2) UNION ALL " ++
+                "SELECT item.session_position,3,item.content_id,content.byte_length,content.digest,r.model,r.provider,item.item_kind,item.item_id_digest," ++
                 resolutionIn("owner.resolution_code", &turn_policy.accepted) ++ " AND owner.session_ref=item.session_ref " ++
                 "AND owner_turn.session_ref=item.session_ref " ++
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
                 "(item.item_kind!=3 OR " ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner,NULL AS sender " ++
+                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+                "LEFT JOIN content ON content.content_id=item.content_id " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
                 "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
                 "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
-                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position ORDER BY item.session_position LIMIT 1)" ++
-                ") ORDER BY position LIMIT 1",
+                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
+                std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
         );
         defer resetCached(statement);
         try bindU64(statement, 1, view.binding.operation_id);
         try bindU64(statement, 2, after_position);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return self.activateHistoricalToolGroup(view);
-        if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {
+                view.entries[view.entries_end] = try readHistoricalEntryRow(view, statement);
+                view.entries_end += 1;
+            },
+            c.SQLITE_DONE => break,
+            else => return error.HistoricalEntryReadFailed,
+        };
+        return if (view.entries_end == 0) null else view.entries[0];
+    }
+
+    fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !HistoricalEntry {
         const position = c.sqlite3_column_int64(statement, 0);
         const kind_value = c.sqlite3_column_int(statement, 1);
         const content_id = c.sqlite3_column_int64(statement, 2);
@@ -5597,44 +5631,42 @@ pub const Store = struct {
             3 => .provider_output,
             else => return error.CorruptStore,
         };
-        const metadata = try self.readContentMetadata(content_id);
+        if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) return error.CorruptStore;
+        const length = c.sqlite3_column_int64(statement, 3);
+        if (length < 0) return error.CorruptStore;
         var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
         if (kind == .provider_output) {
             // Keep contradictory owners visible instead of filtering their
             // output away. Accepted-population validation cannot see failed
             // owners; every selected item must independently certify one.
-            if (c.sqlite3_column_int(statement, 7) != 1) return error.CorruptStore;
+            if (c.sqlite3_column_int(statement, 9) != 1) return error.CorruptStore;
             var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-            try readText(statement, 3, &model);
+            try readText(statement, 5, &model);
             if (model.len == 0) return error.CorruptStore;
-            _ = try readProvider(statement, 4);
+            _ = try readProvider(statement, 6);
             requested_model = model;
         }
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
-        if (c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) {
+        if (c.sqlite3_column_type(statement, 10) != c.SQLITE_NULL) {
             sender = .{};
-            try readText(statement, 8, &sender.?);
+            try readText(statement, 10, &sender.?);
         }
-        const ordinary = HistoricalEntry{
+        return .{
             .position = @intCast(position),
             .kind = kind,
             .requested_model = requested_model,
             .sender = sender,
             .content = .{
                 .view = view,
-                .length = metadata.length,
-                .digest = metadata.digest,
+                .length = @intCast(length),
+                .digest = try readDigest(statement, 4),
                 .private = kind == .provider_output,
                 .item_identity = if (kind == .provider_output) .{
-                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 5)) orelse return error.CorruptStore,
-                    .id_digest = try readDigest(statement, 6),
+                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 7)) orelse return error.CorruptStore,
+                    .id_digest = try readDigest(statement, 8),
                 } else null,
             },
         };
-        if (view.next_tool_group) |group| {
-            if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
-        }
-        return ordinary;
     }
 
     fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalEntry {
