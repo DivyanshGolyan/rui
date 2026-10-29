@@ -116,9 +116,6 @@ RULES = (
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      "Credential mutation and synthetic managed transport"),
-    (("src/evaluator*", "tests/integration/evaluator*"),
-     ("workflow-check", "evaluator-host-integration", "evaluator-churn"),
-     ("workflow-check", "evaluator-host-integration", "evaluator-churn"), "Evaluator lifetime, output and cleanup"),
     (("src/os/*",),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
@@ -155,8 +152,8 @@ RULES = (
      ("server-delivery-integration",), ("server-delivery-integration",), "Delivery oracle's imported fixture owners"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
       ".github/actions/setup/action.yml"),
-     ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
-     ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
+     ("check-full", "admission-debug-integration", "test-full"),
+     ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_transport.sh", ".agents/setup",
       ".github/actions/setup/action.yml"),
@@ -169,7 +166,7 @@ CHECK_COVERS = {
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
-    "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
+    "descriptor-capacity-integration",
     "proposal-integration", "activity-integration", "preference-policy-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
@@ -202,12 +199,10 @@ def execution_batches(targets, check_part="all"):
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
-                "evaluator-churn", "host-launch-integration", "server-delivery-integration",
+                "host-launch-integration", "server-delivery-integration",
                 "transport-h2-integration", "codex-h2-integration"}
-    evaluator = [target for target in targets
-                 if target in {"workflow-check", "evaluator-host-integration"}]
-    shared = [target for target in targets if target not in isolated and target not in evaluator]
-    return (([evaluator] if evaluator else []) + ([shared] if shared else [])
+    shared = [target for target in targets if target not in isolated]
+    return (([shared] if shared else [])
             + [[target, "-Dcheck-part=callers"] if target == "check-full" and check_part == "callers"
                else [target] for target in targets if target in isolated])
 
@@ -255,9 +250,6 @@ def select(paths, phase, available):
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
-        if "evaluator_string" in path:
-            targets.add("evaluator-string-sanitizer")
-            native_targets.add("evaluator-string-sanitizer")
     frontend = {path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)}
     others = [path for path in paths if path not in frontend
               and not (path.endswith(".md") or path.startswith(("docs/", "research/")))]

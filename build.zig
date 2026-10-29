@@ -31,75 +31,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
-    const quickjs = b.dependency("quickjs", .{});
-    const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
-    const evaluator = addEvaluator(b, target, optimize, quickjs, "rui-evaluator", string_sanitizer_step);
-    b.installArtifact(evaluator);
-
-    const evaluator_driver = b.addExecutable(.{
-        .name = "rui-evaluator-boundary-test",
-        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
-    });
-    evaluator_driver.root_module.link_libc = true;
-    evaluator_driver.root_module.addCSourceFile(.{
-        .file = b.path("src/evaluator_parent.c"),
-        .flags = &.{"-std=gnu11"},
-    });
-    evaluator_driver.root_module.addCSourceFile(.{
-        .file = b.path("tests/integration/evaluator_driver.c"),
-        .flags = &.{"-std=gnu11"},
-    });
-    const evaluator_probe = b.addExecutable(.{
-        .name = "rui-evaluator-containment-probe",
-        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
-    });
-    evaluator_probe.root_module.link_libc = true;
-    evaluator_probe.root_module.addCSourceFile(.{
-        .file = b.path("tests/integration/evaluator_containment_probe.c"),
-        .flags = &.{"-std=gnu11"},
-    });
-    const evaluator_integration = b.addSystemCommand(&.{"python3"});
-    evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    evaluator_integration.addFileArg(ci.path(evaluator));
-    evaluator_integration.addFileArg(ci.path(evaluator_driver));
-    evaluator_integration.addFileArg(ci.path(evaluator_probe));
-    const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS evaluator boundary checks");
-    evaluator_step.dependOn(&evaluator_integration.step);
-
-    const evaluator_churn = b.addSystemCommand(&.{"python3"});
-    evaluator_churn.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    evaluator_churn.addFileArg(ci.path(evaluator));
-    evaluator_churn.addFileArg(ci.path(evaluator_driver));
-    evaluator_churn.addArg("--churn-only");
-    const evaluator_churn_step = b.step("evaluator-churn", "Qualify 1,000 same-parent evaluator lifecycles (not a routine gate)");
-    evaluator_churn_step.dependOn(&evaluator_churn.step);
-
-    const evaluator_host = b.addExecutable(.{
-        .name = "rui-evaluator-host-test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/evaluator_host.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    evaluator_host.root_module.link_libc = true;
-    const evaluator_module = b.createModule(.{
-        .root_source_file = b.path("src/evaluator.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-    });
-    evaluator_module.addIncludePath(b.path("src"));
-    const evaluator_bindings = addBindings(b, evaluator_module, "evaluator_native", "#include <evaluator_parent.h>\n#include <unistd.h>\n");
-    evaluator_bindings.addIncludePath(b.path("src"));
-    evaluator_host.root_module.addImport("evaluator", evaluator_module);
-    configurePosix(b, evaluator_host.root_module);
-    configureEvaluatorParent(b, evaluator_host);
-    const run_evaluator_host = ci.run(evaluator_host);
-    run_evaluator_host.addFileArg(ci.path(evaluator));
-    run_evaluator_host.step.dependOn(&evaluator_integration.step);
-    const evaluator_host_step = b.step("evaluator-host-integration", "Run the production evaluator Owner integration");
-    evaluator_host_step.dependOn(&run_evaluator_host.step);
-
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
     if (ci.directory != null and test_filter != null) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
@@ -560,7 +491,6 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.addFileInput(ci.path(release));
-    fast_integrations.step.dependOn(&run_evaluator_host.step);
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
@@ -581,22 +511,12 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(ci.path(preference_policy_actor));
     process_integrations.addArg(@tagName(check_part));
     process_integrations.addFileArg(ci.path(terminal_notice));
-    const full_evaluator = b.addSystemCommand(&.{"python3"});
-    full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    full_evaluator.addFileArg(ci.path(evaluator));
-    full_evaluator.addFileArg(ci.path(evaluator_driver));
-    full_evaluator.addFileArg(ci.path(evaluator_probe));
-    full_evaluator.step.dependOn(&run_tests.step);
-    full_evaluator.step.dependOn(&run_renderer_allocation.step);
-    full_evaluator.step.dependOn(string_sanitizer_step);
-    const full_evaluator_host = ci.run(evaluator_host);
-    full_evaluator_host.addFileArg(ci.path(evaluator));
-    full_evaluator_host.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&format.step);
-    // The execution part owns native tests and evaluator/sanitizer work. The
-    // callers part runs on another machine, isolated from that child-process load.
+    // The execution part owns native tests and sanitizer work. The callers
+    // part runs on another machine, isolated from that child-process load.
     if (check_part != .callers) {
-        process_integrations.step.dependOn(&full_evaluator_host.step);
+        process_integrations.step.dependOn(&run_tests.step);
+        process_integrations.step.dependOn(&run_renderer_allocation.step);
         process_integrations.step.dependOn(h2_test_step);
     }
     process_integrations.addFileInput(ci.path(release));
@@ -680,25 +600,12 @@ pub fn build(b: *std.Build) void {
             }),
             cross_transport,
         );
-        const child = addEvaluator(
-            b,
-            resolved,
-            .ReleaseSmall,
-            quickjs,
-            b.fmt("rui-evaluator-{s}-{s}", .{
-                @tagName(resolved.result.cpu.arch),
-                @tagName(resolved.result.os.tag),
-            }),
-            null,
-        );
         switch (resolved.result.os.tag) {
             .linux => {
                 linux_cross_step.dependOn(&executable.step);
-                linux_cross_step.dependOn(&child.step);
             },
             .macos => {
                 macos_cross_step.dependOn(&executable.step);
-                macos_cross_step.dependOn(&child.step);
             },
             else => unreachable,
         }
@@ -906,59 +813,6 @@ fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget)
     return a.result.cpu.arch == b.result.cpu.arch and
         a.result.os.tag == b.result.os.tag and
         a.result.abi == b.result.abi;
-}
-
-fn addEvaluator(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    quickjs: *std.Build.Dependency,
-    name: []const u8,
-    sanitizer_step: ?*std.Build.Step,
-) *std.Build.Step.Compile {
-    const evaluator = b.addExecutable(.{
-        .name = name,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
-    });
-    // Darwin creates this bounded stack and its guard at exec; it cannot
-    // resize an LC_MAIN custom stack through RLIMIT_STACK afterward.
-    if (target.result.os.tag == .macos) evaluator.stack_size = 1024 * 1024;
-    evaluator.root_module.link_libc = true;
-    evaluator.root_module.addIncludePath(quickjs.path("."));
-    evaluator.root_module.addIncludePath(b.path("src"));
-    evaluator.root_module.addCSourceFile(.{
-        .file = b.path("src/evaluator_child.c"),
-        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-    });
-    const extended_quickjs = b.addSystemCommand(&.{"sh"});
-    extended_quickjs.addFileArg(b.path("src/build_evaluator.sh"));
-    extended_quickjs.addFileArg(quickjs.path("quickjs.c"));
-    const quickjs_source = extended_quickjs.addOutputFileArg("quickjs.c");
-    extended_quickjs.addFileArg(b.path("src/evaluator_policy.patch"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.inc"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.h"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_policy.inc"));
-    if (sanitizer_step) |step| {
-        const string_sanitizer = b.addSystemCommand(&.{"sh"});
-        string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
-        string_sanitizer.addFileArg(quickjs_source);
-        string_sanitizer.addFileArg(quickjs.path("quickjs.c"));
-        string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_probe.c"));
-        string_sanitizer.addFileArg(b.path("src/evaluator_string_reader.h"));
-        step.dependOn(&string_sanitizer.step);
-    }
-    evaluator.root_module.addCSourceFile(.{
-        .file = quickjs_source,
-        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-    });
-    for ([_][]const u8{ "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
-        evaluator.root_module.addCSourceFile(.{
-            .file = quickjs.path(file),
-            .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-        });
-    }
-    evaluator.root_module.linkSystemLibrary("m", .{});
-    return evaluator;
 }
 
 fn addRui(
@@ -1201,14 +1055,6 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
         vaxis.addImport(name, pure);
     }
     module.addImport("vaxis", vaxis);
-}
-
-fn configureEvaluatorParent(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    compile.root_module.addIncludePath(b.path("src"));
-    compile.root_module.addCSourceFile(.{
-        .file = b.path("src/evaluator_parent.c"),
-        .flags = &.{"-std=gnu11"},
-    });
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {

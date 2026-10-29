@@ -12,7 +12,6 @@ Integration fixtures require Python 3.11 or newer on PATH, with the packages pin
 | Runtime behavior | Subsystem mapping below on the landing tip for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
 | Build or dependency | Linux `check-full` and mapped checks on the landing tip; macOS `check-full` and empty-cache acceptance daily |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
-| Evaluator integration | `workflow-check` for child and process cases, `evaluator-host-integration` for the private lifecycle owner, and complete evaluator and Workflow native qualification before a public integration claim. Only the private owner gates exist, on Linux; full cross-platform cases are planned |
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their mappings, not an unconditional per-PR gate.
 
@@ -30,7 +29,6 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using tar
 | HTTP/2 client (`src/h2/`) | `test-h2`; `test-logic` for `src/h2/policy.zig` | Runs in `check` and the `check-full` execution part. Its peer tests run over loopback h2c and TLS in process. System trust against real servers is manual, on each platform (macOS SecTrust above all), and not a gate: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2` and `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2` |
 | Model and transport | `test`, `dispatch-integration`, `transport-h2-integration`; `test-logic` for `src/transport_policy.zig` | Live provider remains opt-in |
 | Codex credentials | `test`, Codex, credential and Codex H2 targets; `test-logic` for `src/codex_credential_policy.zig` and `src/codex_token_wire.zig` | No real account login required |
-| Evaluator | `workflow-check`, `evaluator-host-integration`, `evaluator-churn`; string sanitizer for string changes | No Host resource campaign for an unchanged Host |
 | Product defaults (`src/product_defaults.zig`, `tests/integration/product_defaults.py`) | `test-logic`, `check`, `admission-debug-integration` and the startup-capacity targets on both systems | Every omitted-value surface consumes the module. `host-launch-integration` reads the module instead of copying values. `test-logic` pins the approved values |
 | Native launch or descriptor and startup capacity | `test`, `host-launch-integration`, `descriptor-capacity-integration`, `codex-h2-integration`, `transport-h2-integration` on both systems | Composed gates cover the first three only |
 | Shared `check.sh` driver | Driver tests and `check-full` once | Driver tests require exact fixture membership, overlap, batch drainage and failure propagation; native fixtures need not run again through `check` |
@@ -62,9 +60,9 @@ The existing always-run Auto-land promotion phase reconciles missing current-mai
 
 Human CLI caller, renderer, terminal-restoration and canonical-failure cases run as separate parallel peers in `check` and the `callers` partition. The driver waits for every peer before isolated cases and fails if any peer fails. The unsplit serial gate retains its original case order and assertions.
 
-`zig build check-full` runs routine native tests, the pinned evaluator string sanitizer, evaluator owner cases and process integrations serially after formatting and production builds. Selected CI runs it on Linux for build or dependency changes; macOS `check-full` runs in Daily Mac CI. Run the unsplit default locally for release qualification and isolated process-latency claims. It is not an every-edit gate. Serial execution reduces unrelated load but does not establish scheduler order; use owner-visible outcomes or handshakes for ordering claims.
+`zig build check-full` runs routine native tests and process integrations serially after formatting and production builds. Selected CI runs it on Linux for build or dependency changes; macOS `check-full` runs in Daily Mac CI. Run the unsplit default locally for release qualification and isolated process-latency claims. It is not an every-edit gate. Serial execution reduces unrelated load but does not establish scheduler order; use owner-visible outcomes or handshakes for ordering claims.
 
-Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision. Both must pass. Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch. [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards. Only when the diff touches no strict path does a shard rerun a failed batch once and report both results; a pass after the rerun is a flake to fix. Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets. Composed gates, long witnesses, evaluator churn, launch, Debug admission, reply delivery and H2 stay isolated from other target batches. The `linux` and `macos` statuses fail if any selected job fails or is cancelled. Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
+Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision. Both must pass. Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch. [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards. Only when the diff touches no strict path does a shard rerun a failed batch once and report both results; a pass after the rerun is a flake to fix. Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets. Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches. The `linux` and `macos` statuses fail if any selected job fails or is cancelled. Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
 
 Driver `fixture passed: exit=0 elapsed=1.234s` records (`failed` on nonzero exit) attribute fixture cost, not CPU time, isolated latency or speedup.
 
@@ -83,9 +81,8 @@ Long witnesses are explicit qualification steps outside `check` and `check-full`
 | Witness | Required cadence | Retained or deferred evidence |
 | --- | --- | --- |
 | `zig build test-full` | Client response-wait, inactivity or timeout-default changes, relevant toolchain or platform changes, release qualification | The 61-second witness checks the production 60-second setting in real time. Routine runs report this one skip |
-| `zig build evaluator-churn` | Evaluator or process lifecycle or dependency changes, relevant toolchain or platform changes, release qualification | 1,000 cycles check cumulative native failures. Routine gates keep ten cycles. The 300-second outer timeout is not a throughput requirement |
 
-`check-full` alone does not claim exact-duration or 1,000-cycle evidence. Release evidence requires `check-full`, both long steps and applicable platform and resource gates.
+`check-full` alone does not claim exact-duration evidence. Release evidence requires `check-full`, the long step and applicable platform and resource gates.
 
 Optional `cross-check-linux` and `cross-check-macos` compile supported and experimental architectures. They are not native evidence or a support promise. The Mac cross-build requires an Apple SDK.
 
@@ -297,15 +294,15 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Compile-only entry/import validation](ARCHITECTURE.md#evaluator-containment) | `workflow-check` (`evaluator_integration.py`), `evaluator-host-integration` | Run in `check`. No creation or call-form checks. Entry-check negative control: none located |
+| [Compile-only entry/import validation](ARCHITECTURE.md#evaluator-containment) | none located | Workflow Runtime unimplemented |
 | [Workflow identity, creation keys, Session functions](ARCHITECTURE.md#workflow-identity-and-saved-calls) | none located | Workflow Runtime unimplemented |
 
 ### Evaluation and result binding
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Restricted Promise and global surface | `evaluator_integration.py` | None |
-| [Evaluator output and scratch ownership](ARCHITECTURE.md#owning-evaluator-input-and-output) | `evaluator-host-integration` | Private owner only; no Runtime population |
+| Restricted Promise and global surface | none located | Workflow Runtime unimplemented |
+| [Evaluator output and scratch ownership](ARCHITECTURE.md#owning-evaluator-input-and-output) | none located | Workflow Runtime unimplemented |
 | [Saved-result binding and selection](ARCHITECTURE.md#reevaluating-from-saved-results) | none located | Workflow Runtime unimplemented |
 
 ### Cancellation and submission recovery
@@ -464,10 +461,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Evaluator containment](ARCHITECTURE.md#evaluator-containment): 16 MiB heap, 1 s CPU, 5 s lifetime, stack, descriptors | `workflow-check`, `evaluator-host-integration` | Mach-O reservation, mismatched-stack artifact, five-run timing: none located. Limit readback is not enforcement |
-| 1,000 tiny same-parent evaluations | `evaluator-churn` | Canonical cadence; routine checks keep ten |
-| Evaluator boundary and lifecycle-owner cases: diagnostics, settlement, output budget, prelaunch unlink, cancellation, driver rejection, blocked append, child wait ownership, delayed watchdog, terminal decisions | `workflow-check`, `evaluator-host-integration` | Run before process integrations. Rejection mutated to status 7 must fail `reject_check`; removing parent termination must fail live-child retirement. Blocked append is not a disk-stall witness |
-| Bounded QuickJS string reader | `evaluator-string-sanitizer`, `evaluator-host-integration` | Recheck on QuickJS upgrades. Not Host scheduling or full resource qualification |
+| [Evaluator containment](ARCHITECTURE.md#evaluator-containment): 16 MiB heap, 1 s CPU, 5 s lifetime, stack, descriptors | none located | Workflow Runtime unimplemented. Limit readback is not enforcement |
 | Integration measurements before delivery replacement | none located | Prepared/requested ratio alone does not justify it |
 
 ## Diagnostics

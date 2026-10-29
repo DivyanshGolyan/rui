@@ -15,7 +15,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 To update, run the same commands again. `main` gets changes after Linux CI passes, before Mac and upgrade checks, so it can be ahead of `stable`.
 
-`./install.sh` builds the current checkout, including local changes. It never fetches or switches branches. It pins native dependencies, builds into a new directory under `~/.local/lib/rui`, checks the result and then points `~/.local/bin/rui` and `rui-evaluator` at it. A failed build leaves the previous installation unchanged.
+`./install.sh` builds the current checkout, including local changes. It never fetches or switches branches. It pins native dependencies, builds into a new directory under `~/.local/lib/rui`, checks the result and then points `~/.local/bin/rui` at it. A failed build leaves the previous installation unchanged.
 
 Installation keeps Stores, credentials, shell profiles and earlier builds, because a running Host may still use an earlier build. It reports the selected Store's Host status without starting or stopping anything. A running Host keeps its old executable. To use the new one, let the Host's work finish, run `rui host stop`, wait for `rui host status` to report unavailable, then start `rui` again.
 
@@ -52,4 +52,4 @@ The crash happens after Rui has saved the result and cleanup. So the walkthrough
 
 ## What's next
 
-[Durable JavaScript workflows](https://github.com/DivyanshGolyan/rui/issues/273) are still in development. The private evaluator exists, but the production Host does not call it yet. The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) tracks feature work, separately from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231).
+[Durable JavaScript workflows](https://github.com/DivyanshGolyan/rui/issues/273) are still in development. The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) tracks feature work, separately from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231).

@@ -42,10 +42,9 @@ assert "-Doptimize=ReleaseSafe" in args
 prefix = pathlib.Path(args[args.index("--prefix") + 1])
 (prefix / "bin").mkdir()
 generation = os.environ.get("TEST_GENERATION", "first")
-for name in ("rui", "rui-evaluator"):
-    binary = prefix / "bin" / name
-    binary.write_text("#!/bin/sh\\nprintf '%s\\\\n' '" + generation + "'\\n")
-    binary.chmod(0o755)
+binary = prefix / "bin/rui"
+binary.write_text("#!/bin/sh\\nprintf '%s\\\\n' '" + generation + "'\\n")
+binary.chmod(0o755)
 if os.environ.get("TEST_INVALID_BUILD"):
     (prefix / "bin/rui").write_text("#!/bin/sh\\nexit 3\\n")
 (prefix / "THIRD_PARTY_NOTICES.md").write_text("test notices")
@@ -63,7 +62,7 @@ class InstallTest(unittest.TestCase):
         (self.repo / "src").mkdir()
         shutil.copy2(ROOT / "src/fetch_dependencies.sh", self.repo / "src/fetch_dependencies.sh")
         self.manifest = '.{\n    .minimum_zig_version = "0.17.0",\n    .dependencies = .{\n'
-        for name in ("openssl", "sqlite", "nghttp2", "utf8proc", "quickjs"):
+        for name in ("openssl", "sqlite", "nghttp2", "utf8proc"):
             self.manifest += f'''        .{name} = .{{
             .url = "https://example.invalid/{name}.tar.gz",
             .hash = "test-{name}-hash",
@@ -120,24 +119,33 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         previous = (self.bin / "rui").resolve()
         second = self.install(TEST_GENERATION="second")
         self.assertEqual(second.returncode, 0, second.stderr)
-        for name in ("rui", "rui-evaluator"):
-            self.assertEqual(subprocess.check_output([self.bin / name], text=True), "second\n")
+        self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "second\n")
         self.assertEqual(subprocess.check_output([previous], text=True), "first\n")
         self.assertTrue(((self.bin / "rui").resolve().parent.parent / "THIRD_PARTY_NOTICES.md").exists())
         self.assertEqual([path.read_text() for path in sentinels], ["keep"] * 3)
         self.assertIn("running Host keeps its old executable", second.stdout)
         self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
-    def test_failed_build_or_validation_preserves_installed_commands(self):
+    def test_update_over_a_build_with_the_retired_evaluator_leaves_it_untouched(self):
+        earlier = self.home / ".local/lib/rui/install.earlier/bin"
+        earlier.mkdir(parents=True)
         for name in ("rui", "rui-evaluator"):
-            (self.bin / name).write_text("previous " + name)
+            (earlier / name).write_text("#!/bin/sh\nprintf 'earlier\\n'\n")
+            (earlier / name).chmod(0o755)
+            (self.bin / name).symlink_to(earlier / name)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "first\n")
+        self.assertEqual((self.bin / "rui-evaluator").resolve(), (earlier / "rui-evaluator").resolve())
+
+    def test_failed_build_or_validation_preserves_installed_commands(self):
+        (self.bin / "rui").write_text("previous rui")
         for failure in ({"TEST_HASH_FAILURE": "1"}, {"TEST_BUILD_FAILURE": "1"}, {"TEST_INVALID_BUILD": "1"},
                         {"TEST_ZIG_VERSION": "0.15.2"}):
             with self.subTest(failure=failure):
                 result = self.install(**failure)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                for name in ("rui", "rui-evaluator"):
-                    self.assertEqual((self.bin / name).read_text(), "previous " + name)
+                self.assertEqual((self.bin / "rui").read_text(), "previous rui")
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
                 self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
@@ -180,7 +188,6 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("Pinned aro dependency hash mismatch", failed.stderr)
         self.assertFalse((self.bin / "rui").exists())
-        self.assertFalse((self.bin / "rui-evaluator").exists())
         self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
         cached_manifest = self.root / "selected packages/test-translator-hash/build.zig.zon"
         self.assertEqual(cached_manifest.read_text(), manifests["test-translator-hash"])
@@ -210,8 +217,7 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         result = self.install()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("Preparing pinned openssl dependency", result.stdout)
-        for name in ("rui", "rui-evaluator"):
-            self.assertFalse((self.bin / name).exists())
+        self.assertFalse((self.bin / "rui").exists())
         self.assertFalse((self.root / "selected packages/test-openssl-hash").exists())
         self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
 
@@ -224,7 +230,7 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
                         (self.repo / "build.zig.zon").write_text(self.manifest)
                         first = self.install()
                         self.assertEqual(first.returncode, 0, first.stderr)
-                        previous = {name: (self.bin / name).resolve() for name in ("rui", "rui-evaluator")}
+                        previous = {"rui": (self.bin / "rui").resolve()}
                         url = f"git+https://{host}/ziglang/translate-c.git{fragment}"
                         alias = f'''        .alias = .{{
             .url = "{url}",

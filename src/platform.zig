@@ -571,12 +571,6 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(named_scratch.isOwned("bash-stdout-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("bash-stderr-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("report-12-2.tmp"));
-    try std.testing.expect(named_scratch.isOwned("evaluator-0.tmp"));
-    try std.testing.expect(named_scratch.isOwned("evaluator-ffffffffffffffff.tmp"));
-    for ([_]u64{ 0, 0x1a2b3c, std.math.maxInt(u64) }) |id| {
-        var buffer: [64]u8 = undefined;
-        try std.testing.expect(named_scratch.isOwned(try named_scratch.EvaluatorName.format(&buffer, id)));
-    }
     inline for (.{ "request-", "provider-request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
@@ -597,23 +591,12 @@ test "startup cleanup recognizes only owned ingress names" {
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-999999999999999999999999999999.tmp", .{prefix})));
     }
     try std.testing.expect(!named_scratch.isOwned("response-secret.tmp"));
-    inline for (.{
-        "evaluator-.tmp",
-        "evaluator-00.tmp",
-        "evaluator-1.index",
-        "evaluator-1A.tmp",
-        "evaluator-g.tmp",
-        "evaluator-10000000000000000.tmp",
-        "evaluator-1.tmp.extra",
-        "evaluator-1.index.tmp",
-    }) |name| try std.testing.expect(!named_scratch.isOwned(name));
     try std.testing.expect(!named_scratch.isOwned("canonical.sqlite3"));
 }
 
 test "startup cleanup removes owned files and preserves lookalikes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var output_buffer: [64]u8 = undefined;
     const owned = [_][]const u8{
         "request-0-1.tmp",
         "provider-request-1-1.tmp",
@@ -622,7 +605,6 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "bash-stdout-3-1.tmp",
         "bash-stderr-3-1.tmp",
         "report-0-1.tmp",
-        try named_scratch.EvaluatorName.format(&output_buffer, 0),
     };
     const preserved = [_][]const u8{
         "request-00-1.tmp",
@@ -634,10 +616,6 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "provider-request-0-1.tmp",
         "provider-request-01-1.tmp",
         "provider-request-1-1.tmp.extra",
-        "evaluator-00.tmp",
-        "evaluator-deadbeef.index",
-        "evaluator-DEADBEEF.index",
-        "evaluator-deadbeef.index.extra",
         "diagnostic.log",
         "canonical.sqlite3",
     };
@@ -660,8 +638,7 @@ test "startup cleanup removes owned files and preserves lookalikes" {
 test "startup cleanup refuses an owned name with the wrong type" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var name_buffer: [64]u8 = undefined;
-    const name = try named_scratch.EvaluatorName.format(&name_buffer, 17);
+    const name = "report-17-1.tmp";
     try tmp.dir.createDir(std.testing.io, name, .default_dir);
     var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer root.close(std.testing.io);

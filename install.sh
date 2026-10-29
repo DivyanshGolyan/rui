@@ -35,12 +35,10 @@ if [[ -z $expected_zig || $actual_zig != "$expected_zig" ]]; then
 fi
 
 prefix="$HOME/.local"
-for name in rui rui-evaluator; do
-    if [[ -d "$prefix/bin/$name" ]]; then
-        printf 'Cannot replace directory: %s\n' "$prefix/bin/$name" >&2
-        exit 1
-    fi
-done
+if [[ -d "$prefix/bin/rui" ]]; then
+    printf 'Cannot replace directory: %s\n' "$prefix/bin/rui" >&2
+    exit 1
+fi
 cache=${ZIG_GLOBAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig}
 mkdir -p "$cache/tmp" "$prefix/lib/rui" "$prefix/bin"
 cache=$(cd "$cache" && pwd)
@@ -94,11 +92,10 @@ with subprocess.Popen(["zig", "build", "-Doptimize=ReleaseSafe",
 PY
 printf 'Checking the built command ...\n'
 "$release/bin/rui" --help >/dev/null
-test -x "$release/bin/rui-evaluator"
 test -f "$release/THIRD_PARTY_NOTICES.md"
 printf '%s\n' "$revision" >"$release/revision"
 
-# Keep each complete build: running processes may still use its sibling helper.
+# Keep each complete build: running processes may still use its files.
 # Publish with rename rather than modifying an executable already in use.
 published=1
 python3 - "$release" "$prefix/bin" <<'PY'
@@ -109,10 +106,9 @@ import tempfile
 
 release, destination = map(pathlib.Path, sys.argv[1:])
 with tempfile.TemporaryDirectory(prefix=".rui-install.", dir=destination) as temporary:
-    for name in ("rui-evaluator", "rui"):
-        link = pathlib.Path(temporary) / name
-        link.symlink_to(release / "bin" / name)
-        os.replace(link, destination / name)
+    link = pathlib.Path(temporary) / "rui"
+    link.symlink_to(release / "bin" / "rui")
+    os.replace(link, destination / "rui")
 PY
 printf '\nInstalled %s at %s/bin/rui.\n' "$revision" "$prefix"
 printf 'Previous builds, Stores and credentials were preserved.\n'

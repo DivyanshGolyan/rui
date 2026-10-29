@@ -3,8 +3,7 @@
 
 This is a source architecture check, not Zig's lazy declaration analysis. Both
 platform branches count; test declarations, comments and string contents do not.
-addRui in build.zig owns the Zig executable root. addEvaluator is C-only; its
-private Zig host adapter is currently fixture-only. Package imports are external.
+addRui in build.zig owns the Zig executable root. Package imports are external.
 """
 import argparse
 import json
