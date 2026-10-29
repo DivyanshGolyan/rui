@@ -1016,8 +1016,6 @@ pub const Preparation = struct {
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
-        validation: Output.ReplayValidationCursor = .{},
-        validated: bool = false,
         cursor: request_encoding.ReplayCursor = .{},
     };
 
@@ -1220,8 +1218,16 @@ pub const Preparation = struct {
                 .entry_prefix => {
                     const entry = self.current_entry.?;
                     if (entry.kind == .provider_output) {
+                        // The Store checked the item before serving it.
+                        // Unusable output stays private; no partial request can seal.
+                        const check = entry.replay.?;
+                        if (!check.compatible) self.continuation_unavailable = true;
+                        if (self.continuation_unavailable) {
+                            self.phase = .entry_suffix;
+                            continue;
+                        }
                         const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
-                        self.emitReplay(reader, .entry_suffix);
+                        self.emitReplay(reader, check.omit_content, .entry_suffix);
                     } else {
                         const prefix = if (entry.kind == .user)
                             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
@@ -1430,8 +1436,8 @@ pub const Preparation = struct {
         self.phase = .emitting;
     }
 
-    fn emitReplay(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .replay = .{ .reader = reader } };
+    fn emitReplay(self: *Preparation, reader: store.HistoricalReader, omit_content: bool, next: Phase) void {
+        self.emission = .{ .replay = .{ .reader = reader, .cursor = .{ .omit_content = omit_content } } };
         self.next_phase = next;
         self.phase = .emitting;
     }
@@ -1452,41 +1458,13 @@ pub const Preparation = struct {
                 raw.reader.close();
             },
             .replay => |*replay| {
-                if (!replay.validated) {
-                    const sequential = HistoricalSource{ .reader = &replay.reader };
-                    var incompatible = false;
-                    const complete = replay.validation.advance(sequential, bytes_left, items_left) catch |err| switch (err) {
-                        error.ContinuationUnavailable => done: {
-                            incompatible = true;
-                            break :done true;
-                        },
-                        error.SyntaxError,
-                        error.UnexpectedEndOfInput,
-                        error.UnexpectedJsonDelimiter,
-                        error.InvalidJsonUtf8,
-                        error.JsonTooDeep,
-                        error.DuplicateJsonField,
-                        => return replay.reader.malformed(),
-                        else => return err,
-                    };
-                    if (!complete) return false;
-                    const identity = replay.reader.itemIdentity();
-                    replay.validation.authenticateIdentity(identity.kind, identity.id_digest) catch return replay.reader.malformed();
-                    if (incompatible) self.continuation_unavailable = true;
-                    if (!self.continuation_unavailable) replay.cursor.omit_content = replay.validation.replaysReasoningText();
-                    replay.validated = true;
-                }
-                // Compatibility never excuses unauthenticated later items.
-                // Unusable output stays private; no partial request can seal.
-                if (!self.continuation_unavailable) {
-                    const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
-                    if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
-                }
+                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
+                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
         }
         // Naming the void field stores only the tag; `.none` lowers to a
-        // memset of the whole union, replay validation window included.
+        // memset of the whole union.
         self.emission = .{ .none = {} };
         return true;
     }

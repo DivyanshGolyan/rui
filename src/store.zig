@@ -392,7 +392,14 @@ pub const HistoricalContent = struct {
     raw: bool,
     length: u64,
     digest: [32]u8,
-    item_identity: ?struct { kind: OutputItemKind, id_digest: [32]u8 } = null,
+    item_identity: ?struct {
+        kind: OutputItemKind,
+        id_digest: [32]u8,
+        /// A call item's admission-certified fields, which its bytes decode to.
+        call_fields: ?@FieldType(protocol.ProposalMetadata, "fields") = null,
+    } = null,
+    /// The Store read the whole content and matched its digest.
+    verified: bool = false,
 
     fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
         return self.view == view and view.active;
@@ -505,10 +512,19 @@ pub const HistoricalSettings = struct {
 
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results };
 
+/// The one replay pass over a provider output item in a model call, run by
+/// the Store before it serves the entry: whether today's adapter rules still
+/// accept the item, and whether replay drops its private reasoning text.
+pub const ReplayCheck = struct { compatible: bool, omit_content: bool };
+
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
+    /// Every call, and every other output item at or after the selected
+    /// anchor. Output below the anchor is never replayed, so only its calls
+    /// are authenticated.
+    replay: ?ReplayCheck = null,
     requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null,
     // A User entry's peer sender, in this view's Store.
     sender: ?protocol.Bounded(protocol.max_session_bytes) = null,
@@ -543,7 +559,9 @@ pub const HistoricalView = struct {
     output_expected: u64 = 0,
     output_count: u64 = 0,
     output_previous_position: u64 = 0,
+    selected_anchor: ?u64 = null,
     group_scan: GroupScan = .{},
+    output_check: OutputCheck = .{},
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
     // Ordinary entries copied from one ranged read. Plain values, never a
@@ -554,8 +572,8 @@ pub const HistoricalView = struct {
 
     const entry_batch = 16;
 
-    // One population cursor and one private-item validator, independent of
-    // group/call counts. No statement, blob handle or transaction survives a step.
+    // One population cursor, independent of group/call counts. No
+    // statement, blob handle or transaction survives a step.
     const GroupScan = struct {
         source: u64 = 0,
         boundary: u64 = 0,
@@ -565,10 +583,15 @@ pub const HistoricalView = struct {
         item: u64 = 0,
         calls: u64 = 0,
         position: u64 = 0,
+    };
+
+    // The output item being checked before it is served, with its own
+    // reader; one at a time, independent of item size or count.
+    const OutputCheck = struct {
+        entry: HistoricalEntry = undefined,
         reader: ?ContentReader = null,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
         validation: @import("provider_output.zig").ReplayValidationCursor = .{},
-        fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined,
     };
 
     pub const EntryProgress = union(enum) { pending, ready: ?HistoricalEntry };
@@ -578,7 +601,7 @@ pub const HistoricalView = struct {
     pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
-        if (self.group_scan.reader == null) items_left.* -= 1;
+        if (self.output_check.reader == null) items_left.* -= 1;
         return self.store.readHistoricalEntry(self, after_position, bytes_left, items_left) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
@@ -622,7 +645,7 @@ pub const HistoricalView = struct {
     pub fn contextAnchor(self: *HistoricalView) !?u64 {
         std.debug.assert(self.active);
         while (!try self.validateOutputsStep()) {}
-        return self.store.selectedContextAnchor(self.binding);
+        return self.selected_anchor;
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -670,12 +693,12 @@ pub const HistoricalView = struct {
         else
             try self.store.openProjection(reference.content_id, identity);
         self.readers += 1;
-        return .{ .view = self, .reference = reference, .reader = reader };
+        return .{ .view = self, .reference = reference, .reader = reader, .verified = reference.verified };
     }
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
-        if (self.group_scan.reader) |*reader| reader.close();
+        if (self.output_check.reader) |*reader| reader.close();
         self.active = false;
     }
 
@@ -756,22 +779,10 @@ pub const HistoricalReader = struct {
         return count;
     }
 
-    pub fn itemIdentity(self: *HistoricalReader) struct { kind: OutputItemKind, id_digest: [32]u8 } {
-        std.debug.assert(self.usable() and self.verified);
-        const identity = self.reference.item_identity orelse unreachable;
-        return .{ .kind = identity.kind, .id_digest = identity.id_digest };
-    }
-
     /// Reread only after the complete canonical content digest was verified.
     pub fn readRange(self: *HistoricalReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.usable() and self.verified);
         return self.reader.readRange(start, destination);
-    }
-
-    /// Canonical documents passed syntax validation before acceptance.
-    pub fn malformed(self: *HistoricalReader) anyerror {
-        std.debug.assert(self.usable());
-        return self.view.store.fence(error.CorruptStore);
     }
 
     pub fn close(self: *HistoricalReader) void {
@@ -5362,12 +5373,6 @@ pub const Store = struct {
         };
     }
 
-    fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
-        const access = try self.enter(.none);
-        defer access.release();
-        return access.finish(Ordinary.none, self.selectedContextAnchorLocked(binding));
-    }
-
     fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
         const statement = try self.cached("SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
             "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
@@ -5464,7 +5469,7 @@ pub const Store = struct {
     }
 
     fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
-        if (view.group_scan.reader) |*reader| reader.prepareRead();
+        if (view.output_check.reader) |*reader| reader.prepareRead();
         const access = try self.enter(.none);
         defer access.release();
         return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left)) };
@@ -5506,6 +5511,7 @@ pub const Store = struct {
             try bindU64(source, 5, view.output_cursor_id);
             const result = c.sqlite3_step(source);
             if (result == c.SQLITE_DONE) {
+                view.selected_anchor = try self.selectedContextAnchorLocked(view.binding);
                 view.outputs_validated = true;
                 return true;
             }
@@ -5544,6 +5550,7 @@ pub const Store = struct {
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
         std.debug.assert(view.outputs_validated);
+        if (view.output_check.reader != null) return try self.checkHistoricalOutput(view, bytes_left, items_left);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
             view.entries_end = 0;
@@ -5560,7 +5567,7 @@ pub const Store = struct {
         }
         if (scan_tool_groups) {
             view.tool_group_initialized = false;
-            if (try self.readNextHistoricalToolGroup(view, bytes_left, items_left)) |group| {
+            if (try self.readNextHistoricalToolGroup(view)) |group| {
                 view.tool_group_source_cursor = group.source_operation_id;
                 if (group.entry.position > after_position) {
                     view.next_tool_group = group.entry;
@@ -5574,7 +5581,71 @@ pub const Store = struct {
         if (view.next_tool_group) |group| {
             if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
         }
-        return ordinary;
+        if (ordinary.kind != .provider_output) return ordinary;
+        const content = ordinary.content.?;
+        if (content.item_identity.?.kind != .function_call) {
+            if (view.selected_anchor) |anchor| if (ordinary.position < anchor) return ordinary;
+        }
+        const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
+        view.output_check = .{
+            .entry = ordinary,
+            .reader = if (content.raw)
+                .{ .store = self, .reference = identity, .content_id = content.content_id, .representation = .raw }
+            else
+                try self.openProjectionLocked(content.content_id, identity),
+        };
+        // The next step reads it, after preparing the read outside Store access.
+        return error.HistoricalPending;
+    }
+
+    /// Run the item's one replay pass under the caller's allowance:
+    /// authenticate its bytes, type, ID and a call's certified fields, and
+    /// judge it under today's rules. Corrupt bytes fence; incompatible ones
+    /// are the caller's to refuse.
+    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !HistoricalEntry {
+        const check = &view.output_check;
+        const Source = struct {
+            storage: *Store,
+            check: *HistoricalView.OutputCheck,
+
+            pub fn contentLength(source: @This()) u64 {
+                return source.check.reader.?.reference.length;
+            }
+
+            pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
+                try source.storage.readOwnedContentLocked(&source.check.reader.?, offset, destination);
+                source.check.hash.update(destination);
+                if (offset + destination.len == source.contentLength() and
+                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.?.reference.digest)) return error.CorruptStore;
+                return destination.len;
+            }
+        };
+        var compatible = true;
+        const complete = check.validation.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
+            error.ContinuationUnavailable => done: {
+                compatible = false;
+                break :done true;
+            },
+            // Canonical items passed this grammar's syntax before acceptance.
+            error.SyntaxError,
+            error.UnexpectedEndOfInput,
+            error.UnexpectedJsonDelimiter,
+            error.InvalidJsonUtf8,
+            error.JsonTooDeep,
+            error.DuplicateJsonField,
+            => return error.CorruptStore,
+            else => return err,
+        };
+        if (!complete) return error.HistoricalPending;
+        var entry = check.entry;
+        const identity = entry.content.?.item_identity.?;
+        try check.validation.authenticateIdentity(identity.kind, identity.id_digest);
+        if (identity.kind == .function_call) try check.validation.authenticate(identity.call_fields orelse return error.CorruptStore);
+        check.reader.?.close();
+        check.reader = null;
+        entry.content.?.verified = true;
+        entry.replay = .{ .compatible = compatible, .omit_content = compatible and check.validation.replaysReasoningText() };
+        return entry;
     }
 
     /// The next host input or output item after `after_position`, served from
@@ -5588,7 +5659,7 @@ pub const Store = struct {
         errdefer view.entries_end = 0;
         const statement = try self.cached(
             "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
-                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) " ++
+                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id),NULL " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "LEFT JOIN content ON content.content_id=e.content_id " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
@@ -5599,7 +5670,8 @@ pub const Store = struct {
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
                 "(item.item_kind!=3 OR " ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL " ++
+                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL," ++
+                "(SELECT call.field_metadata FROM model_tool_call call WHERE item.item_kind=3 AND call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal) " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN content ON content.content_id=item.content_id " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
@@ -5649,6 +5721,17 @@ pub const Store = struct {
                 .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 9)) orelse return error.CorruptStore,
                 .id_digest = try readDigest(statement, 10),
             };
+            if (content.item_identity.?.kind == .function_call) {
+                // Four (little-endian length, SHA-256) pairs, as admission certified them.
+                if (c.sqlite3_column_bytes(statement, 13) != 160) return error.CorruptStore;
+                const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 13) orelse return error.CorruptStore);
+                var fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
+                for (&fields, 0..) |*field, index| field.* = .{
+                    .length = std.mem.readInt(u64, certified[index * 40 ..][0..8], .little),
+                    .digest = certified[index * 40 + 8 ..][0..32].*,
+                };
+                content.item_identity.?.call_fields = fields;
+            }
         }
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
         if (c.sqlite3_column_type(statement, 12) != c.SQLITE_NULL) {
@@ -5679,49 +5762,12 @@ pub const Store = struct {
         source_operation_id: u64,
     };
 
-    fn readNextHistoricalToolGroup(
-        self: *Store,
-        view: *HistoricalView,
-        bytes_left: *usize,
-        items_left: *usize,
-    ) !?HistoricalToolGroup {
+    fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalToolGroup {
         const scan = &view.group_scan;
-        if (scan.reader) |*reader| {
-            const Source = struct {
-                storage: *Store,
-                scan: *HistoricalView.GroupScan,
-
-                pub fn contentLength(source: @This()) u64 {
-                    return source.scan.reader.?.reference.length;
-                }
-
-                pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
-                    try source.storage.readOwnedContentLocked(&source.scan.reader.?, offset, destination);
-                    const count = destination.len;
-                    source.scan.hash.update(destination[0..count]);
-                    if (offset + count == source.contentLength() and
-                        !std.mem.eql(u8, &source.scan.hash.finalResult(), &source.scan.reader.?.reference.digest)) return error.CorruptStore;
-                    return count;
-                }
-            };
-            const authenticated = scan.validation.advance(Source{ .storage = self, .scan = scan }, bytes_left, items_left) catch |err| switch (err) {
-                // This scan authenticates canonical calls. Preparation owns
-                // compatibility of the complete selected provider recipe.
-                error.ContinuationUnavailable => true,
-                else => return error.CorruptStore,
-            };
-            if (!authenticated)
-                return error.HistoricalPending;
-            try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
-            try scan.validation.authenticate(scan.fields);
-            reader.close();
-            scan.reader = null;
-            return error.HistoricalPending;
-        }
         if (scan.source != 0) {
             // Walk the immutable item population, not just surviving call rows.
             // One item/classification per step also detects wholly missing calls.
-            const item = try self.cached("SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position,item.content_id," ++
+            const item = try self.cached("SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
                 "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
                 "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
                 "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
@@ -5743,7 +5789,7 @@ pub const Store = struct {
             }
             if (result != c.SQLITE_ROW or c.sqlite3_column_int64(item, 0) != scan.item) return error.CorruptStore;
             const position = try readNullableTokens(item, 3, false) orelse return error.CorruptStore;
-            if (scan.item >= scan.expected_items or c.sqlite3_column_int(item, 5) != 1 or
+            if (scan.item >= scan.expected_items or c.sqlite3_column_int(item, 4) != 1 or
                 position <= scan.admission or position >= scan.boundary or
                 (scan.item != 0 and position != scan.previous_position + 1)) return error.CorruptStore;
             scan.previous_position = position;
@@ -5767,12 +5813,8 @@ pub const Store = struct {
             const accepted = try readNullablePositiveI64(outcome, 0) orelse return error.CorruptStore;
             _ = try self.readPublicContentMetadata(try readNullablePositiveI64(outcome, 1) orelse return error.CorruptStore);
             scan.position = @max(scan.position, @as(u64, @intCast(accepted)));
+            // The call's bytes are authenticated when its entry is served.
             scan.calls += 1;
-            scan.fields = proposal.metadata.fields;
-            scan.validation = .{};
-            scan.hash = protocol.contentHasher();
-            const metadata = try self.readContentMetadata(try readNullablePositiveI64(item, 4) orelse return error.CorruptStore);
-            scan.reader = try self.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, true);
             return error.HistoricalPending;
         }
         const statement = try self.cached(
@@ -10828,6 +10870,21 @@ test "complete historical tool-result traversal scales with groups and calls" {
     try std.testing.expect(more_calls < call_baseline * 8);
 }
 
+/// One bounded step through history in preparation order. Each served
+/// entry moves `after` past it, a tool group is drained, and the end sets
+/// `after` to the largest position.
+fn testingHistoricalStep(view: *HistoricalView, after: *u64, bytes: *usize, items: *usize) !void {
+    switch (try view.nextEntryStep(after.*, bytes, items)) {
+        .pending => {},
+        .ready => |served| if (served) |entry| {
+            after.* = entry.position;
+            if (entry.kind == .tool_results) while (try view.nextToolResult()) |_| {};
+        } else {
+            after.* = std.math.maxInt(u64);
+        },
+    }
+}
+
 test "historical preparation yields covered group populations and cancels proposal authentication" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10853,14 +10910,18 @@ test "historical preparation yields covered group populations and cancels propos
     {
         var view = try storage.openHistoricalView(binding);
         while (!try view.validateOutputsStep()) {}
-        while (view.group_scan.reader == null) {
-            var bytes: usize = 7;
-            var items: usize = 1;
-            try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
-        }
         var bytes: usize = 7;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
+        var after: u64 = 0;
+        while (view.output_check.reader == null) {
+            bytes = 7;
+            items = 1;
+            try testingHistoricalStep(&view, &after, &bytes, &items);
+        }
+        bytes = 7;
+        items = 1;
+        try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
         _ = try configureTestSession(&storage, "yielded-checkpoint");
         const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
         const closes = storage.testing_content_work.closes.load(.monotonic);
@@ -10873,22 +10934,16 @@ test "historical preparation yields covered group populations and cancels propos
     while (!try view.validateOutputsStep()) {}
     var charged: u64 = 0;
     var turns: usize = 0;
-    while (true) {
+    var after: u64 = 0;
+    while (after != std.math.maxInt(u64)) {
         turns += 1;
         try std.testing.expect(turns < 200000);
         const closes = storage.testing_content_work.closes.load(.monotonic);
         var bytes: usize = 127;
         var items: usize = 3;
-        const progress = try view.nextEntryStep(view.output_boundary, &bytes, &items);
+        try testingHistoricalStep(&view, &after, &bytes, &items);
         charged += 127 - bytes;
         try std.testing.expect(storage.testing_content_work.closes.load(.monotonic) - closes <= 1);
-        switch (progress) {
-            .pending => {},
-            .ready => |entry| {
-                try std.testing.expect(entry == null);
-                break;
-            },
-        }
     }
     try std.testing.expect(charged >= 8 * calls.len * arguments.len);
     try std.testing.expect(turns > charged / 127);
@@ -10919,15 +10974,16 @@ test "large historical readers and yielded group authentication leave checkpoint
         var view = try storage.openHistoricalView(continuation);
         defer view.close();
         while (!try view.validateOutputsStep()) {}
-        while (view.group_scan.reader == null) {
+        var after: u64 = 0;
+        while (view.output_check.reader == null) {
             var bytes: usize = 4096;
             var items: usize = 1;
-            try std.testing.expect(try view.nextEntryStep(0, &bytes, &items) == .pending);
+            try testingHistoricalStep(&view, &after, &bytes, &items);
         }
-        view.group_scan.reader.?.allocator = std.testing.allocator;
+        view.output_check.reader.?.allocator = std.testing.allocator;
         var bytes: usize = 4096;
         var items: usize = 1;
-        try std.testing.expect(try view.nextEntryStep(0, &bytes, &items) == .pending);
+        try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
         _ = try configureTestSession(&storage, "large-group-write");
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         // Closing a pending view also frees its reader-owned copied window.
@@ -10995,14 +11051,27 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 try std.testing.expect(storage.isFenced());
                 continue :cases;
             })) {}
+            // Row faults fail while discovery walks the group. A call's bytes
+            // are read, and matched with its certified fields, when its entry
+            // is served, which precedes its results.
+            const bytes_fault = std.mem.indexOf(u8, fault, "payload") != null or std.mem.indexOf(u8, fault, "field_metadata") != null;
+            var after: u64 = 0;
             while (true) {
                 var bytes: usize = 1;
                 var items: usize = 1;
-                _ = view.nextEntryStep(0, &bytes, &items) catch |err| {
+                const progress = view.nextEntryStep(after, &bytes, &items) catch |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
                     break;
                 };
-                if (view.tool_group_initialized) return error.MissingCorruptionFailure;
+                if (!bytes_fault and view.tool_group_initialized) return error.MissingCorruptionFailure;
+                switch (progress) {
+                    .pending => {},
+                    .ready => |served| {
+                        const entry = served orelse return error.MissingCorruptionFailure;
+                        if (entry.kind == .tool_results) return error.MissingCorruptionFailure;
+                        after = entry.position;
+                    },
+                }
             }
             try std.testing.expect(storage.isFenced());
         }
