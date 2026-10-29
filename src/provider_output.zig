@@ -1435,7 +1435,7 @@ test "import accepts exactly the items replay accepts and names the same broken 
         defer source.file.close(std.testing.io);
         var cursor: ReplayValidationCursor = .{};
         const replayed: ?anyerror = if (validateReplayWith(&cursor, std.testing.io, source.file, item.len)) |_| null else |err| err;
-        if (replayed == error.SyntaxError) {
+        if (replayed != null and replayed.? == error.SyntaxError) {
             // Import parses the enclosing event first and names its own
             // syntax errors; both still refuse.
             try std.testing.expect(imported != null);
