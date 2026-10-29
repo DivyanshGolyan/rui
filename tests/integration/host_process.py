@@ -392,7 +392,20 @@ def preserve_failure_metadata(path, collect):
 
 # The Store format fixtures expect, stated independently of src/store.zig so a
 # format change must update its fixtures deliberately.
-STORE_SCHEMA = 36
+STORE_SCHEMA = 37
+
+
+def action_authorized_sql(action):
+    """Whether the action_operation row aliased `action` is authorized: its
+    permission revision bypassed approval, or an accepted allow_once decision
+    names it. The format stores no permission state."""
+    return (
+        f"(EXISTS(SELECT 1 FROM session_revision revision WHERE revision.session_ref={action}.session_ref "
+        f"AND revision.revision={action}.permission_revision AND revision.permission_mode=1) "
+        f"OR EXISTS(SELECT 1 FROM permission_decision_command decision JOIN core_command command "
+        f"ON command.command_key=decision.command_key WHERE decision.action_id=CAST({action}.action_id AS TEXT) "
+        f"AND decision.decision='allow_once' AND command.accepted=1))"
+    )
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and
 # 16 MiB. Each root reserves one fixed slot by atomic mkdir, so concurrent

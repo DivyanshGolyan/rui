@@ -14,7 +14,7 @@ import threading
 from collections import Counter
 
 import model_fixture as fixture
-from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
+from host_process import HostDiagnostics, ReleaseGate, action_authorized_sql, canonical_fixture_root, dispose_all, retain_failure_state
 import os_semantics
 
 
@@ -1500,7 +1500,7 @@ def main():
         fixture.stop_host(host)
         assert rows(
             store,
-            "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
+            f"SELECT {action_authorized_sql('action')},attempt_ordinal FROM action_operation action WHERE session_ref=?",
             (session,),
         ) == [(1, 0)]
         before_launch_gate = ReleaseGate(state / "before-launch-gate")
