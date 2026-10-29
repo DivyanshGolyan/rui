@@ -17128,8 +17128,20 @@ test "completed tool labels trust admission while model replay authenticates pay
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view = try storage.openHistoricalView(next);
     defer view.close();
-    try std.testing.expectError(error.CorruptStore, view.nextEntry(0));
+    try std.testing.expectEqual(@as(?anyerror, error.CorruptStore), testingHistoricalFailure(&view));
     try std.testing.expect(storage.isFenced());
+}
+
+/// Walk the whole history in preparation order, returning the first error.
+fn testingHistoricalFailure(view: *HistoricalView) ?anyerror {
+    while (!(view.validateOutputsStep() catch |err| return err)) {}
+    var after: u64 = 0;
+    while (after != std.math.maxInt(u64)) {
+        var bytes: usize = 64 * 1024;
+        var items: usize = 1024;
+        testingHistoricalStep(view, &after, &bytes, &items) catch |err| return err;
+    }
+    return null;
 }
 
 test "live tool activity survives completed Turns and split result pages" {
@@ -17799,13 +17811,9 @@ test "compaction selected newest base corruption fences rather than using an old
         if (corruption != .payload) {
             try std.testing.expectError(error.CorruptStore, view.contextAnchor());
         } else {
+            // The Store reads the selected anchor's bytes before serving it.
             const anchor = (try view.contextAnchor()).?;
-            const selected = (try view.nextEntry(anchor - 1)).?;
-            try std.testing.expectEqual(anchor, selected.position);
-            var reader = try view.openContent(selected.content.?);
-            defer reader.close();
-            var bytes: [4096]u8 = undefined;
-            try std.testing.expectError(error.CorruptStore, reader.read(0, &bytes));
+            try std.testing.expectError(error.CorruptStore, view.nextEntry(anchor - 1));
         }
         try std.testing.expect(storage.isFenced());
     }
