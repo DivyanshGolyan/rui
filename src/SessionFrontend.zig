@@ -3,6 +3,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -75,11 +76,11 @@ job: Job = .{},
 // The work the latest applied page carried.
 work: protocol.PageWork = .{},
 live: View.Live = .{},
-cursor: client.ActivityCursor = .{},
+cursor: protocol_reply.ActivityCursor = .{},
 // UI commits layout alongside delivered Activity; workers borrow a snapshot.
 compact_tools: bool = false,
 // Continues the transcript above its oldest shown row; null at the start.
-transcript_older: ?client.ConversationCursor = null,
+transcript_older: ?protocol_reply.ConversationCursor = null,
 // What the transcript shows above its copy before older pages (see
 // reads.Plan); its echoes are listed newest first, so `count` falls.
 transcript_plan: reads.Plan = .{ .start = 0 },
@@ -125,7 +126,7 @@ dirty: bool = true,
 detached: bool = false,
 notice: ?[]const u8 = null,
 // One joined read at a time; no reuse until its live diagnostic is delivered.
-pending_diagnostic: ?struct { failure: client.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
+pending_diagnostic: ?struct { failure: protocol_reply.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
 notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
@@ -1254,7 +1255,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
 test "frontend joined read diagnostic survives failed notice and worker reset" {
     const Worker = struct {
         fn fail(_: *anyopaque, task: *Task) !void {
-            var failure: client.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try failure.diagnostic.type.set("busy");
             try failure.diagnostic.code.set("host_busy\x1b\n");
             return task.requests().failRead(failure);

@@ -2,6 +2,7 @@
 //! storage; neither this owner nor its input may move until the borrower joins.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
@@ -48,7 +49,7 @@ path: [std.Io.Dir.max_path_bytes]u8 = undefined,
 target: client.CaptureTarget = undefined,
 captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
-reply: ?client.MutationReply = null,
+reply: ?protocol_reply.MutationReply = null,
 // These capture facts are worker-owned until join, independent of Admission.
 publication: Publication = .not_sent,
 last_error: ?anyerror = null,
@@ -490,7 +491,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
             self.captured.?.close(task.io);
             self.captured = null;
         }
-        const original: client.MutationTarget = switch (self.intent.?) {
+        const original: protocol_reply.MutationTarget = switch (self.intent.?) {
             .message => |ticket| blk: {
                 const bytes = try self.input.message(ticket);
                 break :blk .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };

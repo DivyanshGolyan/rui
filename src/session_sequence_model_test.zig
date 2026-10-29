@@ -5,6 +5,7 @@ const std = @import("std");
 const Screen = @import("SessionScreen.zig");
 const Task = @import("ClientTask.zig");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
 
@@ -320,8 +321,8 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
 fn pages(comptime Frontend: type, comptime ops: anytype) !void {
     const Event = enum { details, history, status, complete, send, latest, transcript, edit };
     const events = std.enums.values(Event);
-    const first_cursor: client.ConversationCursor = .{ .end = 99, .before_position = 79, .before_ordinal = 3 };
-    const next_cursor: client.ConversationCursor = .{ .end = 99, .before_position = 23, .before_ordinal = 1 };
+    const first_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 79, .before_ordinal = 3 };
+    const next_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 23, .before_ordinal = 1 };
     for (0..4) |seed| for (0..512) |sequence| {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
@@ -334,7 +335,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         var request_generation: u64 = 0;
         var request: ?enum { details, history, status } = null;
         var draft: Text = .{};
-        var older: ?client.ConversationCursor = null;
+        var older: ?protocol_reply.ConversationCursor = null;
         // Seed a real retained boundary. History is launched only from the
         // transcript, including A -> launch -> new B -> delayed completion.
         front.job.result.boundaries.add(.{ .output = 0, .cursor = first_cursor, .admitted = first_cursor.before_position });

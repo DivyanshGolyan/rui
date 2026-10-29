@@ -2,6 +2,7 @@
 //! reads that after join.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const signal_stack = @import("signal_stack.zig");
 const Self = @This();
 
@@ -13,7 +14,7 @@ thread: ?std.Thread = null,
 cancellation: client.Cancellation = .{},
 mutex: std.Io.Mutex = .init,
 result: ?anyerror!void = null,
-read_failure: ?client.ReadFailure = null,
+read_failure: ?protocol_reply.ReadFailure = null,
 
 /// All arguments and this owner stay in final storage through join.
 pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
@@ -63,7 +64,7 @@ test "ClientTask read diagnostic survives join with isolated borrowers and reset
         fn run(raw: *anyopaque, owner: *Self) !void {
             const code: *[]const u8 = @ptrCast(@alignCast(raw));
             if (code.*.len == 0) return;
-            var failure: client.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try failure.diagnostic.type.set("busy");
             try failure.diagnostic.code.set(code.*);
             const borrower = owner.requests();

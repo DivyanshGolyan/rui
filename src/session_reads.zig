@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
@@ -18,7 +19,7 @@ const ReadPhase = departure.ReadPhase;
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 /// Writes /status from one Current capture whose attention rows are in the file.
-pub const Status = *const fn (std.Io, []const u8, []const u8, *const client.Current, std.Io.File, *std.Io.Writer) anyerror!void;
+pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
 pub const Inspection = enum { status, requests, help, command };
 
 /// One read. Inputs are frozen at launch; the worker writes only `result`,
@@ -38,9 +39,9 @@ pub const Job = struct {
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
-    cursor: client.ActivityCursor = .{},
+    cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
-    older: ?client.ConversationCursor = null,
+    older: ?protocol_reply.ConversationCursor = null,
     // A history read renders this part of a transcript's listing instead.
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
@@ -81,9 +82,9 @@ pub const Job = struct {
         // The job's Messages after this read.
         messages: Messages = .{},
         live: View.Live = .{},
-        cursor: client.ActivityCursor = .{},
+        cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
-        history_cursor: ?client.ConversationCursor = null,
+        history_cursor: ?protocol_reply.ConversationCursor = null,
         // Where a listing range continues, or null when it is done.
         listing: ?Listing = null,
         // Output custody began; a later failure is not a silent preparation one.
@@ -166,7 +167,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         else => {},
     };
     if (job.opening) {
-        var mark: ?client.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
+        var mark: ?protocol_reply.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
             switch (item.value) {
                 .user, .assistant, .tool_result => mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
@@ -209,12 +210,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 }
 
 /// The /status page for the Current capture whose rows are in scratch.
-fn writeStatus(job: *const Job, io: std.Io, current: *const client.Current, out: *std.Io.Writer) !void {
+fn writeStatus(job: *const Job, io: std.Io, current: *const protocol_reply.Current, out: *std.Io.Writer) !void {
     try job.status(io, job.store, job.session, current, job.scratch, out);
     try writeSubmission(job, out);
 }
 
-fn statusDigest(job: *const Job, io: std.Io, current: *const client.Current) !u64 {
+fn statusDigest(job: *const Job, io: std.Io, current: *const protocol_reply.Current) !u64 {
     var buffer: [256]u8 = undefined;
     var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
     try writeStatus(job, io, current, &hashing.writer);
@@ -386,7 +387,7 @@ pub const Messages = struct {
 /// records the live offset where writing reaches it, never this number.
 pub const Boundary = struct {
     output: u64,
-    cursor: ?client.ConversationCursor,
+    cursor: ?protocol_reply.ConversationCursor,
     /// Every Message admitted before this position that showed did so before
     /// the boundary; one admitted at or after it shows after it, if at all.
     admitted: u64,
@@ -427,7 +428,7 @@ pub const Listing = union(enum) {
     /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
     /// only those not applied at `end`. `cursor` is where the next one is
     /// searched for, backward.
-    range: struct { end: u64, lowest: u64, all: bool, cursor: client.ActivityCursor },
+    range: struct { end: u64, lowest: u64, all: bool, cursor: protocol_reply.ActivityCursor },
 
     pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
         if (lowest >= before) return null;
@@ -498,7 +499,7 @@ pub const Plan = struct {
     dropped: ?Listing = null,
     gap: bool = false,
     unapplied: ?Listing = null,
-    older: ?client.ConversationCursor = null,
+    older: ?protocol_reply.ConversationCursor = null,
 
     /// The listed Message a transcript reads next, if any comes before older
     /// pages. Each is prepended, so newest first: live echoes, the dropped
@@ -691,7 +692,7 @@ test "a silent read marks its end only when complete and every shown Message is 
 /// shown Message's conversation row, and its output's end (see `readEnd`).
 /// An incomplete read that shows nothing records none.
 pub const Marks = struct {
-    pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor, admitted: u64 };
+    pub const Mark = struct { offset: u64, cursor: ?protocol_reply.ConversationCursor, admitted: u64 };
     pub const capacity = 64;
     items: [capacity]Mark = undefined,
     count: usize = 0,
@@ -776,7 +777,7 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     };
     try job.scratch.setLength(task.io, 0);
     var staging: Staging = .{ .io = task.io, .file = job.scratch };
-    const reference: client.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
     const failure = switch (target.source) {
         .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
         .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
@@ -936,7 +937,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
 /// earlier precedes its live output. Only a conversation item is a cursor
 /// into the Conversation; before an Admission or call row it ends at the
 /// previous position, and before the first position there is nothing.
-fn beginningBefore(first: protocol.ActivityItem, end: u64) ?client.ConversationCursor {
+fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.ConversationCursor {
     return switch (first.value) {
         .user, .assistant, .tool_result => .{ .end = end, .before_position = first.position, .before_ordinal = first.ordinal },
         else => if (first.position > 1) .{ .end = first.position - 1 } else null,
@@ -947,7 +948,7 @@ test "a live page's beginning precedes its first item, without repeating or skip
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
     const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
-    const Case = struct { item: protocol.ActivityItem, cursor: ?client.ConversationCursor };
+    const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
         .{ .item = .{ .position = 5, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
         .{ .item = .{ .position = 7, .ordinal = 2, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },

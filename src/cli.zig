@@ -7,6 +7,7 @@ const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -407,7 +408,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     }
 }
 
-fn writeHostStatus(io: std.Io, status: client.HostStatus) !void {
+fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
@@ -992,7 +993,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     };
 }
 
-fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.CapturedIdentity {
+fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_reply.MutationIdentity {
     if (options.model) |model| try requireSupportedModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -1425,7 +1426,7 @@ fn takeStep(stage: *?client.Step, attempt: anytype) !@FieldType(@TypeOf(attempt)
 
 /// A framed reply leaves nothing to report; an unreadable one leaves
 /// admission unknown.
-fn presentedStep(reply: client.MutationReply) ?client.Step {
+fn presentedStep(reply: protocol_reply.MutationReply) ?client.Step {
     return if (reply.answer) |_| null else |_| .admission_response;
 }
 
@@ -1457,7 +1458,7 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
 
 /// Everything /status reports, from one Current capture; `file` holds the
 /// capture's attention rows.
-pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const client.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
+pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
@@ -1596,13 +1597,13 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const workspace = workspace_buffer[0..workspace_length];
         const file = try renderScratch(init);
         defer file.close(init.io);
-        var cursor: client.SessionListCursor = .{};
+        var cursor: protocol_reply.SessionListCursor = .{};
         while (true) {
             try file.setLength(init.io, 0);
             try init.io.vtable.fileSeekTo(init.io.userdata, file, 0);
             var buffer: client.ReplyBuffer = .{};
             const reply = try client.listSessions(init.io, destination, workspace, cursor, file, &buffer);
-            const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+            const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
             const page = switch (decoded) {
                 .page => |*value| value,
                 .failure => |failure| return failure.err(),
@@ -1658,7 +1659,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             if (err != error.UnsupportedModel) TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
         };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
-        const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+        const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
             return;
         };
@@ -1887,7 +1888,7 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         defer file.close(io);
         var response: client.ReplyBuffer = .{};
         const wire_reply = try client.inspectSession(io, selected_store, reference, .current, file, &response);
-        const reply = try client.CurrentReply.decode(io, file, reference, wire_reply);
+        const reply = try protocol_reply.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
             try writeCommandReply(io, wire_reply.command, .stdout);
             return reply.failure.err();
@@ -2010,16 +2011,16 @@ const JsonOutput = struct {
     }
 };
 
-fn writeCommandReply(io: std.Io, reply: client.CommandReply, stream: JsonOutput.Stream) !void {
+fn writeCommandReply(io: std.Io, reply: protocol_reply.CommandReply, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     writer.writeAll(reply.body) catch |err| return output.failure(err);
     writer.writeAll("\n") catch |err| return output.failure(err);
     try output.finish();
-    try client.checkCanonicalFailure(reply);
+    try protocol_reply.checkCanonicalFailure(reply);
 }
 
-fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
+fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     std.json.Stringify.value(.{ .key = key, .@"error" = .{
@@ -2031,7 +2032,7 @@ fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, st
     try output.finish();
 }
 
-fn checkedObservation(io: std.Io, reply: client.ObservationReply, key: []const u8) !client.CommandObservation {
+fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: []const u8) !protocol_reply.CommandObservation {
     return switch (reply) {
         .observation => |observation| observation,
         .failure => |failure| {
@@ -2080,7 +2081,7 @@ const MutationPresentation = enum {
     interactive_configuration,
 };
 
-fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (reply.answer) |answer| {
         if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
             TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
@@ -2103,7 +2104,7 @@ fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const 
     try writer.writeByte('\n');
 }
 
-fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .interactive_configuration and reply.isAccepted()) {
         try writer.writeAll("Rui: Configured.\n");
         return writer.flush();
@@ -2156,7 +2157,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
 }
 
 // Presentation of owned facts only: no wire representation or second parser.
-fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void {
+fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
     try writer.writeAll("{\"context\":");
     try std.json.Stringify.value(.{
         .store = reply.context.store.slice(),
@@ -2217,7 +2218,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
-    var reply = client.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
     try reply.context.key.set("original\"key");
     try reply.context.kind.set("configure");
@@ -2251,7 +2252,7 @@ test "mutation presentation complete modes preserve escaped original context" {
         failed_human,
     };
     for ([_]bool{ false, true }) |failed| {
-        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
+        var reply = protocol_reply.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
         try reply.context.store.set("/store");
         try reply.context.key.set("key/µ\"\n\x1b");
         try reply.context.kind.set("configure");
@@ -2277,7 +2278,7 @@ test "mutation presentation complete modes preserve escaped original context" {
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
     const wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
-    var reply = client.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
     try reply.context.kind.set("configure");
@@ -2292,7 +2293,7 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-const SavedRequest = client.CapturedIdentity;
+const SavedRequest = protocol_reply.MutationIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2308,12 +2309,12 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Save
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?client.SessionListCursor } {
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?protocol_reply.SessionListCursor } {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
     const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
     const page = switch (decoded) {
         .page => |*page| page,
         .failure => |failure| {
@@ -2342,7 +2343,7 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     };
     // Bounded pages stream into one final JSON value; no page population is
     // retained. A failed later page leaves incomplete output and exits nonzero.
-    var cursor: client.SessionListCursor = .{};
+    var cursor: protocol_reply.SessionListCursor = .{};
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
@@ -2398,7 +2399,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try writeMutationReply(init.io, reply, .json);
 }
 
-fn showResult(init: std.process.Init, requester: client.Requests, saved: *const client.MessageAddress) !void {
+fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
     const observed = try checkedObservation(init.io, try requester.observeMessage(saved), saved.key.slice());
     const state = observed.state();
     var line: [256]u8 = undefined;
@@ -2450,7 +2451,7 @@ fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.F
 }
 
 const SessionObservation = struct {
-    current: client.Current,
+    current: protocol_reply.Current,
     // The complete Current capture remains owned until all its permissions
     // have been displayed; no per-Action resident list is needed.
     file: std.Io.File,
@@ -2472,23 +2473,23 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try requester.inspectSession(store, session_ref, .current, file, &response);
-    switch (try client.CurrentReply.decode(init.io, file, session_ref, reply)) {
+    switch (try protocol_reply.CurrentReply.decode(init.io, file, session_ref, reply)) {
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
         .failure => |failure| {
             if (requester.read_failure != null) return requester.failRead(failure);
             try out.writeAll(reply.command.body);
             try out.writeByte('\n');
-            try client.checkCanonicalFailure(reply.command);
+            try protocol_reply.checkCanonicalFailure(reply.command);
             return failure.err();
         },
     }
 }
 
-fn renderActionable(io: std.Io, current: *const client.Current, file: std.Io.File, out: *std.Io.Writer) !void {
+fn renderActionable(io: std.Io, current: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) !void {
     const Sink = struct {
         out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: client.Current.Attention) !void {
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
             if (row == .actionable) {
                 var buffer: [20]u8 = undefined;
                 try writeSafeFieldTo(self.out, "Action requiring attention: ", try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value}));
