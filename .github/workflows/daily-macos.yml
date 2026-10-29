@@ -44,20 +44,16 @@ jobs:
     needs: [changed, macos]
     if: ${{ always() && needs.changed.outputs.changed == 'true' && needs.macos.result != 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: File an issue for the failed daily run
+      - name: File each failure under its cause
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ needs.macos.result }}
-          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          python3 -B tests/ci/report_issue.py \
-            --title "Daily macOS qualification failed" \
-            --body "Daily macOS qualification (check-full, resources) on main $GITHUB_SHA: $RESULT. $URL"
+        run: python3 -B tests/ci/report_issue.py --workflow "Daily macOS qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA"

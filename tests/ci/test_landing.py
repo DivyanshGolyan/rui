@@ -237,6 +237,7 @@ class LandingTest(unittest.TestCase):
             runs = {('check.yml', tip, 'wip/land-1'): green}
             dispatches = []
             fail_dispatch = set()
+            reds = []
 
             def dispatch(*args):
                 workflow = args[2]
@@ -256,6 +257,7 @@ class LandingTest(unittest.TestCase):
                                    lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
                     mock.patch.object(auto_land, 'aggregate', lambda run, name: run.get(name)), \
                     mock.patch.object(auto_land, 'gh', dispatch), \
+                    mock.patch.object(auto_land, 'open_stable_reds', lambda: list(reds)), \
                     mock.patch.object(auto_land, 'DISPATCH_RETRY_DELAYS', (0, 0)), \
                     mock.patch.object(sys, 'argv', ['auto_land.py']), contextlib.redirect_stdout(io.StringIO()):
                 # A dispatch must cover the current main delta even when Linux passes.
@@ -326,6 +328,16 @@ class LandingTest(unittest.TestCase):
                     self.assertEqual(refs(), (tip, base), bad_base)
                 runs[('check.yml', tip, 'main')] = dict(green, event='workflow_dispatch',
                     display_title='Stable qualification from base ' + base)
+                # An open stable-red issue holds a fully qualified candidate, and
+                # nothing is released, until a fix commit closes it.
+                reds.append(dict(number=7, title='CI red: bash: process_exists'))
+                before = len(dispatches)
+                with contextlib.redirect_stdout(io.StringIO()) as held:
+                    auto_land.promote_stable()
+                self.assertEqual(refs(), (tip, base))
+                self.assertEqual(len(dispatches), before)
+                self.assertIn('#7 CI red: bash: process_exists', held.getvalue())
+                reds.clear()
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, tip))
                 self.assertEqual(dispatches[-1][1], ('workflow', 'run', auto_land.RELEASE, '--ref', 'main',
@@ -397,6 +409,31 @@ class LandingTest(unittest.TestCase):
                 auto_land.qualify_main()
                 auto_land.promote_stable()
                 self.assertEqual(len(dispatches), before, 'already qualified main is a no-op')
+
+    def test_stable_red_listing_is_open_labelled_and_fails_closed(self):
+        calls = []
+
+        def gh(*args):
+            calls.append(args)
+            return '[{"number": 3, "title": "CI red: x"}]'
+        with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh):
+            self.assertEqual(auto_land.open_stable_reds(), [dict(number=3, title='CI red: x')])
+        args = calls[0]
+        self.assertEqual(args[:2], ('issue', 'list'))
+        for flag, value in (('--repo', 'o/r'), ('--state', 'open'), ('--label', auto_land.STABLE_RED)):
+            self.assertEqual(args[args.index(flag) + 1], value)
+        # The reporter labels stable reds with the label promotion reads.
+        self.assertIn(f'--label {auto_land.STABLE_RED}', workflow('check.yml'))
+        self.assertIn('issues: read', workflow('auto-land.yml').split('\njobs:', 1)[0])
+
+        def broken(*args):
+            raise subprocess.CalledProcessError(1, ['gh', *args])
+        with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', broken), \
+                mock.patch.object(auto_land, 'qualify_main', lambda: ('a', 'b')), \
+                mock.patch.object(auto_land, 'contains', lambda *_: True), \
+                mock.patch.object(auto_land, 'git', mock.Mock(side_effect=AssertionError('no promotion'))):
+            with self.assertRaises(subprocess.CalledProcessError):
+                auto_land.promote_stable()
 
     def test_preflight_allows_one_open_landing_stack(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
@@ -645,7 +682,8 @@ test "$n" -gt "$FAILS"
                         self.assertEqual(result.stdout.count('::warning::'), min(fails, 2))
 
     def test_native_completion_explicitly_wakes_the_serialized_writer(self):
-        for name, needs in (('check.yml', '[linux, macos, cache_execution]'),
+        # Stable qualification wakes Auto-land only after filing its reds.
+        for name, needs in (('check.yml', '[linux, macos, cache_execution, report]'),
                             ('previous-release-upgrade.yml', 'upgrade')):
             with self.subTest(workflow=name):
                 job = re.search(r'(?ms)^  completion:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow(name))

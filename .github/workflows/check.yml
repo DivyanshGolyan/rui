@@ -41,6 +41,7 @@ jobs:
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
+      linux_split: ${{ steps.select.outputs.linux_split }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,7 +71,7 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from qualification import shards
+          from qualification import shards, split_linux
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
           if os.environ['STABLE'] == 'true':
@@ -90,6 +91,7 @@ jobs:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
+              print('linux_split=' + str(split_linux(p['targets'])).lower(), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
@@ -153,11 +155,38 @@ jobs:
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+          PART: ${{ needs.plan.outputs.linux_split == 'true' && 'rest' || 'all' }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
           name: compiled-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  linux_build_unit:
+    # The unit test binary compiles on one core for about four minutes; on its
+    # own runner it no longer queues behind every other compile.
+    needs: plan
+    if: ${{ needs.plan.outputs.linux_split == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          check-part: compiled-unit
+      - name: Compile the unit test binary once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: publish
+        with:
+          name: compiled-linux-unit-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-compiled
           compression-level: 0
           if-no-files-found: error
@@ -222,8 +251,9 @@ jobs:
         run: python3 -B tests/ci/cache_execution.py
   linux_suites:
     name: linux suites (${{ matrix.name }})
-    needs: [plan, linux_build]
-    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    needs: [plan, linux_build, linux_build_unit]
+    # The unit producer is skipped when no selected target compiles it.
+    if: ${{ !cancelled() && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
     # handoff compiles without the producer's cache.
@@ -244,8 +274,9 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
+          UNIT_ARTIFACT_ID: ${{ needs.linux_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -275,7 +306,7 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     # Policy is required even for documentation-only changes.
-    needs: [plan, policy, linux_build, linux_suites, macos_typecheck]
+    needs: [plan, policy, linux_build, linux_build_unit, linux_suites, macos_typecheck]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -286,11 +317,14 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
           BUILD_RESULT: ${{ needs.linux_build.result }}
+          UNIT_RESULT: ${{ needs.linux_build_unit.result }}
+          SPLIT: ${{ needs.plan.outputs.linux_split }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$POLICY_RESULT" = success
+          if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
             test "$NATIVE_RESULT" = success
@@ -359,9 +393,35 @@ jobs:
           test "$PLAN_RESULT" = success
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
+  report:
+    # Stable reds are filed by cause; a landing tip's own red is its author's,
+    # so it files only the failures its passing jobs retried.
+    needs: [linux, macos, cache_execution]
+    if: ${{ always() && !github.event.repository.private && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && (needs.linux.result != 'success' || needs.macos.result != 'success')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/wip/land-'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE: ${{ inputs.stable && 'true' || '' }}
+        run: |
+          if [ -n "$STABLE" ]; then
+            python3 -B tests/ci/report_issue.py --workflow "Stable qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --label stable-red
+          else
+            python3 -B tests/ci/report_issue.py --workflow "Selected checks" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --retried-only
+          fi
   completion:
     # Explicit dispatch is supported for GITHUB_TOKEN; workflow_run is suppressed.
-    needs: [linux, macos, cache_execution]
+    # The wake follows the report, so a red's stable-red issue exists before promotion runs.
+    needs: [linux, macos, cache_execution, report]
     if: ${{ always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
