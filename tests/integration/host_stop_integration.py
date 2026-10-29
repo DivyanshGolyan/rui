@@ -140,8 +140,8 @@ def mixed_effect_drain(provider_first):
         thread.start()
         host = None
         diagnostics = None
-        # Held from TERM until the trap has run: the 100 ms grace KILL must not
-        # race Bash's scheduling.
+        # Shutdown holds after signalling every effect until the trap has run:
+        # the 100 ms grace KILL must not race Bash's scheduling.
         signalled = ReleaseGate(state / "shutdown-signalled")
         try:
             host = fixture.start_host(
@@ -179,11 +179,13 @@ def mixed_effect_drain(provider_first):
 
             # Both admission orders must retire Bash, and stop cancels the
             # provider stream while its peer still holds the response.
+            diagnostics.wait("test_gate_waiting", subject=str(signalled.path), timeout=3)
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
                              f"{order}: Bash TERM with provider held", timeout=2)
             signalled.release()
             diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
             assert host.wait(timeout=10) == 1, host.returncode
+            assert events.read_text().count("TERM\n") == 1, "Bash was not signalled exactly once"
             assert not provider_release.is_set(), "the peer released the provider before Host exit"
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
