@@ -2383,14 +2383,13 @@ fn requests(init: std.process.Init) !void {
 }
 
 fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
-    const handle = parsed.positional orelse {
-        // The grammar requires --store, --record and --kind together.
-        var reply_buffer: client.ReplyBuffer = .{};
-        const reply = try client.retry(init.io, parsed.get("store").?, parsed.get("record").?, parsed.get("kind").?, &reply_buffer);
-        return writeMutationReply(init.io, reply, .json);
-    };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
+    // The grammar requires --store, --record and --kind together.
+    const saved: client.SavedRecord = if (parsed.positional) |handle|
+        .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
+    else
+        .{ .explicit = .{ .store = parsed.get("store").?, .record = parsed.get("record").?, .kind = parsed.get("kind").? } };
+    var captured = try client.openCaptured(init.io, saved);
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);

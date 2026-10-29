@@ -482,7 +482,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.captured == null) {
         // Only absent publication permits capture of the SAME reserved intent.
-        self.captured = client.openCaptured(task.io, self.directory, &self.key) catch |err| switch (err) {
+        self.captured = client.openCaptured(task.io, .{ .generated = .{ .directory = self.directory, .handle = &self.key } }) catch |err| switch (err) {
             error.FileNotFound => return submit(raw, task),
             else => return err,
         };
@@ -490,15 +490,15 @@ fn resend(raw: *anyopaque, task: *Task) !void {
             self.captured.?.close(task.io);
             self.captured = null;
         }
-        const capture = &self.captured.?;
-        if (!capture.saved.store.eql(self.store) or !capture.saved.session.eql(self.session) or !capture.saved.key.eql(&self.key)) return error.OriginalBindingMismatch;
-        switch (self.intent.?) {
-            .message => |ticket| {
+        const original: client.MutationTarget = switch (self.intent.?) {
+            .message => |ticket| blk: {
                 const bytes = try self.input.message(ticket);
-                if (!capture.saved.isKind(.message) or capture.target != .message or capture.target.message.bytes != bytes.len or !std.mem.eql(u8, &capture.target.message.digest, &protocol.contentDigest(bytes))) return error.OriginalBindingMismatch;
+                break :blk .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
             },
-            .decision => |decision| if (!capture.saved.isKind(.permission_decision) or capture.target != .permission_decision or capture.target.permission_decision.action != decision.action or capture.target.permission_decision.decision != decision.decision) return error.OriginalBindingMismatch,
-        }
+            .decision => |decision| .{ .permission_decision = .{ .action = decision.action, .decision = decision.decision } },
+        };
+        const expected: client.Binding = .{ .store = self.store, .session = self.session, .key = &self.key, .target = original };
+        if (!expected.matches(&self.captured.?.saved, self.captured.?.target)) return error.OriginalBindingMismatch;
         self.publication = .published;
     }
     self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer).get();
