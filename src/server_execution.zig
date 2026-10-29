@@ -342,6 +342,8 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
+    host.history_memos = .{ .capacity = slots.len, .scratch_path = host.lease.paths.scratch.slice() };
+    defer host.history_memos.deinit(host.io);
     const bash_work = mapZeroed(server_host.BashWork, slots.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
@@ -1346,6 +1348,7 @@ fn beginAdmittedAttempt(
         finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
         return .admitted;
     };
+    preparation.memos = &host.history_memos;
     traceOperation(host, "preparation_started", binding);
     return .admitted;
 }

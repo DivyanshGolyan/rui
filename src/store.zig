@@ -615,6 +615,30 @@ pub const HistoricalView = struct {
         return self.store.selectedContextAnchor(self.binding);
     }
 
+    /// The Operation's admission position, the exclusive upper bound of this
+    /// view's history. Known once output validation completes.
+    pub fn admissionPosition(self: *const HistoricalView) u64 {
+        std.debug.assert(self.active and self.outputs_validated);
+        return self.output_boundary;
+    }
+
+    /// The last producing Operation the tool-group scan has examined. After
+    /// the final entry, every earlier Operation of this view is examined.
+    pub fn toolGroupCursor(self: *const HistoricalView) u64 {
+        std.debug.assert(self.active);
+        return self.tool_group_source_cursor;
+    }
+
+    /// Start the tool-group scan after `cursor`, before the first entry
+    /// read. The caller resumes after a position that an earlier view of the
+    /// same Session covered, with that view's final cursor: those Operations'
+    /// groups all lie at or before the covered position, so the scan would
+    /// only skip them.
+    pub fn resumeToolGroups(self: *HistoricalView, cursor: u64) void {
+        std.debug.assert(self.active and self.outputs_validated and !self.tool_group_initialized);
+        self.tool_group_source_cursor = cursor;
+    }
+
     /// A tool-results entry activates one canonical group. Consume it fully
     /// before requesting the next historical entry.
     pub fn nextToolResult(self: *HistoricalView) !?HistoricalToolResult {

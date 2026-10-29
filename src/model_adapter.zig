@@ -3,6 +3,7 @@ const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
+const history_memo = @import("history_memo.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -15,6 +16,11 @@ const tools = @import("tools.zig");
 
 const ScratchBudget = provider.ScratchBudget;
 const PreparedRequest = provider.PreparedRequest;
+pub const HistoryMemos = history_memo.Table;
+
+test {
+    _ = history_memo;
+}
 
 // The sole V1 model adapter owns Codex wire grammar, output interpretation,
 // and managed-route authentication. The Host owns only effect scheduling and
@@ -734,6 +740,10 @@ pub const PreparationFaults = struct {
     // set alongside unlink, the retained owner uses this gate so the test
     // can complete reclamation through the production path.
     unlink_removal: ?*const std.atomic.Value(bool) = null,
+    /// Fail the history memo copy with ENOSPC once this many span bytes
+    /// reached the request file; the failing chunk still lands, so the
+    /// rewind must remove a partial span.
+    memo_copy_failure_after: ?u64 = null,
 };
 
 const RequestWriter = struct {
@@ -745,6 +755,7 @@ const RequestWriter = struct {
     fail_write: bool,
     /// Accepted bytes not yet in the file. Every preparation advance flushes
     /// before it yields or seals, so between advances the file holds `offset`.
+    /// Writes are positional, so the file position never matters.
     pending: [preparation_byte_allowance]u8 = undefined,
     pending_length: usize = 0,
 
@@ -760,7 +771,7 @@ const RequestWriter = struct {
         if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
         if (bytes.len > self.pending.len - self.pending_length) try self.flush();
         if (bytes.len > self.pending.len) {
-            try self.file.writeStreamingAll(self.io, bytes);
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
         } else {
             @memcpy(self.pending[self.pending_length..][0..bytes.len], bytes);
             self.pending_length += bytes.len;
@@ -768,10 +779,41 @@ const RequestWriter = struct {
         self.offset = next_offset;
     }
 
+    /// Append up to `length` bytes from `source` at `source_offset`, charged
+    /// like written bytes. Returns the count actually copied.
+    fn copyFrom(self: *RequestWriter, source: std.Io.File, source_offset: u64, length: u64) !u64 {
+        try self.flush();
+        _ = std.math.add(u64, self.offset, length) catch return error.RequestLengthOverflow;
+        if (!self.budget.allocate(length)) return error.RequestScratchExhausted;
+        self.charged += length;
+        const copied = history_memo.copyRange(self.io, source, source_offset, self.file, self.offset, length) catch |err| {
+            // Nothing is proven unwritten; the caller's rewind settles it.
+            return err;
+        };
+        self.budget.release(length - copied);
+        self.charged -= length - copied;
+        self.offset += copied;
+        return copied;
+    }
+
     fn flush(self: *RequestWriter) !void {
         if (self.pending_length == 0) return;
-        try self.file.writeStreamingAll(self.io, self.pending[0..self.pending_length]);
+        try self.file.writePositionalAll(self.io, self.pending[0..self.pending_length], self.offset - self.pending_length);
         self.pending_length = 0;
+    }
+
+    /// Continue writing at `offset`, which was flushed, discarding what
+    /// follows. Truncation proves those bytes gone and returns their charge
+    /// above `charged`. Without it they stay charged until both aliases
+    /// close; positional writes overwrite them, and sealing still requires
+    /// the file length to equal the request length.
+    fn rewind(self: *RequestWriter, offset: u64, charged: u64) void {
+        std.debug.assert(offset <= self.offset and charged <= self.charged);
+        self.pending_length = 0;
+        self.offset = offset;
+        self.file.setLength(self.io, offset) catch return;
+        self.budget.release(self.charged - charged);
+        self.charged = charged;
     }
 
     fn deinit(self: *RequestWriter) void {
@@ -862,6 +904,17 @@ pub const Preparation = struct {
     peer_part: usize = 0,
     active: bool = true,
     last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
+    /// The Host's history memos, set by the owner after init. Null rebuilds
+    /// every request in full and keeps nothing.
+    memos: ?*history_memo.Table = null,
+    /// The Session's memo file and entry while its span is copied in.
+    memo_file: ?std.Io.File = null,
+    memo_copy: ?history_memo.Memo = null,
+    memo_copied: u64 = 0,
+    memo_copy_charged: u64 = 0,
+    span_start: u64 = 0,
+    /// This request's finished span, kept as the memo once it seals.
+    memo_next: ?history_memo.Memo = null,
 
     const Phase = enum {
         settings,
@@ -878,6 +931,8 @@ pub const Preparation = struct {
         instructions_separator,
         instructions_content,
         input_prefix,
+        history_resume,
+        history_copy,
         history_next,
         covered_tool_result_next,
         compaction_trigger,
@@ -1043,7 +1098,37 @@ pub const Preparation = struct {
                     const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
                     self.emitJsonReader(reader, .input_prefix);
                 },
-                .input_prefix => self.emitFixed("\",\"input\":[", .history_next),
+                .input_prefix => self.emitFixed("\",\"input\":[", .history_resume),
+                // The history span starts here. A memo of this Session's
+                // previous span that this view contains replaces encoding
+                // that prefix; anything else rebuilds it from the Store.
+                .history_resume => {
+                    self.span_start = self.writer.offset;
+                    self.memo_copied = 0;
+                    self.phase = .history_next;
+                    const memos = self.memos orelse continue;
+                    const found = memos.find(self.settings.?.session.slice()) orelse continue;
+                    const key = self.memoKey();
+                    if (!found.memo.serves(&key, self.view.admissionPosition())) continue;
+                    self.writer.flush() catch |err| return .{ .failed = err };
+                    self.memo_file = memos.open(self.writer.io, found.slot) orelse continue;
+                    self.memo_copy = found.memo;
+                    self.memo_copy_charged = self.writer.charged;
+                    self.phase = .history_copy;
+                },
+                .history_copy => {
+                    const memo = self.memo_copy.?;
+                    if (self.memo_copied == memo.length) {
+                        self.finishMemoCopy();
+                        continue;
+                    }
+                    const count = self.copyMemo(@min(bytes_left, memo.length - self.memo_copied)) catch {
+                        self.abandonMemoCopy();
+                        continue;
+                    };
+                    self.memo_copied += count;
+                    bytes_left -= @intCast(count);
+                },
                 .history_next => {
                     items_left += 1; // The semantic cursor charges discovery or parser work.
                     const progress = self.view.nextEntryStep(self.history_position, &bytes_left, &items_left) catch |err| return .{ .failed = err };
@@ -1067,6 +1152,7 @@ pub const Preparation = struct {
                     }
                     self.current_entry = entry;
                     if (entry == null) {
+                        self.endSpan();
                         self.phase = .compaction_trigger;
                     } else if (entry.?.kind == .tool_results) {
                         self.phase = .tool_result_next;
@@ -1181,6 +1267,71 @@ pub const Preparation = struct {
         return self.flushAndYield();
     }
 
+    fn memoKey(self: *const Preparation) history_memo.Key {
+        return .{
+            .session = self.settings.?.session,
+            .model = self.settings.?.model,
+            .anchor = self.selected_anchor,
+        };
+    }
+
+    /// Copy one chunk of the memo span into the request file.
+    fn copyMemo(self: *Preparation, length: u64) !u64 {
+        const copied = try self.writer.copyFrom(self.memo_file.?, self.memo_copied, length);
+        if (self.faults.memo_copy_failure_after) |after| {
+            if (self.memo_copied + copied > after) return error.NoSpaceLeft;
+        }
+        return copied;
+    }
+
+    /// Resume encoding after the copied span exactly as the producing
+    /// request's encoder stood after its last entry.
+    fn finishMemoCopy(self: *Preparation) void {
+        const memo = self.memo_copy.?;
+        self.closeMemoFile();
+        self.history_position = memo.history_position;
+        self.input_comma = memo.input_comma;
+        self.view.resumeToolGroups(memo.tool_group_cursor);
+        self.phase = .history_next;
+    }
+
+    /// A failed copy loses only the memo: discard the partial span and its
+    /// charge, drop the memo and rebuild the history from the Store.
+    fn abandonMemoCopy(self: *Preparation) void {
+        self.closeMemoFile();
+        self.memo_copy = null;
+        self.memo_copied = 0;
+        self.writer.rewind(self.span_start, self.memo_copy_charged);
+        if (self.memos.?.find(self.settings.?.session.slice())) |found|
+            _ = self.memos.?.forget(self.writer.io, found.slot);
+        self.phase = .history_next;
+    }
+
+    fn closeMemoFile(self: *Preparation) void {
+        if (self.memo_file) |file| file.close(self.writer.io);
+        self.memo_file = null;
+    }
+
+    /// The span ends after the last entry; keep it as this Session's next
+    /// memo once the request seals.
+    fn endSpan(self: *Preparation) void {
+        if (self.memos == null) return;
+        self.memo_next = .{
+            .key = self.memoKey(),
+            .boundary = self.view.admissionPosition(),
+            .history_position = self.history_position,
+            .tool_group_cursor = self.view.toolGroupCursor(),
+            .input_comma = self.input_comma,
+            .length = self.writer.offset - self.span_start,
+        };
+    }
+
+    fn releaseMemos(self: *Preparation) void {
+        self.closeMemoFile();
+        self.memo_copy = null;
+        self.memo_next = null;
+    }
+
     fn flushAndYield(self: *Preparation) PreparationProgress {
         self.writer.flush() catch |err| return .{ .failed = err };
         return .pending;
@@ -1293,6 +1444,10 @@ pub const Preparation = struct {
         self.closeEmission();
         self.view.close();
         self.writer.file.close(self.writer.io);
+        // The sealed request is the memo's source; a failure loses only the
+        // memo.
+        if (self.memo_next) |memo| self.memos.?.store(self.writer.io, memo, self.readonly, self.span_start, if (self.memo_copy != null) self.memo_copied else 0);
+        self.releaseMemos();
         const request = PreparedRequest{
             .file = self.readonly,
             .length = self.writer.offset,
@@ -1307,6 +1462,7 @@ pub const Preparation = struct {
 
     pub fn cancel(self: *Preparation) void {
         std.debug.assert(self.active);
+        self.releaseMemos();
         self.closeEmission();
         self.view.close();
         self.readonly.close(self.writer.io);
@@ -3160,11 +3316,14 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try compact.permit.consume();
+    var memos: history_memo.Table = .{ .capacity = 1, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
     {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        prep.memos = &memos;
         defer if (prep.active) prep.cancel();
         const request = try drainPreparation(&prep, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
@@ -3216,9 +3375,16 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
     try prep.init(std.testing.io, try setup.storage.openHistoricalView(next_binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    prep.memos = &memos;
     defer if (prep.active) prep.cancel();
     const request = try drainPreparation(&prep, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
+    // The compaction's own memo has no anchor; the successor selects one,
+    // so it rebuilds, and its replacement Attempt copies the new span.
+    try std.testing.expectEqual(@as(usize, 0), prep.memo_copied);
+    try std.testing.expect(memos.entries[0].held.?.key.anchor != null);
+    const after_anchor: usize = @intCast(memos.entries[0].held.?.length);
+    try std.testing.expectEqual(after_anchor, try expectMemoRebuildEqual(&setup, next_binding, &memos, .{}));
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
@@ -3319,5 +3485,257 @@ test "request preparation cancels inside schema and replay emissions" {
         try std.testing.expect(!preparation.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
+    }
+}
+
+const MemoPrepared = struct { bytes: []u8, copied: usize };
+
+/// Prepare one Attempt, optionally through the memo table, with small
+/// allowances so a memo copy spans many chunks.
+fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: ?*history_memo.Table, faults: PreparationFaults) !MemoPrepared {
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, faults, &retained);
+    preparation.memos = memos;
+    defer if (preparation.active) preparation.cancel();
+    // A rewound copy shrinks the request, so this drain does not require
+    // monotonic growth as drainPreparation does.
+    var steps: usize = 0;
+    var request = while (true) : (steps += 1) {
+        try std.testing.expect(steps < 1 << 16);
+        switch (preparation.advance(7, 3)) {
+            .pending => {},
+            .prepared => |value| break value,
+            .failed => |err| return err,
+        }
+    };
+    const bytes = bytes: {
+        defer request.deinit(std.testing.io, preparation.writer.budget);
+        const bytes = try std.testing.allocator.alloc(u8, @intCast(request.length));
+        errdefer std.testing.allocator.free(bytes);
+        try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes, 0));
+        try std.testing.expectEqual(request.length, try request.file.length(std.testing.io));
+        break :bytes bytes;
+    };
+    errdefer std.testing.allocator.free(bytes);
+    // Every charge, including a rewound partial copy, is released.
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    return .{ .bytes = bytes, .copied = @intCast(preparation.memo_copied) };
+}
+
+/// Prepare through `memos` and again with a full rebuild, and require the
+/// same bytes. Returns how many span bytes the memo supplied.
+fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: *history_memo.Table, faults: PreparationFaults) !usize {
+    const memo = try prepareMemoForTesting(setup, binding, memos, faults);
+    defer std.testing.allocator.free(memo.bytes);
+    const full = try prepareMemoForTesting(setup, binding, null, .{});
+    defer std.testing.allocator.free(full.bytes);
+    try std.testing.expectEqual(@as(usize, 0), full.copied);
+    try std.testing.expectEqualStrings(full.bytes, memo.bytes);
+    return memo.copied;
+}
+
+/// Settle `binding` with a reasoning item and one Bash call, deny that call
+/// and admit the successor.
+fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
+    var names: [4][32]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
+    const reasoning_id = try std.fmt.bufPrint(&names[1], "memo-r{d}", .{round});
+    const item_id = try std.fmt.bufPrint(&names[2], "memo-item-{d}", .{round});
+    const call_id = try std.fmt.bufPrint(&names[3], "memo-call-{d}", .{round});
+    var json_buffer: [128]u8 = undefined;
+    const reasoning = try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round });
+    try settleComposedForTesting(setup, binding, prefix, .reasoning, reasoning, reasoning_id, &.{.{ .item_id = item_id, .call_id = call_id }});
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = round };
+    var key_buffer: [32]u8 = undefined;
+    try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));
+    deny.session = session;
+    try std.testing.expect(setup.storage.decidePermission(&deny, .{}) == .accepted);
+    var successor = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedSuccessorAdmission;
+    return successor.permit.consume();
+}
+
+fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounded(protocol.max_session_bytes) {
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("memo-config");
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(setup.workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 1;
+    command.configuration.tools.values[0] = .bash;
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const reply = setup.storage.configure(&command, true, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+fn heldMemoLength(memos: *history_memo.Table, session: []const u8) usize {
+    const found = memos.find(session) orelse return 0;
+    return @intCast(found.memo.length);
+}
+
+const MemoFileDamage = enum { poisoned, deleted, truncated, extended, directory };
+
+/// Change the Session's memo file behind the table's back.
+fn damageMemoFileForTesting(setup: *PreparationTestSetup, memos: *history_memo.Table, session: []const u8, damage: MemoFileDamage) !void {
+    const found = memos.find(session).?;
+    var name_buffer: [64]u8 = undefined;
+    const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, found.slot + 1, 1);
+    const io = std.testing.io;
+    switch (damage) {
+        .poisoned => {
+            const file = try setup.tmp.dir.openFile(io, name, .{ .mode = .read_write });
+            defer file.close(io);
+            const poison = try std.testing.allocator.alloc(u8, @intCast(found.memo.length));
+            defer std.testing.allocator.free(poison);
+            @memset(poison, 'X');
+            try file.writePositionalAll(io, poison, 0);
+        },
+        .deleted => try setup.tmp.dir.deleteFile(io, name),
+        .truncated, .extended => {
+            const file = try setup.tmp.dir.openFile(io, name, .{ .mode = .read_write });
+            defer file.close(io);
+            try file.setLength(io, if (damage == .truncated) found.memo.length / 2 else found.memo.length + 1);
+        },
+        .directory => {
+            try setup.tmp.dir.deleteFile(io, name);
+            try setup.tmp.dir.createDir(io, name, .fromMode(0o700));
+        },
+    }
+}
+
+test "a history memo hit writes exactly the bytes of a full rebuild" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var memos: history_memo.Table = .{ .capacity = 2, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // A fresh Host has no memo: the first request is a full rebuild.
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    // A replacement Attempt with the same view copies the whole span.
+    const whole = heldMemoLength(&memos, session.slice());
+    try std.testing.expect(whole != 0);
+    try std.testing.expectEqual(whole, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    var round: u64 = 1;
+    while (round <= 3) : (round += 1) {
+        const covered = heldMemoLength(&memos, session.slice());
+        binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
+        // Later Operations copy the previous span and encode only the
+        // reasoning, call and Tool Result that follow it.
+        try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        try std.testing.expect(heldMemoLength(&memos, session.slice()) > covered);
+    }
+}
+
+test "a history memo that does not match the frozen request is rebuilt in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memos: history_memo.Table = .{ .capacity = 2, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    // Each mismatch carries poisoned bytes, so using it would change the
+    // request; equality with the full rebuild proves it was not used.
+    const Mismatch = enum { anchor, model, older_view, session };
+    for (std.enums.values(Mismatch)) |mismatch| {
+        try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
+        const slot = memos.find(session.slice()).?.slot;
+        const memo = &memos.entries[slot].held.?;
+        switch (mismatch) {
+            .anchor => memo.key.anchor = 1,
+            .model => try memo.key.model.set("model-b"),
+            // A retry of an earlier Operation has an older frozen view.
+            .older_view => memo.boundary = std.math.maxInt(u64),
+            .session => try memo.key.session.set("zzzzzz"),
+        }
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        if (mismatch == .session) _ = memos.forget(std.testing.io, memos.find("zzzzzz").?.slot);
+    }
+    // After a Host restart the table starts empty, whatever files remain.
+    var restarted: history_memo.Table = .{ .capacity = 2, .scratch_path = setup.root };
+    defer restarted.deinit(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &restarted, .{}));
+    try std.testing.expect(heldMemoLength(&restarted, session.slice()) != 0);
+}
+
+test "a failed history memo copy rewinds its partial span and rebuilds in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memos: history_memo.Table = .{ .capacity = 2, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    // ENOSPC on the first chunk, and part-way after several chunks reached
+    // the file. Either way the request is the full rebuild's, and that
+    // rebuild leaves a memo the next request uses.
+    for ([_]u64{ 0, 20 }) |after| {
+        const held = heldMemoLength(&memos, session.slice());
+        try std.testing.expect(held > after + 7);
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{ .memo_copy_failure_after = after }));
+        try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    }
+}
+
+test "a history memo file that changed on disk is dropped and rebuilt in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memos: history_memo.Table = .{ .capacity = 2, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    // Missing, short, long, or not a file: the length check refuses it
+    // before any byte is copied. Each rebuild stores a fresh memo.
+    for ([_]MemoFileDamage{ .deleted, .truncated, .extended, .directory }) |damage| {
+        const held = heldMemoLength(&memos, session.slice());
+        try std.testing.expect(held != 0);
+        try damageMemoFileForTesting(&setup, &memos, session.slice(), damage);
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        if (damage == .directory) {
+            // The directory blocks the slot's file; the memo is lost, not the
+            // request.
+            try std.testing.expectEqual(@as(usize, 0), heldMemoLength(&memos, session.slice()));
+            var name_buffer: [64]u8 = undefined;
+            for (0..2) |slot| {
+                const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+                setup.tmp.dir.deleteDir(std.testing.io, name) catch {};
+            }
+            _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+        }
+        try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    }
+    // The table's bytes are the files' bytes, and stopping removes them.
+    try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), memos.bytes);
+    memos.deinit(std.testing.io);
+    var name_buffer: [64]u8 = undefined;
+    for (0..2) |slot| {
+        const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+        try std.testing.expectError(error.FileNotFound, setup.tmp.dir.access(std.testing.io, name, .{}));
     }
 }
