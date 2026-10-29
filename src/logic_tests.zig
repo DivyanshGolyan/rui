@@ -30,6 +30,7 @@ test {
     _ = @import("core_boundary.zig");
     _ = @import("execution.zig");
     _ = @import("execution_turn.zig");
+    _ = @import("history_memo.zig");
     _ = @import("named_scratch.zig");
     _ = @import("new_session_selection.zig");
     _ = @import("request_encoding.zig");

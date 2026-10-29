@@ -77,8 +77,10 @@ pub fn calculate(
     // one serial preparation/spawn/cleanup transition exists. Its budgeted
     // excess of five covers Bash spawn, including both stdin aliases and two child pipe
     // ends in the Host: posix_spawn opens /dev/null for absent stdin and
-    // reports exec failure directly. Model preparation (two files
-    // plus a directory), cleanup (three files plus a directory), failed-
+    // reports exec failure directly. Model preparation (three: its request
+    // file and read-only alias, plus the scratch directory while creating
+    // them or one history memo file while copying from it; sealing closes
+    // the writer before it opens the memo file), cleanup (three files plus a directory), failed-
     // response retention beside its occupied slot (one file plus a
     // directory), transport trust loading, and self-contained native callbacks are smaller and
     // mutually exclusive with that serial excess.
