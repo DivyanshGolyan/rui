@@ -48,7 +48,7 @@ prepare_dependencies() {
             archive="$scratch/${url##*/}"
             printf 'Preparing pinned %s dependency ...\n' "$name"
             curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-                --retry 1 --retry-delay 1 --retry-max-time 95 "$url" -o "$archive"
+                --retry 2 --retry-all-errors --retry-max-time 200 "$url" -o "$archive"
             cp "$manifest" "$scratch/build.zig.zon"
             (cd -- "$scratch" && zig fetch --pkg-dir "$packages" "--save=$name" "$archive")
             actual=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$scratch/build.zig.zon")
