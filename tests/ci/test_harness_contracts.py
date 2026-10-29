@@ -107,6 +107,7 @@ ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
 ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
 ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
+ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
 ZIG_FN = re.compile(r"\b(pub\s+)?(?:(?:export|extern|inline)\s+)?fn\s+(\w+)\s*\(")
 Scope = namedtuple("Scope", "head start end kind name public")
 
@@ -141,18 +142,26 @@ def zig_sleep_ordering(path, text):
                 head = index + 1
         elif char == ";":
             head = index + 1
-    scopes = []
-    for head, start, end in blocks:
+    scopes, unnamed = [], 0
+    for head, start, end in sorted(blocks, key=lambda block: block[1]):
         if test := ZIG_TEST.search(declarations[head:start]):
             scopes.append(Scope(head, start, end, "test", test[1], False))
+        elif ZIG_UNNAMED_TEST.search(declarations[head:start]):
+            unnamed += 1
+            scopes.append(Scope(head, start, end, "test", f"unnamed test {unnamed}", False))
         elif fn := ZIG_FN.search(code[head:start]):
             scopes.append(Scope(head, start, end, "fn", fn[2], bool(fn[1])))
     test_only = re.search(r"(?:^|/)(?:tests|testing)/|tests?\.zig$", path) is not None
 
+    def enclosing(position):
+        return [scope for scope in scopes if scope.start < position < scope.end]
+
     def innermost(position):
-        enclosing = [scope for scope in scopes if scope.start < position < scope.end]
-        tests = [scope for scope in enclosing if scope.kind == "test"]
-        return tests[0] if tests else max(enclosing, default=None)
+        tests = [scope for scope in enclosing(position) if scope.kind == "test"]
+        return tests[0] if tests else deepest(position)
+
+    def deepest(position):
+        return max(enclosing(position), key=lambda scope: scope.start, default=None)
 
     def waits(position, scope):
         statement = max(code.rfind(c, 0, position) for c in ";{}") + 1
@@ -186,7 +195,7 @@ def zig_sleep_ordering(path, text):
 
     def charge(position, helpers):
         scope = innermost(position)
-        if waits(position, scope) or not is_test_code(scope):
+        if waits(position, deepest(position)) or not is_test_code(scope):
             return
         if scope and scope.kind == "fn" and scope not in helpers and (uses := references(scope)):
             for use in uses:
@@ -399,11 +408,26 @@ fn settle() error{Oops}!void {
 test "an error-set helper still charges its test" {
     try settle();
 }
+test "a peer declared inside a poll still sleeps first" {
+    while (!done()) {
+        const Peer = struct {
+            fn run(io: std.Io) void {
+                std.Io.sleep(io, .fromMilliseconds(150), .awake) catch {};
+            }
+        };
+        _ = Peer;
+    }
+}
+test {
+    try std.testing.io.sleep(.fromMilliseconds(150), .awake);
+}
 '''
         self.assertEqual(zig_sleep_ordering("src/a.zig", source), {
             ("src/a.zig", "peer sleeps before it replies"): 2,
             ("src/a.zig", "polls wait on a condition"): 2,
             ("src/a.zig", "an error-set helper still charges its test"): 1,
+            ("src/a.zig", "a peer declared inside a poll still sleeps first"): 1,
+            ("src/a.zig", "unnamed test 1"): 1,
         })
 
     def test_python_straight_line_sleeps_are_charged_to_their_function(self):
