@@ -104,7 +104,9 @@ ZIG_SLEEP = re.compile(r"\b(?:sleep|nanosleep|usleep)\s*\(|\bpoll\(\s*&\[_\][\w.
 ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
 ZIG_WHILE = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?while\b")
 ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
+ZIG_LOOP = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?(?:while|for)\b")
 ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
+ZIG_EXIT = re.compile(r"\breturn\b|\bbreak\b(?:\s*:\s*(\w+))?")
 ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
 ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
@@ -163,17 +165,40 @@ def zig_sleep_ordering(path, text):
     def deepest(position):
         return max(enclosing(position), key=lambda scope: scope.start, default=None)
 
+    def in_fn(position, start):
+        return any(start < scope.start < position < scope.end for scope in scopes if scope.kind == "fn")
+
+    def in_loop(position, start):
+        statement = max(code.rfind(c, start, position) for c in ";{}") + 1
+        return (ZIG_LOOP.match(code[statement:position].strip()) is not None
+                or any(start < inner < position < end and ZIG_LOOP.match(code[head:inner].strip())
+                       for head, inner, end in blocks))
+
+    def exits(header, start, end):
+        """A `return`, or a `break` that leaves this loop rather than one inside it."""
+        label = re.match(r"(\w+)\s*:", header)
+        for exit in ZIG_EXIT.finditer(code, start, end):
+            if in_fn(exit.start(), start):
+                continue
+            if exit[0] == "return" or (label and exit[1] == label[1]) or (
+                    exit[1] is None and not in_loop(exit.start(), start)):
+                return True
+        return False
+
     def waits(position, scope):
         statement = max(code.rfind(c, 0, position) for c in ";{}") + 1
-        loops = [(code[statement:position].strip(), code[statement:position])]
-        loops += [(code[head:start].strip(), code[start:end])
-                  for head, start, end in sorted(blocks, key=lambda block: -block[1])
-                  if (scope.start if scope else -1) < start < position < end]
-        for header, body in loops:
-            if ZIG_WHILE.match(header):
-                return True
-            if ZIG_FOR.match(header):
-                return ZIG_RETRY.match(header) is not None and re.search(r"\b(?:break|return)\b", body) is not None
+        header = code[statement:position].strip()
+        if ZIG_WHILE.match(header):
+            return True
+        if ZIG_FOR.match(header):
+            return ZIG_RETRY.match(header) is not None and ZIG_EXIT.search(header) is not None
+        for head, start, end in sorted(blocks, key=lambda block: -block[1]):
+            if (scope.start if scope else -1) < start < position < end:
+                header = code[head:start].strip()
+                if ZIG_WHILE.match(header):
+                    return True
+                if ZIG_FOR.match(header):
+                    return ZIG_RETRY.match(header) is not None and exits(header, start, end)
         return False
 
     def references(scope):
@@ -220,13 +245,25 @@ def python_sleep_ordering(path, text):
     """
     offenses = Counter()
 
+    loops = (ast.While, ast.For, ast.AsyncFor)
+
+    def exits(node, own):
+        """A `return`, or a `break` that leaves the loop whose body holds `node` (`own`)."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return False
+        if isinstance(node, ast.Return) or (own and isinstance(node, ast.Break)):
+            return True
+        if isinstance(node, loops):
+            return any(exits(child, False) for child in node.body) or any(exits(child, own) for child in node.orelse)
+        return any(exits(child, own) for child in ast.iter_child_nodes(node))
+
     def retry(loop):
         return (isinstance(loop.target, ast.Name) and loop.target.id == "_"
                 and isinstance(loop.iter, ast.Call) and getattr(loop.iter.func, "id", None) == "range"
-                and any(isinstance(node, (ast.Break, ast.Return)) for node in ast.walk(loop)))
+                and any(exits(node, True) for node in loop.body))
 
-    def visit(node, name, polling):
-        for child in ast.iter_child_nodes(node):
+    def visit(children, node, name, polling):
+        for child in children:
             child_name, child_polling = name, polling
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if name is None:
@@ -242,9 +279,16 @@ def python_sleep_ordering(path, text):
                   and child.func.attr == "sleep" and getattr(child.func.value, "id", None) in ("time", "asyncio")
                   and not polling):
                 offenses[(path, name or "<module>")] += 1
-            visit(child, child_name, child_polling)
+            if isinstance(child, loops):
+                # The else suite runs once after the loop, outside its polling.
+                after = {id(part) for part in child.orelse}
+                visit([part for part in ast.iter_child_nodes(child) if id(part) not in after], child, name, child_polling)
+                visit(child.orelse, child, name, polling)
+            else:
+                visit(ast.iter_child_nodes(child), child, child_name, child_polling)
 
-    visit(ast.parse(text), None, False)
+    tree = ast.parse(text)
+    visit(ast.iter_child_nodes(tree), tree, None, False)
     return offenses
 
 
@@ -421,6 +465,39 @@ test "a peer declared inside a poll still sleeps first" {
 test {
     try std.testing.io.sleep(.fromMilliseconds(150), .awake);
 }
+test "an inner loop's exit does not make its outer loop poll" {
+    for (0..10) |_| {
+        for (items) |item| {
+            if (item) break;
+        }
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    for (0..10) |_| {
+        for (items) |item| if (item) break;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    for (0..10) |_| {
+        const Probe = struct {
+            fn ready() bool {
+                return true;
+            }
+        };
+        _ = Probe;
+        _ = blk: {
+            break :blk 1;
+        };
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    while (!done()) {} else {
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+test "a labeled break from an inner loop leaves the retry" {
+    outer: for (0..10) |_| {
+        for (items) |item| if (item) break :outer;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
 '''
         self.assertEqual(zig_sleep_ordering("src/a.zig", source), {
             ("src/a.zig", "peer sleeps before it replies"): 2,
@@ -428,6 +505,7 @@ test {
             ("src/a.zig", "an error-set helper still charges its test"): 1,
             ("src/a.zig", "a peer declared inside a poll still sleeps first"): 1,
             ("src/a.zig", "unnamed test 1"): 1,
+            ("src/a.zig", "an inner loop's exit does not make its outer loop poll"): 4,
         })
 
     def test_python_straight_line_sleeps_are_charged_to_their_function(self):
@@ -448,9 +526,38 @@ def scenario():
 class Handler:
     def do_POST(self):
         time.sleep(2.5)
+def inner_exits():
+    for _ in range(10):
+        for item in items:
+            if item:
+                break
+        time.sleep(1)
+    for _ in range(10):
+        def probe():
+            return True
+        time.sleep(1)
+    for _ in range(10):
+        for item in items:
+            pass
+        else:
+            break
+        time.sleep(0.01)
+def after_the_loop():
+    while not ready():
+        time.sleep(0.01)
+    else:
+        time.sleep(1)
+    for _ in range(10):
+        if ready():
+            break
+        time.sleep(0.01)
+    else:
+        time.sleep(1)
 '''
         self.assertEqual(python_sleep_ordering("tests/integration/x.py", source), {
             ("tests/integration/x.py", "scenario"): 2,
+            ("tests/integration/x.py", "inner_exits"): 2,
+            ("tests/integration/x.py", "after_the_loop"): 2,
             ("tests/integration/x.py", "Handler.do_POST"): 1,
         })
 
