@@ -238,6 +238,13 @@ class SelectionTest(unittest.TestCase):
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
+    def test_linux_producer_splits_only_beside_other_compiles(self):
+        from qualification import split_linux
+        self.assertTrue(split_linux(["check"]))
+        self.assertTrue(split_linux(["test", "test-logic"]))
+        self.assertFalse(split_linux(["test"]))
+        self.assertFalse(split_linux(["test-logic", "admission-debug-integration"]))
+
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
             result = select([path], "review", AVAILABLE)

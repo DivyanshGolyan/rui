@@ -32,7 +32,7 @@ class HandoffTest(unittest.TestCase):
             BUILD_EXIT='0', FLAKY=str(self.root / 'flaky'), ImageOS='ubuntu24', ImageVersion='20261012.334.1',
             GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
             PATH=str(self.root) + os.pathsep + os.environ['PATH'])))
-        self.inputs = dict(format=3, tree='same-tree', targets=['test'], system='Linux', machine='x86_64',
+        self.inputs = dict(format=4, tree='same-tree', targets=['test'], system='Linux', machine='x86_64',
                            compiler='b' * 64)
         self.enterContext(patch.object(build_artifact, 'git', return_value='source'))
         self.enterContext(patch.object(build_artifact, 'identity',
@@ -188,9 +188,27 @@ else:
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
 
-    def test_a_missing_or_repeated_part_rebuilds_locally(self):
+    def test_a_missing_repeated_or_overlapping_part_rebuilds_locally(self):
         self.split_downloads()
-        for ids in (['202'], ['201'], ['201', '201']):
+        downloads = self.downloads
+
+        def read(artifact):
+            zipped = zipfile.ZipFile(io.BytesIO(downloads[artifact][0]))
+            return json.loads(zipped.read('compiled.json')), zipped.read('compiled.tar.gz')
+
+        def publish(artifact, receipt, archive):
+            self.receipt, self.archive = receipt, archive
+            self.refresh_download()
+            downloads[artifact] = (self.download, self.metadata)
+
+        rest, rest_archive = read('202')
+        unit, unit_archive = read('201')
+        publish('203', dict(rest, inputs=dict(rest['inputs'], part='all')), rest_archive)
+        # The unit archive also claiming the rest part's executable.
+        publish('204', dict(unit,
+                            executables=dict(unit['executables'], **rest['executables'])), unit_archive)
+        self.downloads = downloads
+        for ids in (['202'], ['201'], ['201', '201'], ['203', '201'], ['202', '204']):
             with self.subTest(ids=ids):
                 (self.root / 'compiled').unlink(missing_ok=True)
                 build_artifact.restore(ids, ['test'])

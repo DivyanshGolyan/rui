@@ -24,6 +24,11 @@ LINUX_SHARDS = 10
 UNIT_TARGETS = frozenset(("test", "check", "check-full"))
 
 
+def split_linux(targets):
+    # A selection of the unit tests alone leaves the rest producer nothing to compile.
+    return bool(UNIT_TARGETS & set(targets)) and set(targets) != {"test"}
+
+
 def shards(targets, platform="linux", limit=LINUX_SHARDS):
     if platform == "macos":
         # The standard account cap is five Macs shared by all workflows. Use

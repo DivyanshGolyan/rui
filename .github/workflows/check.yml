@@ -75,7 +75,7 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from qualification import UNIT_TARGETS, shards
+          from qualification import shards, split_linux
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
           if os.environ.get('PIN'):
@@ -97,7 +97,7 @@ jobs:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
-              print('linux_split=' + str(bool(UNIT_TARGETS & set(p['targets']))).lower(), file=f)
+              print('linux_split=' + str(split_linux(p['targets'])).lower(), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)

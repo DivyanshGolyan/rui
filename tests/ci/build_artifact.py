@@ -113,7 +113,7 @@ def unpack(archive, receipt, targets):
         raise ValueError("Compiled archive digest mismatch")
     destinations = roots()
     present = {str(PurePosixPath(label, path.relative_to(root)))
-               for label, root in destinations.items() for path in root.rglob("*")}
+               for label, root in destinations.items() for path in root.rglob("*") if path.is_file()}
     seen = set()
     with tarfile.open(archive, "r:gz") as source:
         # Validate the entire inventory before writing, and never extract through
@@ -126,7 +126,7 @@ def unpack(archive, receipt, targets):
             seen.add(member.name)
             if not member.isfile():
                 raise ValueError("Unsafe compiled file")
-        for name in seen:
+        for name in seen | present:
             if any(str(parent) in seen | present for parent in PurePosixPath(name).parents):
                 raise ValueError("Compiled file used as parent")
         # A second streaming pass avoids retaining archive payloads in RAM.
@@ -155,6 +155,8 @@ def verify(receipts):
         raise ValueError(f"Compiled parts do not cover the selection: {parts}")
     expected = {}
     for receipt in receipts:
+        if expected.keys() & receipt["executables"].keys():
+            raise ValueError("Compiled parts overlap")
         expected.update(receipt["executables"])
     actual = {}
     for label, root in roots().items():
@@ -208,18 +210,18 @@ def rebuild(targets):
 
 
 def restore(artifact_ids, targets):
-    artifact_id = ", ".join(artifact_ids)
+    named = ", ".join(artifact_ids)
     try:
         clear()
-        verify([fetch(one, targets) for one in artifact_ids])
-        message = f"Using verified producer artifact {artifact_id}; compiled only, gate acceptance not yet established"
+        verify([fetch(artifact_id, targets) for artifact_id in artifact_ids])
+        message = f"Using verified producer artifact {named}; compiled only, gate acceptance not yet established"
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
             zipfile.BadZipFile, tarfile.TarError) as error:
         kind = "differs from this worker" if isinstance(error, Mismatch) else "was rejected"
-        print(f"Producer artifact {artifact_id} {kind}: {error}. Its bytes are not executed; "
+        print(f"Producer artifact {named} {kind}: {error}. Its bytes are not executed; "
               "compiling this checkout locally before gates.", flush=True)
         rebuild(targets)
-        message = f"Compiled locally because producer artifact {artifact_id} {kind}: {error}"
+        message = f"Compiled locally because producer artifact {named} {kind}: {error}"
     print(message, flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
@@ -239,7 +241,7 @@ def main():
         if args.operation == "build":
             package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets, args.part), args.part)
         else:
-            restore([one for one in args.artifact_id if one], targets)
+            restore([artifact_id for artifact_id in args.artifact_id if artifact_id], targets)
     except subprocess.CalledProcessError as error:
         # A failed local fetch or compile stops before gates with its own status.
         print(f"{' '.join(map(str, error.cmd))} failed with exit {error.returncode}; no gates executed.",
