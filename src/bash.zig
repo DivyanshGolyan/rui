@@ -11,13 +11,6 @@ const tools = @import("tools.zig");
 
 pub const excerpt_bytes: usize = 10_000;
 pub const copy_window_bytes: usize = 16 * 1024;
-/// Bash receives the command as one `-c` argument. Linux rejects an
-/// argument of 128 KiB including its NUL (MAX_ARG_STRLEN with 4 KiB pages),
-/// and with a small stack rlimit the whole argv+environment shares a 128 KiB
-/// floor; 8 KiB stays for the shell path, environment and pointers.
-pub const max_command_bytes: usize = 120 * 1024;
-/// Reuse the command ceiling for optional decoded stdin in charged scratch.
-pub const max_stdin_bytes: usize = max_command_bytes;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
@@ -246,7 +239,7 @@ pub const Prepared = struct {
     timeout_ms: u64,
     faults: Faults,
     /// Decoded command, owned through `allocator` until launch or cleanup,
-    /// at most max_command_bytes.
+    /// at most tools.bash_max_command_bytes.
     command: ?[:0]u8,
     stdin_capture: ?OwnedFile = null,
     stdout_capture: ?OwnedFile,
@@ -967,7 +960,7 @@ const PreparationWriter = struct {
 
     pub fn writeAll(self: *PreparationWriter, bytes: []const u8) !void {
         const command = &self.owner.command;
-        if (bytes.len > max_command_bytes - command.items.len) return error.BashCommandTooLong;
+        if (bytes.len > tools.bash_max_command_bytes - command.items.len) return error.BashCommandTooLong;
         try command.appendSlice(self.owner.allocator, bytes);
     }
 };
@@ -980,7 +973,7 @@ const PreparationInputWriter = struct {
     pub fn writeAll(self: *PreparationInputWriter, bytes: []const u8) !void {
         try self.owner.ensureInput();
         const length = self.owner.cleanup.stdin_capture.?.charged + self.used;
-        if (bytes.len > max_stdin_bytes - length) return error.BashStdinTooLong;
+        if (bytes.len > tools.bash_max_stdin_bytes - length) return error.BashStdinTooLong;
         if (bytes.len > self.buffer.len - self.used) try self.flush();
         @memcpy(self.buffer[self.used..][0..bytes.len], bytes);
         self.used += bytes.len;
