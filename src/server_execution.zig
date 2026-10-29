@@ -150,22 +150,22 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
     for (slots, 0..) |*slot, i| {
         switch (slot.*) {
             .free => {},
-            .model_preparing => |*active| try custody.checkAttachedModel(active.token, active.binding),
-            .model_authenticating => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
-            .model_refreshing => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
-            .provider => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
-            .bash_preparing => |*active| try custody.checkAttachedAction(active.token, active.binding),
+            .model_preparing => |*active| try custody.checkAttached(active.token, .{ .model = active.binding }),
+            .model_authenticating => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
+            .model_refreshing => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
+            .provider => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
+            .bash_preparing => |*active| try custody.checkAttached(active.token, .{ .action = active.binding }),
             // Delivery closure detaches custody while the .bash payload is
             // retained for reclamation: open delivery requires attachment,
             // closed delivery requires detachment plus the retained typed
             // identity. Token-only retained owners (prepared cleanup,
             // named scratch) keep the token-only detached check.
             .bash => |*active| switch (active.delivery) {
-                .open => try custody.checkAttachedAction(active.token, active.binding),
-                .closed => try custody.checkDetachedAction(active.token, active.binding),
+                .open => try custody.checkAttached(active.token, .{ .action = active.binding }),
+                .closed => try custody.checkDetached(active.token, .{ .action = active.binding }),
             },
-            .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token),
-            .named_scratch => |*retained| try custody.checkDetached(retained.token),
+            .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token, null),
+            .named_scratch => |*retained| try custody.checkDetached(retained.token, null),
         }
         const token = slotToken(slot) orelse continue;
         represented += 1;
@@ -856,7 +856,7 @@ fn admitBashAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    const action_binding = host.custody.attachAction(token, &admission.permit) catch |err| {
+    const action_binding = host.custody.attach(token, &admission.permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
@@ -1018,7 +1018,7 @@ fn launchPreparedBash(
         discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     }
-    host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
+    host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
         discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
@@ -1570,7 +1570,7 @@ fn launchPreparedRequest(
         traceOperation(host, "prepared_before_handoff", binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
-    host.custody.consumeLaunchAuthority(token, binding) catch |err| {
+    host.custody.consumeLaunchAuthority(token, .{ .model = binding }) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
@@ -2064,19 +2064,14 @@ fn detachCustody(host: *Host, token: execution.CustodyToken) void {
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
-    const model_binding = if (host.faults.test_phase_trace)
-        host.custody.binding(token) catch null
-    else
-        null;
-    const action_binding = if (host.faults.test_phase_trace and model_binding == null)
-        host.custody.actionBinding(token) catch unreachable
-    else
-        null;
+    const traced = if (host.faults.test_phase_trace) host.custody.binding(token) catch unreachable else null;
     detachCustody(host, token);
     host.custody.cleanupComplete(token) catch unreachable;
     slot.* = .free;
-    if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
-    if (action_binding) |binding| traceAction(host, "cleanup_completed", binding);
+    if (traced) |binding| switch (binding) {
+        .model => |model| traceOperation(host, "cleanup_completed", model),
+        .action => |action| traceAction(host, "cleanup_completed", action),
+    };
 }
 
 test "model retry and inactivity defaults match the owning resource contract" {
@@ -2326,7 +2321,7 @@ test "cleanup publication follows complete execution retirement" {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (self.release_expected) {
                 std.debug.assert(self.slot.* == .bash);
-                self.custody.checkDetached(self.token) catch unreachable;
+                self.custody.checkDetached(self.token, null) catch unreachable;
                 self.release_expected = false;
                 self.releases += 1;
                 return clock.now(std.testing.io);
@@ -2376,7 +2371,7 @@ test "cleanup publication follows complete execution retirement" {
                 .parent_operation_id = 7,
                 .action_id = 11,
             } };
-            const binding = try host.custody.attachAction(token, &permit);
+            const binding = try host.custody.attach(token, &permit);
             if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
             // An Action leaves custody after its settlement claims delivery.
             try std.testing.expect(host.custody.claimTerminalDelivery(token));
@@ -2455,7 +2450,7 @@ test "cleanup publication follows complete execution retirement" {
         .parent_operation_id = 7,
         .action_id = 11,
     } };
-    const binding = try host.custody.attachAction(token, &permit);
+    const binding = try host.custody.attach(token, &permit);
     try host.custody.detach(token);
     const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
         .raw = .fromSeconds(5),
@@ -2503,7 +2498,7 @@ test "cleanup publication follows complete execution retirement" {
     try std.testing.expect(!reclaimBash(&host, &slot, deadline));
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
-    try host.custody.checkDetachedAction(token, binding);
+    try host.custody.checkDetached(token, .{ .action = binding });
     slot.bash.execution.stdout_capture.cleanup_fault = .none;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
     try std.testing.expect(boundary.observed);
@@ -2566,7 +2561,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
     );
     try std.testing.expect(slots[0] == .named_scratch);
     try std.testing.expect(host.dispatch_fenced.load(.acquire));
-    try host.custody.checkDetachedModel(token, binding);
+    try host.custody.checkDetached(token, .{ .model = binding });
 
     const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var retry_at = now;
@@ -2626,7 +2621,7 @@ test "execution slots agree with custody across the complete population" {
         .action_id = 2,
     } };
     const action_token = custody.reserve().?;
-    const action_binding = try custody.attachAction(action_token, &action_permit);
+    const action_binding = try custody.attach(action_token, &action_permit);
 
     var slots = [_]ExecutionSlot{
         .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } },
@@ -2894,7 +2889,7 @@ test "closed Bash delivery retains its payload with detached custody" {
         .parent_operation_id = 1,
         .action_id = 2,
     } };
-    const binding = try host.custody.attachAction(token, &permit);
+    const binding = try host.custody.attach(token, &permit);
     var slots = [_]ExecutionSlot{
         .{ .bash = .{
             .token = token,
@@ -2909,7 +2904,7 @@ test "closed Bash delivery retains its payload with detached custody" {
     try std.testing.expect(host.custody.claimTerminalDelivery(token));
     closeBashDelivery(&host, &slots[0].bash);
     try std.testing.expect(slots[0].bash.delivery == .closed);
-    try host.custody.checkDetachedAction(token, binding);
+    try host.custody.checkDetached(token, .{ .action = binding });
     try checkSlotCustodyAgreement(&slots, &host.custody);
     // The flagged failed-reclamation state is accepted by the checker. This
     // covers the flag value only: no failing reclaimer runs here and no Bash
@@ -2925,7 +2920,7 @@ test "closed Bash delivery retains its payload with detached custody" {
         .parent_operation_id = 4,
         .action_id = 5,
     } };
-    const second_binding = try host.custody.attachAction(second, &second_permit);
+    const second_binding = try host.custody.attach(second, &second_permit);
     const bad = [_]ExecutionSlot{
         .{ .bash = .{
             .token = second,
@@ -2960,14 +2955,14 @@ test "closed Bash payloads keep their typed binding identity" {
         .action_id = 1,
     } };
     const first_token = custody.reserve().?;
-    const first_binding = try custody.attachAction(first_token, &first_permit);
+    const first_binding = try custody.attach(first_token, &first_permit);
     var second_permit = store_module.ActionDispatchPermit{ .binding = .{
         .turn_id = 2,
         .parent_operation_id = 2,
         .action_id = 2,
     } };
     const second_token = custody.reserve().?;
-    const second_binding = try custody.attachAction(second_token, &second_permit);
+    const second_binding = try custody.attach(second_token, &second_permit);
     try custody.detach(first_token);
     try custody.detach(second_token);
 
@@ -3178,7 +3173,7 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
         _ = advanceRetainedCleanup(&host, &slots, retry, &retry);
     };
     try std.testing.expect(!advanceRetainedCleanup(&host, &slots, start, &retry_at));
-    try host.custody.checkDetached(token);
+    try host.custody.checkDetached(token, null);
     try checkSlotCustodyAgreement(&slots, &host.custody);
     try checkSharedPreparation(&slots, null, null);
     try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
@@ -3392,7 +3387,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .parent_operation_id = 1,
                 .action_id = 1,
             } };
-            const binding = try host.custody.attachAction(token, &permit);
+            const binding = try host.custody.attach(token, &permit);
             const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});
             try file.writeStreamingAll(std.testing.io, "output\n");
             var name: protocol.Bounded(96) = .{};
