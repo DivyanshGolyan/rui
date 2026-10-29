@@ -8,7 +8,6 @@ pub const ActionAttemptBinding = struct {
     turn_id: u64,
     parent_operation_id: u64,
     action_id: u64,
-    attempt_ordinal: u64,
 };
 
 pub const ActionDispatchPermit = struct {

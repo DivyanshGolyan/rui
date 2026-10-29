@@ -212,11 +212,7 @@ fn checkSharedPreparation(
     }
     if (bash_preparation) |preparation| {
         const slot_binding = bash_slot orelse return error.PreparationOwnershipMismatch;
-        if (preparation.action_id != slot_binding.action_id or
-            preparation.attempt_ordinal != slot_binding.attempt_ordinal)
-        {
-            return error.PreparationOwnershipMismatch;
-        }
+        if (preparation.action_id != slot_binding.action_id) return error.PreparationOwnershipMismatch;
     } else if (bash_slot != null) {
         return error.PreparationOwnershipMismatch;
     }
@@ -889,7 +885,6 @@ fn admitBashAttempt(
         host.bash_path,
         input.timeout_ms,
         action_binding.action_id,
-        action_binding.attempt_ordinal,
         .{
             .preparation = host.faults.bash_preparation,
             .preparation_after_captures = host.faults.bash_preparation_after_captures,
@@ -2375,7 +2370,6 @@ test "cleanup publication follows complete execution retirement" {
                 .turn_id = 3,
                 .parent_operation_id = 7,
                 .action_id = 11,
-                .attempt_ordinal = 2,
             } };
             const binding = try host.custody.attachAction(token, &permit);
             if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
@@ -2419,7 +2413,7 @@ test "cleanup publication follows complete execution retirement" {
     scratch.io = std.testing.io;
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");
-    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, 2, .{})) {
+    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
             var failure = initial;
@@ -2453,7 +2447,6 @@ test "cleanup publication follows complete execution retirement" {
         .turn_id = 3,
         .parent_operation_id = 7,
         .action_id = 11,
-        .attempt_ordinal = 2,
     } };
     const binding = try host.custody.attachAction(token, &permit);
     try host.custody.detach(token);
@@ -2624,7 +2617,6 @@ test "execution slots agree with custody across the complete population" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const action_token = custody.reserve().?;
     const action_binding = try custody.attachAction(action_token, &action_permit);
@@ -2894,7 +2886,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const binding = try host.custody.attachAction(token, &permit);
     var slots = [_]ExecutionSlot{
@@ -2925,7 +2916,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         .turn_id = 4,
         .parent_operation_id = 4,
         .action_id = 5,
-        .attempt_ordinal = 1,
     } };
     const second_binding = try host.custody.attachAction(second, &second_permit);
     const bad = [_]ExecutionSlot{
@@ -2960,7 +2950,6 @@ test "closed Bash payloads keep their typed binding identity" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 1,
-        .attempt_ordinal = 1,
     } };
     const first_token = custody.reserve().?;
     const first_binding = try custody.attachAction(first_token, &first_permit);
@@ -2968,7 +2957,6 @@ test "closed Bash payloads keep their typed binding identity" {
         .turn_id = 2,
         .parent_operation_id = 2,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const second_token = custody.reserve().?;
     const second_binding = try custody.attachAction(second_token, &second_permit);
@@ -3098,7 +3086,6 @@ test "preparing slots belong to their live preparations" {
         .bash_path = default_bash_path,
         .timeout_ms = 1,
         .action_id = 7,
-        .attempt_ordinal = 1,
         .faults = .{},
         .source = undefined,
     };
@@ -3107,7 +3094,6 @@ test "preparing slots belong to their live preparations" {
             .turn_id = 1,
             .parent_operation_id = 1,
             .action_id = 7,
-            .attempt_ordinal = 1,
         } } },
     };
     // Note: retoken is model-attached above, so slot/custody agreement is
@@ -3397,7 +3383,6 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .turn_id = 1,
                 .parent_operation_id = 1,
                 .action_id = 1,
-                .attempt_ordinal = 1,
             } };
             const binding = try host.custody.attachAction(token, &permit);
             const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});

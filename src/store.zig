@@ -4648,7 +4648,6 @@ pub const Store = struct {
             .turn_id = @intCast(turn_id),
             .parent_operation_id = @intCast(parent_operation_id),
             .action_id = @intCast(action_id),
-            .attempt_ordinal = 1,
         } } };
     }
 
@@ -4673,7 +4672,7 @@ pub const Store = struct {
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
         try readText(statement, 0, &workspace);
         const content_id = c.sqlite3_column_int64(statement, 1);
@@ -4700,11 +4699,10 @@ pub const Store = struct {
     }
 
     fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
-        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND attempt_ordinal=?3");
+        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql);
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         try expectDone(statement);
     }
 
@@ -4719,12 +4717,11 @@ pub const Store = struct {
             "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
                 "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step != c.SQLITE_ROW) return if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed;
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
@@ -4760,7 +4757,7 @@ pub const Store = struct {
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
         if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
     }
 
@@ -4801,7 +4798,7 @@ pub const Store = struct {
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 0, &session_ref);
-        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 1) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (c.sqlite3_column_int64(statement, 1) != binding.turn_id) return error.StaleActionAttemptBinding;
         const stopped = c.sqlite3_column_int(statement, 2);
         if (stopped != 0 and stopped != 1) return error.CorruptStore;
         const effective_code: ActionResolutionCode = if (stopped == 1) .cancelled else code;
@@ -4810,7 +4807,7 @@ pub const Store = struct {
         const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
             "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL " ++
-                "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND resolution_code IS NULL",
+                "WHERE action_id=?1 AND parent_operation_id=?5 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
         );
         defer resetCached(update);
         try bindU64(update, 1, binding.action_id);
@@ -4818,7 +4815,6 @@ pub const Store = struct {
         try bindI64(update, 3, content_id);
         try bindU64(update, 4, position);
         try bindU64(update, 5, binding.parent_operation_id);
-        try bindU64(update, 6, binding.attempt_ordinal);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
         try self.completeStoppedTurnIfReady(binding.turn_id);
@@ -9306,7 +9302,6 @@ test "allow once survives mode changes and reopen without granting another Attem
     }
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     try std.testing.expectEqual(action_id, action.action_id);
-    try std.testing.expectEqual(@as(u64, 1), action.attempt_ordinal);
     try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
     // The admitted Action cannot be reissued; its unapproved sibling remains pending.
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
@@ -12915,7 +12910,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         try workspace.set(storage.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
-        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, 2, .{})) {
+        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, .{})) {
             .preparing => |value| value,
             .failed => |initial| {
                 var failure = initial;

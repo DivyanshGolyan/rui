@@ -525,12 +525,11 @@ pub fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionA
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         nowNs(host),
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
-        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -571,11 +570,10 @@ pub fn traceActionControl(
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
     trace.appendJsonString(command_key) catch return;
-    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
-        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -596,13 +594,12 @@ pub fn traceActionControlOutcome(
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
     trace.appendJsonString(command_key) catch return;
-    trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+    trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         if (attempted) "true" else "false",
         if (failed) "true" else "false",
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
-        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -620,14 +617,13 @@ pub fn traceActionDeadline(
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
         nowNs(host),
         deadline_ns,
         if (failed) "true" else "false",
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
-        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace, &publication);
 }
@@ -837,7 +833,7 @@ test "required Bash observations publish while optional stderr custody is held" 
             if (std.mem.eql(u8, phase, "inspection_captured") or std.mem.eql(u8, phase, "control_store_complete")) {
                 traceSubject(&host, phase, "command_key", "required");
             } else {
-                traceAction(&host, phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3, .attempt_ordinal = 1 });
+                traceAction(&host, phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
             }
             const selected = if (plan == .bash_cleanup)
                 std.mem.startsWith(u8, phase, "cleanup_") or std.mem.eql(u8, phase, "inspection_captured")
