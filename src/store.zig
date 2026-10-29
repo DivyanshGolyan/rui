@@ -10219,6 +10219,9 @@ test "production turn preserves skipped continuation preference through actual S
     const Context = struct {
         storage: *Store,
         preparation_open: bool = true,
+        /// Counts each preparation slot opening or closing, as setSlot does.
+        slot_changes: u64 = 0,
+        observed_open: bool = true,
         model: ?AttemptBinding = null,
         action: ?ActionAttemptBinding = null,
         failure: ?anyerror = null,
@@ -10233,6 +10236,11 @@ test "production turn preserves skipped continuation preference through actual S
         }
         pub fn commitGeneration(self: *@This()) u64 {
             return self.storage.commitGeneration();
+        }
+        pub fn slotChanges(self: *@This()) u64 {
+            if (self.observed_open != self.preparation_open) self.slot_changes += 1;
+            self.observed_open = self.preparation_open;
+            return self.slot_changes;
         }
         pub fn reconcileControls(_: *@This()) void {}
         pub fn advanceBashPreparation(_: *@This()) bool {

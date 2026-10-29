@@ -129,6 +129,9 @@ pub const Host = struct {
     turn_states: model_adapter.TurnStates = .{},
     /// Execution-thread-owned, one per custody record and zero-mapped.
     bash_work: []BashWork = &.{},
+    /// Execution-thread-owned count of execution slot writes; it moves on
+    /// every slot change and nothing else.
+    slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,

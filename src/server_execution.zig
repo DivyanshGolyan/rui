@@ -186,6 +186,7 @@ fn attachSlot(
         store_module.ActionAttemptBinding => .{ .bash_preparing = .{ .token = token, .binding = binding } },
         else => @compileError("not an Attempt binding: " ++ @typeName(@TypeOf(binding))),
     };
+    host.slot_changes +%= 1;
     return binding;
 }
 
@@ -211,6 +212,33 @@ fn moveSlot(host: *Host, slot: *ExecutionSlot, next: ExecutionSlot) void {
         .free => host.custody.cleanupComplete(token) catch unreachable,
     }
     slot.* = next;
+    host.slot_changes +%= 1;
+}
+
+test "execution slots change only through attachSlot and moveSlot" {
+    // Admission skips its scans while `Host.slot_changes` and the commit
+    // generation stand still, so every slot write must move the count. Zig
+    // has no private fields, so this checks the source: outside tests, only
+    // the two writers assign through a slot pointer and no assignment
+    // spells an ExecutionSlot arm.
+    const source = @embedFile("server_execution.zig");
+    var production: std.ArrayList(u8) = .empty;
+    defer production.deinit(std.testing.allocator);
+    var rest: []const u8 = source;
+    while (std.mem.indexOf(u8, rest, "\ntest \"")) |start| {
+        try production.appendSlice(std.testing.allocator, rest[0..start]);
+        const end = std.mem.indexOfPos(u8, rest, start, "\n}\n") orelse return error.UnterminatedTest;
+        rest = rest[end + 2 ..];
+    }
+    try production.appendSlice(std.testing.allocator, rest);
+    const code = production.items;
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, code, "slot.*" ++ " = "));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, code, "host.slot_changes" ++ " +%= 1;"));
+    inline for (comptime std.meta.fieldNames(ExecutionSlot)) |arm| {
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, " = ." ++ arm ++ ";"));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, " = .{ ." ++ arm ++ " ="));
+    }
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, "]" ++ " = ."));
 }
 
 /// Execution-owned consistency checks beside ExecutionSlot. Each inspects
@@ -484,6 +512,10 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn slotChanges(self: *const NativeTurn) u64 {
+        return self.host.slot_changes;
+    }
+
     pub fn reconcileControls(self: *NativeTurn) void {
         cancelSupersededTransfers(
             self.host,
@@ -517,8 +549,14 @@ const NativeTurn = struct {
         return countFreeSlots(self.slots);
     }
 
+    /// Read from the slots, like model preparation, so the slot change count
+    /// covers it; the live preparation must agree.
     pub fn bashPreparationOpen(self: *const NativeTurn) bool {
-        return self.bash_preparation.* == null;
+        const open = for (self.slots) |slot| {
+            if (slot == .bash_preparing) break false;
+        } else true;
+        std.debug.assert(open == (self.bash_preparation.* == null));
+        return open;
     }
 
     pub fn modelPreparationOpen(self: *const NativeTurn) bool {
