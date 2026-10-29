@@ -90,4 +90,12 @@ jobs:
       - name: Wake Auto-land after this qualification finishes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run auto-land.yml --repo "$GITHUB_REPOSITORY" --ref main -f completed_run="$GITHUB_RUN_ID"
+        # A lost wake skips this promotion until the next one. A repeated wake
+        # is harmless: Auto-land's writer is serialized and rechecks evidence.
+        run: |
+          for delay in 10 30 ''; do
+            gh workflow run auto-land.yml --repo "$GITHUB_REPOSITORY" --ref main -f completed_run="$GITHUB_RUN_ID" && exit 0
+            test -n "$delay" || exit 1
+            echo "::warning::Auto-land wake failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
