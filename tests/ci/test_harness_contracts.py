@@ -105,10 +105,11 @@ ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'
 ZIG_WHILE = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?while\b")
 ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
 ZIG_LOOP = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?(?:while|for)\b")
-ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
+ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.")
 ZIG_EXIT = re.compile(r"\breturn\b|\bbreak\b(?:\s*:\s*(\w+))?")
 ZIG_CONTAINER = re.compile(r"\b(\w+)\s*=\s*(?:(?:extern|packed)\s+)?(?:struct|union|enum)\b[^=]*$")
-ZIG_CONDITION = re.compile(r"(?:if\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\|[^|]*\|\s*)?|else\s+)*")
+ZIG_PREFIX = re.compile(r"(?:if\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\|[^|]*\|\s*)?|else\s+|return\s+"
+                        r"|(?:(?:pub\s+)?(?:const|var)\s+)?[\w.\[\]]+\s*(?::[^=]*)?[-+*/|&]?=(?!=)\s*)*")
 ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
 ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
@@ -168,9 +169,21 @@ def zig_sleep_ordering(path, text):
         return max(enclosing(position), key=lambda scope: scope.start, default=None)
 
     def loop_header(head, start):
-        """The statement text before a body, past any unbraced `if (...)` or `else` it sits under."""
+        """The statement text before a body, past an unbraced `if (...)`, `else`,
+        `return` or initializer that the loop sits under or produces a value for."""
         header = code[head:start].strip()
-        return header[ZIG_CONDITION.match(header).end():]
+        return header[ZIG_PREFIX.match(header).end():]
+
+    def retry(header):
+        """`for (0..n) |_|`, with `n` any balanced expression."""
+        if not (opened := ZIG_RETRY.match(header)):
+            return False
+        depth = 1
+        for index in range(opened.end(), len(header)):
+            depth += {"(": 1, ")": -1}.get(header[index], 0)
+            if depth == 0:
+                return re.match(r"\s*\|_\|", header[index + 1:]) is not None
+        return False
 
     def in_fn(position, start):
         return any(start < scope.start < position < scope.end for scope in scopes if scope.kind == "fn")
@@ -198,14 +211,14 @@ def zig_sleep_ordering(path, text):
         if ZIG_WHILE.match(header):
             return True
         if ZIG_FOR.match(header):
-            return ZIG_RETRY.match(header) is not None and ZIG_EXIT.search(header) is not None
+            return retry(header) and ZIG_EXIT.search(header) is not None
         for head, start, end in sorted(blocks, key=lambda block: -block[1]):
             if (scope.start if scope else -1) < start < position < end:
                 header = loop_header(head, start)
                 if ZIG_WHILE.match(header):
                     return True
                 if ZIG_FOR.match(header):
-                    return ZIG_RETRY.match(header) is not None and exits(header, start, end)
+                    return retry(header) and exits(header, start, end)
         return False
 
     def container(scope):
@@ -550,6 +563,21 @@ test "a callback spawned inside a poll still sleeps first" {
         const thread = try std.Thread.spawn(.{}, peer, .{});
         thread.join();
     }
+}
+test "a retry bound may call, and a poll may produce a value" {
+    for (0..@as(usize, @min(10, limit()))) |_| {
+        if (ready()) break;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const result = while (true) {
+        if (ready()) break true;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    };
+    _ = result;
+    total += for (0..10) |_| {
+        if (ready()) break 1;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    } else 0;
 }
 test "a labeled break from an inner loop leaves the retry" {
     outer: for (0..10) |_| {
