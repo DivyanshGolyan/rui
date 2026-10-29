@@ -490,7 +490,7 @@ const Intake = struct {
                 if (exchange.state == .retired) {
                     exchange.job = .cleanup;
                 } else {
-                    if (self.host.effect_shutdown.load(.acquire)) exchange.retireUnhanded();
+                    if (self.host.stopping()) exchange.retireUnhanded();
                     if (exchange.state == .retired) continue;
                 }
                 exchange.state = .working;
@@ -510,11 +510,11 @@ const Intake = struct {
             // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
-            if (self.host.effect_shutdown.load(.acquire)) {
+            if (self.host.stopping()) {
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
             self.serviceWorkers();
-            if (self.host.effect_shutdown.load(.acquire) and listener_open.*) {
+            if (self.host.stopping() and listener_open.*) {
                 listener.deinit(self.host.io);
                 listener_open.* = false;
                 std.Io.Dir.deleteFileAbsolute(self.host.io, self.host.lease.paths.socket.slice()) catch |err|
@@ -650,10 +650,7 @@ const Intake = struct {
                 };
                 if (self.host.faults.shutdown_after_accept) {
                     failure = error.InjectedListenerFailure;
-                    self.host.launch_mutex.lockUncancelable(self.host.io);
-                    self.host.effect_shutdown.store(true, .release);
-                    self.host.dispatch_fenced.store(true, .release);
-                    self.host.launch_mutex.unlock(self.host.io);
+                    _ = self.host.advance(.stopping);
                     break;
                 }
                 // Give a newly acquired reserved place a classification turn
@@ -951,9 +948,7 @@ pub fn serve(
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
-        host.launch_mutex.lockUncancelable(host.io);
-        host.execution_shutdown.store(true, .release);
-        host.launch_mutex.unlock(host.io);
+        _ = host.advance(.stopping);
         execution_thread.join();
     }
     var ready: protocol.ResponseBuffer = .{};
@@ -1175,11 +1170,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.setJson(200, response.slice());
         },
         .host_stop => {
-            host.launch_mutex.lockUncancelable(host.io);
-            const first = !host.effect_shutdown.swap(true, .acq_rel);
-            host.dispatch_fenced.store(true, .release);
-            host.launch_mutex.unlock(host.io);
-            if (first) wakeListener(host);
+            if (host.advance(.stopping) != .stopping) wakeListener(host);
             if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
         },
         .configure => |*command| {
@@ -3245,7 +3236,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     exchange.request = try std.testing.allocator.create(protocol.Request);
     exchange.request.?.* = .{ .configure = .{} };
     defer exchange.releaseRequest();
-    host.effect_shutdown.store(true, .release);
+    _ = host.advance(.stopping);
     intake.serviceWorkers();
     try std.testing.expectEqual(.retired, exchange.state);
     try std.testing.expectEqual(.prepare, exchange.job);
@@ -3497,7 +3488,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         var joined = false;
         defer if (!joined) {
             Probe.released.store(true, .release);
-            host.effect_shutdown.store(true, .release);
+            _ = host.advance(.stopping);
             intake.notify();
             thread.join();
         };
@@ -3540,7 +3531,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         defer stop.socket.close(std.testing.io);
         try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
         try Probe.response(stop.socket.handle);
-        try std.testing.expect(host.effect_shutdown.load(.acquire));
+        try std.testing.expect(host.stopping());
         try std.testing.expect(!Probe.released.load(.acquire));
         for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }) |peer| {
             var polls = [_]std.c.pollfd{.{ .fd = peer, .events = std.posix.POLL.IN, .revents = 0 }};

@@ -386,7 +386,7 @@ pub fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
-    while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
+    while (!host.stopping()) {
         var native = NativeTurn{
             .host = host,
             .reactor = reactor,
@@ -502,7 +502,7 @@ const NativeTurn = struct {
     }
 
     pub fn dispatchFenced(self: *const NativeTurn) bool {
-        return self.host.dispatch_fenced.load(.acquire);
+        return !self.host.launchAllowed();
     }
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
@@ -2600,7 +2600,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
         ),
     );
     try std.testing.expect(slots[0] == .named_scratch);
-    try std.testing.expect(host.dispatch_fenced.load(.acquire));
+    try std.testing.expect(!host.launchAllowed());
     try host.custody.checkDetached(token, .{ .model = binding });
 
     const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
@@ -2788,7 +2788,7 @@ test "no-work admission restores only its temporary custody reservation" {
             try std.testing.expectEqual(AdmissionProgress.no_work, progress);
             try std.testing.expect(slots[0] == .free);
             try std.testing.expect(bash_preparation == null);
-            try std.testing.expect(!host.dispatch_fenced.load(.acquire));
+            try std.testing.expect(host.launchAllowed());
             try std.testing.expectEqual(baseline, host.custody.occupied());
             try checkSlotCustodyAgreement(&slots, &host.custody);
             try std.testing.expect(!(try storage.inspectSession("direct/no-work")).found);
@@ -2891,7 +2891,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             };
             try std.testing.expectEqual(AdmissionProgress.retry_later, progress);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expect(host.dispatch_fenced.load(.acquire));
+            try std.testing.expect(!host.launchAllowed());
             try std.testing.expect(slots[0] == .free);
             try std.testing.expect(bash_preparation == null);
             try std.testing.expectEqual(baseline, host.custody.occupied());
@@ -3303,7 +3303,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+    for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = std.testing.io,
@@ -3336,7 +3336,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .token = token,
             .binding = binding,
         } }};
-        @field(host, flag).store(true, .release);
+        _ = host.advance(phase);
         try std.testing.expect(advanceModelPreparation(
             &host,
             null,
@@ -3355,7 +3355,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
 test "Host fences dispose a sealed request before native transfer construction" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+    for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = std.testing.io,
@@ -3389,7 +3389,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };
         var reactor: provider.Reactor = undefined; // Must never be accessed.
-        @field(host, flag).store(true, .release);
+        _ = host.advance(phase);
         launchPreparedRequest(&host, &reactor, &slot, owner, &request, null);
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
@@ -3410,7 +3410,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
         .store_dir = undefined,
         .lock_file = undefined,
     };
-    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+    for ([_]server_host.Phase{ .fenced, .stopping }) |phase| {
         for ([_]bool{ false, true }) |fail_cleanup| {
             var records: [1]execution.CustodyRecord = @splat(.{});
             var host = Host{
@@ -3463,12 +3463,12 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             } }};
             var work: [1]server_host.BashWork = undefined;
             host.bash_work = &work;
-            @field(host, flag).store(true, .release);
+            _ = host.advance(phase);
             launchPreparedBash(&host, &slots[0], token, binding, &prepared);
             try std.testing.expect(prepared.stdout_capture == null);
             try std.testing.expect(prepared.command == null);
             // A retained cleanup fence must not become an effect shutdown.
-            try std.testing.expectEqual(std.mem.eql(u8, flag, "effect_shutdown"), host.effect_shutdown.load(.acquire));
+            try std.testing.expectEqual(phase, host.phase.load(.acquire));
             if (fail_cleanup) {
                 try std.testing.expect(slots[0] == .bash_prepared_cleanup);
                 try std.testing.expect(slots[0].bash_prepared_cleanup.cleanup.stdout_capture.?.file == null);

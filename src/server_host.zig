@@ -102,6 +102,13 @@ const TestTransition = enum {
     action_result_committed,
 };
 
+/// How far a Host has shut down. It only moves forward, under the launch
+/// gate, through `Host.advance`. `fenced` blocks new effect launches while
+/// owned work, retained cleanup and intake continue. `stopping` also retires
+/// unhanded requests, closes the listener and winds execution down; Host
+/// teardown enters it too, whatever stopped intake.
+pub const Phase = enum(u8) { open, fenced, stopping };
+
 pub const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -129,9 +136,7 @@ pub const Host = struct {
     /// owner tests that have no lease.
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
-    execution_shutdown: std.atomic.Value(bool) = .init(false),
-    effect_shutdown: std.atomic.Value(bool) = .init(false),
-    dispatch_fenced: std.atomic.Value(bool) = .init(false),
+    phase: std.atomic.Value(Phase) = .init(.open),
     controls_changed: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
@@ -151,9 +156,21 @@ pub const Host = struct {
     // to Host. The Store handoff must enter this gate, in that lock order, for
     // every effect. A preflight observation alone cannot authorize a launch.
     pub fn launchAllowed(self: *const Host) bool {
-        return !self.dispatch_fenced.load(.acquire) and
-            !self.execution_shutdown.load(.acquire) and
-            !self.effect_shutdown.load(.acquire);
+        return self.phase.load(.acquire) == .open;
+    }
+
+    pub fn stopping(self: *const Host) bool {
+        return self.phase.load(.acquire) == .stopping;
+    }
+
+    /// Moves the Host forward to `target`, never back, and returns the
+    /// phase it was in.
+    pub fn advance(self: *Host, target: Phase) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
+        return previous;
     }
 
     pub fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
@@ -324,11 +341,7 @@ pub fn unmapZeroed(items: anytype) void {
 }
 
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    host.launch_mutex.lockUncancelable(host.io);
-    const already_shutting_down = host.effect_shutdown.swap(true, .acq_rel);
-    host.dispatch_fenced.store(true, .release);
-    host.launch_mutex.unlock(host.io);
-    if (already_shutting_down) return;
+    if (host.advance(.stopping) == .stopping) return;
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
@@ -339,9 +352,7 @@ pub fn wakeListener(host: *Host) void {
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
-    host.launch_mutex.lockUncancelable(host.io);
-    host.dispatch_fenced.store(true, .release);
-    host.launch_mutex.unlock(host.io);
+    _ = host.advance(.fenced);
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
@@ -419,7 +430,7 @@ pub fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch
 /// execution owner's.
 pub fn executionFacts(host: *Host) store_module.SessionReportExecution {
     return .{
-        .dispatch_fenced = host.dispatch_fenced.load(.acquire),
+        .dispatch_fenced = !host.launchAllowed(),
         .custody_occupied = host.custody.held(),
         .scratch_used_bytes = host.scratch_used.load(.acquire),
     };
@@ -858,13 +869,13 @@ test "required Bash observations publish while optional stderr custody is held" 
     }
 }
 
-test "effect launch gate rechecks every Host suppression combination" {
+test "effect launch gate rechecks every Host phase" {
     const Launch = struct {
         fn run(calls: *usize) !void {
             calls.* += 1;
         }
     };
-    for (0..8) |mask| {
+    for (std.enums.values(Phase)) |phase| {
         var host = Host{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
@@ -874,16 +885,34 @@ test "effect launch gate rechecks every Host suppression combination" {
         };
         // The preflight result is deliberately stale before the real gate.
         try std.testing.expect(host.launchAllowed());
-        host.dispatch_fenced.store(mask & 1 != 0, .release);
-        host.execution_shutdown.store(mask & 2 != 0, .release);
-        host.effect_shutdown.store(mask & 4 != 0, .release);
+        _ = host.advance(phase);
         var calls: usize = 0;
-        if (mask == 0) {
+        if (phase == .open) {
             try host.withEffectLaunch(&calls, Launch.run);
             try std.testing.expectEqual(@as(usize, 1), calls);
         } else {
             try std.testing.expectError(error.HostDispatchSuppressed, host.withEffectLaunch(&calls, Launch.run));
             try std.testing.expectEqual(@as(usize, 0), calls);
+        }
+    }
+}
+
+test "Host phases only move forward" {
+    for (std.enums.values(Phase)) |start| {
+        for (std.enums.values(Phase)) |target| {
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = undefined,
+                .store = undefined,
+                .faults = .{},
+            };
+            try std.testing.expectEqual(Phase.open, host.advance(start));
+            try std.testing.expectEqual(start, host.advance(target));
+            const later = if (@backingInt(target) > @backingInt(start)) target else start;
+            try std.testing.expectEqual(later, host.phase.load(.acquire));
+            try std.testing.expectEqual(later == .open, host.launchAllowed());
+            try std.testing.expectEqual(later == .stopping, host.stopping());
         }
     }
 }
