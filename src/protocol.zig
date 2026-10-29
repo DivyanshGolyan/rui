@@ -276,7 +276,24 @@ pub const MessageRejection = enum {
     model_is_immutable,
     revision_exhausted,
 };
-pub const CommandKind = enum { configure, message, session_stop, model_interruption, permission_decision };
+pub const CommandKind = enum {
+    configure,
+    message,
+    session_stop,
+    model_interruption,
+    permission_decision,
+
+    /// The route a command's request is sent to and served from.
+    pub fn route(self: CommandKind) []const u8 {
+        return switch (self) {
+            .configure => "/v1/configure",
+            .message => "/v1/message",
+            .session_stop => "/v1/control/session-stop",
+            .model_interruption => "/v1/control/model-interruption",
+            .permission_decision => "/v1/control/permission-decision",
+        };
+    }
+};
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
@@ -464,6 +481,21 @@ pub const ToolPresentation = struct {
 
     pub fn writeJson(self: ToolPresentation, out: *std.Io.Writer) !void {
         try writeShape(out, json_shape, .{ if (self.description) |description| description.slice() else null, self.code, self.publication_position });
+    }
+
+    /// One non-blank line of UTF-8 within the description bound.
+    pub fn validDescription(bytes: []const u8) bool {
+        if (bytes.len == 0 or bytes.len > max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
+        var scalars = std.unicode.Utf8View.initUnchecked(bytes).iterator();
+        var nonblank = false;
+        while (scalars.nextCodepoint()) |scalar| {
+            switch (scalar) {
+                '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
+                ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
+                else => nonblank = true,
+            }
+        }
+        return nonblank;
     }
 };
 

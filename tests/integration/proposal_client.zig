@@ -7,7 +7,7 @@ pub fn main(init: std.process.Init) !void {
     defer std.heap.c_allocator.free(args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "layout")) {
         var buffer: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "proposal page={d} cursor={d} bytes (fixed owned values)\n", .{ @sizeOf(client.ProposalPage), @sizeOf(client.ProposalCursor) }));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "proposal page={d} cursor={d} bytes (fixed owned values)\n", .{ @sizeOf(client.protocol_reply.ProposalPage), @sizeOf(client.protocol_reply.ProposalCursor) }));
         return;
     }
     if (args.len != 6) return error.InvalidArguments;

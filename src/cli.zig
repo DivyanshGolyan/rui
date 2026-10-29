@@ -7,6 +7,7 @@ const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -407,7 +408,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     }
 }
 
-fn writeHostStatus(io: std.Io, status: client.HostStatus) !void {
+fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
@@ -992,7 +993,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     };
 }
 
-fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.CapturedIdentity {
+fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_reply.MutationIdentity {
     if (options.model) |model| try requireSupportedModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -1072,13 +1073,13 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         .model = .{ .present = true, .value = selected.model.slice() },
         .tools = product_defaults.tools,
         .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
-    }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
         try testGate(init.io, "RUI_TEST_CAPTURE_GATE");
-        break :blk client.sendCaptured(init.io, &captured, &reply_buffer) catch |err| {
+        break :blk (client.Requests{ .io = init.io }).sendCaptured(&captured, &reply_buffer).get() catch |err| {
             TerminalText.diagnostic("rui: configuration not confirmed ({s}); use rui request recover {s}. Do not replace uncertain work.\n", .{ @errorName(err), saved.key.slice() });
             return err;
         };
@@ -1314,25 +1315,23 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) return message(init, parsed, input);
-    var stage: client.FailureStage = .store;
-    errdefer reportFailureStage(stage);
-    input.stage = &stage;
-    var sender = requester;
-    sender.stage = &stage;
-    sender.drop_reply = parsed.get("test-drop-reply");
+    var step: ?client.Step = .store;
+    errdefer reportFailureStep(step);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     const human = target == .generated;
-    var captured = try client.captureConfigure(io, input, target);
+    var sender = requester;
+    sender.drop_reply = parsed.get("test-drop-reply");
+    var captured = try takeCapture(&step, client.captureConfigure(io, input, target));
     const saved = captured.identity().*;
     var admitted: ?bool = null;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk sender.sendCaptured(&captured, &reply_buffer);
+        break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1359,14 +1358,14 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
     const io = init.io;
-    var stage: client.FailureStage = .input_parse;
-    errdefer reportFailureStage(stage);
+    var step: ?client.Step = .input_parse;
+    errdefer reportFailureStep(step);
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
         TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration, .stage = &stage };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
     // Never let incomplete or malformed peer context fall back to HOME or
     // become an anonymous send. The Host still authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
@@ -1381,7 +1380,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
     }
-    stage = .store;
+    step = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (sender_store) |trusted| {
         const sender_paths = try platform.resolveClientPaths(io, trusted);
@@ -1396,23 +1395,49 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try client.captureMessage(io, input, target);
-    const sender: client.Requests = .{ .io = io, .stage = &stage, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated);
+    var captured = try takeCapture(&step, client.captureMessage(io, input, target));
+    const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
+    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated, &step);
     defer captured.close(io);
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try sender.sendCaptured(&captured, &reply_buffer);
+    const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
-fn reportFailureStage(stage: client.FailureStage) void {
-    if (stage == .presentation) return;
-    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(stage)});
-    if (stage == .upload or stage == .admission_response)
+/// The value of a capture or send, after recording the step a failure
+/// stopped in for the command's diagnostic. A failure before any step keeps
+/// the step the command already holds.
+fn takeStep(step: *?client.Step, stepped: anytype) !@FieldType(@TypeOf(stepped), "done") {
+    if (stepped == .failed) if (stepped.failed.step) |failed| {
+        step.* = failed;
+    };
+    return stepped.get();
+}
+
+/// A captured record; until a send begins, a later failure is the capture's.
+fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
+    const captured = try takeStep(step, stepped);
+    step.* = .capture;
+    return captured;
+}
+
+/// A send's reply. A framed reply leaves nothing to report; an unreadable
+/// one leaves admission unknown.
+fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationReply {
+    const reply = try takeStep(step, stepped);
+    step.* = if (reply.answer) |_| null else |_| .admission_response;
+    return reply;
+}
+
+/// Null once the Host's reply was presented.
+fn reportFailureStep(held: ?client.Step) void {
+    const step = held orelse return;
+    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
+    if (step.mayHaveReachedHost())
         TerminalText.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
@@ -1436,7 +1461,7 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
 
 /// Everything /status reports, from one Current capture; `file` holds the
 /// capture's attention rows.
-pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const client.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
+pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
@@ -1575,13 +1600,13 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const workspace = workspace_buffer[0..workspace_length];
         const file = try renderScratch(init);
         defer file.close(init.io);
-        var cursor: client.SessionListCursor = .{};
+        var cursor: protocol_reply.SessionListCursor = .{};
         while (true) {
             try file.setLength(init.io, 0);
             try init.io.vtable.fileSeekTo(init.io.userdata, file, 0);
             var buffer: client.ReplyBuffer = .{};
             const reply = try client.listSessions(init.io, destination, workspace, cursor, file, &buffer);
-            const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+            const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
             const page = switch (decoded) {
                 .page => |*value| value,
                 .failure => |failure| return failure.err(),
@@ -1637,7 +1662,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             if (err != error.UnsupportedModel) TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
         };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
-        const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+        const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
             return;
         };
@@ -1719,15 +1744,15 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
             else => continue,
         };
         if (!saved.store.eql(canonical.store.slice())) continue;
-        if ((saved.isKind(.configure) or saved.isKind(.message)) and saved.session.len == 0) {
+        if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ReplyBuffer = .{};
             const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
-            if (observed.status != .accepted or !saved.kind.eql(@tagName(observed.kind.?)) or !observed.target.?.eql(session_ref)) continue;
+            if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
         try writeSafeTextTo(out, handle);
         try out.writeAll(" (");
-        try writeSafeTextTo(out, saved.kind.slice());
+        try writeSafeTextTo(out, @tagName(saved.kind));
         try out.writeAll(")\n");
     }
 }
@@ -1771,7 +1796,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1783,18 +1808,20 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool, reported: ?*?client.Step) !void {
     const io = sender.io;
+    var unreported: ?client.Step = null;
+    const step = reported orelse &unreported;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (generated) try announceCapture(io, captured.identity().key.slice());
-        break :blk try sender.sendCaptured(captured, &reply_buffer);
+        break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
     };
     try writeMutationReply(io, reply, .json);
 }
@@ -1813,7 +1840,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1863,7 +1890,7 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         defer file.close(io);
         var response: client.ReplyBuffer = .{};
         const wire_reply = try client.inspectSession(io, selected_store, reference, .current, file, &response);
-        const reply = try client.CurrentReply.decode(io, file, reference, wire_reply);
+        const reply = try protocol_reply.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
             try writeCommandReply(io, wire_reply.command, .stdout);
             return reply.failure.err();
@@ -1986,16 +2013,16 @@ const JsonOutput = struct {
     }
 };
 
-fn writeCommandReply(io: std.Io, reply: client.CommandReply, stream: JsonOutput.Stream) !void {
+fn writeCommandReply(io: std.Io, reply: protocol_reply.CommandReply, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     writer.writeAll(reply.body) catch |err| return output.failure(err);
     writer.writeAll("\n") catch |err| return output.failure(err);
     try output.finish();
-    try client.checkCanonicalFailure(reply);
+    try protocol_reply.checkCanonicalFailure(reply);
 }
 
-fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
+fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     std.json.Stringify.value(.{ .key = key, .@"error" = .{
@@ -2007,7 +2034,7 @@ fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, st
     try output.finish();
 }
 
-fn checkedObservation(io: std.Io, reply: client.ObservationReply, key: []const u8) !client.CommandObservation {
+fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: []const u8) !protocol_reply.CommandObservation {
     return switch (reply) {
         .observation => |observation| observation,
         .failure => |failure| {
@@ -2056,7 +2083,7 @@ const MutationPresentation = enum {
     interactive_configuration,
 };
 
-fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (reply.answer) |answer| {
         if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
             TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
@@ -2079,7 +2106,7 @@ fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const 
     try writer.writeByte('\n');
 }
 
-fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .interactive_configuration and reply.isAccepted()) {
         try writer.writeAll("Rui: Configured.\n");
         return writer.flush();
@@ -2132,13 +2159,13 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
 }
 
 // Presentation of owned facts only: no wire representation or second parser.
-fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void {
+fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
     try writer.writeAll("{\"context\":");
     try std.json.Stringify.value(.{
         .store = reply.context.store.slice(),
         .session = reply.context.session.slice(),
         .key = reply.context.key.slice(),
-        .kind = reply.context.kind.slice(),
+        .kind = @tagName(reply.context.kind),
     }, .{}, writer);
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -2193,10 +2220,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
-    var reply = client.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
     try reply.context.key.set("original\"key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     @memset(&bytes, 'x');
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2227,10 +2254,10 @@ test "mutation presentation complete modes preserve escaped original context" {
         failed_human,
     };
     for ([_]bool{ false, true }) |failed| {
-        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
+        var reply = protocol_reply.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
         try reply.context.store.set("/store");
         try reply.context.key.set("key/µ\"\n\x1b");
-        try reply.context.kind.set("configure");
+        reply.context.kind = .configure;
         for (modes, 0..) |mode, index| {
             var buffer: [2048]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
@@ -2253,10 +2280,10 @@ test "mutation presentation complete modes preserve escaped original context" {
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
     const wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
-    var reply = client.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     var buffer: [1024]u8 = undefined;
     for ([_]MutationPresentation{ .human, .interactive_configuration }) |mode| {
         var writer = std.Io.Writer.fixed(&buffer);
@@ -2268,28 +2295,37 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-const SavedRequest = client.CapturedIdentity;
+const SavedRequest = protocol_reply.MutationIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
-fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !SavedRequest {
-    if (parsed.positional) |handle| return savedRequest(init, handle);
-    var identity: SavedRequest = .{};
+/// The Store and key a request command names, from a saved handle or flags.
+const RequestIdentity = struct {
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+};
+
+fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
+    if (parsed.positional) |handle| {
+        const saved = try savedRequest(init, handle);
+        return .{ .store = saved.store, .key = saved.key };
+    }
+    var identity: RequestIdentity = .{};
     try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?client.SessionListCursor } {
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?protocol_reply.SessionListCursor } {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
     const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
     const page = switch (decoded) {
         .page => |*page| page,
         .failure => |failure| {
@@ -2318,7 +2354,7 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     };
     // Bounded pages stream into one final JSON value; no page population is
     // retained. A failed later page leaves incomplete output and exits nonzero.
-    var cursor: client.SessionListCursor = .{};
+    var cursor: protocol_reply.SessionListCursor = .{};
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
@@ -2359,23 +2395,53 @@ fn requests(init: std.process.Init) !void {
 }
 
 fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
-    const handle = parsed.positional orelse {
-        // The grammar requires --store, --record and --kind together.
-        var reply_buffer: client.ReplyBuffer = .{};
-        const reply = try client.retry(init.io, parsed.get("store").?, parsed.get("record").?, parsed.get("kind").?, &reply_buffer);
-        return writeMutationReply(init.io, reply, .json);
-    };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
+    // The grammar requires --store, --record and --kind together.
+    const saved: client.SavedRecord = if (parsed.positional) |handle|
+        .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
+    else blk: {
+        const store = parsed.get("store").?;
+        const kind = parseRetryName(parsed.get("kind").?) orelse {
+            // The Store is resolved before the kind is read, so its failure stays first.
+            _ = try platform.resolveClientPaths(init.io, store);
+            return error.InvalidRetryKind;
+        };
+        break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
+    };
+    var captured = try client.openCaptured(init.io, saved);
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try client.sendCaptured(init.io, &captured, &buffer);
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json);
 }
 
-fn showResult(init: std.process.Init, requester: client.Requests, saved: *const client.MessageAddress) !void {
+/// A command kind in its `rui request recover --kind` spelling.
+fn parseRetryName(name: []const u8) ?protocol.CommandKind {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
+        if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
+    }
+    return null;
+}
+
+fn retryName(comptime kind: protocol.CommandKind) []const u8 {
+    comptime {
+        var name = @tagName(kind)[0..@tagName(kind).len].*;
+        std.mem.replaceScalar(u8, &name, '_', '-');
+        const final = name;
+        return &final;
+    }
+}
+
+test "recover accepts only the hyphenated spelling of each command kind" {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, kind), parseRetryName(comptime retryName(kind)));
+    inline for (.{ "session_stop", "model_interruption", "permission_decision", "Message", "", "configure-" }) |name|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, null), parseRetryName(name));
+}
+
+fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
     const observed = try checkedObservation(init.io, try requester.observeMessage(saved), saved.key.slice());
     const state = observed.state();
     var line: [256]u8 = undefined;
@@ -2427,7 +2493,7 @@ fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.F
 }
 
 const SessionObservation = struct {
-    current: client.Current,
+    current: protocol_reply.Current,
     // The complete Current capture remains owned until all its permissions
     // have been displayed; no per-Action resident list is needed.
     file: std.Io.File,
@@ -2449,23 +2515,23 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try requester.inspectSession(store, session_ref, .current, file, &response);
-    switch (try client.CurrentReply.decode(init.io, file, session_ref, reply)) {
+    switch (try protocol_reply.CurrentReply.decode(init.io, file, session_ref, reply)) {
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
         .failure => |failure| {
             if (requester.read_failure != null) return requester.failRead(failure);
             try out.writeAll(reply.command.body);
             try out.writeByte('\n');
-            try client.checkCanonicalFailure(reply.command);
+            try protocol_reply.checkCanonicalFailure(reply.command);
             return failure.err();
         },
     }
 }
 
-fn renderActionable(io: std.Io, current: *const client.Current, file: std.Io.File, out: *std.Io.Writer) !void {
+fn renderActionable(io: std.Io, current: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) !void {
     const Sink = struct {
         out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: client.Current.Attention) !void {
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
             if (row == .actionable) {
                 var buffer: [20]u8 = undefined;
                 try writeSafeFieldTo(self.out, "Action requiring attention: ", try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value}));
