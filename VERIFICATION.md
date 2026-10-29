@@ -365,7 +365,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Detach notice | `'detached notice'`, `terminal-restoration-integration -- notice` | None |
 | Composer readiness waits | `human_cli_integration.py terminal-waits` | Withheld composer is not readiness. 15 s readiness, 10 s exit, no renewal. Named selections are partial evidence |
 | Fixture disposal | `host_process.dispose_all` in `host_process_test.py` | Body failure stays primary; failed cleanup after success fails |
-| [Session listing](ARCHITECTURE.md#session-listing) | `session_list_integration.py`, `session_list_facts_integration.py`, `client.zig` `'Session list'` | Interrupted delivery and Mac footprint unqualified |
+| [Session listing](ARCHITECTURE.md#session-listing) | `session_list_integration.py`, `session_list_facts_integration.py`, `client.zig` and `protocol_reply.zig` `'Session list'` | Interrupted delivery and Mac footprint unqualified |
 | [Conversation cursor bounds](ARCHITECTURE.md#public-conversation-pages) | `protocol.zig` `'conversation cursor parser rejects'`, `conversation_page_integration.py` | None |
 | [Store ownership](ARCHITECTURE.md#exclusive-store-ownership) through listener failure | `admission_integration.sh` (`InjectedListenerFailure`) | A fixed sleep is not ownership evidence |
 | [Ingress through admission](ARCHITECTURE.md#ingress-ownership-through-admission) | `admission_integration.sh` | None |

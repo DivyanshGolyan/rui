@@ -2,6 +2,7 @@
 //! reads that after join.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const signal_stack = @import("signal_stack.zig");
 const Self = @This();
 
@@ -13,7 +14,7 @@ thread: ?std.Thread = null,
 cancellation: client.Cancellation = .{},
 mutex: std.Io.Mutex = .init,
 result: ?anyerror!void = null,
-read_failure: ?client.ReadFailure = null,
+read_failure: ?protocol_reply.ReadFailure = null,
 
 /// All arguments and this owner stay in final storage through join.
 pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
@@ -63,7 +64,7 @@ test "ClientTask read diagnostic survives join with isolated borrowers and reset
         fn run(raw: *anyopaque, owner: *Self) !void {
             const code: *[]const u8 = @ptrCast(@alignCast(raw));
             if (code.*.len == 0) return;
-            var failure: client.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
             try failure.diagnostic.type.set("busy");
             try failure.diagnostic.code.set(code.*);
             const borrower = owner.requests();
@@ -81,13 +82,13 @@ test "ClientTask read diagnostic survives join with isolated borrowers and reset
     try second.start(std.testing.io, @ptrCast(&second_code), Worker.run);
     try std.testing.expectError(error.CanonicalStoreFailure, first.join());
     try std.testing.expectError(error.CanonicalStoreFailure, second.join());
-    var bytes: [1024]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try first.read_failure.?.writeDiagnostic(&out);
-    try std.testing.expectEqualStrings("HTTP 503; type: busy; code: classification_capacity_exhausted", out.buffered());
-    out = std.Io.Writer.fixed(&bytes);
-    try second.read_failure.?.writeDiagnostic(&out);
-    try std.testing.expectEqualStrings("HTTP 503; type: busy; code: other\\x1b\\n", out.buffered());
+    // Each task keeps its own first failure, not the later canonical one.
+    for ([_]*const Self{ &first, &second }, [_][]const u8{ first_code, second_code }) |task, code| {
+        const failure = task.read_failure.?;
+        try std.testing.expectEqual(@as(u16, 503), failure.status);
+        try std.testing.expectEqualStrings("busy", failure.diagnostic.type.slice());
+        try std.testing.expectEqualStrings(code, failure.diagnostic.code.slice());
+    }
     first_code = "";
     try first.start(std.testing.io, @ptrCast(&first_code), Worker.run);
     try first.join();

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
@@ -18,29 +19,29 @@ const ReadPhase = departure.ReadPhase;
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 /// Writes /status from one Current capture whose attention rows are in the file.
-pub const Status = *const fn (std.Io, []const u8, []const u8, *const client.Current, std.Io.File, *std.Io.Writer) anyerror!void;
+pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
 pub const Inspection = enum { status, requests, help, command };
 
 /// One read. Inputs are frozen at launch; the worker writes only `result`,
 /// which the UI reads after join. No worker reads or writes the controller.
 /// Live output renders into the inspection scratch file and shows whole, with
 /// its footer, status and cursor, in one UI step after join.
+/// The frontend's private scratch files, which a read borrows whole.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+
 pub const Job = struct {
     init: std.process.Init = undefined,
     store: []const u8 = "",
     session: []const u8 = "",
-    scratch: std.Io.File = undefined,
-    action_file: std.Io.File = undefined,
-    inspection_file: std.Io.File = undefined,
-    status_file: std.Io.File = undefined,
+    files: Files = undefined,
     colour: bool = false,
     command: Command = undefined,
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
-    cursor: client.ActivityCursor = .{},
+    cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
-    older: ?client.ConversationCursor = null,
+    older: ?protocol_reply.ConversationCursor = null,
     // A history read renders this part of a transcript's listing instead.
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
@@ -81,9 +82,9 @@ pub const Job = struct {
         // The job's Messages after this read.
         messages: Messages = .{},
         live: View.Live = .{},
-        cursor: client.ActivityCursor = .{},
+        cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
-        history_cursor: ?client.ConversationCursor = null,
+        history_cursor: ?protocol_reply.ConversationCursor = null,
         // Where a listing range continues, or null when it is done.
         listing: ?Listing = null,
         // Output custody began; a later failure is not a silent preparation one.
@@ -102,8 +103,8 @@ pub const Job = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    try job.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
+    try job.files.inspection.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
     // Saved descriptors must not leak into anything the command executes.
     const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
     defer for (saved) |fd| if (fd >= 0) {
@@ -112,7 +113,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
     // Redirected descriptors are output custody: any failure now is fatal.
     job.result.rendering = true;
-    const page = job.inspection_file.handle;
+    const page = job.files.inspection.handle;
     const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else job.command(job.init, .{ .io = task.io, .cancellation = job.interrupted }, job.store, job.session, job.command_text[0..job.command_text_length]);
     const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
     job.result.command_stderr_restored = std.c.dup2(saved[1], 2) >= 0;
@@ -124,9 +125,9 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
     if (job.result.work.first_action) |action| {
-        try job.action_file.setLength(task.io, 0);
-        var output: DisplayCapture = .{ .task = task, .file = job.action_file };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.scratch, &output, job.colour);
+        try job.files.action.setLength(task.io, 0);
+        var output: DisplayCapture = .{ .task = task, .file = job.files.action };
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.files.scratch, &output, job.colour);
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -145,14 +146,14 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.work = page.facts.work;
     // Only /status reads Current, once; it may be newer than the page.
     if (job.open_status or job.watch_status) {
-        const current = try View.current(requests, job.store, job.session, job.scratch);
+        const current = try View.current(requests, job.store, job.session, job.files.scratch);
         // Before anything else reuses scratch, which holds this capture's rows.
         job.result.status_digest = try statusDigest(job, task.io, &current);
         if (job.open_status or job.result.status_digest != job.status_shown) {
-            try job.status_file.setLength(task.io, 0);
-            try task.io.vtable.fileSeekTo(task.io.userdata, job.status_file, 0);
+            try job.files.status.setLength(task.io, 0);
+            try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
             var buffer: [4096]u8 = undefined;
-            var output = job.status_file.writerStreaming(task.io, &buffer);
+            var output = job.files.status.writerStreaming(task.io, &buffer);
             try writeStatus(job, task.io, &current, &output.interface);
             try output.flush();
             job.result.status = true;
@@ -166,7 +167,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         else => {},
     };
     if (job.opening) {
-        var mark: ?client.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
+        var mark: ?protocol_reply.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
             switch (item.value) {
                 .user, .assistant, .tool_result => mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
@@ -180,8 +181,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file, .messages = job.messages, .end = page.facts.end };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(&output);
@@ -209,12 +210,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 }
 
 /// The /status page for the Current capture whose rows are in scratch.
-fn writeStatus(job: *const Job, io: std.Io, current: *const client.Current, out: *std.Io.Writer) !void {
-    try job.status(io, job.store, job.session, current, job.scratch, out);
+fn writeStatus(job: *const Job, io: std.Io, current: *const protocol_reply.Current, out: *std.Io.Writer) !void {
+    try job.status(io, job.store, job.session, current, job.files.scratch, out);
     try writeSubmission(job, out);
 }
 
-fn statusDigest(job: *const Job, io: std.Io, current: *const client.Current) !u64 {
+fn statusDigest(job: *const Job, io: std.Io, current: *const protocol_reply.Current) !u64 {
     var buffer: [256]u8 = undefined;
     var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
     try writeStatus(job, io, current, &hashing.writer);
@@ -233,13 +234,13 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const latest = job.phase == .details;
     if (!latest) if (job.listing) |step| return list(job, task, step);
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.scratch);
+    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
     job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
@@ -248,8 +249,8 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
 /// where the listing continues. Nothing shows until the UI prepends it.
 fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
-    try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
     defer job.result.collapsed = output.blocks;
     switch (step) {
         .echo => |echo| {
@@ -386,7 +387,7 @@ pub const Messages = struct {
 /// records the live offset where writing reaches it, never this number.
 pub const Boundary = struct {
     output: u64,
-    cursor: ?client.ConversationCursor,
+    cursor: ?protocol_reply.ConversationCursor,
     /// Every Message admitted before this position that showed did so before
     /// the boundary; one admitted at or after it shows after it, if at all.
     admitted: u64,
@@ -427,7 +428,7 @@ pub const Listing = union(enum) {
     /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
     /// only those not applied at `end`. `cursor` is where the next one is
     /// searched for, backward.
-    range: struct { end: u64, lowest: u64, all: bool, cursor: client.ActivityCursor },
+    range: struct { end: u64, lowest: u64, all: bool, cursor: protocol_reply.ActivityCursor },
 
     pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
         if (lowest >= before) return null;
@@ -498,7 +499,7 @@ pub const Plan = struct {
     dropped: ?Listing = null,
     gap: bool = false,
     unapplied: ?Listing = null,
-    older: ?client.ConversationCursor = null,
+    older: ?protocol_reply.ConversationCursor = null,
 
     /// The listed Message a transcript reads next, if any comes before older
     /// pages. Each is prepended, so newest first: live echoes, the dropped
@@ -691,7 +692,7 @@ test "a silent read marks its end only when complete and every shown Message is 
 /// shown Message's conversation row, and its output's end (see `readEnd`).
 /// An incomplete read that shows nothing records none.
 pub const Marks = struct {
-    pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor, admitted: u64 };
+    pub const Mark = struct { offset: u64, cursor: ?protocol_reply.ConversationCursor, admitted: u64 };
     pub const capacity = 64;
     items: [capacity]Mark = undefined,
     count: usize = 0,
@@ -774,9 +775,9 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
             if (bytes.len != 0) self.last = bytes[bytes.len - 1];
         }
     };
-    try job.scratch.setLength(task.io, 0);
-    var staging: Staging = .{ .io = task.io, .file = job.scratch };
-    const reference: client.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+    try job.files.scratch.setLength(task.io, 0);
+    var staging: Staging = .{ .io = task.io, .file = job.files.scratch };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
     const failure = switch (target.source) {
         .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
         .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
@@ -784,7 +785,7 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     if (failure) |value| return requests.failRead(value);
     if (staging.offset != target.content.length) return error.ContentLengthMismatch;
     const lines = staging.newlines + @intFromBool(staging.last != '\n');
-    try writeMessagePage(task.io, job.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.inspection_file);
+    try writeMessagePage(task.io, job.files.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.files.inspection);
 }
 
 /// Writes the Message page for the `length` validated bytes in `scratch`.
@@ -908,10 +909,10 @@ const MessagePage = struct {
 
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    try job.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
+    try job.files.inspection.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
     var buffer: [4096]u8 = undefined;
-    var output = job.inspection_file.writerStreaming(task.io, &buffer);
+    var output = job.files.inspection.writerStreaming(task.io, &buffer);
     if (job.inspection_kind == .help) {
         if (job.inspection_action) |action| {
             try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
@@ -936,7 +937,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
 /// earlier precedes its live output. Only a conversation item is a cursor
 /// into the Conversation; before an Admission or call row it ends at the
 /// previous position, and before the first position there is nothing.
-fn beginningBefore(first: protocol.ActivityItem, end: u64) ?client.ConversationCursor {
+fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.ConversationCursor {
     return switch (first.value) {
         .user, .assistant, .tool_result => .{ .end = end, .before_position = first.position, .before_ordinal = first.ordinal },
         else => if (first.position > 1) .{ .end = first.position - 1 } else null,
@@ -947,7 +948,7 @@ test "a live page's beginning precedes its first item, without repeating or skip
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
     const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
-    const Case = struct { item: protocol.ActivityItem, cursor: ?client.ConversationCursor };
+    const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
         .{ .item = .{ .position = 5, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
         .{ .item = .{ .position = 7, .ordinal = 2, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },
@@ -987,7 +988,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .inspection_file = page, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
