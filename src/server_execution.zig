@@ -123,14 +123,25 @@ pub const ExecutionSlot = union(enum) {
     named_scratch: NamedScratchSlot,
 };
 
-/// Execution-owned consistency checks beside ExecutionSlot. Each inspects
-/// current slot and custody facts without mutating them. The legal
-/// checkpoint is after a complete admission, preparation, completion, or
-/// cleanup transition on the execution owner, when no admission
-/// temporaries are outstanding. Payloads match by custody token, never by
-/// array index. Aggregate reconciliation runs only here, not midway
-/// through beginAdmittedAttempt or launchPreparedRequest where partially
-/// established local ownership is legitimate.
+/// The custody a slot's arm holds for its token. A slot is the execution
+/// owner's record of who holds custody; its custody record follows the arm
+/// through `attachSlot` and `moveSlot`, the only writers of either.
+const SlotCustody = enum { free, attached, detached };
+
+fn slotCustody(slot: *const ExecutionSlot) SlotCustody {
+    return switch (slot.*) {
+        .free => .free,
+        .model_preparing, .model_authenticating, .model_refreshing, .provider, .bash_preparing => .attached,
+        // Delivery closure detaches custody while the .bash payload is
+        // retained for reclamation.
+        .bash => |*active| switch (active.delivery) {
+            .open => .attached,
+            .closed => .detached,
+        },
+        .bash_prepared_cleanup, .named_scratch => .detached,
+    };
+}
+
 fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
     return switch (slot.*) {
         .free => null,
@@ -145,29 +156,78 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
     };
 }
 
+/// Null for a free slot and for retained cleanup owners, which keep only
+/// their token.
+fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
+    return switch (slot.*) {
+        .free, .bash_prepared_cleanup, .named_scratch => null,
+        .model_preparing => |*active| .{ .model = active.binding },
+        .model_authenticating => |*active| .{ .model = active.owner.binding },
+        .model_refreshing => |*active| .{ .model = active.owner.binding },
+        .provider => |*active| .{ .model = active.owner.binding },
+        .bash_preparing => |*active| .{ .action = active.binding },
+        .bash => |*active| .{ .action = active.binding },
+    };
+}
+
+/// Attaches a reserved token's Attempt and occupies the free `slot` with its
+/// preparation in one step, so attached custody always has its slot. A Bash
+/// preparation starts after its slot is occupied.
+fn attachSlot(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    permit: anytype,
+) !@TypeOf(permit.binding) {
+    std.debug.assert(slot.* == .free);
+    const binding = try host.custody.attach(token, permit);
+    slot.* = switch (@TypeOf(binding)) {
+        store_module.AttemptBinding => .{ .model_preparing = .{ .token = token, .binding = binding } },
+        store_module.ActionAttemptBinding => .{ .bash_preparing = .{ .token = token, .binding = binding } },
+        else => @compileError("not an Attempt binding: " ++ @typeName(@TypeOf(binding))),
+    };
+    return binding;
+}
+
+/// Every later transition of an occupied slot, keeping its token. Custody
+/// moves with the arm: leaving the attached arms detaches it and freeing
+/// the slot completes its cleanup. Custody never returns to attached.
+fn moveSlot(host: *Host, slot: *ExecutionSlot, next: ExecutionSlot) void {
+    const token = slotToken(slot).?;
+    if (slotToken(&next)) |kept| std.debug.assert(std.meta.eql(kept, token));
+    const from = slotCustody(slot);
+    const to = slotCustody(&next);
+    if (from == .attached and to != .attached) {
+        std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
+        host.custody.detach(token) catch unreachable;
+    }
+    switch (to) {
+        .attached => std.debug.assert(from == .attached),
+        .detached => {},
+        .free => host.custody.cleanupComplete(token) catch unreachable,
+    }
+    slot.* = next;
+}
+
+/// Execution-owned consistency checks beside ExecutionSlot. Each inspects
+/// current slot and custody facts without mutating them. The legal
+/// checkpoint is after a complete admission, preparation, completion, or
+/// cleanup transition on the execution owner, when no admission
+/// temporaries are outstanding. Payloads match by custody token, never by
+/// array index. Aggregate reconciliation runs only here, not midway
+/// through beginAdmittedAttempt or launchPreparedRequest where partially
+/// established local ownership is legitimate.
 fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.CustodyPool) !void {
     var represented: usize = 0;
     for (slots, 0..) |*slot, i| {
-        switch (slot.*) {
-            .free => {},
-            .model_preparing => |*active| try custody.checkAttached(active.token, .{ .model = active.binding }),
-            .model_authenticating => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
-            .model_refreshing => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
-            .provider => |*active| try custody.checkAttached(active.owner.token, .{ .model = active.owner.binding }),
-            .bash_preparing => |*active| try custody.checkAttached(active.token, .{ .action = active.binding }),
-            // Delivery closure detaches custody while the .bash payload is
-            // retained for reclamation: open delivery requires attachment,
-            // closed delivery requires detachment plus the retained typed
-            // identity. Token-only retained owners (prepared cleanup,
-            // named scratch) keep the token-only detached check.
-            .bash => |*active| switch (active.delivery) {
-                .open => try custody.checkAttached(active.token, .{ .action = active.binding }),
-                .closed => try custody.checkDetached(active.token, .{ .action = active.binding }),
-            },
-            .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token, null),
-            .named_scratch => |*retained| try custody.checkDetached(retained.token, null),
-        }
         const token = slotToken(slot) orelse continue;
+        // Retained cleanup owners keep only their token, so their check is
+        // the token-only detached check.
+        switch (slotCustody(slot)) {
+            .free => unreachable,
+            .attached => try custody.checkAttached(token, slotBinding(slot).?),
+            .detached => try custody.checkDetached(token, slotBinding(slot)),
+        }
         represented += 1;
         for (slots[i + 1 ..]) |*later| {
             const other = slotToken(later) orelse continue;
@@ -686,7 +746,7 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             preparation.cancel();
-            finishCustodyNow(host, slot, active.token);
+            finishCustodyNow(host, slot);
         },
         .model_authenticating => |*active| {
             if (active.cancelled) continue;
@@ -721,7 +781,7 @@ fn cancelSupersededTransfers(
             // deinit cancels the stream; nothing of it is outstanding after,
             // so its slot is free at once and siblings are untouched.
             active.transfer.deinit();
-            finishCustodyNow(host, slot, owner.token);
+            finishCustodyNow(host, slot);
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
@@ -808,7 +868,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
             const service = active.execution.service(bashScratch(host), window);
             if (was_running and active.execution.lifecycle.process != .running) {
                 host.store.revokeActionSender(active.binding) catch |err| {
-                    _ = failBash(host, active, "Bash sender retirement", err);
+                    _ = failBash(host, slot, "Bash sender retirement", err);
                 };
             }
             made_progress = made_progress or service.made_progress;
@@ -820,10 +880,10 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
                 if (host.faults.bash_observed_exit_gate_path) |path| waitAtTestGate(host, path);
             }
             if (service.fault) |err| {
-                made_progress = failBash(host, active, "Bash process service", err) or made_progress;
+                made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
             }
             if (active.delivery == .open and service.retired) {
-                completeBash(host, active);
+                completeBash(host, slot);
                 made_progress = true;
             }
             if (active.delivery == .closed and service.retired) {
@@ -856,7 +916,7 @@ fn admitBashAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    const action_binding = host.custody.attach(token, &admission.permit) catch |err| {
+    const action_binding = attachSlot(host, slot, token, &admission.permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
@@ -864,13 +924,13 @@ fn admitBashAttempt(
     testTransition(host, .action_attempt_admitted, action_binding);
     const input = host.store.readBashExecutionInput(action_binding) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
     const arguments = host.store.openContent(input.arguments) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
@@ -902,10 +962,6 @@ fn admitBashAttempt(
         .preparing => |value| {
             preparation.* = value;
             preparation.*.?.sender_handle = input.sender_handle;
-            slot.* = .{ .bash_preparing = .{
-                .token = token,
-                .binding = action_binding,
-            } };
         },
         .failed => |value| {
             var failure = value;
@@ -929,7 +985,7 @@ fn advanceBashPreparation(
     if (!host.launchAllowed()) {
         const cleanup = active_preparation.cancel();
         preparation.* = null;
-        discardBashResources(host, slot, preparing.token, cleanup);
+        discardBashResources(host, slot, cleanup);
         return true;
     }
     switch (active_preparation.advance()) {
@@ -977,13 +1033,13 @@ fn finishBashPreparationFailure(
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
     }
     failure.cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
-        retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
+        retainBashPreparedCleanup(host, slot, failure.cleanup, cleanup_err);
         return;
     };
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }
-    finishCustodyNow(host, slot, token);
+    finishCustodyNow(host, slot);
 }
 
 // Discarding an unlaunched effect changes only local custody. In particular,
@@ -991,15 +1047,14 @@ fn finishBashPreparationFailure(
 fn discardBashResources(
     host: *Host,
     slot: *ExecutionSlot,
-    token: execution.CustodyToken,
     resources: bash.PreparedCleanup,
 ) void {
     var cleanup = resources;
     cleanup.cleanup(bashScratch(host)) catch |err| {
-        retainBashPreparedCleanup(host, slot, token, cleanup, err);
+        retainBashPreparedCleanup(host, slot, cleanup, err);
         return;
     };
-    finishCustodyNow(host, slot, token);
+    finishCustodyNow(host, slot);
 }
 
 fn launchPreparedBash(
@@ -1015,12 +1070,12 @@ fn launchPreparedBash(
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
     if (!host.launchAllowed()) {
-        discardBashResources(host, slot, token, prepared.takeCleanup());
+        discardBashResources(host, slot, prepared.takeCleanup());
         return;
     }
     host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
-        discardBashResources(host, slot, token, prepared.takeCleanup());
+        discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
     var launched: ?bash.Execution = null;
@@ -1044,16 +1099,16 @@ fn launchPreparedBash(
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
-        discardBashResources(host, slot, token, prepared.takeCleanup());
+        discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
     const work = &host.bash_work[token.index];
     work.* = .{ .execution = launched.? };
-    slot.* = .{ .bash = .{
+    moveSlot(host, slot, .{ .bash = .{
         .token = token,
         .binding = action_binding,
         .execution = &work.execution,
-    } };
+    } });
     traceAction(host, "bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
     traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
@@ -1076,10 +1131,10 @@ fn stopSupersededBash(
             preparation.* = null;
             settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
             cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
-                retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
+                retainBashPreparedCleanup(host, slot, cleanup, cleanup_err);
                 continue;
             };
-            finishCustodyNow(host, slot, active.token);
+            finishCustodyNow(host, slot);
         },
         .bash => |*active| {
             const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
@@ -1092,7 +1147,7 @@ fn stopSupersededBash(
                     traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
                     const action = active.execution.requestStop(.now(host.io, .awake));
                     host.store.revokeActionSender(active.binding) catch |err| {
-                        _ = failBash(host, active, "Bash sender retirement", err);
+                        _ = failBash(host, slot, "Bash sender retirement", err);
                     };
                     traceActionControlOutcome(
                         host,
@@ -1109,16 +1164,17 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, active: *BashSlot) void {
+fn completeBash(host: *Host, slot: *ExecutionSlot) void {
+    const active = &slot.bash;
     const token = active.token;
     const binding = active.binding;
     const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
-        _ = failBash(host, active, "Bash output reservation", err);
+        _ = failBash(host, slot, "Bash output reservation", err);
         return;
     };
     const outcome = active.execution.outcome(bashScratch(host), include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
-        _ = failBash(host, active, "Bash outcome materialization", err);
+        _ = failBash(host, slot, "Bash outcome materialization", err);
         return;
     };
     if (host.faults.before_result_delay_ms != 0) {
@@ -1132,28 +1188,29 @@ fn completeBash(host: *Host, active: *BashSlot) void {
             .before_commit = host.faults.result_before_commit,
         }) catch |err| {
             active.execution.releaseOutputReservation(host.retention);
-            _ = failBash(host, active, "Bash result settlement", err);
+            _ = failBash(host, slot, "Bash result settlement", err);
             return;
         };
         testTransition(host, .action_result_committed, binding);
         if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
     } else active.execution.releaseOutputReservation(host.retention);
-    closeBashDelivery(host, active);
+    closeBashDelivery(host, slot);
 }
 
-fn failBash(host: *Host, active: *BashSlot, phase: []const u8, err: anyerror) bool {
+fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
     fenceDispatch(host, phase, err);
-    if (active.delivery != .open) return false;
-    active.execution.releaseOutputReservation(host.retention);
-    closeBashDelivery(host, active);
+    if (slot.bash.delivery != .open) return false;
+    slot.bash.execution.releaseOutputReservation(host.retention);
+    closeBashDelivery(host, slot);
     return true;
 }
 
-fn closeBashDelivery(host: *Host, active: *BashSlot) void {
-    std.debug.assert(active.delivery == .open);
-    detachCustody(host, active.token);
-    traceAction(host, "cleanup_started", active.binding);
-    active.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
+fn closeBashDelivery(host: *Host, slot: *ExecutionSlot) void {
+    var closed = slot.bash;
+    std.debug.assert(closed.delivery == .open);
+    closed.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
+    moveSlot(host, slot, .{ .bash = closed });
+    traceAction(host, "cleanup_started", closed.binding);
 }
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
@@ -1181,10 +1238,8 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
         if (first_failure) retainDispatchFence(host, "Bash resource reclamation", err);
         return first_failure;
     };
-    const token = active.token;
     const binding = active.binding;
-    host.custody.cleanupComplete(token) catch unreachable;
-    slot.* = .free;
+    moveSlot(host, slot, .free);
     traceAction(host, "cleanup_completed", binding);
     return true;
 }
@@ -1192,18 +1247,17 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
 fn retainBashPreparedCleanup(
     host: *Host,
     slot: *ExecutionSlot,
-    token: execution.CustodyToken,
     cleanup: bash.PreparedCleanup,
     err: anyerror,
 ) void {
     retainDispatchFence(host, "Bash preparation cleanup", err);
-    detachCustody(host, token);
+    const token = slotToken(slot).?;
     const work = &host.bash_work[token.index];
     work.* = .{ .prepared_cleanup = cleanup };
-    slot.* = .{ .bash_prepared_cleanup = .{
+    moveSlot(host, slot, .{ .bash_prepared_cleanup = .{
         .token = token,
         .cleanup = &work.prepared_cleanup,
-    } };
+    } });
 }
 
 fn settleActionFailure(
@@ -1271,20 +1325,18 @@ fn beginAdmittedAttempt(
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
-    std.debug.assert(slot.* == .free);
-    const binding = host.custody.attach(token, permit) catch |err| {
+    const binding = attachSlot(host, slot, token, permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-    slot.* = .{ .model_preparing = .{ .token = token, .binding = binding } };
     const view = host.store.openHistoricalView(binding) catch |err| {
         if (err == error.SupersededByControl) {
-            finishCustodyNow(host, slot, token);
+            finishCustodyNow(host, slot);
             return .admitted;
         }
         fenceDispatch(host, "historical view", err);
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return .admitted;
     };
     var retained_scratch: ?named_scratch.Owner = null;
@@ -1329,7 +1381,7 @@ fn advanceModelPreparation(
     if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = host.launchAllowed() } }) == .abandon) {
         preparation.cancel();
         // Infrastructure fencing does not invent a user stop or a Resolution.
-        finishCustodyNow(host, slot, owner.token);
+        finishCustodyNow(host, slot);
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
@@ -1353,7 +1405,7 @@ fn advanceModelPreparation(
             var request = value;
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
                 .authenticate => {
-                    slot.* = .{ .model_authenticating = .{ .owner = owner, .request = request } };
+                    moveSlot(host, slot, .{ .model_authenticating = .{ .owner = owner, .request = request } });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
                 },
                 .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
@@ -1377,7 +1429,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
         .model_authenticating => |*active| {
             if (active.cancelled) {
                 active.request.deinit(host.io, host.scratch_budget.?);
-                finishCustodyNow(host, slot, active.owner.token);
+                finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
                 worker.request();
@@ -1386,7 +1438,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
         },
         .model_refreshing => |*active| {
             if (active.cancelled) {
-                finishCustodyNow(host, slot, active.owner.token);
+                finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
                 worker.requestRefresh(active.rejected_generation);
@@ -1412,7 +1464,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
             .ready => unreachable,
         }
     }
-    finishCustodyNow(host, slot, active.owner.token);
+    finishCustodyNow(host, slot);
     return true;
 }
 
@@ -1424,16 +1476,16 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
     const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "credential refresh claim", err);
         slot.provider.transfer.deinit();
-        finishCustodyNow(host, slot, owner.token);
+        finishCustodyNow(host, slot);
         return true;
     };
     if (!claimed) return false;
     slot.provider.transfer.deinit();
-    slot.* = .{ .model_refreshing = .{
+    moveSlot(host, slot, .{ .model_refreshing = .{
         .owner = owner,
         .rejected_generation = rejected_generation,
         .request_id = answered.request_id,
-    } };
+    } });
     return true;
 }
 
@@ -1456,7 +1508,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
             request.deinit(host.io, host.scratch_budget.?);
             if (decision == .settle_authentication_failure)
                 settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
-            finishCustodyNow(host, slot, owner.token);
+            finishCustodyNow(host, slot);
         },
         else => unreachable,
     }
@@ -1476,8 +1528,7 @@ fn finishModelPreparationFailure(
         .superseded = err == error.SupersededByControl,
     } })) {
         .retain_cleanup => {
-            host.custody.detach(owner.token) catch unreachable;
-            slot.* = .{ .named_scratch = .{ .token = owner.token, .owner = retained_scratch.? } };
+            moveSlot(host, slot, .{ .named_scratch = .{ .token = owner.token, .owner = retained_scratch.? } });
             retainDispatchFence(host, "request scratch unlink", err);
             return;
         },
@@ -1486,7 +1537,7 @@ fn finishModelPreparationFailure(
         .abandon => {},
         else => unreachable,
     }
-    finishCustodyNow(host, slot, owner.token);
+    finishCustodyNow(host, slot);
 }
 
 fn launchPreparedRequest(
@@ -1501,14 +1552,14 @@ fn launchPreparedRequest(
     const binding = owner.binding;
     if (!host.launchAllowed()) {
         request.deinit(host.io, host.scratch_budget.?);
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return;
     }
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit(host.io, host.scratch_budget.?);
         settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return;
     }
     var headers: model_adapter.Headers = .{};
@@ -1521,17 +1572,17 @@ fn launchPreparedRequest(
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, request.session_affinity, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
-            finishCustodyNow(host, slot, token);
+            finishCustodyNow(host, slot);
             return;
         };
     }
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
-    slot.* = .{ .provider = .{
+    moveSlot(host, slot, .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
-    } };
+    } });
     const active = &slot.provider;
     const write_once = host.faults.response_write_once;
     active.transfer.start(reactor, request.*, binding, .{
@@ -1547,11 +1598,10 @@ fn launchPreparedRequest(
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
-            host.custody.detach(token) catch unreachable;
-            slot.* = .{ .named_scratch = .{
+            moveSlot(host, slot, .{ .named_scratch = .{
                 .token = token,
                 .owner = retained,
-            } };
+            } });
             retainDispatchFence(host, "response scratch unlink", err);
             return;
         }
@@ -1561,7 +1611,7 @@ fn launchPreparedRequest(
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return;
     };
     // Spent only by a Transfer that started, so a failed start keeps it armed.
@@ -1574,7 +1624,7 @@ fn launchPreparedRequest(
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return;
     };
     host.store.withDispatchHandoff(
@@ -1606,7 +1656,7 @@ fn launchPreparedRequest(
             },
             else => unreachable,
         }
-        finishCustodyNow(host, slot, token);
+        finishCustodyNow(host, slot);
         return;
     };
     traceOperation(host, "transport_handoff_committed", binding);
@@ -1675,13 +1725,12 @@ fn completeTransfer(
     switch (decision) {
         .interpret_output => {
             switch (completeSuccessfulTransfer(host, active, http_status.?)) {
-                .cleanup => finishCustodyNow(host, slot, owner.token),
+                .cleanup => finishCustodyNow(host, slot),
                 .named_scratch => |scratch| {
-                    host.custody.detach(owner.token) catch unreachable;
-                    slot.* = .{ .named_scratch = .{
+                    moveSlot(host, slot, .{ .named_scratch = .{
                         .token = owner.token,
                         .owner = scratch,
-                    } };
+                    } });
                 },
             }
             return;
@@ -1714,7 +1763,7 @@ fn completeTransfer(
         },
     }
     active.transfer.deinit();
-    finishCustodyNow(host, slot, owner.token);
+    finishCustodyNow(host, slot);
 }
 
 fn failureClass(
@@ -1886,14 +1935,12 @@ fn advanceRetainedCleanup(
     for (slots) |*slot| switch (slot.*) {
         .bash_prepared_cleanup => |*retained| {
             retained.cleanup.cleanup(bashScratch(host)) catch continue;
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-            slot.* = .free;
+            moveSlot(host, slot, .free);
             made_progress = true;
         },
         .named_scratch => |*retained| {
             _ = retained.owner.reclaim(host.lease.paths.scratch.slice()) catch continue;
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-            slot.* = .free;
+            moveSlot(host, slot, .free);
             made_progress = true;
         },
         else => {},
@@ -1911,21 +1958,21 @@ fn shutdownExecution(
     // A cancelled transfer has nothing outstanding, so it retires at once.
     for (slots) |*slot| switch (slot.*) {
         .free => {},
-        .model_preparing => |active| {
+        .model_preparing => {
             model_preparation.cancel();
-            finishCustodyNow(host, slot, active.token);
+            finishCustodyNow(host, slot);
         },
         .model_authenticating => |*active| {
             active.request.deinit(host.io, host.scratch_budget.?);
-            finishCustodyNow(host, slot, active.owner.token);
+            finishCustodyNow(host, slot);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
         // and its spent claim forbids another refresh after restart.
-        .model_refreshing => |active| finishCustodyNow(host, slot, active.owner.token),
-        .bash_preparing => |active| {
+        .model_refreshing => finishCustodyNow(host, slot),
+        .bash_preparing => {
             const cleanup = preparation.*.?.cancel();
             preparation.* = null;
-            discardBashResources(host, slot, active.token, cleanup);
+            discardBashResources(host, slot, cleanup);
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
@@ -1933,7 +1980,7 @@ fn shutdownExecution(
         // ordinary model completion or saving a semantic failure.
         .provider => |*active| {
             active.transfer.deinit();
-            finishCustodyNow(host, slot, active.owner.token);
+            finishCustodyNow(host, slot);
         },
     };
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
@@ -2056,18 +2103,12 @@ fn settleFailure(
 /// An Action leaves custody unsettled only once dispatch is fenced or the Host
 /// is shutting down, and neither admits work again, so uncertain Actions come
 /// only from an earlier Host and the lifecycle owner stops scanning for them.
-fn detachCustody(host: *Host, token: execution.CustodyToken) void {
-    std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
-    host.custody.detach(token) catch unreachable;
-}
-
-fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
+/// Frees an attached slot whose resources its caller has retired.
+fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
-    const traced = if (host.faults.test_phase_trace) host.custody.binding(token) catch unreachable else null;
-    detachCustody(host, token);
-    host.custody.cleanupComplete(token) catch unreachable;
-    slot.* = .free;
+    const traced = if (host.faults.test_phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
+    moveSlot(host, slot, .free);
     if (traced) |binding| switch (binding) {
         .model => |model| traceOperation(host, "cleanup_completed", model),
         .action => |action| traceAction(host, "cleanup_completed", action),
@@ -2350,9 +2391,8 @@ test "cleanup publication follows complete execution retirement" {
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
     boundary.custody = &host.custody;
-    // Both typed owners and admission-local Action custody before an
-    // execution payload is installed share this boundary.
-    for (0..3) |kind| {
+    // Both typed owners, as admission attaches them, share this boundary.
+    for (0..2) |kind| {
         const token = host.custody.reserve().?;
         boundary.token = token;
         boundary.observed = false;
@@ -2362,20 +2402,20 @@ test "cleanup publication follows complete execution retirement" {
                 .operation_id = 7,
                 .attempt_ordinal = 2,
             } };
-            const binding = try host.custody.attach(token, &permit);
-            slot = .{ .model_preparing = .{ .token = token, .binding = binding } };
-            finishCustodyNow(&host, &slot, token);
+            _ = try attachSlot(&host, &slot, token, &permit);
+            try std.testing.expect(slot == .model_preparing);
+            finishCustodyNow(&host, &slot);
         } else {
             var permit = store_module.ActionDispatchPermit{ .binding = .{
                 .turn_id = 3,
                 .parent_operation_id = 7,
                 .action_id = 11,
             } };
-            const binding = try host.custody.attach(token, &permit);
-            if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
+            _ = try attachSlot(&host, &slot, token, &permit);
+            try std.testing.expect(slot == .bash_preparing);
             // An Action leaves custody after its settlement claims delivery.
             try std.testing.expect(host.custody.claimTerminalDelivery(token));
-            finishCustodyNow(&host, &slot, token);
+            finishCustodyNow(&host, &slot);
         }
         try std.testing.expect(boundary.observed);
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -2902,7 +2942,7 @@ test "closed Bash delivery retains its payload with detached custody" {
     // The real delivery-close transition detaches custody while retaining
     // the .bash payload for reclamation: the checker must accept it.
     try std.testing.expect(host.custody.claimTerminalDelivery(token));
-    closeBashDelivery(&host, &slots[0].bash);
+    closeBashDelivery(&host, &slots[0]);
     try std.testing.expect(slots[0].bash.delivery == .closed);
     try host.custody.checkDetached(token, .{ .action = binding });
     try checkSlotCustodyAgreement(&slots, &host.custody);
