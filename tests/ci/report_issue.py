@@ -23,7 +23,10 @@ STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
 # The fixture is the first script after the case name, past any `env VAR=…` wrapper.
 FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) [^\n]*?"\$directory/([^"]+)"', re.M)
-RECORD = re.compile(r"^([a-z0-9-]+) failed: exit=\d+", re.M)
+RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
+# Zig's line for a failed build step; a standalone gate names its script here.
+COMMAND = re.compile(r"^failed command: (.+)$", re.M)
+SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
 ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S.*?)\.\.\.FAIL \((\w+)\)$", re.M)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
@@ -91,19 +94,54 @@ def raising_line(parsed, path):
     return found
 
 
+def case_output(log, records, index):
+    """The output check.sh printed for one case.
+
+    A batch case's record precedes its log; a serial case's output precedes its
+    record. The span before a record belongs to the previous case in a batch,
+    so it is read only when that case runs a different fixture.
+    """
+    record = records[index]
+    after = log[record.end():records[index + 1].start() if index + 1 < len(records) else len(log)]
+    if index == 0:
+        return after, log[:record.start()]
+    return after, log[records[index - 1].end():record.start()]
+
+
+def fixture_cause(name, path, spans):
+    for span in spans:
+        if raised := raising_line(list(tracebacks(span)), path):
+            code, error = raised
+            return Cause(f"{name}: {code} raised {error.split(':', 1)[0]}", [path], error)
+    return None
+
+
 def failure_causes(log, cases):
     """Every failure signature in one job's log, without repeats."""
     log = untimed(log)
-    parsed = list(tracebacks(log))
     found, unparsed = [], []
-    for name in RECORD.findall(log):
+    records = list(RECORD.finditer(log))
+    for index, record in enumerate(records):
+        name, verdict = record.groups()
+        if verdict != "failed":
+            continue
         path = cases.get(name)
-        raised = raising_line(parsed, path) if path else None
-        if raised:
-            code, error = raised
-            found.append(Cause(f"{name}: {code} raised {error.split(':', 1)[0]}", [path], error))
+        after, before = case_output(log, records, index)
+        neighbour = cases.get(records[index - 1][1]) if index else None
+        spans = (after,) if neighbour == path else (after, before)
+        cause = fixture_cause(name, path, spans) if path else None
+        if cause:
+            found.append(cause)
         else:
             unparsed.append(Cause(f"{name}: exit without a parsed traceback", [path] if path else []))
+    # A gate build.zig runs directly, without check.sh's records.
+    for command in COMMAND.findall(log):
+        if "check.sh" in command or not (script := SCRIPT.search(command)):
+            continue
+        path = script[0]
+        name = Path(path).stem
+        cause = fixture_cause(name, path, (log,))
+        found.append(cause or Cause(f"{name}: exit without a parsed traceback", [path]))
     for crash in ZIG_CRASH.finditer(log):
         test, how = crash.groups()
         # The test's stderr follows, indented: the failed expectation, then the panic.

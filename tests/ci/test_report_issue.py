@@ -124,6 +124,39 @@ class CauseTest(unittest.TestCase):
         self.assertEqual(gate.signature,
                          'renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0')
 
+    def test_cases_sharing_a_fixture_file_keep_their_own_raising_lines(self):
+        def case(name, statement):
+            return [f"{name} failed: exit=1 elapsed=4.000s",
+                    "Traceback (most recent call last):",
+                    '  File "/w/rui/tests/integration/human_cli_integration.py", line 9, in main',
+                    f"    {statement}",
+                    "AssertionError"]
+        log = logged(*case("human-cli", "assert caller_ok"), *case("human-cli-renderer", "assert frame_ok"))
+        self.assertEqual([cause.signature for cause in report_issue.failure_causes(log, self.cases)],
+                         ["human-cli: assert caller_ok raised AssertionError",
+                          "human-cli-renderer: assert frame_ok raised AssertionError"])
+        # A failed case without its own traceback never borrows its same-file neighbour's.
+        log = logged(*case("human-cli", "assert caller_ok"), "human-cli-renderer failed: exit=1 elapsed=1s")
+        self.assertEqual([cause.signature for cause in report_issue.failure_causes(log, self.cases)],
+                         ["human-cli: assert caller_ok raised AssertionError",
+                          "human-cli-renderer: exit without a parsed traceback"])
+
+    def test_a_standalone_gate_is_named_by_its_script_and_raising_line(self):
+        def gate(statement):
+            return logged("Traceback (most recent call last):",
+                          '  File "/w/rui/tests/integration/codex_h2_integration.py", line 50, in main',
+                          f"    {statement}",
+                          "AssertionError: mismatch",
+                          "error: process exited with code 1",
+                          "failed command: python3 /w/rui/tests/integration/codex_h2_integration.py "
+                          "./.zig-cache/o/ci-compiled/rui-release-safe")
+        signatures = [report_issue.failure_causes(gate(statement), self.cases)
+                      for statement in ("assert stream_reset", "assert goaway_sent")]
+        self.assertEqual([[cause.signature for cause in causes] for causes in signatures],
+                         [["codex_h2_integration: assert stream_reset raised AssertionError"],
+                          ["codex_h2_integration: assert goaway_sent raised AssertionError"]])
+        self.assertEqual(signatures[0][0].paths, ["tests/integration/codex_h2_integration.py"])
+
     def test_a_record_without_a_traceback_still_names_its_fixture(self):
         [cause] = report_issue.failure_causes(logged('host-stop failed: exit=124 elapsed=60.000s'), self.cases)
         self.assertEqual(cause.signature, 'host-stop: exit without a parsed traceback')
