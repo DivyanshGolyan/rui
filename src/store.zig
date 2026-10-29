@@ -106,10 +106,18 @@ const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND r
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
-const retry_admission_select_sql =
+/// Due retries one admission read keeps after sorting by operation_id. The
+/// due-time index cannot supply that order, so the literal LIMIT keeps the
+/// sort to these rows; a bound one would make the cached plan re-prepare on
+/// every bind. A default Host's active Operations and its oldest due retry
+/// fit in one read, and a larger Host pages on operation_id.
+const retry_admission_page_rows = product_defaults.active_capacity + 1;
+const retry_admission_select_sql = std.fmt.comptimePrint(
     "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
-    "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
-    "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
+        "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
+        "AND retry_due_at_ms<=?1 AND operation_id>?2 ORDER BY operation_id LIMIT {d}",
+    .{retry_admission_page_rows},
+);
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -5203,20 +5211,24 @@ pub const Store = struct {
         faults: Faults,
     ) !?AttemptAdmission {
         const snapshot_ms = try readUnixMilliseconds(self.io);
-        const selection_limit = try std.math.add(
-            usize,
-            active.maximum_exclusions,
-            1,
-        );
-        if (selection_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
+        const selection_limit = try std.math.add(usize, active.maximum_exclusions, 1);
         const select = try self.cached(retry_admission_select_sql);
         defer resetCached(select);
         try bindI64(select, 1, snapshot_ms);
-        try bindI64(select, 2, @as(i64, @intCast(selection_limit)));
+        try bindI64(select, 2, 0);
         var selected: ?AttemptBinding = null;
-        while (true) {
+        var scanned: usize = 0;
+        var page_rows: usize = 0;
+        var after_operation_id: i64 = 0;
+        while (scanned < selection_limit) {
             const result = c.sqlite3_step(select);
-            if (result == c.SQLITE_DONE) break;
+            if (result == c.SQLITE_DONE) {
+                if (page_rows < retry_admission_page_rows) break;
+                if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetrySelectionFailed;
+                try bindI64(select, 2, after_operation_id);
+                page_rows = 0;
+                continue;
+            }
             if (result != c.SQLITE_ROW) return error.RetrySelectionFailed;
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
@@ -5228,6 +5240,9 @@ pub const Store = struct {
             {
                 return error.CorruptStore;
             }
+            scanned += 1;
+            page_rows += 1;
+            after_operation_id = operation_id;
             if (active.contains(@intCast(operation_id))) continue;
             selected = .{
                 .turn_id = @intCast(turn_id),
@@ -6033,21 +6048,16 @@ pub const Store = struct {
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        const scan_limit = try std.math.add(
-            usize,
-            active.maximum_exclusions,
-            1,
-        );
-        if (scan_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
+        const scan_limit = try std.math.add(usize, active.maximum_exclusions, 1);
         const select = try self.cached(
             "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
                 "WHERE " ++ retry_exhausted_sql ++ " " ++
-                "ORDER BY operation_id LIMIT ?1",
+                "ORDER BY operation_id",
         );
         defer resetCached(select);
-        try bindI64(select, 1, @as(i64, @intCast(scan_limit)));
         var selected: ?AttemptBinding = null;
-        while (true) {
+        var scanned: usize = 0;
+        while (scanned < scan_limit) : (scanned += 1) {
             const result = c.sqlite3_step(select);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.RetryRecoveryFailed;
@@ -16329,11 +16339,11 @@ test "retry due index excludes future population and preserves age ordering" {
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     const QueryCost = struct {
-        fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64, limit: i64) !i32 {
+        fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64) !i32 {
             const statement = try prepare(database, sql);
             defer _ = c.sqlite3_finalize(statement);
             try bindI64(statement, 1, snapshot_ms);
-            try bindI64(statement, 2, limit);
+            try bindI64(statement, 2, 0);
             while (true) switch (c.sqlite3_step(statement)) {
                 c.SQLITE_ROW => {},
                 c.SQLITE_DONE => break,
@@ -16353,7 +16363,7 @@ test "retry due index excludes future population and preserves age ordering" {
     const age_control_sql =
         "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
         "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND attempt_ordinal<4 " ++
-        "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
+        "AND retry_due_at_ms<=?1 AND operation_id>?2 ORDER BY operation_id LIMIT 2";
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
         try exec(storage.database, "DELETE FROM model_operation");
         const insert = try std.testing.allocator.printSentinel(
@@ -16369,8 +16379,8 @@ test "retry due index excludes future population and preserves age ordering" {
         );
         defer std.testing.allocator.free(insert);
         try exec(storage.database, insert);
-        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
-        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99, 2);
+        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
+        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99);
     }
     const minimum_future_cost = @min(future_costs[0], future_costs[1], future_costs[2]);
     const maximum_future_cost = @max(future_costs[0], future_costs[1], future_costs[2]);
@@ -16390,7 +16400,7 @@ test "retry due index excludes future population and preserves age ordering" {
         );
         defer std.testing.allocator.free(insert);
         try exec(storage.database, insert);
-        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
+        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
     }
     try std.testing.expect(due_costs[1] > due_costs[0]);
     try std.testing.expect(due_costs[2] > due_costs[1]);
@@ -16486,6 +16496,37 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try std.testing.expectEqual(c1.operation_id, c2.operation_id);
     try std.testing.expectEqual(@as(u64, 2), c2.attempt_ordinal);
     try std.testing.expect(!try reopened.claimModelAuthRefresh(c2));
+}
+
+test "retry admission reads past a full page of active Operations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    const insert = try std.testing.allocator.printSentinel(
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0 FROM sequence",
+        .{retry_admission_page_rows + 1},
+        0,
+    );
+    defer std.testing.allocator.free(insert);
+    try exec(storage.database, insert);
+    const Active = struct {
+        fn contains(_: *const anyopaque, operation_id: u64) bool {
+            return operation_id <= retry_admission_page_rows;
+        }
+    };
+    const active_filter = ActiveOperationFilter{
+        .context = &empty_active_context,
+        .containsFn = Active.contains,
+        .maximum_exclusions = retry_admission_page_rows,
+    };
+    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
+    try std.testing.expectEqual(@as(u64, retry_admission_page_rows + 1), admitted.permit.binding.operation_id);
 }
 
 test "retry transitions preserve age and settle one exhausted outcome per call" {
