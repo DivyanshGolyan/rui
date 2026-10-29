@@ -573,6 +573,7 @@ pub const Current = struct {
         output_reservation_override: ?PolicyNumber(true),
         reasoning_effort: ?JsonEnum(protocol.ReasoningEffort),
         reasoning_effort_override: ?JsonEnum(protocol.ReasoningEffort),
+        label: ?JsonString(protocol.max_label_bytes),
 
         pub fn jsonStringify(self: Settings, jw: anytype) !void {
             try writeObject(self, jw);
@@ -784,6 +785,7 @@ pub const Current = struct {
             return .unconfigured;
         };
         if (!protocol.validSessionId(settings.reference.slice()) or !settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
+            (if (settings.label) |label| !protocol.ToolPresentation.validDescription(label.slice()) else false) or
             settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
@@ -2565,7 +2567,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
+    const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}";
     const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
@@ -2601,17 +2603,17 @@ test "Current settings preserve decimal token heuristics in projections" {
     const cases = [_]struct { suffix: []const u8, valid: bool }{
         .{ .suffix = "}", .valid = false },
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = true },
-        .{ .suffix = ",\"compaction_trigger\":\"42\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\"}", .valid = true },
-        .{ .suffix = ",\"compaction_trigger\":\"0\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":\"0\",\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":\"-1\"}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"01\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
-        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":1,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"0\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":\"0\",\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":\"-1\",\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"01\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":1,\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null}", .valid = false },
     };
     for (cases) |case| {
         var settings_buffer: [4096]u8 = undefined;
@@ -2641,7 +2643,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -2684,7 +2686,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });

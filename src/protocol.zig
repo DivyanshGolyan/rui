@@ -99,6 +99,8 @@ pub const Configuration = struct {
     compaction_trigger: OptionalBounded(20) = .{},
     output_reservation: OptionalBounded(20) = .{},
     reasoning_effort: OptionalBounded(16) = .{},
+    /// Display text only: never model input, an address or a selector.
+    label: OptionalBounded(max_label_bytes) = .{},
 };
 
 pub const Kind = enum {
@@ -161,6 +163,7 @@ pub const ConfigureCommand = struct {
         hashOptional(&hash, &self.configuration.compaction_trigger);
         hashOptional(&hash, &self.configuration.output_reservation);
         hashOptional(&hash, &self.configuration.reasoning_effort);
+        hashOptional(&hash, &self.configuration.label);
         hash.update(&.{@intFromBool(self.require_model)});
         return hash.finalResult();
     }
@@ -178,6 +181,8 @@ pub const MessageCommand = struct {
     // one transaction. The requested Session must then be empty. Initial
     // configuration cannot supply instruction or schema content values.
     configuration: ?Configuration = null,
+    // A creating Message only: create nothing unless the Host has a model.
+    require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
         try removeContent(&self.text, io);
@@ -185,7 +190,7 @@ pub const MessageCommand = struct {
 
     pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/message/v3");
+        hashField(&hash, "rui/core/message/v4");
         hashField(&hash, self.session.slice());
         hash.update(&.{@intFromBool(self.sender != null)});
         if (self.sender) |sender| {
@@ -196,7 +201,8 @@ pub const MessageCommand = struct {
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
         hashContent(&hash, &self.text);
         if (self.configuration) |configuration| {
-            const creation = ConfigureCommand{ .configuration = configuration };
+            // The creation's own digest covers its capability condition.
+            const creation = ConfigureCommand{ .configuration = configuration, .require_model = self.require_model };
             hashField(&hash, "initial-configuration");
             hash.update(&creation.semanticDigest());
         }
@@ -252,6 +258,7 @@ pub const ConfigurationRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -271,6 +278,7 @@ pub const MessageRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -1172,15 +1180,7 @@ const Parser = struct {
         request.configuration = try self.parseConfiguration(true);
         if (try self.consumeIf(',')) {
             try self.expectKey("require_model");
-            try self.skipWhitespace();
-            const first = try self.source.readByte();
-            const rest: []const u8 = switch (first) {
-                't' => "rue",
-                'f' => "alse",
-                else => return error.InvalidJsonShape,
-            };
-            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-            request.require_model = first == 't';
+            request.require_model = try self.readBoolean();
         }
         return request;
     }
@@ -1212,6 +1212,7 @@ const Parser = struct {
         var trigger_seen = false;
         var reservation_seen = false;
         var effort_seen = false;
+        var label_seen = false;
         while (try self.consumeIf(',')) {
             var key: Bounded(32) = .{};
             try self.readSmallString(&key);
@@ -1225,6 +1226,9 @@ const Parser = struct {
             } else if (key.eql("reasoning_effort") and !effort_seen) {
                 effort_seen = true;
                 try self.readOptionalSmallNullable(16, &request.configuration.reasoning_effort, true);
+            } else if (key.eql("label") and !label_seen) {
+                label_seen = true;
+                try self.readOptionalSmallNullable(max_label_bytes, &request.configuration.label, true);
             } else return error.UnexpectedField;
         }
         try self.expectByte('}');
@@ -1276,6 +1280,12 @@ const Parser = struct {
         try self.expectKey("text");
         try self.readContent(&request.text, false, true);
         if (request.text.state != .value) return error.InvalidMessage;
+        if (try self.consumeIf(',')) {
+            // Only a creating Message carries a capability condition.
+            if (request.configuration == null) return error.InvalidMessage;
+            try self.expectKey("require_model");
+            request.require_model = try self.readBoolean();
+        }
         return request;
     }
 
@@ -1665,6 +1675,18 @@ const Parser = struct {
     fn expectByte(self: *Parser, expected: u8) !void {
         try self.skipWhitespace();
         if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+    }
+
+    fn readBoolean(self: *Parser) !bool {
+        try self.skipWhitespace();
+        const first = try self.source.readByte();
+        const rest: []const u8 = switch (first) {
+            't' => "rue",
+            'f' => "alse",
+            else => return error.InvalidJsonShape,
+        };
+        for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        return first == 't';
     }
 
     fn consumeIf(self: *Parser, expected: u8) !bool {
@@ -2110,6 +2132,8 @@ pub const message_request = struct {
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const tail = .{"}}"};
+    /// A creating Message's capability condition follows its text.
+    pub const require_model_tail = .{"},\"require_model\":true}"};
 };
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
@@ -2744,7 +2768,9 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
 }
 
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {
-    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, failure: ?anyerror = null }{
+    const longest_label: [max_label_bytes]u8 = @splat('x');
+    const overlong_label: [max_label_bytes + 1]u8 = @splat('x');
+    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, label: ?[]const u8 = null, failure: ?anyerror = null }{
         .{ .suffix = "" },
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}" },
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"100000\"}", .trigger = "100000" },
@@ -2763,6 +2789,11 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"}" },
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"ultra\"}" },
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"},\"reasoning_effort\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"Review PR 412\"}", .label = "Review PR 412" },
+        .{ .suffix = ",\"label\":{\"state\":\"null\"}" },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ longest_label ++ "\"}", .label = &longest_label },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ overlong_label ++ "\"}", .failure = error.ValueTooLong },
+        .{ .suffix = ",\"label\":{\"state\":\"null\"},\"label\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
     };
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
@@ -2782,11 +2813,14 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         const command = (try parser.parse()).configure;
         if (case.trigger) |value| try std.testing.expectEqualStrings(value, command.configuration.compaction_trigger.value.slice());
         if (case.reservation) |value| try std.testing.expectEqualStrings(value, command.configuration.output_reservation.value.slice());
+        if (case.label) |value| try std.testing.expectEqualStrings(value, command.configuration.label.value.slice());
         if (std.mem.indexOf(u8, case.suffix, "\"state\":\"null\"") != null) {
             const state = if (std.mem.indexOf(u8, case.suffix, "compaction_trigger") != null)
                 command.configuration.compaction_trigger.state
             else if (std.mem.indexOf(u8, case.suffix, "reasoning_effort") != null)
                 command.configuration.reasoning_effort.state
+            else if (std.mem.indexOf(u8, case.suffix, "label") != null)
+                command.configuration.label.state
             else
                 command.configuration.output_reservation.state;
             try std.testing.expectEqual(FieldState.explicit_null, state);
@@ -3086,6 +3120,58 @@ test "initial Message ingress retains text custody and rejects extra content bef
         try std.testing.expect(rejected.capture == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
+}
+
+test "only a creating Message carries require_model, and it binds the digest" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const creating = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
+        "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
+        .{ .bytes = creating ++ "}" },
+        .{ .bytes = creating ++ ",\"require_model\":false}" },
+        .{ .bytes = creating ++ ",\"require_model\":true}", .require_model = true },
+        .{ .bytes = creating ++ ",\"require_model\":1}", .failure = error.InvalidJsonShape },
+        .{ .bytes = creating ++ ",\"required_model\":true}", .failure = error.UnexpectedField },
+        .{ .bytes = addressed ++ "}" },
+        .{ .bytes = addressed ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
+        .{ .bytes = addressed ++ ",\"require_model\":false}", .failure = error.InvalidMessage },
+    };
+    var digests: [cases.len][32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var used = std.atomic.Value(u64).init(0);
+        var retained: ?named_scratch.Owner = null;
+        var ingress = Ingress.init(std.testing.allocator, .{
+            .io = io,
+            .fd = -1,
+            .content_length = case.bytes.len,
+            .scratch_path = root[0..root_len],
+            .request_number = 44,
+            .retained_scratch = &retained,
+            .scratch_budget = .{ .used = &used, .limit = 16 },
+            .expected_kind = .message,
+        });
+        defer ingress.deinit();
+        if (case.failure) |failure| {
+            const result = if (ingress.feed(case.bytes)) |_| ingress.finish() else |err| err;
+            try std.testing.expectError(failure, result);
+            continue;
+        }
+        try ingress.feed(case.bytes);
+        var request = try ingress.finish();
+        defer request.removeTemporaryContent(io) catch unreachable;
+        try std.testing.expectEqual(case.require_model, request.message.require_model);
+        digests[index] = request.message.semanticDigest();
+    }
+    // An explicit false is the omitted condition; true is a different intent.
+    try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
+    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[2]));
+    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[5]));
 }
 
 test "incremental ingress preserves grammar and releases both captures after late failure" {

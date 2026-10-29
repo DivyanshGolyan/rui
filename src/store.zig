@@ -1301,6 +1301,7 @@ fn configurationBeforeWorkspace(
             return .model_is_immutable;
         }
     }
+    if (requested.label.state == .value and !protocol.ToolPresentation.validDescription(requested.label.value.slice())) return .invalid_label;
     if (requested.reasoning_effort.state == .value) {
         const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
@@ -1358,6 +1359,11 @@ fn planConfigurationUpdate(
         .omitted => {},
         .explicit_null => next.reasoning_effort = null,
         .value => next.reasoning_effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()).?,
+    }
+    switch (requested.label.state) {
+        .omitted => {},
+        .explicit_null => next.label = null,
+        .value => next.label = requested.label.value,
     }
 
     return .{ .update = .{
@@ -2019,19 +2025,28 @@ pub const Store = struct {
         return .{ .rejected = .{ .replayed = false, .code = code } };
     }
 
-    pub fn submitMessage(
+    /// A Message from a caller whose Host always has a model.
+    pub fn submitMessage(self: *Store, command: *const protocol.MessageCommand, faults: Faults) MessageReply {
+        return self.submitMessageWithModel(command, true, faults);
+    }
+
+    /// `model_available` is the Host's model capability, which a creating
+    /// Message's `require_model` condition checks before creating anything.
+    pub fn submitMessageWithModel(
         self: *Store,
         command: *const protocol.MessageCommand,
+        model_available: bool,
         faults: Faults,
     ) MessageReply {
         const access = self.enter(.none) catch return .infrastructure_failure;
         defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, self.submitMessageLocked(command, faults)) catch .infrastructure_failure;
+        return access.finishTransaction(Ordinary.none, faults, self.submitMessageLocked(command, model_available, faults)) catch .infrastructure_failure;
     }
 
     fn submitMessageLocked(
         self: *Store,
         request: *const protocol.MessageCommand,
+        model_available: bool,
         faults: Faults,
     ) !MessageReply {
         var resolved = request.*;
@@ -2074,6 +2089,8 @@ pub const Store = struct {
             .invalid_sender_handle
         else if (!creating and try self.readSession(command.session.slice()) == null)
             .unknown_session
+        else if (command.require_model and !model_available)
+            .model_capability_unavailable
         else
             null;
         if (code == null) if (command.configuration) |configuration| {
@@ -3639,6 +3656,8 @@ pub const Store = struct {
         } else {
             try capture.append("null");
         }
+        try capture.append(",\"label\":");
+        if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
         try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
         try self.appendCurrentWork(session_ref, current.created_at, capture);
         try capture.append(",\"selected_message\":");
@@ -4145,7 +4164,7 @@ pub const Store = struct {
                 "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
                 "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
                 "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
-                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation,revision_row.reasoning_effort " ++
+                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation,revision_row.reasoning_effort,revision_row.label " ++
                 "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
                 "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
                 "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
@@ -4173,6 +4192,8 @@ pub const Store = struct {
             try appendNullableNonnegativeInteger(statement, 14, capture);
             try capture.append(",\"reasoning_effort\":");
             try appendNullableEffort(try readNullableEffort(statement, 15), capture);
+            try capture.append(",\"label\":");
+            if (try readNullableLabel(statement, 16)) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
             try capture.append(",\"tools\":");
             try capture.appendTools(@intCast(tools));
             try capture.append(",\"permission_mode\":");
@@ -7282,7 +7303,7 @@ pub const Store = struct {
         try bindNullableU64(statement, 12, current.compaction_trigger);
         try bindNullableU64(statement, 13, current.output_reservation);
         try bindNullableEffort(statement, 14, current.reasoning_effort);
-        try bindOptionalLabel(statement, 15, current.label);
+        try bindOptionalLabel(statement, 15, &current.label);
         try expectDone(statement);
     }
 
@@ -7983,11 +8004,13 @@ fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *c
     try bindNullableU64(statement, 11, current.compaction_trigger);
     try bindNullableU64(statement, 12, current.output_reservation);
     try bindNullableEffort(statement, 13, current.reasoning_effort);
-    try bindOptionalLabel(statement, 14, current.label);
+    try bindOptionalLabel(statement, 14, &current.label);
 }
 
-fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: ?protocol.Bounded(protocol.max_label_bytes)) !void {
-    if (label) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
+/// SQLite binds the text without copying it, so it borrows the caller's
+/// Label, never a by-value copy that ends with this call.
+fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: *const ?protocol.Bounded(protocol.max_label_bytes)) !void {
+    if (label.*) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
 }
 
 fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
@@ -14009,6 +14032,117 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession(created_session_0.slice())).pending_messages);
     try std.testing.expectEqual(@as(u32, 1000), try pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
+}
+
+fn testingLabel(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !?[]u8 {
+    const bytes = try testingSessionReport(storage, tmp, session, 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const label = report.value.object.get("session").?.object.get("label").?;
+    return if (label == .null) null else try std.testing.allocator.dupe(u8, label.string);
+}
+
+test "a Label is configured, replayed, cleared and validated like any setting" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+    // Set at creation.
+    var create = try completeConfiguration("label-create", "", workspace, "model-a");
+    create.configuration.label.state = .value;
+    try create.configuration.label.value.set("Review PR 412");
+    const created = storage.configure(&create, true, .{});
+    try std.testing.expect(created == .accepted);
+    const session = created.accepted.session;
+    {
+        const label = (try testingLabel(&storage, &tmp, session.slice())).?;
+        defer std.testing.allocator.free(label);
+        try std.testing.expectEqualStrings("Review PR 412", label);
+    }
+    // An exact replay answers the saved admission; a changed Label under the
+    // same key conflicts.
+    try std.testing.expect(storage.configure(&create, true, .{}).accepted.replayed);
+    var changed = create;
+    try changed.configuration.label.value.set("Review PR 413");
+    try std.testing.expect(storage.configure(&changed, true, .{}) == .conflict);
+
+    // A Label-only revision relabels without touching the Conversation, and
+    // omission preserves the Label.
+    var relabel: protocol.ConfigureCommand = .{};
+    try relabel.key.set("label-relabel");
+    try relabel.session.set(session.slice());
+    relabel.configuration.label.state = .value;
+    try relabel.configuration.label.value.set("Fix the flaky resize test");
+    try std.testing.expectEqual(@as(u64, 2), storage.configure(&relabel, true, .{}).accepted.revision);
+    var effort: protocol.ConfigureCommand = .{};
+    try effort.key.set("label-preserved");
+    try effort.session.set(session.slice());
+    effort.configuration.permission_mode.state = .value;
+    try effort.configuration.permission_mode.value.set("ask");
+    try std.testing.expect(storage.configure(&effort, true, .{}) == .accepted);
+    {
+        const label = (try testingLabel(&storage, &tmp, session.slice())).?;
+        defer std.testing.allocator.free(label);
+        try std.testing.expectEqualStrings("Fix the flaky resize test", label);
+    }
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM conversation_entry"));
+    try std.testing.expectEqual(@as(u64, 3), try queryU64(storage.database, "SELECT count(*) FROM session_revision WHERE label IS NOT NULL"));
+
+    // Explicit null clears it.
+    var clear: protocol.ConfigureCommand = .{};
+    try clear.key.set("label-clear");
+    try clear.session.set(session.slice());
+    clear.configuration.label.state = .explicit_null;
+    try std.testing.expect(storage.configure(&clear, true, .{}) == .accepted);
+    try std.testing.expect((try testingLabel(&storage, &tmp, session.slice())) == null);
+
+    // A Label obeys the saved description rule: blank and multi-line text
+    // is refused and saved as such.
+    for ([_][]const u8{ " ", "two\nlines", "tab\u{2028}separated" }, 0..) |text, index| {
+        var refused: protocol.ConfigureCommand = .{};
+        var key_buffer: [32]u8 = undefined;
+        try refused.key.set(try std.fmt.bufPrint(&key_buffer, "label-refused-{d}", .{index}));
+        try refused.session.set(session.slice());
+        refused.configuration.label.state = .value;
+        try refused.configuration.label.value.set(text);
+        const reply = storage.configure(&refused, true, .{});
+        try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_label, reply.rejected.code);
+    }
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a creating Message with require_model creates nothing without a model" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    const settings = try completeConfiguration("composer", "", workspace, "model-a");
+    var message: protocol.MessageCommand = .{ .configuration = settings.configuration, .require_model = true };
+    try message.key.set("composer");
+    message.text = try testingBytesContent(&tmp, "composer-message", "start here");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    const refused = storage.submitMessageWithModel(&message, false, .{});
+    try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, refused.rejected.code);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM session"));
+    // The saved refusal replays even once a model is available, and the
+    // same key without the condition is a different request.
+    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}).rejected.replayed);
+    var unconditional = message;
+    unconditional.require_model = false;
+    try std.testing.expect(storage.submitMessageWithModel(&unconditional, true, .{}) == .conflict);
+
+    var accepted = message;
+    try accepted.key.set("composer-ready");
+    const reply = storage.submitMessageWithModel(&accepted, true, .{});
+    try std.testing.expect(reply == .accepted);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
 }
 
 test "initial Message atomically allocates its Session and replays its original admission" {

@@ -372,6 +372,8 @@ pub const ConfigureInput = struct {
     compaction_trigger: OptionalPolicy = .{},
     output_reservation: OptionalPolicy = .{},
     reasoning_effort: OptionalPolicy = .{},
+    /// A null value clears the Label.
+    label: OptionalPolicy = .{},
 };
 
 pub const MessageInput = struct {
@@ -877,7 +879,10 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
-    if ((kind != .configure and (kind != .message and fields.configuration != null or fields.require_model != null)) or
+    // Configuration, and its capability condition, belong to a configure or
+    // a creating Message.
+    if ((kind != .configure and kind != .message and fields.configuration != null) or
+        (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
@@ -1007,7 +1012,10 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
-    try capture.writeRequest(protocol.message_request.tail, .{});
+    if (input.configuration != null and input.configuration.?.require_model)
+        try capture.writeRequest(protocol.message_request.require_model_tail, .{})
+    else
+        try capture.writeRequest(protocol.message_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
@@ -1243,6 +1251,8 @@ const Capture = struct {
         try self.writeOptionalPolicy(input.output_reservation);
         try self.write(",\"reasoning_effort\":");
         try self.writeOptionalPolicy(input.reasoning_effort);
+        try self.write(",\"label\":");
+        try self.writeOptionalPolicy(input.label);
         try self.write("}");
     }
 

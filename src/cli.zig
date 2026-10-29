@@ -1268,6 +1268,25 @@ test "policy arguments reset and preserve spelling" {
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
+/// A Label obeys the saved Bash description rule; "" is the one spelling
+/// that clears it and can never be a Label.
+fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
+    if (text.len == 0) return .{ .present = true, .value = null };
+    if (protocol.ToolPresentation.validDescription(text)) return .{ .present = true, .value = text };
+    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed.\n" ++ cli_args.label_help);
+    return error.InvalidLabel;
+}
+
+test "a Label argument sets, clears or refuses before capture" {
+    try std.testing.expectEqualStrings("Review PR 412", (try labelArgument("Review PR 412")).value.?);
+    const cleared = try labelArgument("");
+    try std.testing.expect(cleared.present and cleared.value == null);
+    const longest: [100]u8 = @splat('x');
+    const too_long: [101]u8 = @splat('x');
+    for ([_][]const u8{ "two\nlines", " ", &too_long }) |text| try std.testing.expectError(error.InvalidLabel, labelArgument(text));
+    try std.testing.expectEqual(@as(usize, 100), (try labelArgument(&longest)).value.?.len);
+}
+
 fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
     if (model_capability.supportsModel(model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
@@ -1310,6 +1329,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
     if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
     if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
+    if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
@@ -1706,7 +1726,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
             return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
-            if (err == error.UnsupportedModel) return; // The pre-capture diagnostic already gives the repair.
+            if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
             TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
             if (err == error.CanonicalStoreFailure) return err;
         };
@@ -2705,7 +2725,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:

@@ -1174,7 +1174,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             deliverResponse(host.io, fd, status, response.slice());
         },
         .message => |*command| {
-            const result = host.store.submitMessage(command, host.hooks.storeFaults(.command));
+            const result = host.store.submitMessageWithModel(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }

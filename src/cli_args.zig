@@ -41,7 +41,7 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
-            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print its new six-character ID, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
+            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print its new six-character ID, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help, .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ value("profile", "current|full"), value("failed-response", "body|metadata"), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ "profile", "failed-response" }}, .requires = need_session },
@@ -79,6 +79,13 @@ pub const compaction_policy =
     \\Unknown models have no automatic threshold.
 ;
 
+/// Shared by `session configure`, `session start` and the interactive /configure.
+pub const label_help =
+    \\--label TEXT sets a short description shown in lists: one line of at most 100 bytes. --label "" clears it.
+    \\A Label is display text only; it never addresses or selects a Session.
+    \\
+;
+
 pub const reasoning_help =
     \\--reasoning-effort VALUE selects a model-supported effort; default clears the Session override.
     \\Omission preserves an existing choice. New Sessions and resets use the model's catalog default.
@@ -90,7 +97,7 @@ pub const reasoning_help =
     \\
 ;
 
-const compaction_help = reasoning_help ++ compaction_policy ++
+const compaction_help = label_help ++ reasoning_help ++ compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
@@ -138,9 +145,9 @@ const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
 const settings = &[_]Option{
     value("workspace", "PATH"),                                          value("instructions", "-"), value("tools", "bash|none"),                   value("permission-mode", "bypass|ask"),
     value("output-schema", "FILE|-"),                                    flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
-    value("reasoning-effort", "none|low|medium|high|xhigh|max|default"),
+    value("reasoning-effort", "none|low|medium|high|xhigh|max|default"), value("label", "TEXT"),
 };
-const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8] };
+const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8], settings[9] };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 const endpoint_conflicts = &[_][2][]const u8{
