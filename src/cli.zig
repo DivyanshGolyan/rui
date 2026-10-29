@@ -237,7 +237,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         } else if (err == error.PreferenceProviderRequired) {
             TerminalText.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
         } else if (err == error.UnsupportedPreferenceModel) {
-            TerminalText.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ product_defaults.model_help, .{});
+            TerminalText.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ model_capability.model_help, .{});
         } else if (err == error.InvalidPreferenceModel) {
             TerminalText.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
@@ -266,8 +266,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    var codex = model_capability.capability(readiness);
-    codex.valid_model = product_defaults.supportsModel;
+    const codex = model_capability.supportedCapability(readiness);
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
         .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
@@ -334,8 +333,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"local_credential\":\"{s}\",\"next_session\":", .{@tagName(facts.readiness)});
-    var codex = model_capability.capability(facts.readiness);
-    codex.valid_model = product_defaults.supportsModel;
+    const codex = model_capability.supportedCapability(facts.readiness);
     if (provider_selection.resolve(&.{codex}, null, null, facts.provider, facts.model)) |choice| switch (choice) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
@@ -1241,10 +1239,10 @@ test "policy arguments reset and preserve spelling" {
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
 fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
-    if (product_defaults.supportsModel(model)) return;
+    if (model_capability.supportsModel(model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
     // on stderr credit. Spell arbitrary bytes safely, without changing input.
-    var bytes: [4 * protocol.max_model_bytes + product_defaults.model_help.len + 256]u8 = undefined;
+    var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 256]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     out.writeAll("\nrui: unsupported model ") catch unreachable;
     if (model.len <= protocol.max_model_bytes) {
@@ -1254,7 +1252,7 @@ fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
     } else {
         out.print("ID ({d} bytes exceeds the {d}-byte limit)", .{ model.len, protocol.max_model_bytes }) catch unreachable;
     }
-    out.writeAll(". Nothing captured or changed.\n" ++ product_defaults.model_help ++ "See rui session configure --help.\n") catch unreachable;
+    out.writeAll(". Nothing captured or changed.\n" ++ model_capability.model_help ++ "See rui session configure --help.\n") catch unreachable;
     _ = @import("stderr.zig").write(out.buffered());
     return error.UnsupportedModel;
 }

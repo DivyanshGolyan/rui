@@ -27,7 +27,7 @@ pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones.
     accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null },
-    rejected: struct { kind: Kind, code: protocol.Bounded(96) },
+    rejected: struct { kind: Kind, code: protocol.Bounded(protocol.max_code_bytes) },
     failed: struct { err: anyerror },
 
     pub fn failure(self: End) ?anyerror {
@@ -293,7 +293,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission } };
     }
     self.state = .rejected;
-    var code: protocol.Bounded(96) = .{};
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     if (answer.result == .rejected) code = answer.result.rejected else try code.set("request conflict");
     return .{ .rejected = .{ .kind = kind, .code = code } };
 }
