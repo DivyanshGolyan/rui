@@ -227,14 +227,14 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
  SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,(SELECT v FROM q),100+i,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id)
- SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),100+i,100+i,100+i,'provider_http_422',NULL FROM n;
+INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_at)
+ SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),100+i,100+i,100+i,'provider_http_422',NULL,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,retry_due_at_ms,resolution_code,output_reservation)
- SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,2*i,1,NULL,'provider_http_422',0 FROM n;
+INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,retry_due_at_ms,resolution_code,output_reservation,resolved_at)
+ SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,2*i,1,NULL,'provider_http_422',0,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id)
- SELECT (SELECT target FROM core_command WHERE command_key='template-configure'),i,2*i-1,1,100+i,100+i,NULL,NULL,(SELECT v FROM q) FROM n;
+INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at)
+ SELECT (SELECT target FROM core_command WHERE command_key='template-configure'),i,2*i-1,1,100+i,100+i,NULL,NULL,(SELECT v FROM q),unixepoch() FROM n;
 UPDATE session SET next_position=2*%[1]d+1 WHERE session_ref=(SELECT target FROM core_command WHERE command_key='template-configure');
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
@@ -244,8 +244,8 @@ INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,tu
  SELECT 1000100+i,(SELECT target FROM core_command WHERE command_key='s-config'),'s-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 's-stop',3,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),NULL,NULL,1,'',1,0 WHERE %[2]d>0;
-INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff)
- SELECT 's-stop',(SELECT target FROM core_command WHERE command_key='s-config'),NULL,1000100+%[2]d WHERE %[2]d>0;
+INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at)
+ SELECT 's-stop',(SELECT target FROM core_command WHERE command_key='s-config'),NULL,1000100+%[2]d,unixepoch() WHERE %[2]d>0;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 'e-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='e-config-'||i),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0 FROM n;

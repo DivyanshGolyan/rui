@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 37;
+pub const schema_version: u32 = 38;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -47,6 +47,12 @@ const activity_sql = public_tool_groups_sql ++
     // Each compound keeps within the Store's four-term limit.
     "UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1), " ++
     "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
+/// Nullable columns permit corruption detection; no writer may omit one.
+/// Each partial index is empty in a sound Store, so every activity read
+/// checks the whole Session in a few steps, however long its history.
+const activity_sequence_guard_sql = "SELECT 1 FROM message_admission INDEXED BY message_admission_unpositioned WHERE session_ref=?1 AND admission_position IS NULL " ++
+    "UNION ALL SELECT 1 FROM session_stop INDEXED BY session_stop_unpositioned WHERE session_ref=?1 AND position IS NULL " ++
+    "UNION ALL SELECT 1 FROM turn INDEXED BY turn_unpositioned WHERE session_ref=?1 AND ((outcome_code IS NULL)!=(outcome_position IS NULL)) LIMIT 1";
 const complete_tool_results_sql =
     resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
@@ -100,6 +106,8 @@ const pending_message_count_sql =
 const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
 /// An unresolved last Attempt with no retry due: its outcome is uncertain.
 const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal={d}", .{retry_policy.maximum_attempts});
+/// Every model Operation resolution ends its Attempt or retry wait at once.
+const operation_resolved_at_sql = "resolved_at=unixepoch(),attempt_at=NULL,retry_scheduled_at=NULL";
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
@@ -1216,6 +1224,9 @@ const CurrentConfiguration = struct {
     compaction_trigger: ?u64 = null,
     output_reservation: ?u64 = null,
     reasoning_effort: ?protocol.ReasoningEffort = null,
+    label: ?protocol.Bounded(protocol.max_label_bytes) = null,
+    /// Read only: the Store dates a Session when it inserts it.
+    created_at: u64 = 0,
 };
 
 const MessageProjection = struct {
@@ -2084,7 +2095,7 @@ pub const Store = struct {
                 answer,
             );
             if (sender_known) if (command.sender) |sender| {
-                const statement = try self.cached("INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position) VALUES(?1,?2,?3)");
+                const statement = try self.cached("INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?2,?3,unixepoch())");
                 defer resetCached(statement);
                 try bindText(statement, 1, command.key.slice());
                 try bindText(statement, 2, sender.session.slice());
@@ -2219,7 +2230,7 @@ pub const Store = struct {
         {
             const position = try self.claimSessionPosition(command.session.slice());
             const insert = try self.cached(
-                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position) VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,?2,?3,?4,?5,unixepoch())",
             );
             defer resetCached(insert);
             try bindText(insert, 1, command.key.slice());
@@ -2256,7 +2267,7 @@ pub const Store = struct {
                     "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
                         "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
                         "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
-                        "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
+                        "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2,resolved_at=unixepoch()," ++
                         "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
                         "WHERE action_id IN (SELECT action_id FROM cancelled)",
                 );
@@ -2413,7 +2424,7 @@ pub const Store = struct {
     fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) !void {
         const update = try self.cached(
             "UPDATE model_operation SET retry_due_at_ms=NULL," ++ resolutionIs("resolution_code", .interrupted) ++ "," ++
-                "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
+                "interrupted_by_command_key=?2," ++ operation_resolved_at_sql ++ " WHERE operation_id=?1 AND resolution_code IS NULL",
         );
         defer resetCached(update);
         try bindU64(update, 1, operation_id);
@@ -2529,7 +2540,7 @@ pub const Store = struct {
         if (rejection == null) {
             switch (command.decision) {
                 .allow_once => {
-                    const update = try self.cached("UPDATE action_operation SET authorized=1 WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
+                    const update = try self.cached("UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
                     defer resetCached(update);
                     try bindU64(update, 1, command.action_id);
                     try expectDone(update);
@@ -2539,7 +2550,7 @@ pub const Store = struct {
                     const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
                     const position = try self.claimSessionPosition(command.session.slice());
                     const update = try self.cached(
-                        "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
+                        "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
                             "WHERE action_id=?1 AND resolution_code IS NULL",
                     );
                     defer resetCached(update);
@@ -3174,10 +3185,7 @@ pub const Store = struct {
     }
 
     fn validateActivitySequence(self: *Store, session: []const u8) !void {
-        // Nullable columns permit corruption detection; no writer may omit one.
-        const guard = try self.cached("SELECT 1 FROM message_admission WHERE session_ref=?1 AND admission_position IS NULL " ++
-            "UNION ALL SELECT 1 FROM session_stop WHERE session_ref=?1 AND position IS NULL " ++
-            "UNION ALL SELECT 1 FROM turn WHERE session_ref=?1 AND ((outcome_code IS NULL)!=(outcome_position IS NULL)) LIMIT 1");
+        const guard = try self.cached(activity_sequence_guard_sql);
         defer resetCached(guard);
         try bindText(guard, 1, session);
         if (c.sqlite3_step(guard) != c.SQLITE_DONE) return error.CorruptStore;
@@ -4694,7 +4702,7 @@ pub const Store = struct {
         try std.Io.randomSecure(self.io, &random);
         const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try self.cached(
-            "UPDATE action_operation SET " ++ action_attempted_sql ++ ",bash_timeout_ms=?2,sender_handle=?3 " ++
+            "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=unixepoch(),bash_timeout_ms=?2,sender_handle=?3 " ++
                 "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer resetCached(update);
@@ -4867,7 +4875,7 @@ pub const Store = struct {
         const content_id = try self.importBytesContent(effective_result, false, faults.content_import);
         const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
-            "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL " ++
+            "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=unixepoch() " ++
                 "WHERE action_id=?1 AND parent_operation_id=?5 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
         );
         defer resetCached(update);
@@ -4929,7 +4937,7 @@ pub const Store = struct {
         );
         const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
-            "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3 " ++
+            "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
                 "WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1",
         );
         defer resetCached(update);
@@ -5175,9 +5183,9 @@ pub const Store = struct {
         }
         if (selected != 0) {
             const project = try self.cached(
-                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
                     "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
-                    "row_number() OVER (ORDER BY admission_id),?3 + row_number() OVER (ORDER BY admission_id) - 1,1,?2,admission_id,NULL,NULL,content_id " ++
+                    "row_number() OVER (ORDER BY admission_id),?3 + row_number() OVER (ORDER BY admission_id) - 1,1,?2,admission_id,NULL,NULL,content_id,unixepoch() " ++
                     "FROM message_admission WHERE turn_id=?2 AND admission_id>=?4 ORDER BY admission_id",
             );
             defer resetCached(project);
@@ -5209,9 +5217,9 @@ pub const Store = struct {
         };
         if (instruction_count != 0) {
             const project = try self.cached(
-                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
                     "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
-                    "row_number() OVER (ORDER BY revision),?3 + row_number() OVER (ORDER BY revision) - 1,2,?2,NULL,revision,NULL,instructions_content_id " ++
+                    "row_number() OVER (ORDER BY revision),?3 + row_number() OVER (ORDER BY revision) - 1,2,?2,NULL,revision,NULL,instructions_content_id,unixepoch() " ++
                     "FROM session_revision r WHERE r.session_ref=?1 AND " ++
                     "r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
                     "AND r.revision<=?4 AND r.instructions_updated=1 ORDER BY revision",
@@ -5232,8 +5240,8 @@ pub const Store = struct {
         {
             const insert = try self.cached(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,0)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,0,unixepoch())",
             );
             defer resetCached(insert);
             try bindU64(insert, 1, operation_id);
@@ -5326,7 +5334,7 @@ pub const Store = struct {
         if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
         const replacement_ordinal = current.attempt_ordinal + 1;
         const update = try self.cached(
-            "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0 " ++
+            "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=unixepoch(),retry_scheduled_at=NULL " ++
                 "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
                 "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
         );
@@ -6087,7 +6095,7 @@ pub const Store = struct {
                     null;
                 const update = try self.cached(
                     "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
-                        "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END " ++
+                        "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END," ++ operation_resolved_at_sql ++ " " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                 );
                 defer resetCached(update);
@@ -6110,7 +6118,7 @@ pub const Store = struct {
             },
             .refreshed => {
                 const update = try self.cached(
-                    "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3 " ++
+                    "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4 " ++
                         "AND auth_refresh_claimed=1 AND " ++ retry_allowance_open_sql,
                 );
@@ -6125,7 +6133,7 @@ pub const Store = struct {
             .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io), retry_random)) {
                 .schedule_at_ms => |due_at_ms| {
                     const update = try self.cached(
-                        "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3 " ++
+                        "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4",
                     );
                     defer resetCached(update);
@@ -6142,7 +6150,7 @@ pub const Store = struct {
                     else
                         null;
                     const update = try self.cached(
-                        "UPDATE model_operation SET retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5 " ++
+                        "UPDATE model_operation SET retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5," ++ operation_resolved_at_sql ++ " " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                     );
                     defer resetCached(update);
@@ -6207,7 +6215,7 @@ pub const Store = struct {
         try self.execute("BEGIN IMMEDIATE");
         {
             const update_operation = try self.cached(
-                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
+                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_at_sql ++ " " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2",
             );
             defer resetCached(update_operation);
@@ -6361,8 +6369,8 @@ pub const Store = struct {
             try bindU64(certify, 2, record.ordinal);
             try bindI64(certify, 3, content_id);
             try expectDone(certify);
-            const insert = try self.cached("INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id) " ++
-                "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+1,session_position,3,?3,?4,?6,?5 " ++
+            const insert = try self.cached("INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
+                "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+1,session_position,3,?3,?4,?6,?5,unixepoch() " ++
                 "FROM model_output_item WHERE operation_id=?4 AND item_ordinal=?6");
             defer resetCached(insert);
             try bindText(insert, 1, session_ref.slice());
@@ -6461,8 +6469,8 @@ pub const Store = struct {
                 if (rejection_code == null) {
                     const action_id = try self.nextIdentity("action_operation", "action_id");
                     const insert_action = try self.cached(
-                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code) " ++
-                            "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL)",
+                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
+                            "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN unixepoch() END)",
                     );
                     defer resetCached(insert_action);
                     try bindU64(insert_action, 1, action_id);
@@ -6489,7 +6497,7 @@ pub const Store = struct {
         const resolution_code = @tagName(turn_policy.Resolution.of(output_fact));
         {
             const update = try self.cached(
-                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
+                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12," ++ operation_resolved_at_sql ++ " " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer resetCached(update);
@@ -7114,7 +7122,7 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try self.cached("SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort FROM session WHERE session_ref=?1");
+        const statement = try self.cached("SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
@@ -7142,11 +7150,13 @@ pub const Store = struct {
         current.compaction_trigger = try readNullableTokens(statement, 9, false);
         current.output_reservation = try readNullableTokens(statement, 10, true);
         current.reasoning_effort = try readNullableEffort(statement, 11);
+        current.label = try readNullableLabel(statement, 12);
+        current.created_at = @intCast(try readNullablePositiveI64(statement, 13) orelse return error.CorruptStore);
         return current;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-        const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(session_ref) DO NOTHING");
+        const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
         try bindU64(statement, 9, current.next_position);
@@ -7155,7 +7165,7 @@ pub const Store = struct {
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13 WHERE session_ref=?1");
+        const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
         try expectDone(statement);
@@ -7169,7 +7179,7 @@ pub const Store = struct {
         current: *const CurrentConfiguration,
         instructions_updated: bool,
     ) !void {
-        const statement = try self.cached("INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)");
+        const statement = try self.cached("INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, current.revision);
@@ -7185,6 +7195,7 @@ pub const Store = struct {
         try bindNullableU64(statement, 12, current.compaction_trigger);
         try bindNullableU64(statement, 13, current.output_reservation);
         try bindNullableEffort(statement, 14, current.reasoning_effort);
+        try bindOptionalLabel(statement, 15, current.label);
         try expectDone(statement);
     }
 
@@ -7298,7 +7309,7 @@ pub const Store = struct {
         const content_id: ?i64 = if (outcome == .completed) outcome.completed else null;
         // A failure code spelling a fixed outcome would read back as that outcome.
         std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
-        const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4 WHERE turn_id=?1 AND outcome_code IS NULL");
+        const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=unixepoch() WHERE turn_id=?1 AND outcome_code IS NULL");
         defer resetCached(update);
         try bindU64(update, 1, turn_id);
         try bindText(update, 2, outcome.code());
@@ -7530,6 +7541,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
         \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
+        \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
+        \\ created_at INTEGER NOT NULL CHECK(created_at>0),
         \\ next_position INTEGER NOT NULL CHECK(next_position>0)
         \\) STRICT;
         \\CREATE INDEX session_workspace_list ON session(workspace);
@@ -7560,6 +7573,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
         \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
+        \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
         \\ PRIMARY KEY(session_ref,revision)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE message_admission(
@@ -7579,6 +7593,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ sender_session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ sender_position INTEGER NOT NULL CHECK(sender_position>0),
+        \\ rejected_at INTEGER NOT NULL CHECK(rejected_at>0),
         \\ UNIQUE(sender_session_ref,sender_position)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE turn(
@@ -7589,7 +7604,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ operation_id INTEGER NOT NULL,
         \\ outcome_code TEXT CHECK(outcome_code IS NULL OR length(CAST(outcome_code AS BLOB)) BETWEEN 1 AND 96),
         \\ outcome_content_id INTEGER REFERENCES content(content_id),
-        \\ outcome_position INTEGER CHECK(outcome_position>0)
+        \\ outcome_position INTEGER CHECK(outcome_position>0),
+        \\ outcome_at INTEGER CHECK(outcome_at IS NULL OR outcome_at>0),
+        \\ CHECK((outcome_code IS NULL)=(outcome_at IS NULL))
         \\) STRICT;
         \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
         \\CREATE TABLE session_stop(
@@ -7597,7 +7614,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ selected_turn_id INTEGER REFERENCES turn(turn_id),
         \\ position INTEGER CHECK(position>0),
-        \\ admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0)
+        \\ admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),
+        \\ stopped_at INTEGER NOT NULL CHECK(stopped_at>0)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_interruption_command(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
@@ -7630,8 +7648,15 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ usage_content_id INTEGER REFERENCES content(content_id),
         \\ usage_tokens INTEGER CHECK(usage_tokens IS NULL OR (usage_tokens>=0 AND usage_content_id IS NOT NULL)),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
+        \\ attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),
+        \\ retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),
+        \\ resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),
+        \\ -- The second the current state began: exactly the time its state owns.
+        \\ CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR
+        \\       (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR
+        \\       (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),
         \\ CHECK((resolution_code IS 'interrupted' AND interrupted_by_command_key IS NOT NULL) OR
         \\       (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),
         \\ UNIQUE(operation_id,session_ref)
@@ -7647,6 +7672,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ source_operation_id INTEGER REFERENCES model_operation(operation_id),
         \\ source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ recorded_at INTEGER NOT NULL CHECK(recorded_at>0),
         \\ PRIMARY KEY(session_ref,entry_ordinal),
         \\ UNIQUE(session_ref,session_position),
         \\ UNIQUE(session_ref,source_revision),
@@ -7710,6 +7736,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled','succeeded','failed','timed_out','indeterminate','storage_failed','spawn_failed','infrastructure_shutdown')),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
         \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
+        \\ attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),
+        \\ decided_at INTEGER CHECK(decided_at IS NULL OR decided_at>0),
+        \\ resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),
         \\ UNIQUE(parent_operation_id,call_ordinal),
         \\ FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
@@ -7718,7 +7747,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR
         \\       (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
         \\ CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR
-        \\       (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL))
+        \\       (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),
+        \\ CHECK((attempt_ordinal=1)=(attempt_at IS NOT NULL)),
+        \\ CHECK((authorized=1)=(decided_at IS NOT NULL)),
+        \\ CHECK((resolution_code IS NULL)=(resolved_at IS NULL))
         \\) STRICT;
         \\CREATE TABLE permission_decision_command(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
@@ -7737,7 +7769,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
-        \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
+        \\CREATE INDEX message_admission_person ON message_admission(session_ref,admission_id) WHERE sender_session_ref IS NULL;
+        \\CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL;
+        \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position);
+        \\CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;
         \\CREATE INDEX session_stop_turn ON session_stop(selected_turn_id);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL;
@@ -7760,6 +7795,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
         \\CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4;
         \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
+        \\CREATE INDEX turn_unpositioned ON turn(session_ref) WHERE (outcome_code IS NULL)!=(outcome_position IS NULL);
     );
     try exec(database, "PRAGMA application_id=1280591409");
     try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
@@ -7779,7 +7815,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','message_admission_person','message_admission_unpositioned','session_stop_exclusion','session_stop_unpositioned','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest','turn_unpositioned')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -7860,6 +7896,19 @@ fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *c
     try bindNullableU64(statement, 11, current.compaction_trigger);
     try bindNullableU64(statement, 12, current.output_reservation);
     try bindNullableEffort(statement, 13, current.reasoning_effort);
+    try bindOptionalLabel(statement, 14, current.label);
+}
+
+fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: ?protocol.Bounded(protocol.max_label_bytes)) !void {
+    if (label) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
+}
+
+fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
+    if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
+    var label: protocol.Bounded(protocol.max_label_bytes) = .{};
+    try readText(statement, column, &label);
+    if (!protocol.ToolPresentation.validDescription(label.slice())) return error.CorruptStore;
+    return label;
 }
 
 fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
@@ -10142,8 +10191,8 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     const cases = [_]Case{
         // An unresolved Operation needs a retry time; zero marks it uncertain.
         .{
-            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0",
-            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=NULL",
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,attempt_at=1,resolved_at=NULL",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=NULL,attempt_at=1,resolved_at=NULL",
         },
         // Interruption linkage requires the interrupted Resolution.
         .{
@@ -10157,17 +10206,17 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         },
         // A denied Action never started an Attempt.
         .{
-            .valid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1,resolution_code='failed'," ++
-                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
-            .invalid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1,resolution_code='denied'," ++
-                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
+            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1,resolution_code='failed'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
+            .invalid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1,resolution_code='denied'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
         },
         // An authorized Action is never denied.
         .{
-            .valid = "UPDATE action_operation SET authorized=1,resolution_code='failed'," ++
-                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
-            .invalid = "UPDATE action_operation SET authorized=1,resolution_code='denied'," ++
-                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
+            .valid = "UPDATE action_operation SET authorized=1,decided_at=1,resolution_code='failed'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
+            .invalid = "UPDATE action_operation SET authorized=1,decided_at=1,resolution_code='denied'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1 WHERE call_ordinal=0",
         },
     };
     var outcomes: [cases.len]ConstraintProbe = undefined;
@@ -10176,6 +10225,113 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         outcome.* = try probeConstraint(storage.database, case.invalid);
     }
     try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
+}
+
+test "each state-bearing row keeps exactly the time its state owns" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const session = try configureTestSessionAsk(&storage, "time-config");
+    try submitTestMessage(&storage, &tmp, "time-message", "time-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\",\"timeout_ms\":null}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "time-metadata", &calls);
+
+    // Each pair moves one row to a state. The valid write sets exactly that
+    // state's time; the invalid one forgets it or keeps the old state's time.
+    const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
+    const cases = [_]Case{
+        .{
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,attempt_at=1,resolved_at=NULL",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,attempt_at=1",
+        },
+        .{
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,attempt_at=1,resolved_at=NULL",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,resolved_at=NULL",
+        },
+        .{
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=5,retry_scheduled_at=1,resolved_at=NULL",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=5,retry_scheduled_at=1,attempt_at=1,resolved_at=NULL",
+        },
+        .{
+            .valid = "UPDATE model_operation SET resolved_at=2",
+            .invalid = "UPDATE model_operation SET resolved_at=NULL",
+        },
+        .{
+            .valid = "UPDATE turn SET outcome_code='cancelled',outcome_position=99,outcome_at=1",
+            .invalid = "UPDATE turn SET outcome_code='cancelled',outcome_position=99",
+        },
+        .{
+            .valid = "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1",
+            .invalid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1",
+        },
+        .{
+            .valid = "UPDATE action_operation SET authorized=1,decided_at=1",
+            .invalid = "UPDATE action_operation SET authorized=1",
+        },
+        .{
+            .valid = "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1",
+            .invalid = "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1",
+        },
+        .{
+            .valid = "UPDATE conversation_entry SET recorded_at=1",
+            .invalid = "UPDATE conversation_entry SET recorded_at=0",
+        },
+    };
+    var outcomes: [cases.len]ConstraintProbe = undefined;
+    for (cases, &outcomes) |case, *outcome| {
+        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, case.valid));
+        outcome.* = try probeConstraint(storage.database, case.invalid);
+    }
+    try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
+}
+
+test "every transition dates its fact from the Host clock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const before: u64 = @intCast(@divFloor(try readUnixMilliseconds(std.testing.io), 1000));
+
+    const session = try configureTestSessionAsk(&storage, "dated-config");
+    try submitTestMessage(&storage, &tmp, "dated-message", "dated-message", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\",\"timeout_ms\":null}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "dated-metadata", &calls);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation"), .decision = .allow_once };
+    try allow.key.set("dated-allow");
+    try allow.session.set(session.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    var stop = try completeSessionStop("dated-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    const after: u64 = @intCast(@divFloor(try readUnixMilliseconds(std.testing.io), 1000));
+
+    const Column = struct { table: []const u8, column: []const u8 };
+    const columns = [_]Column{
+        .{ .table = "session", .column = "created_at" },
+        .{ .table = "conversation_entry", .column = "recorded_at" },
+        .{ .table = "model_operation", .column = "resolved_at" },
+        .{ .table = "action_operation", .column = "decided_at" },
+        .{ .table = "action_operation", .column = "attempt_at" },
+        .{ .table = "action_operation", .column = "resolved_at" },
+        .{ .table = "session_stop", .column = "stopped_at" },
+        .{ .table = "turn", .column = "outcome_at" },
+    };
+    for (columns) |column| {
+        var sql_buffer: [160]u8 = undefined;
+        const sql = try std.fmt.bufPrintSentinel(&sql_buffer, "SELECT count(*) FROM {s} WHERE {s} BETWEEN {d} AND {d}", .{ column.table, column.column, before, after }, 0);
+        const dated = try queryU64(storage.database, sql);
+        if (dated == 0) std.debug.print("{s}.{s} is not dated within the transition\n", .{ column.table, column.column });
+        try std.testing.expect(dated != 0);
+    }
 }
 
 test "Action admission never visits an Action waiting for permission" {
@@ -11364,9 +11520,9 @@ test "historical accepted output selection work excludes failed Operation popula
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-                "attempt_ordinal,output_reservation,resolution_code) " ++
+                "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-                "1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "1,0,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -11491,8 +11647,8 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
                 "SELECT value,'{1s}',printf('excluded-%d',value),1,NULL,1 FROM sequence; " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                 "VALUES({0}+1,'{1s}','eligible',1,NULL,1); " ++
-                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
-                "VALUES('history-stop','{1s}',NULL,{0})",
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
+                "VALUES('history-stop','{1s}',NULL,{0},1)",
             .{ history, session.slice() },
             0,
         );
@@ -11551,8 +11707,8 @@ test "Full Message projection work does not multiply Messages by stops" {
                 const insert = try std.testing.allocator.printSentinel(
                     "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
                         "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
-                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
-                        "VALUES('stop-{0}','{2s}',NULL,{1})",
+                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
+                        "VALUES('stop-{0}','{2s}',NULL,{1},1)",
                     .{ index, message_count, session.slice() },
                     0,
                 );
@@ -11765,10 +11921,10 @@ test "later idle stop does not reclassify a completed Message" {
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try exec(
         storage.database,
-        "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='answer'," ++
+        "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='answer',attempt_at=NULL,resolved_at=1," ++
             "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message')",
     );
-    try execSessionSql(storage.database, "UPDATE turn SET outcome_code='completed',outcome_content_id=(SELECT content_id FROM message_admission " ++
+    try execSessionSql(storage.database, "UPDATE turn SET outcome_code='completed',outcome_at=1,outcome_content_id=(SELECT content_id FROM message_admission " ++
         "WHERE command_key='completed-stop-message') WHERE session_ref=?1", session.slice());
     var stop = try completeSessionStop("completed-stop", session.slice());
     const accepted = storage.stopSession(&stop, .{});
@@ -15958,8 +16114,8 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
         try std.testing.expect(healthy.items[0].kind == .user);
         const position = try queryU64(storage.database, "SELECT next_position FROM session");
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try exec(storage.database, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id) " ++
-            "SELECT o.session_ref,2,s.next_position,3,o.turn_id,o.operation_id,0,o.resolution_content_id " ++
+        try exec(storage.database, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
+            "SELECT o.session_ref,2,s.next_position,3,o.turn_id,o.operation_id,0,o.resolution_content_id,1 " ++
             "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref");
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         try exec(storage.database, "UPDATE session SET next_position=next_position+1");
@@ -16390,6 +16546,40 @@ test "runnable selection finds age through pending index then groups one session
     try std.testing.expect(uses_session_index);
 }
 
+test "activity revalidation takes the same steps however long a Session's history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+
+    var steps: [2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        try exec(storage.database, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM turn");
+        const insert = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "SELECT value,'h1st0r',printf('history-%d',value),1,3*value,value,1 FROM sequence; " ++
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'h1st0r',value,value,value,'cancelled',3*value+1,1 FROM sequence; " ++
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
+                "SELECT printf('stop-%d',value),'h1st0r',value,value,3*value+2,1 FROM sequence",
+            .{history},
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        const guard = try prepare(storage.database, activity_sequence_guard_sql);
+        defer _ = c.sqlite3_finalize(guard);
+        try bindText(guard, 1, "h1st0r");
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(guard));
+        cost.* = c.sqlite3_stmt_status(guard, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
 test "runnable discovery measures eligible ineligible and history populations independently" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -16411,14 +16601,14 @@ test "runnable discovery measures eligible ineligible and history populations in
                 try exec(
                     database,
                     "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position) VALUES('st0ped','/','codex','model-a',1,0,0,NULL,1,1)",
+                        "output_schema_content_id,revision,next_position,created_at) VALUES('st0ped','/','codex','model-a',1,0,0,NULL,1,1,1)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                         "SELECT value,'st0ped',printf('stopped-%d',value),1,NULL,1 FROM sequence; " ++
-                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
-                        "VALUES('stop','st0ped',NULL,{0})",
+                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
+                        "VALUES('stop','st0ped',NULL,{0},1)",
                     .{ineligible},
                     0,
                 );
@@ -16428,8 +16618,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
-                    "output_schema_content_id,revision,next_position) " ++
-                    "SELECT printf('%06d',value),'/','codex','model-a',1,0,0,NULL,1,1 FROM sequence; " ++
+                    "output_schema_content_id,revision,next_position,created_at) " ++
+                    "SELECT printf('%06d',value),'/','codex','model-a',1,0,0,NULL,1,1,1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -16612,11 +16802,11 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0 FROM sequence; " ++
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0,1 FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) VALUES" ++
-                "({1},{1},'0der00',1,1,1,1,99,0),({2},{2},'ear1er',1,1,1,1,1,0)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) VALUES" ++
+                "({1},{1},'0der00',1,1,1,1,99,0,1),({2},{2},'ear1er',1,1,1,1,1,0,1)",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -16636,8 +16826,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0 FROM sequence",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1 FROM sequence",
             .{due_count},
             0,
         );
@@ -16652,10 +16842,10 @@ test "retry due index excludes future population and preserves age ordering" {
     try exec(
         storage.database,
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) VALUES" ++
-            "(1,1,'000001',1,1,1,1,99,0)," ++
-            "(2,2,'000002',1,1,1,1,50,0)," ++
-            "(3,3,'000003',1,1,1,1,1,0)",
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) VALUES" ++
+            "(1,1,'000001',1,1,1,1,99,0,1)," ++
+            "(2,2,'000002',1,1,1,1,50,0,1)," ++
+            "(3,3,'000003',1,1,1,1,1,0,1)",
     );
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -16751,8 +16941,8 @@ test "retry admission reads past a full page of active Operations" {
     const insert = try std.testing.allocator.printSentinel(
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
-            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0 FROM sequence",
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1 FROM sequence",
         .{retry_admission_page_rows + 1},
         0,
     );
@@ -16783,9 +16973,9 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
             "SELECT value,value,printf('%06d',value),1,1,1,1," ++
-            "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0 FROM sequence",
+            "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1 FROM sequence",
     );
 
     const Active = struct {
@@ -16844,8 +17034,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try bindText(insert_turn, 2, session.slice());
         try expectDone(insert_turn);
         const insert_operation = try prepare(storage.database, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
-            "VALUES(?1,?1,?2,1,1,1,4,0,0)");
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at) " ++
+            "VALUES(?1,?1,?2,1,1,1,4,0,0,1)");
         defer _ = c.sqlite3_finalize(insert_operation);
         try bindU64(insert_operation, 1, value);
         try bindText(insert_operation, 2, session.slice());
@@ -18060,9 +18250,9 @@ test "historical context selection work excludes nonmatching Operation populatio
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,resolution_code) " ++
+                "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -18108,9 +18298,9 @@ test "model admission work excludes failed historical Operation population" {
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,resolution_code) " ++
+                "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);

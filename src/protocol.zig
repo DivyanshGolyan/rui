@@ -16,6 +16,8 @@ pub const max_model_bytes = model_capability.max_model_bytes;
 // Resolution, rejection and failure codes.
 pub const max_code_bytes = 96;
 pub const max_tool_description_bytes = 100;
+/// A Session Label obeys the saved Bash description rule.
+pub const max_label_bytes = max_tool_description_bytes;
 pub const Provider = enum { codex };
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
