@@ -314,6 +314,9 @@ def main():
             pending.close()
             pending = None
             for upload, remainder in uploads:
+                # Stop retires held input without a reply; an early rejection
+                # would leave its reply buffered here.
+                assert upload.recv(1, socket.MSG_PEEK) == b"", "late upload was answered instead of held"
                 response = finish(upload, remainder)
                 assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
