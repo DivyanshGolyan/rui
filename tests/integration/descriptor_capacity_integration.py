@@ -259,7 +259,7 @@ def assert_connections_live(connections):
 
 
 def admitted_at_gate(diagnostics, ordinal):
-    records = diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1), attempt="1")
+    records = diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1))
     assert len(records) == 1, records
     return records[0]
 

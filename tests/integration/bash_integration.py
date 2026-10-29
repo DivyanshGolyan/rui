@@ -671,12 +671,10 @@ def prove_reused_session(state):
             released = milestones.wait(
                 "cleanup_release_observed",
                 action=str(action["action"]),
-                attempt="1",
             )[0]
             completed = milestones.wait(
                 "cleanup_completed",
                 action=str(action["action"]),
-                attempt="1",
             )
             assert len(completed) == 1, completed
             assert int(released["at_ns"]) <= int(completed[0]["at_ns"])
@@ -690,7 +688,6 @@ def prove_reused_session(state):
                 milestones.matching(
                     "cleanup_completed",
                     action=str(action["action"]),
-                    attempt="1",
                 )
             ) == 1, milestones.records
         assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"

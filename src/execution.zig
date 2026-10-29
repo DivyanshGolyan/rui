@@ -356,8 +356,7 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .attached or record.binding_kind != .action or
             record.action_binding.turn_id != action_binding.turn_id or
             record.action_binding.action_id != action_binding.action_id or
-            record.action_binding.parent_operation_id != action_binding.parent_operation_id or
-            record.action_binding.attempt_ordinal != action_binding.attempt_ordinal)
+            record.action_binding.parent_operation_id != action_binding.parent_operation_id)
         {
             return error.ForeignLaunchAuthority;
         }
@@ -382,6 +381,14 @@ pub const CustodyPool = struct {
         const record = self.current(token) catch return false;
         if (record.state.load(.acquire) != .attached) return false;
         return record.delivered.cmpxchgStrong(false, true, .acq_rel, .acquire) == null;
+    }
+
+    /// An attached Action whose terminal delivery nobody claimed: detaching
+    /// it leaves the Action unsettled.
+    pub fn holdsUndeliveredAction(self: *CustodyPool, token: CustodyToken) bool {
+        const record = self.current(token) catch return false;
+        return record.state.load(.acquire) == .attached and record.binding_kind == .action and
+            !record.delivered.load(.acquire);
     }
 
     pub fn detach(self: *CustodyPool, token: CustodyToken) !void {
@@ -442,8 +449,7 @@ pub const CustodyPool = struct {
         if (record.binding_kind != .action) return error.CustodyDetached;
         if (record.action_binding.turn_id != expected.turn_id or
             record.action_binding.action_id != expected.action_id or
-            record.action_binding.parent_operation_id != expected.parent_operation_id or
-            record.action_binding.attempt_ordinal != expected.attempt_ordinal)
+            record.action_binding.parent_operation_id != expected.parent_operation_id)
         {
             return error.ForeignLaunchAuthority;
         }
@@ -480,8 +486,7 @@ pub const CustodyPool = struct {
         if (record.binding_kind != .action) return error.CustodyDetached;
         if (record.action_binding.turn_id != expected.turn_id or
             record.action_binding.action_id != expected.action_id or
-            record.action_binding.parent_operation_id != expected.parent_operation_id or
-            record.action_binding.attempt_ordinal != expected.attempt_ordinal)
+            record.action_binding.parent_operation_id != expected.parent_operation_id)
         {
             return error.ForeignLaunchAuthority;
         }
@@ -687,7 +692,6 @@ test "model and Action Attempt bindings cannot cross custody paths" {
             .turn_id = 1,
             .parent_operation_id = 2,
             .action_id = 4,
-            .attempt_ordinal = 1,
         }),
     );
 
@@ -696,7 +700,6 @@ test "model and Action Attempt bindings cannot cross custody paths" {
         .turn_id = 1,
         .parent_operation_id = 2,
         .action_id = 4,
-        .attempt_ordinal = 1,
     } };
     const action_binding = try pool.attachAction(action_token, &action_permit);
     try pool.checkAttachedAction(action_token, action_binding);
@@ -770,15 +773,13 @@ test "action launch authority requires every identity field including turn" {
         .turn_id = 7,
         .parent_operation_id = 8,
         .action_id = 9,
-        .attempt_ordinal = 10,
     } };
     const binding = try pool.attachAction(token, &permit);
 
     const variants = [_]attempt.ActionAttemptBinding{
-        .{ .turn_id = 70, .parent_operation_id = 8, .action_id = 9, .attempt_ordinal = 10 },
-        .{ .turn_id = 7, .parent_operation_id = 80, .action_id = 9, .attempt_ordinal = 10 },
-        .{ .turn_id = 7, .parent_operation_id = 8, .action_id = 90, .attempt_ordinal = 10 },
-        .{ .turn_id = 7, .parent_operation_id = 8, .action_id = 9, .attempt_ordinal = 100 },
+        .{ .turn_id = 70, .parent_operation_id = 8, .action_id = 9 },
+        .{ .turn_id = 7, .parent_operation_id = 80, .action_id = 9 },
+        .{ .turn_id = 7, .parent_operation_id = 8, .action_id = 90 },
     };
     for (variants) |mismatch| {
         try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeActionLaunchAuthority(token, mismatch));
@@ -797,7 +798,6 @@ test "action launch authority requires every identity field including turn" {
             .turn_id = 7,
             .parent_operation_id = 8,
             .action_id = 90,
-            .attempt_ordinal = 10,
         }),
     );
     try std.testing.expectError(

@@ -747,6 +747,10 @@ const RequestWriter = struct {
     offset: u64 = 0,
     charged: u64 = 0,
     fail_write: bool,
+    /// Accepted bytes not yet in the file. Every preparation advance flushes
+    /// before it yields or seals, so between advances the file holds `offset`.
+    pending: [preparation_byte_allowance]u8 = undefined,
+    pending_length: usize = 0,
 
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
         const next_offset = std.math.add(u64, self.offset, bytes.len) catch
@@ -758,8 +762,20 @@ const RequestWriter = struct {
         // write retains that full reservation until both file aliases close.
         self.charged = next_charged;
         if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
-        try self.file.writeStreamingAll(self.io, bytes);
+        if (bytes.len > self.pending.len - self.pending_length) try self.flush();
+        if (bytes.len > self.pending.len) {
+            try self.file.writeStreamingAll(self.io, bytes);
+        } else {
+            @memcpy(self.pending[self.pending_length..][0..bytes.len], bytes);
+            self.pending_length += bytes.len;
+        }
         self.offset = next_offset;
+    }
+
+    fn flush(self: *RequestWriter) !void {
+        if (self.pending_length == 0) return;
+        try self.file.writeStreamingAll(self.io, self.pending[0..self.pending_length]);
+        self.pending_length = 0;
     }
 
     fn deinit(self: *RequestWriter) void {
@@ -980,10 +996,11 @@ pub const Preparation = struct {
             .work_items = item_allowance - items_left,
             .request_bytes = self.writer.offset,
         };
+        self.view.checkAttempt() catch |err| return .{ .failed = err };
         while (bytes_left != 0 and items_left != 0) {
             if (self.phase == .emitting) {
                 const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };
-                if (!finished) return .pending;
+                if (!finished) return self.flushAndYield();
                 self.phase = self.next_phase;
                 continue;
             }
@@ -1165,6 +1182,11 @@ pub const Preparation = struct {
                 .emitting => unreachable,
             }
         }
+        return self.flushAndYield();
+    }
+
+    fn flushAndYield(self: *Preparation) PreparationProgress {
+        self.writer.flush() catch |err| return .{ .failed = err };
         return .pending;
     }
 
@@ -1251,7 +1273,9 @@ pub const Preparation = struct {
                 replay.reader.close();
             },
         }
-        self.emission = .none;
+        // Naming the void field stores only the tag; `.none` lowers to a
+        // memset of the whole union, replay validation window included.
+        self.emission = .{ .none = {} };
         return true;
     }
 
@@ -1267,6 +1291,7 @@ pub const Preparation = struct {
     fn seal(self: *Preparation) !PreparationProgress {
         if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
+        try self.writer.flush();
         try self.writer.file.sync(self.writer.io);
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
         self.closeEmission();
@@ -1336,7 +1361,7 @@ pub const Preparation = struct {
             .replay => |*replay| replay.reader.close(),
             .none, .fixed => {},
         }
-        self.emission = .none;
+        self.emission = .{ .none = {} };
     }
 };
 
@@ -1364,6 +1389,7 @@ test "request writer charges exact growth and seals through a readonly descripto
     try std.testing.expectEqual(@as(u64, 3), writer.offset);
     try std.testing.expectEqual(@as(u64, 7), writer.charged);
     try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
+    try writer.flush();
     try writer.file.sync(std.testing.io);
     try std.testing.expectEqual(@as(u64, 3), try readonly.length(std.testing.io));
     try std.testing.expectError(error.NotOpenForWriting, readonly.writeStreamingAll(std.testing.io, "x"));
@@ -1411,6 +1437,7 @@ test "request writer failure retains the full reservation until the owner releas
     try std.testing.expectEqual(@as(u64, 5), writer.offset);
     try std.testing.expectEqual(@as(u64, 12), writer.charged);
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    try writer.flush();
     try std.testing.expectEqual(@as(u64, 5), try writer.file.length(std.testing.io));
     writer.deinit();
     writer_owned = false;

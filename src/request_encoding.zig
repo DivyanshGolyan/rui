@@ -130,38 +130,6 @@ pub const JsonCursor = struct {
     encoded_offset: u3 = 0,
 
     pub fn advance(self: *JsonCursor, source: anytype, writer: anytype, bytes_left: *usize) !bool {
-        // Batch plain runs and escapes together before reaching scratch IO.
-        // This window exists only during this synchronous call; every normal
-        // return submits its tail, and a write failure ends preparation.
-        const Chunk = struct {
-            destination: @TypeOf(writer),
-            bytes: [window_bytes]u8 = undefined,
-            used: usize = 0,
-
-            pub fn write(chunk: *@This(), bytes: []const u8) !void {
-                var offset: usize = 0;
-                while (offset < bytes.len) {
-                    const count = @min(bytes.len - offset, chunk.bytes.len - chunk.used);
-                    @memcpy(chunk.bytes[chunk.used..][0..count], bytes[offset..][0..count]);
-                    chunk.used += count;
-                    offset += count;
-                    if (chunk.used == chunk.bytes.len) try chunk.flush();
-                }
-            }
-
-            fn flush(chunk: *@This()) !void {
-                if (chunk.used == 0) return;
-                try chunk.destination.write(chunk.bytes[0..chunk.used]);
-                chunk.used = 0;
-            }
-        };
-        var chunk: Chunk = .{ .destination = writer };
-        const complete = try self.encode(source, &chunk, bytes_left);
-        try chunk.flush();
-        return complete;
-    }
-
-    fn encode(self: *JsonCursor, source: anytype, writer: anytype, bytes_left: *usize) !bool {
         while (bytes_left.* != 0) {
             if (self.encoded_offset != self.encoded_length) {
                 const count = @min(bytes_left.*, self.encoded_length - self.encoded_offset);

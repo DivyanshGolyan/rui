@@ -93,7 +93,7 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
     store, marker, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     try:
-        original_diagnostics.wait("action_attempt_admitted", action="1", attempt="1")
+        original_diagnostics.wait("action_attempt_admitted", action="1")
         crash = fixture.crash_host(original_host, state, "attempt-before-launch-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL and not marker.exists(), crash
         recovered_host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
@@ -113,7 +113,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
     recovered_host = None
     continuation_release = threading.Event()
     try:
-        original_diagnostics.wait("action_result_ready", action="1", attempt="1")
+        original_diagnostics.wait("action_result_ready", action="1")
         assert marker.read_text() == "x"
         crash = fixture.crash_host(original_host, state, "effect-before-result-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL, crash
@@ -147,7 +147,7 @@ def prove_committed_bash_result_survives_restart(state):
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     try:
-        original_diagnostics.wait("action_result_committed", action="1", attempt="1")
+        original_diagnostics.wait("action_result_committed", action="1")
         original_result = bash.result_text(store, session)
         assert marker.read_text() == "x" and bash.resolution(store, session) == "succeeded"
         crash = fixture.crash_host(original_host, state, "result-after-commit-crash", original_diagnostics)

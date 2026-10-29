@@ -21,7 +21,6 @@ pub const Outcome = union(enum) {
     terminate,
 };
 
-const ActionRecoveryKey = struct { generation: u64, free_slots: usize };
 /// Every fact the Bash, message and tool-continuation scans depend on
 /// besides Store rows; the rows move the commit generation.
 const AdmissionKey = struct { generation: u64, free_slots: usize, bash_open: bool, model_open: bool };
@@ -33,9 +32,9 @@ pub const State = struct {
     next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
     /// Commit generation read before the last complete reconciliation.
     reconciled_generation: ?u64 = null,
-    /// Generation and free slots before the last scan found nothing; only a
-    /// commit or a released slot can make an uncertain Action eligible.
-    idle_action_recovery: ?ActionRecoveryKey = null,
+    /// An Action loses custody unsettled only once dispatch is fenced or the
+    /// Host shuts down, so uncertain Actions come only from an earlier Host.
+    uncertain_action_scan_exhausted: bool = false,
     /// Admission facts before the last pass whose Bash, message and
     /// tool-continuation scans all found nothing. Those scans read only
     /// Store rows, so they rerun only once a fact changes. Retry admission
@@ -79,13 +78,8 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
         last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
     else
         true;
-    const action_recovery: ActionRecoveryKey = .{ .generation = context.commitGeneration(), .free_slots = context.freeSlots() };
-    const unchanged = if (state.idle_action_recovery) |previous| std.meta.eql(previous, action_recovery) else false;
-    if (!unchanged) {
-        if (try context.recoverUncertainAction()) {
-            made_progress = true;
-            state.idle_action_recovery = null;
-        } else state.idle_action_recovery = action_recovery;
+    if (!state.uncertain_action_scan_exhausted) {
+        if (try context.recoverUncertainAction()) made_progress = true else state.uncertain_action_scan_exhausted = true;
     }
     const maintain_retries = context.providerConfigured() and (retry_poll_due or capacity_released);
     if (maintain_retries) {
@@ -529,26 +523,21 @@ test "absent control hint still reconciles when the fallback deadline is due" {
     try std.testing.expectEqual(@as(usize, 5), context.reconcile_count);
 }
 
-test "uncertain Action recovery rescans only after a commit or a released slot" {
+test "uncertain Action recovery scans until one scan finds none" {
     var context = idle();
-    context.generation_advance = 0;
+    context.recover_action = true;
     var state: State = .{};
     _ = run(&state, &context);
     _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_action));
-    context.free = 2;
-    _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_action));
-    context.generation += 1;
+    context.recover_action = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
+    // Commits and released slots cannot create another uncertain Action.
+    context.free = 2;
     _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
-    // A recovery commits; the next turn scans for another candidate.
-    context.recover_action = true;
-    context.generation += 1;
-    _ = run(&state, &context);
-    _ = run(&state, &context);
-    try std.testing.expectEqual(@as(usize, 5), context.count(.recover_action));
 }
 
 test "live Bash observes a later clock than Bash preparation in the same lifecycle service" {

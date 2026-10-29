@@ -1,10 +1,13 @@
 const std = @import("std");
 
+/// An Action has one Attempt. The Store issues it this ordinal; 0 means the
+/// Action is unattempted.
+pub const action_attempt_ordinal: u64 = 1;
+
 pub const ActionAttemptBinding = struct {
     turn_id: u64,
     parent_operation_id: u64,
     action_id: u64,
-    attempt_ordinal: u64,
 };
 
 pub const ActionDispatchPermit = struct {

@@ -212,11 +212,7 @@ fn checkSharedPreparation(
     }
     if (bash_preparation) |preparation| {
         const slot_binding = bash_slot orelse return error.PreparationOwnershipMismatch;
-        if (preparation.action_id != slot_binding.action_id or
-            preparation.attempt_ordinal != slot_binding.attempt_ordinal)
-        {
-            return error.PreparationOwnershipMismatch;
-        }
+        if (preparation.action_id != slot_binding.action_id) return error.PreparationOwnershipMismatch;
     } else if (bash_slot != null) {
         return error.PreparationOwnershipMismatch;
     }
@@ -889,7 +885,6 @@ fn admitBashAttempt(
         host.bash_path,
         input.timeout_ms,
         action_binding.action_id,
-        action_binding.attempt_ordinal,
         .{
             .preparation = host.faults.bash_preparation,
             .preparation_after_captures = host.faults.bash_preparation_after_captures,
@@ -985,10 +980,10 @@ fn finishBashPreparationFailure(
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
-    finishCustodyNow(host, slot, token);
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }
+    finishCustodyNow(host, slot, token);
 }
 
 // Discarding an unlaunched effect changes only local custody. In particular,
@@ -1024,8 +1019,8 @@ fn launchPreparedBash(
         return;
     }
     host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
-        discardBashResources(host, slot, token, prepared.takeCleanup());
         fenceDispatch(host, "Bash launch authority", err);
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
     var launched: ?bash.Execution = null;
@@ -1147,19 +1142,16 @@ fn completeBash(host: *Host, active: *BashSlot) void {
 }
 
 fn failBash(host: *Host, active: *BashSlot, phase: []const u8, err: anyerror) bool {
-    var closed = false;
-    if (active.delivery == .open) {
-        active.execution.releaseOutputReservation(host.retention);
-        closeBashDelivery(host, active);
-        closed = true;
-    }
     fenceDispatch(host, phase, err);
-    return closed;
+    if (active.delivery != .open) return false;
+    active.execution.releaseOutputReservation(host.retention);
+    closeBashDelivery(host, active);
+    return true;
 }
 
 fn closeBashDelivery(host: *Host, active: *BashSlot) void {
     std.debug.assert(active.delivery == .open);
-    host.custody.detach(active.token) catch unreachable;
+    detachCustody(host, active.token);
     traceAction(host, "cleanup_started", active.binding);
     active.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
 }
@@ -1204,14 +1196,14 @@ fn retainBashPreparedCleanup(
     cleanup: bash.PreparedCleanup,
     err: anyerror,
 ) void {
-    host.custody.detach(token) catch unreachable;
+    retainDispatchFence(host, "Bash preparation cleanup", err);
+    detachCustody(host, token);
     const work = &host.bash_work[token.index];
     work.* = .{ .prepared_cleanup = cleanup };
     slot.* = .{ .bash_prepared_cleanup = .{
         .token = token,
         .cleanup = &work.prepared_cleanup,
     } };
-    retainDispatchFence(host, "Bash preparation cleanup", err);
 }
 
 fn settleActionFailure(
@@ -2061,6 +2053,14 @@ fn settleFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
+/// An Action leaves custody unsettled only once dispatch is fenced or the Host
+/// is shutting down, and neither admits work again, so uncertain Actions come
+/// only from an earlier Host and the lifecycle owner stops scanning for them.
+fn detachCustody(host: *Host, token: execution.CustodyToken) void {
+    std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
+    host.custody.detach(token) catch unreachable;
+}
+
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
@@ -2072,7 +2072,7 @@ fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyT
         host.custody.actionBinding(token) catch unreachable
     else
         null;
-    host.custody.detach(token) catch unreachable;
+    detachCustody(host, token);
     host.custody.cleanupComplete(token) catch unreachable;
     slot.* = .free;
     if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
@@ -2375,10 +2375,11 @@ test "cleanup publication follows complete execution retirement" {
                 .turn_id = 3,
                 .parent_operation_id = 7,
                 .action_id = 11,
-                .attempt_ordinal = 2,
             } };
             const binding = try host.custody.attachAction(token, &permit);
             if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
+            // An Action leaves custody after its settlement claims delivery.
+            try std.testing.expect(host.custody.claimTerminalDelivery(token));
             finishCustodyNow(&host, &slot, token);
         }
         try std.testing.expect(boundary.observed);
@@ -2419,7 +2420,7 @@ test "cleanup publication follows complete execution retirement" {
     scratch.io = std.testing.io;
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");
-    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, 2, .{})) {
+    var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, reader, arguments.len, session, root, workspace, default_bash_path, 1000, 11, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
             var failure = initial;
@@ -2453,7 +2454,6 @@ test "cleanup publication follows complete execution retirement" {
         .turn_id = 3,
         .parent_operation_id = 7,
         .action_id = 11,
-        .attempt_ordinal = 2,
     } };
     const binding = try host.custody.attachAction(token, &permit);
     try host.custody.detach(token);
@@ -2624,7 +2624,6 @@ test "execution slots agree with custody across the complete population" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const action_token = custody.reserve().?;
     const action_binding = try custody.attachAction(action_token, &action_permit);
@@ -2894,7 +2893,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const binding = try host.custody.attachAction(token, &permit);
     var slots = [_]ExecutionSlot{
@@ -2908,6 +2906,7 @@ test "closed Bash delivery retains its payload with detached custody" {
 
     // The real delivery-close transition detaches custody while retaining
     // the .bash payload for reclamation: the checker must accept it.
+    try std.testing.expect(host.custody.claimTerminalDelivery(token));
     closeBashDelivery(&host, &slots[0].bash);
     try std.testing.expect(slots[0].bash.delivery == .closed);
     try host.custody.checkDetachedAction(token, binding);
@@ -2925,7 +2924,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         .turn_id = 4,
         .parent_operation_id = 4,
         .action_id = 5,
-        .attempt_ordinal = 1,
     } };
     const second_binding = try host.custody.attachAction(second, &second_permit);
     const bad = [_]ExecutionSlot{
@@ -2960,7 +2958,6 @@ test "closed Bash payloads keep their typed binding identity" {
         .turn_id = 1,
         .parent_operation_id = 1,
         .action_id = 1,
-        .attempt_ordinal = 1,
     } };
     const first_token = custody.reserve().?;
     const first_binding = try custody.attachAction(first_token, &first_permit);
@@ -2968,7 +2965,6 @@ test "closed Bash payloads keep their typed binding identity" {
         .turn_id = 2,
         .parent_operation_id = 2,
         .action_id = 2,
-        .attempt_ordinal = 1,
     } };
     const second_token = custody.reserve().?;
     const second_binding = try custody.attachAction(second_token, &second_permit);
@@ -3098,7 +3094,6 @@ test "preparing slots belong to their live preparations" {
         .bash_path = default_bash_path,
         .timeout_ms = 1,
         .action_id = 7,
-        .attempt_ordinal = 1,
         .faults = .{},
         .source = undefined,
     };
@@ -3107,7 +3102,6 @@ test "preparing slots belong to their live preparations" {
             .turn_id = 1,
             .parent_operation_id = 1,
             .action_id = 7,
-            .attempt_ordinal = 1,
         } } },
     };
     // Note: retoken is model-attached above, so slot/custody agreement is
@@ -3397,7 +3391,6 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .turn_id = 1,
                 .parent_operation_id = 1,
                 .action_id = 1,
-                .attempt_ordinal = 1,
             } };
             const binding = try host.custody.attachAction(token, &permit);
             const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});

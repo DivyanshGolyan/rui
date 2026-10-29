@@ -103,10 +103,24 @@ const pending_message_count_sql =
 const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
 /// An unresolved last Attempt with no retry due: its outcome is uncertain.
 const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal={d}", .{retry_policy.maximum_attempts});
-const retry_admission_select_sql =
+/// Matches the ordinal the Store issues an Action Attempt, so statements
+/// compare it as a literal rather than a bound value.
+const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
+/// The content row columns a view handle needs, decoded by
+/// `readHistoricalContent` in this order.
+const historical_content_columns_sql = "content.byte_length,content.digest,content.private,typeof(content.payload)!='null'";
+/// Due retries one admission read keeps after sorting by operation_id. The
+/// due-time index cannot supply that order, so the literal LIMIT keeps the
+/// sort to these rows; a bound one would make the cached plan re-prepare on
+/// every bind. A default Host's active Operations and its oldest due retry
+/// fit in one read, and a larger Host pages on operation_id.
+const retry_admission_page_rows = product_defaults.active_capacity + 1;
+const retry_admission_select_sql = std.fmt.comptimePrint(
     "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
-    "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
-    "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
+        "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
+        "AND retry_due_at_ms<=?1 AND operation_id>?2 ORDER BY operation_id LIMIT {d}",
+    .{retry_admission_page_rows},
+);
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -426,9 +440,12 @@ pub const AttemptAdmission = struct {
 /// Borrowed from one pointer-stable preparation view. Invalid after it closes.
 pub const HistoricalContent = struct {
     view: *HistoricalView,
+    // Resolved once with the metadata, so opening needs no digest lookup and
+    // a raw row needs no Store access.
+    content_id: i64,
+    raw: bool,
     length: u64,
     digest: [32]u8,
-    private: bool = false,
     item_identity: ?struct { kind: OutputItemKind, id_digest: [32]u8 } = null,
 
     fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
@@ -583,6 +600,13 @@ pub const HistoricalView = struct {
     group_scan: GroupScan = .{},
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
+    // Ordinary entries copied from one ranged read. Plain values, never a
+    // statement: history below the admission boundary is immutable.
+    entries: [entry_batch]HistoricalEntry = undefined,
+    entries_next: usize = 0,
+    entries_end: usize = 0,
+
+    const entry_batch = 16;
 
     // One population cursor and one private-item validator, independent of
     // group/call counts. No statement, blob handle or transaction survives a step.
@@ -613,6 +637,13 @@ pub const HistoricalView = struct {
             error.HistoricalPending => .pending,
             else => return err,
         };
+    }
+
+    /// Each preparation advance checks the Attempt once. Its steps read only
+    /// history below the admission boundary, and the handoff checks again.
+    pub fn checkAttempt(self: *HistoricalView) !void {
+        std.debug.assert(self.active);
+        return self.store.checkAttempt(self.binding);
     }
 
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
@@ -657,7 +688,11 @@ pub const HistoricalView = struct {
 
     pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
         std.debug.assert(reference.belongsTo(self));
-        const reader = try self.store.openContentIdentity(.{ .length = reference.length, .digest = reference.digest }, reference.private);
+        const identity: ContentReference = .{ .length = reference.length, .digest = reference.digest };
+        const reader: ContentReader = if (reference.raw)
+            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .representation = .raw }
+        else
+            try self.store.openProjection(reference.content_id, identity);
         self.readers += 1;
         return .{ .view = self, .reference = reference, .reader = reader };
     }
@@ -1373,7 +1408,7 @@ pub const Store = struct {
         const action = error{ActionNotFound};
         const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
         const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
-        const historical_entry = attempt_binding || error{HistoricalPending};
+        const historical_entry = error{HistoricalPending};
         const model_success = attempt_binding || error{InvalidProviderEnvelope};
         const action_attempt = error{StaleActionAttemptBinding};
         const action_dispatch = action_attempt || error{SupersededByControl};
@@ -4622,7 +4657,7 @@ pub const Store = struct {
         try std.Io.randomSecure(self.io, &random);
         const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try self.cached(
-            "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2,sender_handle=?3 " ++
+            "UPDATE action_operation SET " ++ action_attempted_sql ++ ",bash_timeout_ms=?2,sender_handle=?3 " ++
                 "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer resetCached(update);
@@ -4637,7 +4672,6 @@ pub const Store = struct {
             .turn_id = @intCast(turn_id),
             .parent_operation_id = @intCast(parent_operation_id),
             .action_id = @intCast(action_id),
-            .attempt_ordinal = 1,
         } } };
     }
 
@@ -4653,13 +4687,12 @@ pub const Store = struct {
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
                 "AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
@@ -4690,11 +4723,10 @@ pub const Store = struct {
     }
 
     fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
-        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND attempt_ordinal=?3");
+        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql);
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         try expectDone(statement);
     }
 
@@ -4709,12 +4741,11 @@ pub const Store = struct {
             "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
                 "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step != c.SQLITE_ROW) return if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed;
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
@@ -4741,13 +4772,12 @@ pub const Store = struct {
         const statement = try self.cached(
             "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
                 "AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
@@ -4782,12 +4812,11 @@ pub const Store = struct {
                 "FROM action_operation action JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 " ++
-                "AND action.attempt_ordinal=?3 AND action.resolution_code IS NULL",
+                "AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
@@ -4802,7 +4831,7 @@ pub const Store = struct {
         const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
             "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL " ++
-                "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND resolution_code IS NULL",
+                "WHERE action_id=?1 AND parent_operation_id=?5 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
         );
         defer resetCached(update);
         try bindU64(update, 1, binding.action_id);
@@ -4810,7 +4839,6 @@ pub const Store = struct {
         try bindI64(update, 3, content_id);
         try bindU64(update, 4, position);
         try bindU64(update, 5, binding.parent_operation_id);
-        try bindU64(update, 6, binding.attempt_ordinal);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
         try self.completeStoppedTurnIfReady(binding.turn_id);
@@ -4827,16 +4855,15 @@ pub const Store = struct {
 
     fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {
         const limit = try std.math.add(usize, active.maximum_exclusions, 1);
-        if (limit > std.math.maxInt(i64)) return error.ActionSelectionLimitExceeded;
         var selected: ?u64 = null;
         {
             const select = try self.cached(
                 "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt " ++
-                    "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+                    "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id",
             );
             defer resetCached(select);
-            try bindI64(select, 1, @as(i64, @intCast(limit)));
-            while (true) switch (c.sqlite3_step(select)) {
+            var scanned: usize = 0;
+            while (scanned < limit) : (scanned += 1) switch (c.sqlite3_step(select)) {
                 c.SQLITE_ROW => {
                     const action_id = c.sqlite3_column_int64(select, 0);
                     const operation_id = c.sqlite3_column_int64(select, 1);
@@ -5204,20 +5231,24 @@ pub const Store = struct {
         faults: Faults,
     ) !?AttemptAdmission {
         const snapshot_ms = try readUnixMilliseconds(self.io);
-        const selection_limit = try std.math.add(
-            usize,
-            active.maximum_exclusions,
-            1,
-        );
-        if (selection_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
+        const selection_limit = try std.math.add(usize, active.maximum_exclusions, 1);
         const select = try self.cached(retry_admission_select_sql);
         defer resetCached(select);
         try bindI64(select, 1, snapshot_ms);
-        try bindI64(select, 2, @as(i64, @intCast(selection_limit)));
+        try bindI64(select, 2, 0);
         var selected: ?AttemptBinding = null;
-        while (true) {
+        var scanned: usize = 0;
+        var page_rows: usize = 0;
+        var after_operation_id: i64 = 0;
+        while (scanned < selection_limit) {
             const result = c.sqlite3_step(select);
-            if (result == c.SQLITE_DONE) break;
+            if (result == c.SQLITE_DONE) {
+                if (page_rows < retry_admission_page_rows) break;
+                if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetrySelectionFailed;
+                try bindI64(select, 2, after_operation_id);
+                page_rows = 0;
+                continue;
+            }
             if (result != c.SQLITE_ROW) return error.RetrySelectionFailed;
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
@@ -5229,6 +5260,9 @@ pub const Store = struct {
             {
                 return error.CorruptStore;
             }
+            scanned += 1;
+            page_rows += 1;
+            after_operation_id = operation_id;
             if (active.contains(@intCast(operation_id))) continue;
             selected = .{
                 .turn_id = @intCast(turn_id),
@@ -5311,10 +5345,14 @@ pub const Store = struct {
     }
 
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
+        try self.checkAttempt(binding);
+        return .{ .store = self, .binding = binding };
+    }
+
+    fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
         const access = try self.enter(.none);
         defer access.release();
         try access.finish(Ordinary.attempt_binding, self.validateCurrentAttempt(binding));
-        return .{ .store = self, .binding = binding };
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
@@ -5339,11 +5377,10 @@ pub const Store = struct {
     fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.selectedContextAnchorLocked(binding));
+        return access.finish(Ordinary.none, self.selectedContextAnchorLocked(binding));
     }
 
     fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
-        try self.validateCurrentAttempt(binding);
         const statement = try self.cached("SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
             "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
             "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position " ++
@@ -5387,11 +5424,10 @@ pub const Store = struct {
     fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.readHistoricalSettingsLocked(view));
+        return access.finish(Ordinary.none, self.readHistoricalSettingsLocked(view));
     }
 
     fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView) !HistoricalSettings {
-        try self.validateCurrentAttempt(view.binding);
         const statement = try self.cached(
             "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
@@ -5406,11 +5442,8 @@ pub const Store = struct {
         const output_schema_id = try readNullablePositiveI64(statement, 2);
         const tools = c.sqlite3_column_int(statement, 3);
         if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
-        const instructions = try self.readContentMetadata(instructions_id);
-        const output_schema = if (output_schema_id) |content_id| blk: {
-            const metadata = try self.readContentMetadata(content_id);
-            break :blk HistoricalContent{ .view = view, .length = metadata.length, .digest = metadata.digest };
-        } else null;
+        const instructions = try self.historicalContent(view, instructions_id);
+        const output_schema = if (output_schema_id) |content_id| try self.historicalContent(view, content_id) else null;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 5, &session_ref);
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
@@ -5436,7 +5469,7 @@ pub const Store = struct {
             .store = self.selector,
             .session = session_ref,
             .session_affinity = digest[0..16].*,
-            .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
+            .baseline_instructions = instructions,
             .output_schema = output_schema,
             .tools_mask = @intCast(tools),
         };
@@ -5452,13 +5485,12 @@ pub const Store = struct {
     fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.validateHistoricalOutputsStepLocked(view));
+        return access.finish(Ordinary.none, self.validateHistoricalOutputsStepLocked(view));
     }
 
     // Select the producing Operation before its items, so even a completely
     // missing output is detected. No statement or lock survives this one step.
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
-        try self.validateCurrentAttempt(view.binding);
         if (view.outputs_validated) return true;
         if (view.output_frontier == null) {
             const boundary = try self.cached("SELECT current.admission_position,coalesce((SELECT base.admission_position " ++
@@ -5523,10 +5555,10 @@ pub const Store = struct {
     }
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
-        try self.validateCurrentAttempt(view.binding);
         std.debug.assert(view.outputs_validated);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
+            view.entries_end = 0;
             view.tool_group_source_cursor = 0;
             view.next_tool_group = null;
             view.next_tool_group_source_id = null;
@@ -5550,33 +5582,59 @@ pub const Store = struct {
             view.tool_group_initialized = true;
         }
         view.tool_group_scan_after = after_position;
+        const ordinary = try self.nextOrdinaryHistoricalEntry(view, after_position) orelse return self.activateHistoricalToolGroup(view);
+        if (view.next_tool_group) |group| {
+            if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
+        }
+        return ordinary;
+    }
+
+    /// The next host input or output item after `after_position`, served from
+    /// the view's read-ahead and refilled by one ranged query.
+    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+        while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
+            if (view.entries[view.entries_next].position > after_position) return view.entries[view.entries_next];
+        }
+        view.entries_next = 0;
+        view.entries_end = 0;
+        errdefer view.entries_end = 0;
         const statement = try self.cached(
-            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner,sender FROM (" ++
-                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner," ++
-                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender " ++
+            "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
+                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
+                "LEFT JOIN content ON content.content_id=e.content_id " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-                "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
-                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest," ++
+                "AND e.entry_kind IN (1,2) UNION ALL " ++
+                "SELECT item.session_position,3,item.content_id," ++ historical_content_columns_sql ++ ",r.model,r.provider,item.item_kind,item.item_id_digest," ++
                 resolutionIn("owner.resolution_code", &turn_policy.accepted) ++ " AND owner.session_ref=item.session_ref " ++
                 "AND owner_turn.session_ref=item.session_ref " ++
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
                 "(item.item_kind!=3 OR " ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner,NULL AS sender " ++
+                "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+                "LEFT JOIN content ON content.content_id=item.content_id " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
                 "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
                 "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
-                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position ORDER BY item.session_position LIMIT 1)" ++
-                ") ORDER BY position LIMIT 1",
+                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
+                std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
         );
         defer resetCached(statement);
         try bindU64(statement, 1, view.binding.operation_id);
         try bindU64(statement, 2, after_position);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return self.activateHistoricalToolGroup(view);
-        if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {
+                view.entries[view.entries_end] = try readHistoricalEntryRow(view, statement);
+                view.entries_end += 1;
+            },
+            c.SQLITE_DONE => break,
+            else => return error.HistoricalEntryReadFailed,
+        };
+        return if (view.entries_end == 0) null else view.entries[0];
+    }
+
+    fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !HistoricalEntry {
         const position = c.sqlite3_column_int64(statement, 0);
         const kind_value = c.sqlite3_column_int(statement, 1);
         const content_id = c.sqlite3_column_int64(statement, 2);
@@ -5587,44 +5645,35 @@ pub const Store = struct {
             3 => .provider_output,
             else => return error.CorruptStore,
         };
-        const metadata = try self.readContentMetadata(content_id);
+        var content = try readHistoricalContent(view, statement, 3, content_id, kind == .provider_output);
         var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
         if (kind == .provider_output) {
             // Keep contradictory owners visible instead of filtering their
             // output away. Accepted-population validation cannot see failed
             // owners; every selected item must independently certify one.
-            if (c.sqlite3_column_int(statement, 7) != 1) return error.CorruptStore;
+            if (c.sqlite3_column_int(statement, 11) != 1) return error.CorruptStore;
             var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-            try readText(statement, 3, &model);
+            try readText(statement, 7, &model);
             if (model.len == 0) return error.CorruptStore;
-            _ = try readProvider(statement, 4);
+            _ = try readProvider(statement, 8);
             requested_model = model;
+            content.item_identity = .{
+                .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 9)) orelse return error.CorruptStore,
+                .id_digest = try readDigest(statement, 10),
+            };
         }
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
-        if (c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) {
+        if (c.sqlite3_column_type(statement, 12) != c.SQLITE_NULL) {
             sender = .{};
-            try readText(statement, 8, &sender.?);
+            try readText(statement, 12, &sender.?);
         }
-        const ordinary = HistoricalEntry{
+        return .{
             .position = @intCast(position),
             .kind = kind,
             .requested_model = requested_model,
             .sender = sender,
-            .content = .{
-                .view = view,
-                .length = metadata.length,
-                .digest = metadata.digest,
-                .private = kind == .provider_output,
-                .item_identity = if (kind == .provider_output) .{
-                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 5)) orelse return error.CorruptStore,
-                    .id_digest = try readDigest(statement, 6),
-                } else null,
-            },
+            .content = content,
         };
-        if (view.next_tool_group) |group| {
-            if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
-        }
-        return ordinary;
     }
 
     fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalEntry {
@@ -5775,14 +5824,13 @@ pub const Store = struct {
     ) !?HistoricalToolResult {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.readHistoricalToolResultLocked(view));
+        return access.finish(Ordinary.none, self.readHistoricalToolResultLocked(view));
     }
 
     fn readHistoricalToolResultLocked(
         self: *Store,
         view: *HistoricalView,
     ) !?HistoricalToolResult {
-        try self.validateCurrentAttempt(view.binding);
         const source_operation_id = view.active_tool_group_source_id orelse unreachable;
         const after_call_ordinal = view.active_tool_group_after_ordinal;
         const next_call = "SELECT call.call_ordinal,call.call_id_content_id," ++
@@ -5818,13 +5866,35 @@ pub const Store = struct {
             return error.CorruptStore;
         if (call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
             return error.CorruptStore;
-        const call_id = try self.readContentMetadata(call_id_content_id);
-        const output = try self.readContentMetadata(output_content_id);
+        const call_id = try self.historicalContent(view, call_id_content_id);
+        const output = try self.historicalContent(view, output_content_id);
         view.active_tool_group_after_ordinal = @intCast(call_ordinal);
         view.active_tool_group_count += 1;
+        return .{ .call_id = call_id, .output = output };
+    }
+
+    /// Public content as a view handle. Like a digest lookup of public
+    /// content, a private row cannot stand in.
+    fn historicalContent(self: *Store, view: *HistoricalView, content_id: i64) !HistoricalContent {
+        const statement = try self.cached("SELECT " ++ historical_content_columns_sql ++ " FROM content WHERE content.content_id=?1");
+        defer resetCached(statement);
+        try bindI64(statement, 1, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return readHistoricalContent(view, statement, 0, content_id, false);
+    }
+
+    /// Decodes `historical_content_columns_sql` starting at column `first`. A
+    /// row whose privacy differs from `private` cannot stand in.
+    fn readHistoricalContent(view: *HistoricalView, statement: *c.sqlite3_stmt, first: c_int, content_id: i64, private: bool) !HistoricalContent {
+        if (c.sqlite3_column_type(statement, first) == c.SQLITE_NULL) return error.CorruptStore;
+        const length = c.sqlite3_column_int64(statement, first);
+        if (length < 0 or (c.sqlite3_column_int(statement, first + 2) != 0) != private) return error.CorruptStore;
         return .{
-            .call_id = .{ .view = view, .length = call_id.length, .digest = call_id.digest },
-            .output = .{ .view = view, .length = output.length, .digest = output.digest },
+            .view = view,
+            .content_id = content_id,
+            .raw = c.sqlite3_column_int(statement, first + 3) != 0,
+            .length = @intCast(length),
+            .digest = try readDigest(statement, first + 1),
         };
     }
 
@@ -6034,21 +6104,16 @@ pub const Store = struct {
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        const scan_limit = try std.math.add(
-            usize,
-            active.maximum_exclusions,
-            1,
-        );
-        if (scan_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
+        const scan_limit = try std.math.add(usize, active.maximum_exclusions, 1);
         const select = try self.cached(
             "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
                 "WHERE " ++ retry_exhausted_sql ++ " " ++
-                "ORDER BY operation_id LIMIT ?1",
+                "ORDER BY operation_id",
         );
         defer resetCached(select);
-        try bindI64(select, 1, @as(i64, @intCast(scan_limit)));
         var selected: ?AttemptBinding = null;
-        while (true) {
+        var scanned: usize = 0;
+        while (scanned < scan_limit) : (scanned += 1) {
             const result = c.sqlite3_step(select);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.RetryRecoveryFailed;
@@ -6583,6 +6648,17 @@ pub const Store = struct {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openContentIdentityLocked(reference, private));
+    }
+
+    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.openProjectionLocked(content_id, reference));
+    }
+
+    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+        if (try self.contentIsRaw(content_id, reference.length)) return error.CorruptStore;
+        return .{ .store = self, .reference = reference, .content_id = content_id, .representation = .{ .projection = .{} } };
     }
 
     fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
@@ -7789,6 +7865,14 @@ const StatementCache = struct {
 fn resetCached(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
     _ = c.sqlite3_clear_bindings(statement);
+    // Clearing bindings expires a statement whose plan read a bound value (a
+    // bound LIMIT, or a bind compared with a partial index's WHERE), so every
+    // later use would re-prepare it. Debug covers the Host binaries that
+    // integration tests drive.
+    const builtin = @import("builtin");
+    if ((builtin.is_test or builtin.mode == .debug) and c.sqlite3_expired(statement) != 0) {
+        std.debug.panic("cached statement plan depends on a bound value: {s}", .{c.sqlite3_sql(statement)});
+    }
 }
 
 fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
@@ -9289,7 +9373,6 @@ test "allow once survives mode changes and reopen without granting another Attem
     }
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     try std.testing.expectEqual(action_id, action.action_id);
-    try std.testing.expectEqual(@as(u64, 1), action.attempt_ordinal);
     try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
     // The admitted Action cannot be reissued; its unapproved sibling remains pending.
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
@@ -12898,7 +12981,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         try workspace.set(storage.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
-        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, 2, .{})) {
+        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, .{})) {
             .preparing => |value| value,
             .failed => |initial| {
                 var failure = initial;
@@ -16330,11 +16413,11 @@ test "retry due index excludes future population and preserves age ordering" {
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     const QueryCost = struct {
-        fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64, limit: i64) !i32 {
+        fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64) !i32 {
             const statement = try prepare(database, sql);
             defer _ = c.sqlite3_finalize(statement);
             try bindI64(statement, 1, snapshot_ms);
-            try bindI64(statement, 2, limit);
+            try bindI64(statement, 2, 0);
             while (true) switch (c.sqlite3_step(statement)) {
                 c.SQLITE_ROW => {},
                 c.SQLITE_DONE => break,
@@ -16354,7 +16437,7 @@ test "retry due index excludes future population and preserves age ordering" {
     const age_control_sql =
         "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
         "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND attempt_ordinal<4 " ++
-        "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
+        "AND retry_due_at_ms<=?1 AND operation_id>?2 ORDER BY operation_id LIMIT 2";
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
         try exec(storage.database, "DELETE FROM model_operation");
         const insert = try std.testing.allocator.printSentinel(
@@ -16370,8 +16453,8 @@ test "retry due index excludes future population and preserves age ordering" {
         );
         defer std.testing.allocator.free(insert);
         try exec(storage.database, insert);
-        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
-        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99, 2);
+        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
+        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99);
     }
     const minimum_future_cost = @min(future_costs[0], future_costs[1], future_costs[2]);
     const maximum_future_cost = @max(future_costs[0], future_costs[1], future_costs[2]);
@@ -16391,7 +16474,7 @@ test "retry due index excludes future population and preserves age ordering" {
         );
         defer std.testing.allocator.free(insert);
         try exec(storage.database, insert);
-        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
+        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
     }
     try std.testing.expect(due_costs[1] > due_costs[0]);
     try std.testing.expect(due_costs[2] > due_costs[1]);
@@ -16487,6 +16570,37 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try std.testing.expectEqual(c1.operation_id, c2.operation_id);
     try std.testing.expectEqual(@as(u64, 2), c2.attempt_ordinal);
     try std.testing.expect(!try reopened.claimModelAuthRefresh(c2));
+}
+
+test "retry admission reads past a full page of active Operations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    const insert = try std.testing.allocator.printSentinel(
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0 FROM sequence",
+        .{retry_admission_page_rows + 1},
+        0,
+    );
+    defer std.testing.allocator.free(insert);
+    try exec(storage.database, insert);
+    const Active = struct {
+        fn contains(_: *const anyopaque, operation_id: u64) bool {
+            return operation_id <= retry_admission_page_rows;
+        }
+    };
+    const active_filter = ActiveOperationFilter{
+        .context = &empty_active_context,
+        .containsFn = Active.contains,
+        .maximum_exclusions = retry_admission_page_rows,
+    };
+    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
+    try std.testing.expectEqual(@as(u64, retry_admission_page_rows + 1), admitted.permit.binding.operation_id);
 }
 
 test "retry transitions preserve age and settle one exhausted outcome per call" {
