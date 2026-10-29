@@ -160,6 +160,10 @@ class CauseTest(unittest.TestCase):
                          [["codex_h2_integration: assert stream_reset raised AssertionError"],
                           ["codex_h2_integration: assert goaway_sent raised AssertionError"]])
         self.assertEqual(signatures[0][0].paths, ["tests/integration/codex_h2_integration.py"])
+        # A passing step's stderr also ends in "failed command:", without an exit line.
+        passing = logged("renderer allocation wide: retained=1",
+                         "failed command: python3 /w/rui/tests/integration/codex_h2_integration.py")
+        self.assertEqual(report_issue.failure_causes(passing, self.cases), [])
 
     def test_zig_failures_keep_their_names_across_assertion_diagnostics(self):
         log = logged("1/4 store.test.opens...OK",
