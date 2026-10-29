@@ -690,15 +690,8 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 		counts["pending"] != 0 || counts["decisions"] != expected.Valid || counts["foreign_key_failures"] != 0 {
 		return map[string]any{"counts": counts}, fmt.Errorf("audit mismatch for %+v: %v", expected, counts)
 	}
-	// The Store keeps no permission state: an Action is authorized by a
-	// bypassing permission revision or an accepted allow_once decision.
 	rowsQuery := `SELECT call.call_ordinal,call.item_ordinal,` +
-		`call.rejection_code AS rejection,action.action_id AS action_id,` +
-		`CASE WHEN action.action_id IS NULL THEN NULL ELSE ` +
-		`EXISTS(SELECT 1 FROM session_revision revision WHERE revision.session_ref=action.session_ref ` +
-		`AND revision.revision=action.permission_revision AND revision.permission_mode=1) OR ` +
-		`EXISTS(SELECT 1 FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key ` +
-		`WHERE decision.action_id=CAST(action.action_id AS TEXT) AND decision.decision='allow_once' AND command.accepted=1) END AS authorized,` +
+		`call.rejection_code AS rejection,action.action_id AS action_id,action.authorized AS authorized,` +
 		`action.resolution_code AS action_outcome FROM model_tool_call call ` +
 		`LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal ` +
 		`ORDER BY call.call_ordinal;`

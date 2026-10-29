@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, action_authorized_sql, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -1390,12 +1390,12 @@ def main(mode="all", correlation_case="all"):
         processes.remove(proposal_host)
         with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
             assert database.execute(
-                f"SELECT {action_authorized_sql('action')},resolution_code FROM action_operation action WHERE action_id=?",
+                "SELECT authorized,resolution_code FROM action_operation WHERE action_id=?",
                 (int(first_request["action"]),),
             ).fetchone() == (0, "denied")
             for session, expected_rows in expected_action_rows.items():
                 rows = database.execute(
-                    f"SELECT call_ordinal,{action_authorized_sql('action')},resolution_code FROM action_operation action "
+                    "SELECT call_ordinal,authorized,resolution_code FROM action_operation "
                     "WHERE session_ref=? ORDER BY call_ordinal",
                     (session,),
                 ).fetchall()
