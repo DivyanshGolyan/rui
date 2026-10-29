@@ -103,6 +103,9 @@ const pending_message_count_sql =
 const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
 /// An unresolved last Attempt with no retry due: its outcome is uncertain.
 const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal={d}", .{retry_policy.maximum_attempts});
+/// Matches the ordinal the Store issues an Action Attempt, so statements
+/// compare it as a literal rather than a bound value.
+const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
 const retry_admission_select_sql =
     "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
     "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
@@ -4622,7 +4625,7 @@ pub const Store = struct {
         try std.Io.randomSecure(self.io, &random);
         const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try self.cached(
-            "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2,sender_handle=?3 " ++
+            "UPDATE action_operation SET " ++ action_attempted_sql ++ ",bash_timeout_ms=?2,sender_handle=?3 " ++
                 "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer resetCached(update);
@@ -4653,17 +4656,16 @@ pub const Store = struct {
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
                 "AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-        if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
         try readText(statement, 0, &workspace);
         const content_id = c.sqlite3_column_int64(statement, 1);
@@ -4741,17 +4743,16 @@ pub const Store = struct {
         const statement = try self.cached(
             "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
                 "AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-        if (c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
         if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
     }
 
@@ -4782,18 +4783,17 @@ pub const Store = struct {
                 "FROM action_operation action JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 " ++
-                "AND action.attempt_ordinal=?3 AND action.resolution_code IS NULL",
+                "AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 0, &session_ref);
-        if (c.sqlite3_column_int64(statement, 1) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (binding.attempt_ordinal != attempt.action_attempt_ordinal or c.sqlite3_column_int64(statement, 1) != binding.turn_id) return error.StaleActionAttemptBinding;
         const stopped = c.sqlite3_column_int(statement, 2);
         if (stopped != 0 and stopped != 1) return error.CorruptStore;
         const effective_code: ActionResolutionCode = if (stopped == 1) .cancelled else code;
@@ -4827,16 +4827,15 @@ pub const Store = struct {
 
     fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {
         const limit = try std.math.add(usize, active.maximum_exclusions, 1);
-        if (limit > std.math.maxInt(i64)) return error.ActionSelectionLimitExceeded;
         var selected: ?u64 = null;
         {
             const select = try self.cached(
                 "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt " ++
-                    "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+                    "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id",
             );
             defer resetCached(select);
-            try bindI64(select, 1, @as(i64, @intCast(limit)));
-            while (true) switch (c.sqlite3_step(select)) {
+            var scanned: usize = 0;
+            while (scanned < limit) : (scanned += 1) switch (c.sqlite3_step(select)) {
                 c.SQLITE_ROW => {
                     const action_id = c.sqlite3_column_int64(select, 0);
                     const operation_id = c.sqlite3_column_int64(select, 1);
