@@ -2788,3 +2788,4 @@ test "incremental ingress preserves grammar and releases both captures after lat
     }
 }
 // hillclimb nonce eff-a--1-1793295368
+// hillclimb nonce eff-a-0-1793296716
