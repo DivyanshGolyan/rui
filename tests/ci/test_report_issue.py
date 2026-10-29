@@ -192,6 +192,18 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(updated['workflows'], ['Daily macOS qualification', 'Stable qualification'])
         [comment] = fake.made('comment')
         self.assertEqual(comment[2], '5')
+        self.assertNotIn('--add-label', edit)
+
+    def test_a_stable_red_labels_an_issue_another_workflow_filed(self):
+        signature = 'bash: assert process_exists(child_pid) raised AssertionError'
+        fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH},
+                          [issue(5, signature, [], ['Daily macOS qualification'], 'a' * 40, state='CLOSED')])
+        self.run_main(fake, '--label', 'stable-red')
+        self.assertEqual(fake.made('create'), [])
+        [edit] = fake.made('edit')
+        self.assertEqual(edit[2], '5')
+        self.assertEqual(edit[edit.index('--add-label') + 1], 'stable-red')
+        self.assertEqual([call[2] for call in fake.made('reopen')], ['5'])
 
     def test_an_unparsed_failure_is_still_filed_under_its_job(self):
         fake = FakeGitHub([dict(id=1, name='macos / resources', conclusion='failure')], {1: logged('boom')})

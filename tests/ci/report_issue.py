@@ -155,7 +155,10 @@ def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
     if matches:
         number, state, recorded = matches[-1]
         recorded.update(last_sha=sha, workflows=sorted({*recorded["workflows"], workflow}))
-        gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail))
+        # A signature Daily Mac or a landing retry filed first still gains this
+        # run's labels, such as stable-red.
+        gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail),
+           *(arg for label in labels for arg in ("--add-label", label)))
         if state != "OPEN":
             gh("issue", "reopen", str(number), "--repo", repository)
             issues[issues.index(matches[-1])] = (number, "OPEN", recorded)
