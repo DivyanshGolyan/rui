@@ -89,7 +89,7 @@ def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
     assert notice, (args, result.stderr)
     admission = json.loads(result.stdout)
     assert admission["context"]["key"] == notice.group(1), (admission, result.stderr)
-    return {"request": notice.group(1), "admission": admission}
+    return {"request": notice.group(1), "admission": admission, "stderr": result.stderr}
 
 
 def invoke(home, *args, expect=0, environment=None, input=None):
@@ -6173,10 +6173,30 @@ def main(selected="all"):
             "session": absent, "code": "unknown_session"}, rejected
         refused = fixture.observe(store, rejected["request"])
         assert refused["status"] == "rejected" and refused["code"] == "unknown_session", refused
-        replayed_rejection = json.loads(invoke(home, "request", "recover", rejected["request"], expect=1).stdout)
+        not_accepted = ("\nrui: the Host did not accept this request; stdout carries its saved answer and code. "
+            "Replay returns that same answer and never resubmits: rui request recover ")
+        assert f"{not_accepted}{rejected['request']}\n" in rejected["stderr"], rejected["stderr"]
+        recovered_rejection = invoke(home, "request", "recover", rejected["request"], expect=1)
+        assert f"{not_accepted}{rejected['request']}\n" in recovered_rejection.stderr, recovered_rejection.stderr
+        replayed_rejection = json.loads(recovered_rejection.stdout)
         assert replayed_rejection == {"context": {"store": str(store), "session": absent,
             "key": rejected["request"], "kind": "message"}, "answer": {"status": "rejected", "replayed": True,
             "session": absent, "code": "unknown_session"}, "input": rejected["admission"]["input"]}, replayed_rejection
+        stop_record = state / "absent-stop.json"
+        refused_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
+            "--record", stop_record, "--key", "absent-stop", expect=1)
+        assert json.loads(refused_stop.stdout)["answer"] == {"status": "rejected", "replayed": False,
+            "session": absent, "code": "unknown_session"}, refused_stop
+        repeated_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
+            "--record", stop_record, "--key", "absent-stop", expect=1)
+        assert not repeated_stop.stdout and "RecordAlreadyExists" in repeated_stop.stderr, repeated_stop
+        explicit_route = f"rui request recover --store $'{store}' --record $'{stop_record}' --kind session-stop"
+        assert f"{not_accepted[:-len('rui request recover ')]}{explicit_route}\n" in refused_stop.stderr, refused_stop.stderr
+        replayed_stop = subprocess.run(["bash", "-c", shlex.quote(str(fixture.RUI)) + explicit_route[len("rui"):]],
+            env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=20)
+        assert replayed_stop.returncode == 1 and replayed_stop.stderr == refused_stop.stderr, replayed_stop
+        assert json.loads(replayed_stop.stdout)["answer"] == {"status": "rejected", "replayed": True,
+            "session": absent, "code": "unknown_session"}, replayed_stop
         assert rejected["admission"]["input"]["bytes"] == str(len(b"unknown session")), rejected
 
         large_answer = "x" * 4095 + "🍰" + "y" * (128 * 1024)
