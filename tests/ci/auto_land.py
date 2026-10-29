@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import time
 
 from select_tests import changed_paths
 
@@ -26,12 +27,39 @@ STABLE_BASE = re.compile(r"Stable qualification from base ([0-9a-f]{40})")
 WORKFLOW_FILES = ".github/workflows/"
 
 
+# Seconds before each repeated dispatch submission; long enough for a run the
+# failed submission created to appear in the run listing. A dispatch creates no
+# test evidence, so retrying it is not a native-test retry.
+DISPATCH_RETRY_DELAYS = (10, 30)
+
+
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def gh(*args):
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+
+def dispatch(workflow, *args, run_exists):
+    """Submit a workflow dispatch, retrying transient API failures.
+
+    A failed submission may still have created the run, so each retry first
+    asks run_exists() and stops once the run exists. The last failure
+    propagates.
+    """
+    for delay in (*DISPATCH_RETRY_DELAYS, None):
+        try:
+            gh("workflow", "run", workflow, "--ref", "main", *args)
+            return
+        except subprocess.CalledProcessError as failure:
+            if delay is None:
+                raise
+            print(f"::warning::Dispatch of {workflow} failed; retrying in {delay}s: "
+                  f"{(failure.stderr or '').strip()}")
+        time.sleep(delay)
+        if run_exists():
+            return
 
 
 def latest(workflow, sha, branch):
@@ -234,10 +262,11 @@ def qualify_main():
     base = git("rev-parse", "origin/stable")
     if sha != base and contains(sha, base):
         if latest("check.yml", sha, "main") is None:
-            gh("workflow", "run", "check.yml", "--ref", "main", "-f", f"base={base}", "-f", "stable=true")
+            dispatch("check.yml", "-f", f"base={base}", "-f", "stable=true",
+                     run_exists=lambda: latest("check.yml", sha, "main") is not None)
             print(f"Dispatched missing Mac qualification on main {sha} from stable {base}")
         if latest(UPGRADE, sha, "main") is None:
-            gh("workflow", "run", UPGRADE, "--ref", "main")
+            dispatch(UPGRADE, run_exists=lambda: latest(UPGRADE, sha, "main") is not None)
             print(f"Dispatched missing upgrade qualification on main {sha}")
     return sha, base
 
@@ -263,8 +292,9 @@ def promote_stable():
         print(f"Promoted stable from {stable_sha} to {sha}\n"
               f"Mac: {selected['html_url']}\nUpgrade: {upgrade['html_url']}")
         # The stable push emits no workflows; a lost dispatch leaves this SHA
-        # unreleased until a manual dispatch or the next promotion.
-        gh("workflow", "run", RELEASE, "--ref", "main", "-f", f"sha={sha}")
+        # unreleased until a manual dispatch or the next promotion. Release
+        # skips an already released SHA, so a duplicate run publishes nothing.
+        dispatch(RELEASE, "-f", f"sha={sha}", run_exists=lambda: False)
         print(f"Dispatched release of {sha}")
         return
     print(f"No newer exact-SHA Mac-and-upgrade-green main commit; stable remains {stable_sha}")
