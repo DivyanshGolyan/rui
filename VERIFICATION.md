@@ -382,7 +382,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Session-list resource census | `session_list_integration.py`, `session_list_release_proof.py` | Held-cleanup and leak negatives are opt-in, Linux |
 | Reply delivery inactivity and drain | `'reply delivery'`, `server-delivery-integration`, `PeerCensus` | Run apart from load. Not Mac drain or SIGPIPE |
 | Controls queue behind settlement | `'active model settlement'`, `control_integration.py` | Store hold proves exclusion, not latency. Unordered contention reports unavailable |
-| Host reply bounds | `'exact worst-case'` | Each bound derives from the JSON shape its renderer writes; full 128-byte keys and escaped 96-byte codes. No fixed 8 KiB allowance |
+| Host reply and request bounds | `'exact worst-case'` | Each bound derives from the JSON shape its writer writes; full 128-byte keys, escaped Store, Session and workspace strings and escaped 96-byte codes. No fixed 8 KiB allowance |
 | [Conversation pages](ARCHITECTURE.md#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `'public assistant message provenance'`, `conversation_page_integration.py` | Exact message item, public projection, Session, Turn and Attempt bindings. No earlier-prefix authentication or aggregate memory |
 | [Proposal reads](ARCHITECTURE.md#historical-proposal-reads) | `proposal-integration` | Not activity chronology. Cannot clear historical Mac reds |
 | [Session activity](ARCHITECTURE.md#public-session-activity) and tool labels | `activity-integration`, `'tool label'` | `RUI_ACTIVITY_MEASURE=1` samples. No latency bound |

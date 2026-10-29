@@ -1933,90 +1933,84 @@ fn isLiteral(comptime part: anytype) bool {
     return @typeInfo(@TypeOf(part)) == .pointer;
 }
 
-pub const max_session_stop_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
+// Request shapes. The client writes each request with `writeShape` and each
+// bound is `shapeBytes` of the same shape. Store, key and Session holes take
+// fully escaped strings because the Host accepts any JSON spelling of them.
+const store_hole = Hole{ .string = max_store_bytes };
+const key_hole = Hole{ .string = max_key_bytes };
+const session_hole = Hole{ .string = max_session_bytes };
 
-pub const max_model_interruption_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
-    ",\"target\":{\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"turn\":\"".len + 20 +
-    "\",\"operation\":\"".len + 20 + "\"}}".len;
+/// Holes: Store, key, Session.
+pub const session_stop_request = .{ "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, "}" };
+/// Holes: Store, key, Session, turn, operation.
+pub const model_interruption_request = .{ "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
+/// Holes: Store, key, Session, Action, decision.
+pub const permission_decision_request = .{ "{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+/// Holes: Store, key.
+pub const observe_command_request = .{ "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
+/// Holes: Store.
+pub const host_info_request = .{ "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
+/// Holes: Store.
+pub const host_stop_request = .{ "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
+/// Holes: Store, key.
+pub const read_result_request = .{ "{\"version\":\"1\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
+pub const inspect_session_request = struct {
+    /// Holes: Store, Session.
+    pub const current = .{ "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, "}" };
+    /// Holes: Store, Session.
+    pub const full = .{ "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"profile\":\"full\"}" };
+    /// Holes: Store, Session, part, operation, attempt.
+    pub const failed_response = .{ "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
+    pub const max_bytes = maxShapeBytes(.{ current, full, failed_response });
+};
+/// Holes: Store, workspace, after, ceiling.
+pub const list_sessions_request = .{ "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, Action.
+pub const read_action_arguments_request = .{ "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, Action.
+pub const read_action_call_id_request = .{ "{\"version\":\"1\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, position, ordinal. The client always streams from
+/// the start.
+pub const conversation_content_request = .{ "{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\",\"stream\":true}" };
+/// Holes: Store, Session, end, before position, before ordinal.
+pub const conversation_page_request = .{ "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, end, after.
+pub const proposal_page_request = .{ "{\"version\":\"1\",\"kind\":\"proposal_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"after\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, position, field.
+pub const proposal_field_request = .{ "{\"version\":\"1\",\"kind\":\"proposal_field\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = ProposalField }, "\"}" };
+/// Holes: Store, Session, end, position, ordinal, direction.
+pub const activity_page_request = .{ "{\"version\":\"1\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
+/// Holes: Store, Session, position, ordinal.
+pub const activity_content_request = .{ "{\"version\":\"1\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 
-pub const max_permission_decision_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"}".len;
+pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
+pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
+pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
+pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, model_interruption_request, permission_decision_request });
+pub const max_observe_command_request_bytes = shapeBytes(observe_command_request);
+pub const max_host_info_request_bytes = shapeBytes(host_info_request);
+pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
+pub const max_read_result_request_bytes = shapeBytes(read_result_request);
+pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
+pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request);
+pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
+pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
+pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
+pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
+pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
+pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
+pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
+pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+/// Every request the client writes into a `RequestBuffer`. Control requests
+/// are captured to a record file instead.
+pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
+    observe_command_request,     host_info_request,            host_stop_request,
+    read_result_request,         list_sessions_request,        read_action_arguments_request,
+    read_action_call_id_request, conversation_content_request, conversation_page_request,
+    proposal_page_request,       proposal_field_request,       activity_page_request,
+    activity_content_request,
+}));
 
-pub const max_control_request_bytes = @max(
-    @max(max_session_stop_request_bytes, max_model_interruption_request_bytes),
-    max_permission_decision_request_bytes,
-);
-
-pub const max_observe_command_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
-pub const max_host_info_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) + "}".len;
-pub const max_host_stop_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) + "}".len;
-pub const max_read_result_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"read_result\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
-pub const max_inspect_session_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"failed_response\":\"metadata\",\"operation\":\"".len + 19 + "\",\"attempt\":\"".len + 19 + "\"}".len;
-pub const max_list_sessions_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
-    ",\"after\":\"".len + 20 + ",\"ceiling\":\"".len + 20 + "\"}".len;
-pub const max_read_action_arguments_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\"}".len;
-pub const max_read_action_call_id_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"read_action_call_id\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\"}".len;
-pub const max_conversation_content_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"position\":\"".len + 20 +
-    "\",\"ordinal\":\"".len + 20 +
-    "\",\"start\":\"".len + 20 + "\",\"stream\":true}".len;
-pub const max_conversation_page_request_bytes =
-    "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"end\":\"".len + 20 +
-    "\",\"before_position\":\"".len + 20 +
-    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
-pub const max_client_request_bytes = @max(
-    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
-    @max(
-        @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
-        @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
-    ),
-);
-
-// Both proposal requests are smaller than the existing Conversation page
-// maximum (two shorter cursor keys or one position and a closed field).
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
     return count * item_bytes + count -| 1;
