@@ -198,6 +198,10 @@ fn moveSlot(host: *Host, slot: *ExecutionSlot, next: ExecutionSlot) void {
     const from = slotCustody(slot);
     const to = slotCustody(&next);
     if (from == .attached and to != .attached) {
+        // An Action leaves custody unsettled only once dispatch is fenced or
+        // the Host is shutting down, and neither admits work again, so
+        // uncertain Actions come only from an earlier Host and the lifecycle
+        // owner stops scanning for them.
         std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
         host.custody.detach(token) catch unreachable;
     }
@@ -386,7 +390,7 @@ pub fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
-    while (!host.stopping()) {
+    while (!host.executionEnding()) {
         var native = NativeTurn{
             .host = host,
             .reactor = reactor,
@@ -965,7 +969,7 @@ fn admitBashAttempt(
         },
         .failed => |value| {
             var failure = value;
-            finishBashPreparationFailure(host, slot, token, action_binding, &failure);
+            finishBashPreparationFailure(host, slot, &failure);
         },
     }
     return .admitted;
@@ -981,7 +985,6 @@ fn advanceBashPreparation(
         .bash_preparing => break candidate,
         else => {},
     } else unreachable;
-    const preparing = slot.bash_preparing;
     if (!host.launchAllowed()) {
         const cleanup = active_preparation.cancel();
         preparation.* = null;
@@ -993,30 +996,20 @@ fn advanceBashPreparation(
         .failed => |value| {
             var failure = value;
             preparation.* = null;
-            finishBashPreparationFailure(
-                host,
-                slot,
-                preparing.token,
-                preparing.binding,
-                &failure,
-            );
+            finishBashPreparationFailure(host, slot, &failure);
         },
         .prepared => |value| {
             var prepared = value;
             preparation.* = null;
-            launchPreparedBash(host, slot, preparing.token, preparing.binding, &prepared);
+            launchPreparedBash(host, slot, &prepared);
         },
     }
     return true;
 }
 
-fn finishBashPreparationFailure(
-    host: *Host,
-    slot: *ExecutionSlot,
-    token: execution.CustodyToken,
-    binding: store_module.ActionAttemptBinding,
-    failure: *bash.PreparationFailure,
-) void {
+fn finishBashPreparationFailure(host: *Host, slot: *ExecutionSlot, failure: *bash.PreparationFailure) void {
+    const token = slot.bash_preparing.token;
+    const binding = slot.bash_preparing.binding;
     const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
         failure.cause == error.ShortCanonicalRead;
     if (failure.cause == error.BashCommandTooLong) {
@@ -1057,13 +1050,9 @@ fn discardBashResources(
     finishCustodyNow(host, slot);
 }
 
-fn launchPreparedBash(
-    host: *Host,
-    slot: *ExecutionSlot,
-    token: execution.CustodyToken,
-    action_binding: store_module.ActionAttemptBinding,
-    prepared: *bash.Prepared,
-) void {
+fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepared) void {
+    const token = slot.bash_preparing.token;
+    const action_binding = slot.bash_preparing.binding;
     testTransition(host, .prepared_before_handoff, action_binding);
     if (host.faults.before_launch_delay_ms != 0) {
         traceAction(host, "prepared_before_handoff", action_binding);
@@ -2100,9 +2089,6 @@ fn settleFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
-/// An Action leaves custody unsettled only once dispatch is fenced or the Host
-/// is shutting down, and neither admits work again, so uncertain Actions come
-/// only from an earlier Host and the lifecycle owner stops scanning for them.
 /// Frees an attached slot whose resources its caller has retired.
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
     // Capture checked identity while attached, but observe only after callers
@@ -3464,7 +3450,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             var work: [1]server_host.BashWork = undefined;
             host.bash_work = &work;
             _ = host.advance(phase);
-            launchPreparedBash(&host, &slots[0], token, binding, &prepared);
+            launchPreparedBash(&host, &slots[0], &prepared);
             try std.testing.expect(prepared.stdout_capture == null);
             try std.testing.expect(prepared.command == null);
             // A retained cleanup fence must not become an effect shutdown.

@@ -104,10 +104,11 @@ const TestTransition = enum {
 
 /// How far a Host has shut down. It only moves forward, under the launch
 /// gate, through `Host.advance`. `fenced` blocks new effect launches while
-/// owned work, retained cleanup and intake continue. `stopping` also retires
-/// unhanded requests, closes the listener and winds execution down; Host
-/// teardown enters it too, whatever stopped intake.
-pub const Phase = enum(u8) { open, fenced, stopping };
+/// owned work, retained cleanup and intake continue. `draining` is Host
+/// teardown after intake has returned: execution winds down, and a failure
+/// found while it does is still reported. `stopping` stops effects: it
+/// retires unhanded requests, closes the listener and winds execution down.
+pub const Phase = enum(u8) { open, fenced, draining, stopping };
 
 pub const Host = struct {
     io: std.Io,
@@ -161,6 +162,10 @@ pub const Host = struct {
 
     pub fn stopping(self: *const Host) bool {
         return self.phase.load(.acquire) == .stopping;
+    }
+
+    pub fn executionEnding(self: *const Host) bool {
+        return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.draining);
     }
 
     /// Moves the Host forward to `target`, never back, and returns the
@@ -913,6 +918,7 @@ test "Host phases only move forward" {
             try std.testing.expectEqual(later, host.phase.load(.acquire));
             try std.testing.expectEqual(later == .open, host.launchAllowed());
             try std.testing.expectEqual(later == .stopping, host.stopping());
+            try std.testing.expectEqual(later == .draining or later == .stopping, host.executionEnding());
         }
     }
 }

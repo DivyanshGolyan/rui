@@ -948,7 +948,7 @@ pub fn serve(
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
-        _ = host.advance(.stopping);
+        _ = host.advance(.draining);
         execution_thread.join();
     }
     var ready: protocol.ResponseBuffer = .{};
