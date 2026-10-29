@@ -11,6 +11,7 @@ const provider_output = @import("provider_output.zig");
 const retry_policy = @import("retry_policy.zig");
 const turn_policy = @import("turn_policy.zig");
 const session_work = @import("session_work.zig");
+const change_ring = @import("change_ring.zig");
 
 const c = @import("sqlite");
 
@@ -1495,6 +1496,16 @@ pub const Store = struct {
     /// after every successful COMMIT. An unchanged value proves no canonical
     /// fact changed since it was read; a rolled-back change also advances it.
     commit_generation: std.atomic.Value(u64) = .init(0),
+    /// The Sessions the current entry point changed. Every writer touches
+    /// each Session whose rows it changes, and `release` records them under
+    /// the generation the commit advances to.
+    touched: change_ring.Touched = .{},
+    /// Which Sessions changed at recent generations: Session listing's
+    /// `since` hint, guarded by the mutex.
+    changes: change_ring.Ring = .{},
+    /// This opening's identity: a `since` token from any other opening
+    /// names generations this one never counted.
+    instance: [16]u8 = undefined,
     statements: StatementCache = .{},
     // Access.release closes the read transaction before unlocking, including
     // errors and yielded historical scans. Logical readers cannot pin the WAL.
@@ -1606,14 +1617,20 @@ pub const Store = struct {
         }
 
         fn release(self: Access) void {
-            self.store.read_blob.close();
-            if (@import("builtin").is_test) self.store.statements.assertIdle();
-            // Counts autocommit and explicit-transaction writes alike.
-            if (c.sqlite3_total_changes64(self.store.database) != self.changes) {
-                _ = self.store.commit_generation.fetchAdd(1, .release);
+            const store = self.store;
+            store.read_blob.close();
+            if (@import("builtin").is_test) store.statements.assertIdle();
+            // Counts autocommit and explicit-transaction writes alike. A
+            // rolled-back change also records: a spurious change, never a
+            // missed one.
+            if (c.sqlite3_total_changes64(store.database) != self.changes) {
+                if (@import("builtin").is_test) if (store.untouchedForTesting()) |id|
+                    std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
+                const generation = store.commit_generation.fetchAdd(1, .release) + 1;
+                store.changes.record(generation, &store.touched);
             }
             self.trace.mark(.complete);
-            self.store.mutex.unlock(self.store.io);
+            store.mutex.unlock(store.io);
         }
 
         fn Transaction(comptime Result: type) type {
@@ -1626,6 +1643,9 @@ pub const Store = struct {
         if (self.isFenced()) return error.StoreFenced;
         trace.mark(.requested);
         self.mutex.lockUncancelable(self.io);
+        self.touched = .{};
+        // Rows a test changed outside any entry point belong to none.
+        if (@import("builtin").is_test) self.clearTouchOracleForTesting();
         const access: Access = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
         trace.mark(.acquired);
         if (self.isFenced()) {
@@ -1638,6 +1658,63 @@ pub const Store = struct {
     /// Administrative access without canonical classification.
     fn lockAdmin(self: *Store) void {
         self.mutex.lockUncancelable(self.io);
+    }
+
+    /// Records that this entry point changes `session_ref`'s rows.
+    fn touch(self: *Store, session_ref: []const u8) void {
+        self.touched.add(session_ref);
+    }
+
+    /// Runs a write whose `RETURNING session_ref` names each changed row's
+    /// Session, touching each. Returns the rows changed.
+    fn stepTouching(self: *Store, statement: *c.sqlite3_stmt) !usize {
+        var count: usize = 0;
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {
+                var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(statement, 0, &session);
+                self.touch(session.slice());
+                count += 1;
+            },
+            c.SQLITE_DONE => return count,
+            else => return error.StatementFailed,
+        };
+    }
+
+    /// Test builds: a Session whose rows this entry point changed but did
+    /// not touch. The oracle is a temporary trigger on each table that
+    /// carries a Session, so a writer that skips `touch` fails whichever
+    /// test drives it.
+    fn untouchedForTesting(self: *Store) ?change_ring.Id {
+        if (!@import("builtin").is_test) @compileError("test-only check");
+        if (self.touched.everything) return null;
+        // Cached, so a test that counts prepared or uncached statements sees
+        // none. A test that makes SQLite fail gets no verdict.
+        const statement = self.cached("SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
+        defer resetCached(statement);
+        while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+            const changed = c.sqlite3_column_text(statement, 0)[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
+            if (self.touched.contains(changed)) continue;
+            var id: change_ring.Id = @splat('?');
+            const length = @min(id.len, changed.len);
+            @memcpy(id[0..length], changed[0..length]);
+            return id;
+        }
+        return null;
+    }
+
+    fn clearTouchOracleForTesting(self: *Store) void {
+        if (!@import("builtin").is_test) @compileError("test-only oracle");
+        const statement = self.cached("DELETE FROM temp.touched_oracle") catch return;
+        defer resetCached(statement);
+        _ = c.sqlite3_step(statement);
+    }
+
+    /// Whether nothing changed since `since` on this opening: atomics only,
+    /// no lock. Never while fenced, so a read reports the failure.
+    pub fn notModified(self: *const Store, since: change_ring.Token) bool {
+        return !self.isFenced() and std.mem.eql(u8, &since.instance, &self.instance) and
+            since.generation == self.commit_generation.load(.acquire);
     }
 
     /// The only fence setter. Returns `err` so callers can propagate it.
@@ -1747,9 +1824,15 @@ pub const Store = struct {
         // A new Host never inherits a lost Action's sender authority.
         try exec(database.?, "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL");
 
+        if (@import("builtin").is_test) try createTouchOracleForTesting(database.?);
+
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
         var store: Store = .{ .io = io, .database = database.?, .selector = stored_selector };
+        // Tells this opening's `since` tokens from another's. It grants
+        // nothing, so the process CSPRNG serves, and Session IDs keep sole
+        // use of secure draws.
+        io.random(&store.instance);
         errdefer store.statements.deinit();
         // Error paths then roll back without preparing or allocating.
         _ = try store.cached("ROLLBACK");
@@ -2447,6 +2530,7 @@ pub const Store = struct {
         if (rejection) |code| {
             return self.saveModelInterruptionAnswer(command, &digest, false, @tagName(code), faults);
         }
+        self.touch(command.session.slice());
 
         const current_turn = try self.cached(
             "SELECT 1 FROM turn WHERE turn_id=?1 AND session_ref=?2 AND operation_id=?3 AND outcome_code IS NULL",
@@ -2596,6 +2680,7 @@ pub const Store = struct {
         try bindText(save, 3, @tagName(command.decision));
         try expectDone(save);
         if (rejection == null) {
+            self.touch(command.session.slice());
             switch (command.decision) {
                 .allow_once => {
                     const update = try self.cached("UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
@@ -3588,9 +3673,7 @@ pub const Store = struct {
     /// Returns an owned, unlinked page; no SQLite cursor or mutex survives capture.
     /// The caller releases its scratch charge by deinitializing the report.
     pub fn captureSessionList(self: *Store, request: protocol.ListSessions, options: SessionListOptions) !SessionReport {
-        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
-            (request.after == 0 and request.ceiling != 0) or
-            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        try request.validate();
         var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
@@ -3602,6 +3685,19 @@ pub const Store = struct {
     }
 
     fn renderSessionListLocked(self: *Store, request: protocol.ListSessions, capture: *SessionReportCapture) !void {
+        const generation = self.commit_generation.load(.acquire);
+        // Changed rows answer while the hint still covers the token; a token
+        // from another opening, or one too old, gets a full traversal.
+        if (request.since) |since| {
+            const through = if (request.changed) |changed| changed.through else generation;
+            if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
+                return self.renderChangedSessionsLocked(request, since.generation, through, capture);
+        }
+        try self.renderAllSessionsLocked(.{ .workspace = request.workspace, .after = request.after, .ceiling = request.ceiling }, generation, capture);
+    }
+
+    /// Every Session in scope, in creation order, eight per page.
+    fn renderAllSessionsLocked(self: *Store, request: protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
         var ceiling = request.ceiling;
         if (request.after == 0) {
             const maximum = try self.cached("SELECT coalesce(max(rowid),0) FROM session");
@@ -3642,18 +3738,60 @@ pub const Store = struct {
                 count += 1;
             }
         }
+        var shown: [protocol.session_list_page_size][]const u8 = undefined;
+        for (references[0..count], 0..) |*reference, index| shown[index] = reference.slice();
+        try self.appendSessionRows(shown[0..count], capture);
+        var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+        const since = (protocol.SinceToken{ .instance = self.instance, .generation = generation }).format(&token);
+        if (more)
+            try capture.appendShape(protocol.session_list_reply.full_tail, .{ protocol.ListDelta.full, since, last, ceiling })
+        else
+            try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, since });
+        std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
+    }
+
+    /// The Sessions in scope that the hint says changed in (since, through],
+    /// in ID order, eight per page. A Session it names may be unchanged, or
+    /// outside the scope; one it omits did not change.
+    fn renderChangedSessionsLocked(self: *Store, request: protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
+        var references: [protocol.session_list_page_size + 1]change_ring.Id = undefined;
+        var count: usize = 0;
+        var after: ?change_ring.Id = if (request.changed) |changed| changed.after_reference else null;
+        var batch: [16]change_ring.Id = undefined;
+        scan: while (true) {
+            const ids = self.changes.changed(since, through, if (after) |*id| id else null, &batch);
+            for (ids) |*id| {
+                after = id.*;
+                // A touched creation may have rolled back.
+                const current = try self.readSession(id) orelse continue;
+                if (request.workspace) |*workspace| if (!current.workspace.eql(workspace.slice())) continue;
+                references[count] = id.*;
+                count += 1;
+                if (count == references.len) break :scan;
+            }
+            if (ids.len < batch.len) break;
+        }
+        var shown: [protocol.session_list_page_size][]const u8 = undefined;
+        for (references[0..@min(count, shown.len)], 0..) |*id, index| shown[index] = id;
+        try self.appendSessionRows(shown[0..@min(count, shown.len)], capture);
+        var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+        const next = (protocol.SinceToken{ .instance = self.instance, .generation = through }).format(&token);
+        if (count > shown.len)
+            try capture.appendShape(protocol.session_list_reply.changed_tail, .{ protocol.ListDelta.changed, next, through, &references[shown.len - 1] })
+        else
+            try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.changed, next });
+        std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
+    }
+
+    /// The page head and its rows, each read fresh under this lock.
+    fn appendSessionRows(self: *Store, references: []const []const u8, capture: *SessionReportCapture) !void {
         const now_ms = try readUnixMilliseconds(self.io);
         try capture.appendShape(protocol.session_list_reply.head, .{});
-        for (references[0..count], 0..) |*reference, index| {
+        for (references, 0..) |reference, index| {
             if (index != 0) try capture.append(",");
-            const row = try self.readSessionRowLocked(reference.slice(), now_ms);
+            const row = try self.readSessionRowLocked(reference, now_ms);
             try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow }}, .{&row});
         }
-        if (more)
-            try capture.appendShape(protocol.session_list_reply.next_tail, .{ last, ceiling })
-        else
-            try capture.appendShape(protocol.session_list_reply.last_tail, .{});
-        std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
     }
 
     /// One list row: the Session's settings, then a fixed number of seeks
@@ -4943,14 +5081,13 @@ pub const Store = struct {
         const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try self.cached(
             "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=unixepoch(),bash_timeout_ms=?2,sender_handle=?3 " ++
-                "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+                "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 RETURNING session_ref",
         );
         defer resetCached(update);
         try bindI64(update, 1, action_id);
         try bindU64(update, 2, selected_timeout_ms);
         try bindText(update, 3, &sender_handle);
-        try expectDone(update);
-        if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+        if (try self.stepTouching(update) != 1) return error.ActionSelectionChanged;
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
         try self.execute("COMMIT");
         return .{ .permit = .{ .binding = .{
@@ -5008,11 +5145,11 @@ pub const Store = struct {
     }
 
     fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
-        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql);
+        const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql ++ " RETURNING session_ref");
         defer resetCached(statement);
         try bindU64(statement, 1, binding.action_id);
         try bindU64(statement, 2, binding.parent_operation_id);
-        try expectDone(statement);
+        _ = try self.stepTouching(statement);
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
@@ -5365,6 +5502,7 @@ pub const Store = struct {
         }
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session_ref);
+        self.touch(session_ref.slice());
         const first_admission = c.sqlite3_column_int64(select, 1);
         const cutoff = c.sqlite3_column_int64(select, 2);
         var selected = c.sqlite3_column_int64(select, 3);
@@ -5576,7 +5714,7 @@ pub const Store = struct {
         const update = try self.cached(
             "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=unixepoch(),retry_scheduled_at=NULL " ++
                 "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
-                "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
+                "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5 RETURNING session_ref",
         );
         defer resetCached(update);
         try bindU64(update, 1, current.operation_id);
@@ -5584,8 +5722,7 @@ pub const Store = struct {
         try bindU64(update, 3, current.turn_id);
         try bindU64(update, 4, current.attempt_ordinal);
         try bindI64(update, 5, snapshot_ms);
-        try expectDone(update);
-        if (c.sqlite3_changes(self.database) != 1) {
+        if (try self.stepTouching(update) != 1) {
             try self.execute("ROLLBACK");
             return null;
         }
@@ -5651,7 +5788,7 @@ pub const Store = struct {
 
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
         const statement = try self.cached(
-            "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
+            "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key,session_ref " ++
                 "FROM model_operation WHERE operation_id=?1",
         );
         defer resetCached(statement);
@@ -5659,6 +5796,10 @@ pub const Store = struct {
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
         if (step != c.SQLITE_ROW) return error.OperationReadFailed;
+        // Every write that settles this Attempt changes its Session.
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 4, &session);
+        self.touch(session.slice());
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
             return error.StaleAttemptBinding;
@@ -7396,6 +7537,7 @@ pub const Store = struct {
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
+        self.touch(session_ref);
         const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
@@ -7405,6 +7547,7 @@ pub const Store = struct {
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
+        self.touch(session_ref);
         const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
@@ -7512,6 +7655,8 @@ pub const Store = struct {
     /// consecutive positions and returns the first. Called only inside the
     /// owning write transaction; no separate frontier.
     fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
+        // Every activity row claims here, so every writer of one touches.
+        self.touch(session);
         if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
         const statement = try self.cached("UPDATE session SET next_position=next_position+?2 " ++
             "WHERE session_ref=?1 AND next_position<=9223372036854775807-?2 RETURNING next_position-?2");
@@ -8255,6 +8400,45 @@ fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
     var prior: c_int = 0;
     if (c.sqlite3_db_config(database, operation, value, &prior) != c.SQLITE_OK) {
         return error.SqliteConfigurationFailed;
+    }
+}
+
+/// Test builds: a temporary trigger on each table that carries a Session
+/// notes every Session whose rows change, for `untouchedForTesting`.
+/// It precedes every cached statement, so none re-prepares.
+fn createTouchOracleForTesting(database: *c.sqlite3) !void {
+    if (!@import("builtin").is_test) @compileError("test-only oracle");
+    try setLimit(database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 1);
+    try exec(database, "CREATE TEMP TABLE touched_oracle(session_ref TEXT)");
+    // Each table that carries a Session: the columns naming the Sessions a
+    // new or removed row changes, then those an updated row changes. An
+    // admission's sender, position, content and time are written once, so
+    // an update changes only its recipient.
+    const owners = .{
+        .{ "session", .{"session_ref"}, .{"session_ref"} },
+        .{ "session_revision", .{"session_ref"}, .{"session_ref"} },
+        .{ "message_admission", .{ "session_ref", "sender_session_ref" }, .{"session_ref"} },
+        .{ "sent_rejection", .{"sender_session_ref"}, .{"sender_session_ref"} },
+        .{ "turn", .{"session_ref"}, .{"session_ref"} },
+        .{ "session_stop", .{"session_ref"}, .{"session_ref"} },
+        .{ "model_operation", .{"session_ref"}, .{"session_ref"} },
+        .{ "action_operation", .{"session_ref"}, .{"session_ref"} },
+        .{ "conversation_entry", .{"session_ref"}, .{"session_ref"} },
+        .{ "model_output_item", .{"session_ref"}, .{"session_ref"} },
+    };
+    inline for (owners) |owner| {
+        inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
+            const body = comptime blk: {
+                var text: []const u8 = "";
+                const columns = if (std.mem.eql(u8, event, "UPDATE")) owner[2] else owner[1];
+                for (columns) |column| {
+                    if (!std.mem.eql(u8, event, "DELETE")) text = text ++ "INSERT INTO touched_oracle VALUES(NEW." ++ column ++ ");";
+                    if (!std.mem.eql(u8, event, "INSERT")) text = text ++ "INSERT INTO touched_oracle VALUES(OLD." ++ column ++ ");";
+                }
+                break :blk text;
+            };
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ owner[0], event, event, owner[0], body }));
+        }
     }
 }
 
@@ -9129,7 +9313,11 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     try std.testing.expect(storage.configure(&unrelated, true, .{}) == .rejected);
     const empty = try testingSessionList(&storage, &tmp, .{}, &used, 1);
     defer std.testing.allocator.free(empty);
-    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}", empty);
+    // A full listing's token is this opening's current generation.
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
+    var expected_empty: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -9217,6 +9405,186 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     try std.testing.expect(!storage.isFenced());
 }
 
+/// One list page as a client reads it, and the request that continues it.
+const TestingListing = struct {
+    delta: protocol.ListDelta,
+    since: protocol.SinceToken,
+    references: [protocol.session_list_page_size]change_ring.Id = undefined,
+    count: usize = 0,
+    next: ?protocol.ListSessions = null,
+
+    fn read(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions) !TestingListing {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try testingSessionList(storage, tmp, request, &used, 1);
+        defer std.testing.allocator.free(bytes);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        var result: TestingListing = .{
+            .delta = std.meta.stringToEnum(protocol.ListDelta, object.get("delta").?.string).?,
+            .since = try protocol.SinceToken.parse(object.get("since").?.string),
+        };
+        for (object.get("sessions").?.array.items) |row| {
+            result.references[result.count] = row.object.get("reference").?.string[0..protocol.session_id_bytes].*;
+            result.count += 1;
+        }
+        if (object.get("next").? == .object) {
+            const next = object.get("next").?.object;
+            var continued: protocol.ListSessions = .{ .workspace = request.workspace };
+            if (next.get("through")) |through| {
+                continued.since = request.since;
+                continued.changed = .{ .through = try std.fmt.parseInt(u64, through.string, 10), .after_reference = next.get("after_reference").?.string[0..protocol.session_id_bytes].* };
+            } else {
+                continued.after = try std.fmt.parseInt(u64, next.get("after").?.string, 10);
+                continued.ceiling = try std.fmt.parseInt(u64, next.get("ceiling").?.string, 10);
+            }
+            result.next = continued;
+        }
+        return result;
+    }
+
+    fn expectReferences(self: *const TestingListing, expected: []const change_ring.Id) !void {
+        try std.testing.expectEqual(expected.len, self.count);
+        for (expected, self.references[0..self.count]) |*want, *got| try std.testing.expectEqualStrings(want, got);
+    }
+};
+
+test "a since listing answers only the Sessions changed since its token, or everything" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var nested = try tmp.dir.createDirPathOpen(std.testing.io, "other", .{});
+    defer nested.close(std.testing.io);
+    var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const other = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+    var commands: u64 = 0;
+    const Change = struct {
+        /// Creates a Session, or relabels one: a new revision each time.
+        fn configure(store: *Store, count: *u64, session: []const u8, place: []const u8) !change_ring.Id {
+            count.* += 1;
+            var key: [32]u8 = undefined;
+            var command = try completeConfiguration(try std.fmt.bufPrint(&key, "since-{d}", .{count.*}), session, place, "model");
+            command.configuration.label.state = .value;
+            try command.configuration.label.value.set(try std.fmt.bufPrint(&key, "Label {d}", .{count.*}));
+            const configured = store.configure(&command, true, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
+        }
+    };
+    var ids: [12]change_ring.Id = undefined;
+    for (&ids) |*id| id.* = try Change.configure(&storage, &commands, "", workspace);
+    const elsewhere = try Change.configure(&storage, &commands, "", other);
+    var scope: protocol.ListSessions = .{ .workspace = .{} };
+    try scope.workspace.?.set(workspace);
+
+    // A full listing's token is the generation it read under.
+    const full = try TestingListing.read(&storage, &tmp, scope);
+    try std.testing.expectEqual(protocol.ListDelta.full, full.delta);
+    try std.testing.expectEqualSlices(u8, &storage.instance, &full.since.instance);
+    try std.testing.expectEqual(storage.commit_generation.load(.acquire), full.since.generation);
+    try std.testing.expect(storage.notModified(full.since));
+    var since = scope;
+    since.since = full.since;
+    try (try TestingListing.read(&storage, &tmp, since)).expectReferences(&.{});
+
+    // Only what changed, read fresh, in ID order; the token moves to now.
+    const changed_pair = [_]change_ring.Id{ ids[3], ids[10] };
+    _ = try Change.configure(&storage, &commands, &ids[10], workspace);
+    _ = try Change.configure(&storage, &commands, &ids[3], workspace);
+    try std.testing.expect(!storage.notModified(full.since));
+    var sorted_pair = changed_pair;
+    std.mem.sort(change_ring.Id, &sorted_pair, {}, testingIdLess);
+    const pair = try TestingListing.read(&storage, &tmp, since);
+    try std.testing.expectEqual(protocol.ListDelta.changed, pair.delta);
+    try pair.expectReferences(&sorted_pair);
+    try std.testing.expectEqual(storage.commit_generation.load(.acquire), pair.since.generation);
+    try std.testing.expect(storage.notModified(pair.since));
+    // Another opening's token, even at this generation, gets everything.
+    var stranger = since;
+    stranger.since.?.instance[0] ^= 1;
+    stranger.since.?.generation = pair.since.generation;
+    try std.testing.expect(!storage.notModified(stranger.since.?));
+    try std.testing.expectEqual(protocol.ListDelta.full, (try TestingListing.read(&storage, &tmp, stranger)).delta);
+
+    // The request's Workspace scopes the changes.
+    _ = try Change.configure(&storage, &commands, &elsewhere, other);
+    since.since = pair.since;
+    try (try TestingListing.read(&storage, &tmp, since)).expectReferences(&.{});
+    try (try TestingListing.read(&storage, &tmp, .{ .since = pair.since })).expectReferences(&.{elsewhere});
+
+    // Eight per page; a continuation answers through the first page's
+    // generation, so a commit between pages waits for the next token.
+    since.since = (try TestingListing.read(&storage, &tmp, since)).since;
+    for (ids) |id| _ = try Change.configure(&storage, &commands, &id, workspace);
+    var all = ids;
+    std.mem.sort(change_ring.Id, &all, {}, testingIdLess);
+    const first = try TestingListing.read(&storage, &tmp, since);
+    try first.expectReferences(all[0..8]);
+    try std.testing.expectEqual(first.since.generation, first.next.?.changed.?.through);
+    _ = try Change.configure(&storage, &commands, &all[0], workspace);
+    const rest = try TestingListing.read(&storage, &tmp, first.next.?);
+    try std.testing.expectEqual(protocol.ListDelta.changed, rest.delta);
+    try rest.expectReferences(all[8..]);
+    try std.testing.expect(rest.next == null);
+    try std.testing.expectEqual(first.since.generation, rest.since.generation);
+    since.since = rest.since;
+    try (try TestingListing.read(&storage, &tmp, since)).expectReferences(&.{all[0]});
+
+    // Once the hint forgets a change after the token, the answer is the
+    // ordinary traversal, and so is a changed continuation that was
+    // overtaken.
+    var filler: change_ring.Touched = .{};
+    filler.add(&elsewhere);
+    for (0..change_ring.capacity) |_| storage.changes.record(storage.commit_generation.load(.acquire), &filler);
+    _ = try Change.configure(&storage, &commands, &ids[0], workspace);
+    for ([_]protocol.ListSessions{ since, first.next.? }) |request| {
+        const restarted = try TestingListing.read(&storage, &tmp, request);
+        try std.testing.expectEqual(protocol.ListDelta.full, restarted.delta);
+        try std.testing.expectEqual(@as(usize, 8), restarted.count);
+        try std.testing.expect(restarted.next.?.since == null and restarted.next.?.after != 0);
+        try std.testing.expectEqual(storage.commit_generation.load(.acquire), restarted.since.generation);
+    }
+    // A fenced Store never answers unchanged, so the read reports the failure.
+    const now: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+    try std.testing.expect(storage.notModified(now));
+    try std.testing.expectEqual(error.SqliteExecFailed, storage.fence(error.SqliteExecFailed));
+    try std.testing.expect(!storage.notModified(now));
+}
+
+fn testingIdLess(_: void, left: change_ring.Id, right: change_ring.Id) bool {
+    return std.mem.order(u8, &left, &right) == .lt;
+}
+
+test "the touch oracle names a Session whose rows changed without a touch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    var command = try completeConfiguration("oracle", "", root[0..try tmp.dir.realPath(std.testing.io, &root)], "model");
+    const configured = storage.configure(&command, true, .{});
+    const session = configured.accepted.session.slice();
+    const generation = storage.commit_generation.load(.acquire);
+    {
+        const access = try storage.enter(.none);
+        defer access.release();
+        try std.testing.expect(storage.untouchedForTesting() == null);
+        // A writer that forgets its touch.
+        var sql: [96]u8 = undefined;
+        try exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE session SET label='forgot' WHERE session_ref='{s}'", .{session}, 0));
+        try std.testing.expectEqualStrings(session, &storage.untouchedForTesting().?);
+        storage.touch(session);
+        try std.testing.expect(storage.untouchedForTesting() == null);
+    }
+    // The touched write is recorded under the generation it advanced to.
+    try std.testing.expectEqual(generation + 1, storage.commit_generation.load(.acquire));
+    var out: [1]change_ring.Id = undefined;
+    try std.testing.expectEqualStrings(session, &storage.changes.changed(generation, generation + 1, null, &out)[0]);
+}
+
 test "Session list capture and cursor storage stay page bounded as dormant Sessions grow" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9237,7 +9605,8 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
             var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
             defer parsed.deinit();
             try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), parsed.value.object.get("sessions").?.array.items.len);
-            if (i == 99) first_length = bytes.len else try std.testing.expect(bytes.len <= first_length + 1);
+            // Only the ceiling and the token's generation gain a digit.
+            if (i == 99) first_length = bytes.len else try std.testing.expect(bytes.len <= first_length + 2);
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         }
     }

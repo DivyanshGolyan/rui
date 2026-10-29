@@ -771,11 +771,15 @@ def concurrent_peers():
             refused = run(installed, *args, home=home, expect=1, input="must not run" if kind == "send" else None)
             assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "unknown_session", refused
             assert run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home) == missing_before
-            assert run(installed, "session", "list", "--store", store, "--all", home=home) == listing
+            # The saved refusal is a commit, so only the listing's token moves.
+            assert run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"] == listing["sessions"]
         updated = run(installed, "session", "configure", "--store", store, "--session", parent,
                       "--permission-mode", "bypass", home=home)
         assert allocated(updated) == parent, updated
-        assert run(installed, "session", "list", "--store", store, "--all", home=home) == listing
+        # It is the parent's next revision and changes no other row.
+        expected = [{**row, "revision": str(int(row["revision"]) + 1)} if row["reference"] == parent else row
+                    for row in listing["sessions"]]
+        assert run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"] == expected
         assert all(address_of(request) != unknown for request in endpoint.requests), endpoint.requests
         print("ten concurrent allocated peers passed: each started and reported by bare ID through Rui Bash; "
               "all senders, Action outcomes and original results checked; guessed send/configure fail without creation or work")

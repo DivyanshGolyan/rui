@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -29,6 +30,13 @@ def exchange(socket_path, route, request):
     head, payload = b"".join(chunks).split(b"\r\n\r\n", 1)
     assert int(next(line.split(b": ", 1)[1] for line in head.split(b"\r\n") if line.startswith(b"Content-Length: "))) == len(payload)
     return int(head.split(b" ", 2)[1]), json.loads(payload)
+
+
+def assert_empty_full(page):
+    """A first listing of a Store with no Sessions: everything, which is nothing."""
+    assert {key: value for key, value in page.items() if key != "since"} == {
+        "version": "1", "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
+    assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", page["since"]), page
 
 
 def linux_resources(pid):
@@ -155,10 +163,11 @@ def main():
                 return 200, json.loads(result.stdout)
 
             initial = listing()
-            assert initial == (200, {"version": "1", "type": "session_list", "sessions": [], "next": None}), initial
+            assert initial[0] == 200, initial
+            assert_empty_full(initial[1])
             baseline = released_resources(process.pid, diagnostics, latest_invocation)
             # A rejected configuration creates a request fact but no Session.
-            def configure(key, reference, workspace, complete=True, model="gpt-6-sol"):
+            def configure(key, reference, workspace, complete=True, model="gpt-6-sol", label=None):
                 config = {
                     "workspace": {"state": "value", "value": workspace} if complete else {"state": "omitted"},
                     "provider": {"state": "value", "value": "codex"},
@@ -168,6 +177,8 @@ def main():
                     "permission_mode": {"state": "omitted"},
                     "output_schema": {"state": "omitted"},
                 }
+                if label is not None:
+                    config["label"] = {"state": "value", "value": label}
                 return exchange(address, "configure", {**base("configure"), "key": key, "session": reference, "configuration": config})
 
             def create(key, workspace, model="gpt-6-sol"):
@@ -217,6 +228,27 @@ def main():
             assert "Bash runs without approval" not in all_workspaces.stdout
             assert [row["permission_mode"] for row in all_list["sessions"]] == ["bypass"] * 11, all_list
             assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + [later]), all_list
+            # --since answers nothing new, only what changed, or everything.
+            assert current_list["delta"] == "full" and all_list["delta"] == "full", all_list
+            def since_listing(token):
+                result = subprocess.run([binary, "session", "list", "--store", store, "--all", "--since", token],
+                    cwd=root, capture_output=True, text=True, timeout=10)
+                assert result.returncode == 0, result.stderr
+                return json.loads(result.stdout)
+            token = all_list["since"]
+            assert since_listing(token) == {"version": "1", "type": "session_list", "sessions": [],
+                "delta": "not_modified", "since": token, "next": None}
+            assert configure("since-label", later, str(root), label="Watched")[1]["answer"]["status"] == "accepted"
+            changed = since_listing(token)
+            assert changed["delta"] == "changed" and changed["since"] != token, changed
+            assert [(row["reference"], row["label"]) for row in changed["sessions"]] == [(later, "Watched")], changed
+            assert since_listing(changed["since"])["delta"] == "not_modified"
+            # Another Host's token (this one never issued it) lists everything.
+            everything = since_listing("0" * 32 + "." + token.split(".")[1])
+            assert everything["delta"] == "full" and len(everything["sessions"]) == 11, everything
+            refused = subprocess.run([binary, "session", "list", "--store", store, "--since", "nope"],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            assert refused.returncode != 0 and refused.stdout == "" and "--since" in refused.stderr, refused
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
             # IDs cannot carry controls; retain the escaped-string round trip in
             # the caller-controlled model, associated with its allocated Session.

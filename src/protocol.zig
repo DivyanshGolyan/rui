@@ -411,7 +411,29 @@ pub const ListSessions = struct {
     // Zero/zero begins a traversal. A continuation carries both values.
     after: u64 = 0,
     ceiling: u64 = 0,
+    /// A token from an earlier reply: answer only what changed since it.
+    since: ?SinceToken = null,
+    /// A changed continuation: the first page's generation, and the last
+    /// Session the previous page gave.
+    changed: ?ChangedCursor = null,
+
+    pub const ChangedCursor = struct { through: u64, after_reference: change_ring.Id };
+
+    pub fn validate(self: *const ListSessions) error{InvalidCursor}!void {
+        if (self.after > std.math.maxInt(i64) or self.ceiling > std.math.maxInt(i64) or
+            (self.after == 0 and self.ceiling != 0) or
+            (self.after != 0 and self.after > self.ceiling)) return error.InvalidCursor;
+        // A full continuation needs no token; a changed one needs its own.
+        if (self.since != null and self.after != 0) return error.InvalidCursor;
+        if (self.changed) |changed| {
+            const since = self.since orelse return error.InvalidCursor;
+            if (changed.through < since.generation or !validSessionId(&changed.after_reference)) return error.InvalidCursor;
+        }
+    }
 };
+
+/// What a list reply answers relative to its request's `since`.
+pub const ListDelta = enum { not_modified, changed, full };
 
 // Positions are immutable within a Session. The zero end/cursor requests the
 // first (newest) page; subsequent requests carry the returned fixed end.
@@ -632,6 +654,9 @@ pub const CallActivity = struct {
 
 pub const session_work = @import("session_work.zig");
 pub const WorkState = session_work.WorkState;
+pub const change_ring = @import("change_ring.zig");
+/// A list reply's opaque change token.
+pub const SinceToken = change_ring.Token;
 
 comptime {
     std.debug.assert(session_work.max_code_bytes == max_code_bytes);
@@ -800,13 +825,19 @@ pub const SessionRow = struct {
     }
 };
 
-/// A `list-sessions` reply: up to eight rows, then the continuation.
+/// A `list-sessions` reply: up to eight rows, what they answer relative to
+/// the request's `since`, the next token, then the continuation.
 pub const session_list_reply = struct {
     pub const head = .{"{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":["};
-    /// Holes: after, ceiling.
-    pub const next_tail = .{ "],\"next\":{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
-    pub const last_tail = .{"],\"next\":null}"};
-    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ next_tail, last_tail });
+    /// Holes: delta, token.
+    const facts = .{ "],\"delta\":\"", Hole{ .tag = ListDelta }, "\",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"next\":" };
+    /// Holes: delta, token, after, ceiling.
+    pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
+    /// Holes: delta, token, through, after reference.
+    pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
+    /// Holes: delta, token.
+    pub const last_tail = facts ++ .{"null}"};
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
 };
 
 pub const ActivityFacts = struct {
@@ -1523,9 +1554,23 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("ceiling");
         request.ceiling = try self.readCanonicalU64();
-        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
-            (request.after == 0 and request.ceiling != 0) or
-            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        if (try self.consumeIf(',')) {
+            try self.expectKey("since");
+            var token: Bounded(SinceToken.max_bytes) = .{};
+            try self.readSmallString(&token);
+            request.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
+            if (try self.consumeIf(',')) {
+                try self.expectKey("through");
+                const through = try self.readCanonicalU64();
+                try self.expectByte(',');
+                try self.expectKey("after_reference");
+                var reference: Bounded(session_id_bytes) = .{};
+                try self.readSmallString(&reference);
+                if (reference.len != session_id_bytes) return error.InvalidCursor;
+                request.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
+            }
+        }
+        try request.validate();
         return request;
     }
 
@@ -2191,8 +2236,13 @@ pub const inspect_session_request = struct {
     pub const failed_response = .{ "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
     pub const max_bytes = maxShapeBytes(.{ current, full, failed_response });
 };
-/// Holes: Store, workspace, after, ceiling.
-pub const list_sessions_request = .{ "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Workspace, after, ceiling.
+const list_sessions_head = .{ "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
+pub const list_sessions_request = list_sessions_head ++ .{"}"};
+/// Hole: the token, after the head's.
+pub const list_sessions_since_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"}" };
+/// Holes: the token, through, after reference, after the head's.
+pub const list_sessions_changed_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}" };
 /// Holes: Store, Session, Action.
 pub const read_action_arguments_request = .{ "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, Action.
@@ -2241,7 +2291,7 @@ pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
-pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request);
+pub const max_list_sessions_request_bytes = maxShapeBytes(.{ list_sessions_request, list_sessions_since_request, list_sessions_changed_request });
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
@@ -2253,10 +2303,10 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,     host_info_request,            host_stop_request,
-    read_result_request,         list_sessions_request,        read_action_arguments_request,
-    read_action_call_id_request, conversation_content_request, conversation_page_request,
-    proposal_page_request,       proposal_field_request,       activity_page_request,
+    observe_command_request,     host_info_request,             host_stop_request,
+    read_result_request,         list_sessions_changed_request, read_action_arguments_request,
+    read_action_call_id_request, conversation_content_request,  conversation_page_request,
+    proposal_page_request,       proposal_field_request,        activity_page_request,
     activity_content_request,
 }));
 
@@ -3070,12 +3120,28 @@ test "Session inspection selects a closed report profile or exact failed respons
     }
 }
 
-test "Session listing wire distinguishes all, exact workspace, continuation and invalid cursor" {
-    const cases = [_]struct { json: []const u8, workspace: ?[]const u8, after: u64, ceiling: u64, valid: bool }{
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}", .workspace = null, .after = 0, .ceiling = 0, .valid = true },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12, .valid = true },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .workspace = null, .after = 0, .ceiling = 12, .valid = false },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .workspace = null, .after = 13, .ceiling = 12, .valid = false },
+test "Session listing wire distinguishes all, exact workspace, continuation, since and invalid cursor" {
+    const head = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
+    const since = ",\"since\":\"abababababababababababababababab.42\"";
+    const Case = struct { json: []const u8, workspace: ?[]const u8 = null, after: u64 = 0, ceiling: u64 = 0, since: ?u64 = null, through: ?u64 = null, failure: ?anyerror = null };
+    const cases = [_]Case{
+        .{ .json = head ++ "}" },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        // A token's first page, and a changed continuation through the
+        // first page's generation after the last reference it gave.
+        .{ .json = head ++ since ++ "}", .since = 42 },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 48 },
+        .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
+        // A full continuation carries no token; a changed one never ends
+        // before its token, and names a Session.
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2q\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"ABABABABABABABABABABABABABABABAB.42\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"abababababababababababababababab.042\"}", .failure = error.InvalidCursor },
     };
     for (cases) |case| {
         var source = SocketBody.init(-1, 0);
@@ -3090,12 +3156,18 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
             .request_number = 0,
             .retained_scratch = &retained,
         } };
-        if (case.valid) {
-            const request = (try parser.parse()).list_sessions;
-            try std.testing.expectEqual(case.after, request.after);
-            try std.testing.expectEqual(case.ceiling, request.ceiling);
-            if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
-        } else try std.testing.expectError(error.InvalidCursor, parser.parse());
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+            continue;
+        }
+        const request = (try parser.parse()).list_sessions;
+        try std.testing.expectEqual(case.after, request.after);
+        try std.testing.expectEqual(case.ceiling, request.ceiling);
+        if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
+        try std.testing.expectEqual(case.since, if (request.since) |token| token.generation else null);
+        if (request.since) |token| try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0xab)), &token.instance);
+        try std.testing.expectEqual(case.through, if (request.changed) |changed| changed.through else null);
+        if (request.changed) |changed| try std.testing.expectEqualStrings("k7m2qx", &changed.after_reference);
     }
 }
 

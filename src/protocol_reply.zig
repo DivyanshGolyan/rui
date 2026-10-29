@@ -965,13 +965,45 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
     };
 }
 
+/// The next `list-sessions` request: a full traversal's keyset, or a token
+/// and, for a changed continuation, where that answer resumes.
 pub const SessionListCursor = struct {
     after: u64 = 0,
     ceiling: u64 = 0,
+    since: ?protocol.SinceToken = null,
+    changed: ?protocol.ListSessions.ChangedCursor = null,
 
     pub fn validate(self: SessionListCursor) !void {
-        if (self.after > std.math.maxInt(i64) or self.ceiling > std.math.maxInt(i64) or
-            (self.after == 0 and self.ceiling != 0) or (self.after != 0 and self.after > self.ceiling)) return error.InvalidCursor;
+        const request: protocol.ListSessions = .{ .after = self.after, .ceiling = self.ceiling, .since = self.since, .changed = self.changed };
+        try request.validate();
+    }
+};
+
+/// One `session list` traversal: which request comes next, and what the
+/// pages read so far answer together relative to the traversal's `since`.
+/// A changed traversal that turns `full` restarts as that full traversal;
+/// rows it already gave stay valid and are replaced by reference.
+pub const SessionTraversal = struct {
+    cursor: SessionListCursor,
+    delta: protocol.ListDelta = .full,
+    /// The token to keep: the first page's, or the first `full` page's
+    /// after a restart. Each later page is read after it, so a commit it
+    /// misses can only reappear, never be lost.
+    since: ?protocol.SinceToken = null,
+
+    pub fn init(since: ?protocol.SinceToken) SessionTraversal {
+        return .{ .cursor = .{ .since = since } };
+    }
+
+    /// Takes the page the current cursor returned. Returns whether another
+    /// page follows; `cursor` is then its request.
+    pub fn advance(self: *SessionTraversal, page: *const SessionListPage) bool {
+        if (self.since == null or (self.delta != .full and page.delta == .full)) {
+            self.delta = page.delta;
+            self.since = page.since;
+        }
+        self.cursor = page.next orelse return false;
+        return true;
     }
 };
 
@@ -1065,6 +1097,8 @@ pub const SessionListPage = struct {
 
     rows: [protocol.session_list_page_size]Row = undefined,
     count: usize = 0,
+    delta: protocol.ListDelta = .full,
+    since: protocol.SinceToken = .{ .instance = @splat(0), .generation = 0 },
     next: ?SessionListCursor = null,
 
     /// Reads exactly [0, bytes) from caller-owned scratch, not its physical EOF.
@@ -1092,7 +1126,14 @@ pub const SessionListPage = struct {
             version: JsonString(8),
             type: JsonString(32),
             sessions: Rows,
-            next: ?struct { after: JsonString(20), ceiling: JsonString(20) },
+            delta: JsonEnum(protocol.ListDelta),
+            since: JsonString(protocol.SinceToken.max_bytes),
+            next: ?struct {
+                after: ?JsonString(20) = null,
+                ceiling: ?JsonString(20) = null,
+                through: ?JsonString(20) = null,
+                after_reference: ?JsonString(protocol.max_session_bytes) = null,
+            },
         };
         var input_buffer: [protocol.content_window_bytes]u8 = undefined;
         var file_reader = file.reader(io, &.{});
@@ -1107,18 +1148,56 @@ pub const SessionListPage = struct {
         // Underlying physical EOF can precede the limit even after valid JSON.
         if (body.remaining != .nothing) return error.InvalidSessionPage;
         if (!wire.version.eql("1") or !wire.type.eql("session_list")) return error.InvalidSessionPage;
-        var result: SessionListPage = .{ .rows = wire.sessions.rows, .count = wire.sessions.count };
-        if (cursor.after != 0 and cursor.after == cursor.ceiling and result.count != 0) return error.InvalidSessionPage;
+        var result: SessionListPage = .{
+            .rows = wire.sessions.rows,
+            .count = wire.sessions.count,
+            .delta = wire.delta.value,
+            .since = protocol.SinceToken.parse(wire.since.slice()) catch return error.InvalidSessionPage,
+        };
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (workspace) |scope| if (!row.workspace.eql(scope)) return error.InvalidSessionPage;
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
         }
-        if (wire.next) |next| {
-            const after = mutationId(next.after, false) catch return error.InvalidSessionPage;
-            const ceiling = mutationId(next.ceiling, false) catch return error.InvalidSessionPage;
-            if (result.count != protocol.session_list_page_size or after <= cursor.after or after >= ceiling or
-                ceiling > std.math.maxInt(i64) or (cursor.after != 0 and ceiling != cursor.ceiling)) return error.InvalidSessionPage;
-            result.next = .{ .after = after, .ceiling = ceiling };
+        switch (result.delta) {
+            // Only a token's own first page, echoing it, with nothing to read.
+            .not_modified => {
+                const since = cursor.since orelse return error.InvalidSessionPage;
+                if (cursor.changed != null or result.count != 0 or wire.next != null or
+                    !std.meta.eql(since, result.since)) return error.InvalidSessionPage;
+            },
+            // Rows after the cursor's reference in ID order, from this
+            // token's Host instance, answered through the first page's
+            // generation.
+            .changed => {
+                const since = cursor.since orelse return error.InvalidSessionPage;
+                if (!std.mem.eql(u8, &since.instance, &result.since.instance) or result.since.generation < since.generation) return error.InvalidSessionPage;
+                if (cursor.changed) |changed| if (result.since.generation != changed.through) return error.InvalidSessionPage;
+                for (result.rows[0..result.count], 0..) |*row, index| {
+                    const previous: ?[]const u8 = if (index != 0) result.rows[index - 1].reference.slice() else if (cursor.changed) |*changed| &changed.after_reference else null;
+                    if (previous) |reference| if (std.mem.order(u8, reference, row.reference.slice()) != .lt) return error.InvalidSessionPage;
+                }
+                if (wire.next) |next| {
+                    if (next.after != null or next.ceiling != null or result.count != protocol.session_list_page_size) return error.InvalidSessionPage;
+                    const through = mutationId(next.through orelse return error.InvalidSessionPage, true) catch return error.InvalidSessionPage;
+                    const reference = next.after_reference orelse return error.InvalidSessionPage;
+                    if (through != result.since.generation or !reference.eql(result.rows[result.count - 1].reference.slice())) return error.InvalidSessionPage;
+                    result.next = .{ .since = since, .changed = .{ .through = through, .after_reference = reference.value.bytes[0..protocol.session_id_bytes].* } };
+                }
+            },
+            // The ordinary traversal; a token-bearing request that gets it
+            // starts over at its first page.
+            .full => {
+                const keyset: SessionListCursor = if (cursor.since == null) cursor else .{};
+                if (keyset.after != 0 and keyset.after == keyset.ceiling and result.count != 0) return error.InvalidSessionPage;
+                if (wire.next) |next| {
+                    if (next.through != null or next.after_reference != null) return error.InvalidSessionPage;
+                    const after = mutationId(next.after orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    const ceiling = mutationId(next.ceiling orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    if (result.count != protocol.session_list_page_size or after <= keyset.after or after >= ceiling or
+                        ceiling > std.math.maxInt(i64) or (keyset.after != 0 and ceiling != keyset.ceiling)) return error.InvalidSessionPage;
+                    result.next = .{ .after = after, .ceiling = ceiling };
+                }
+            },
         }
         return result;
     }
@@ -1126,7 +1205,14 @@ pub const SessionListPage = struct {
     pub fn writeJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
         try self.writeRowsJson(writer);
-        if (self.next) |next| try writer.print("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling }) else try writer.writeAll("],\"next\":null}");
+        var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+        try writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":", .{ self.delta, self.since.format(&token) });
+        if (self.next) |next| {
+            if (next.changed) |changed|
+                try writer.print("{{\"through\":\"{d}\",\"after_reference\":\"{s}\"}}}}", .{ changed.through, &changed.after_reference })
+            else
+                try writer.print("{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling });
+        } else try writer.writeAll("null}");
     }
 
     /// Rows borrow this validated page. A caller may stream many bounded pages
@@ -2274,6 +2360,8 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
     try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
 }
 
+/// A full page's facts after its rows, up to `next`.
+const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 /// A list row's facts after its settings, for a Session no one has messaged.
 const testing_row_facts = ",\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
@@ -2294,7 +2382,7 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        facts ++ ",\"extra\":[null,{\"discard\":true}]}],\"next\":null,\"extra\":1}";
+        facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
     const page = &decoded.page;
@@ -2314,7 +2402,7 @@ test "Session list facts own complete rows and render semantic output after scra
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
     try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"label\":\"Review PR\"" ++ facts["\"label\":\"Review \\u0050R\"".len..] ++ "}],\"next\":null}", writer.buffered());
+        "\"label\":\"Review PR\"" ++ facts["\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -2340,7 +2428,7 @@ test "Session list byte range rejects zero instead of decoding an older page" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = 0 } }));
 }
@@ -2351,8 +2439,8 @@ test "Session list byte range reads a shorter overwritten prefix without changin
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const old = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}],\"next\":null}";
-    const current = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const old = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
+    const current = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, old, 0);
     try file.writePositionalAll(io, current, 0);
     const reply = try SessionListReply.decode(io, file, "/w", .{}, .{ .report = .{ .bytes = current.len } });
@@ -2374,7 +2462,7 @@ test "Session list byte range rejects physical EOF before promised completion" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 1 } }));
 }
@@ -2385,7 +2473,7 @@ test "Session list byte range rejects a promise excluding the final delimiter" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len - 1 } }));
 }
@@ -2396,7 +2484,7 @@ test "Session list byte range validates junk inside and ignores junk outside the
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire ++ "false", 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 5 } }));
     const reply = try SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len } });
@@ -2412,12 +2500,12 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     defer tmp.cleanup();
     const row = "{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
     inline for (.{
-        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
+        "{\"version\":\"1\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
         "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[]}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}false",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":{\"after\":\"7\",\"ceiling\":\"11\"}}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ row ++ "," ++ row ++ "],\"next\":null}",
+        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}false",
+        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "{\"after\":\"7\",\"ceiling\":\"11\"}}",
+        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ row ++ "," ++ row ++ testing_list_facts ++ "null}",
     }, 0..) |wire, index| {
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("page-{d}", .{index}), .{ .read = true });
         defer file.close(io);
@@ -2436,7 +2524,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     }, 0..) |suffix, index| {
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("row-{d}", .{index}), .{ .read = true });
         defer file.close(io);
-        const wire = prefix ++ suffix ++ testing_row_facts ++ "}],\"next\":null}";
+        const wire = prefix ++ suffix ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
@@ -2445,7 +2533,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     {
         const file = try tmp.dir.createFile(io, "facts-valid", .{ .read = true });
         defer file.close(io);
-        const wire = settings ++ testing_started_row_facts ++ "}],\"next\":null}";
+        const wire = settings ++ testing_started_row_facts ++ "}" ++ testing_list_facts ++ "null}";
         try file.writePositionalAll(io, wire, 0);
         const page = try SessionListPage.read(io, file, wire.len, null, .{});
         try std.testing.expectEqual(@as(?protocol.Peer, null), page.rows[0].first_message.?.sender);
@@ -2473,10 +2561,122 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         const facts = testing_started_row_facts;
         const at = std.mem.indexOf(u8, facts, case[0]).?;
         var buffer: [2048]u8 = undefined;
-        const wire = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}}}],\"next\":null}}", .{ settings, facts[0..at], case[1], facts[at + case[0].len ..] });
+        const wire = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}}}" ++ testing_list_facts ++ "null}}", .{ settings, facts[0..at], case[1], facts[at + case[0].len ..] });
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
+}
+
+/// A list page of rows named by `references`, then `facts`.
+fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+    for (references, 0..) |reference, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.print("{{\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.writeAll(testing_row_facts ++ "}");
+    }
+    try writer.writeAll(facts);
+    return writer.buffered();
+}
+
+test "a since reply answers its request's token: unchanged, changed rows in ID order, or a full restart" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
+    const asked: SessionListCursor = .{ .since = since };
+    const continued: SessionListCursor = .{ .since = since, .changed = .{ .through = 48, .after_reference = "c00000".* } };
+    const eight = [_][]const u8{ "d00000", "d00001", "d00002", "d00003", "d00004", "d00005", "d00006", "d00007" };
+    const Case = struct { cursor: SessionListCursor, references: []const []const u8, facts: []const u8, valid: bool };
+    const cases = [_]Case{
+        // Unchanged: the token's own first page echoes it, with nothing.
+        .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = true },
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
+        .{ .cursor = continued, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.43\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &.{"k7m2qx"}, .facts = "],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
+        // Changed: this instance, no earlier than the token, in ID order.
+        .{ .cursor = asked, .references = &.{ "a00000", "k7m2qx" }, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = true },
+        .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = true },
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &.{ "k7m2qx", "a00000" }, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.48\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &.{}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.41\",\"next\":null}", .valid = false },
+        // A changed continuation resumes after its reference, through the
+        // first page's generation.
+        .{ .cursor = continued, .references = &.{"d00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = true },
+        .{ .cursor = continued, .references = &.{"c00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":null}", .valid = false },
+        .{ .cursor = continued, .references = &.{"d00000"}, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.49\",\"next\":null}", .valid = false },
+        .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00007\"}}", .valid = true },
+        .{ .cursor = asked, .references = eight[0..7], .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00006\"}}", .valid = false },
+        .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"47\",\"after_reference\":\"d00007\"}}", .valid = false },
+        .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00006\"}}", .valid = false },
+        .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"after\":\"8\",\"ceiling\":\"20\"}}", .valid = false },
+        // Full: any instance, and a token's request starts the traversal over.
+        .{ .cursor = continued, .references = &eight, .facts = "],\"delta\":\"full\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3\",\"next\":{\"after\":\"8\",\"ceiling\":\"20\"}}", .valid = true },
+        .{ .cursor = asked, .references = &eight, .facts = "],\"delta\":\"full\",\"since\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3\",\"next\":{\"through\":\"3\",\"after_reference\":\"d00007\"}}", .valid = false },
+        // The facts themselves.
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"full\",\"next\":null}", .valid = false },
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"partial\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", .valid = false },
+        .{ .cursor = .{}, .references = &.{}, .facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab\",\"next\":null}", .valid = false },
+    };
+    var buffer: [8192]u8 = undefined;
+    for (cases) |case| {
+        const wire = try testingListPage(&buffer, case.references, case.facts);
+        try file.writePositionalAll(io, wire, 0);
+        if (!case.valid) {
+            try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, case.cursor));
+            continue;
+        }
+        const page = try SessionListPage.read(io, file, wire.len, null, case.cursor);
+        try std.testing.expectEqual(case.references.len, page.count);
+        var output: [8192]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try page.writeJson(&writer);
+        try std.testing.expectEqualStrings(wire, writer.buffered());
+    }
+    // A changed page's continuation names the token, its through and its last row.
+    const wire = try testingListPage(&buffer, &eight, "],\"delta\":\"changed\",\"since\":\"abababababababababababababababab.48\",\"next\":{\"through\":\"48\",\"after_reference\":\"d00007\"}}");
+    try file.writePositionalAll(io, wire, 0);
+    const changed = try SessionListPage.read(io, file, wire.len, null, asked);
+    try std.testing.expectEqualDeep(SessionListCursor{ .since = since, .changed = .{ .through = 48, .after_reference = "d00007".* } }, changed.next.?);
+    try changed.next.?.validate();
+}
+
+test "a traversal keeps its first page's token, and a changed one that turns full restarts" {
+    const first = try protocol.SinceToken.parse("abababababababababababababababab.42");
+    const later = try protocol.SinceToken.parse("abababababababababababababababab.50");
+    const other = try protocol.SinceToken.parse("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.3");
+    const changed_next: SessionListCursor = .{ .since = first, .changed = .{ .through = 48, .after_reference = "d00007".* } };
+    // A full listing's later pages are read after its first; its first token covers them.
+    var full = SessionTraversal.init(null);
+    try std.testing.expect(full.advance(&.{ .delta = .full, .since = first, .next = .{ .after = 8, .ceiling = 20 } }));
+    try std.testing.expectEqualDeep(SessionListCursor{ .after = 8, .ceiling = 20 }, full.cursor);
+    try std.testing.expect(!full.advance(&.{ .delta = .full, .since = later }));
+    try std.testing.expectEqual(protocol.ListDelta.full, full.delta);
+    try std.testing.expectEqualDeep(first, full.since.?);
+    // Changed pages continue through the first page's generation...
+    var traversal = SessionTraversal.init(first);
+    try std.testing.expectEqualDeep(SessionListCursor{ .since = first }, traversal.cursor);
+    const through = try protocol.SinceToken.parse("abababababababababababababababab.48");
+    try std.testing.expect(traversal.advance(&.{ .delta = .changed, .since = through, .next = changed_next }));
+    try std.testing.expectEqual(protocol.ListDelta.changed, traversal.delta);
+    try std.testing.expectEqualDeep(changed_next, traversal.cursor);
+    // ...until the hint stops covering the token: the traversal is then full, with the full traversal's token.
+    try std.testing.expect(traversal.advance(&.{ .delta = .full, .since = other, .next = .{ .after = 8, .ceiling = 20 } }));
+    try std.testing.expectEqual(protocol.ListDelta.full, traversal.delta);
+    try std.testing.expectEqualDeep(other, traversal.since.?);
+    try std.testing.expect(!traversal.advance(&.{ .delta = .full, .since = later }));
+    try std.testing.expectEqualDeep(other, traversal.since.?);
+    // Unchanged is one page.
+    var unchanged = SessionTraversal.init(first);
+    try std.testing.expect(!unchanged.advance(&.{ .delta = .not_modified, .since = first }));
+    try std.testing.expectEqual(protocol.ListDelta.not_modified, unchanged.delta);
+    try std.testing.expectEqualDeep(first, unchanged.since.?);
 }
 
 test "Session list terminal cursor accepts only empty rows without rejecting initial or continuing pages" {
@@ -2485,7 +2685,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
         const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
@@ -2493,7 +2693,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
         try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
     }
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = wire.len } }));
-    const empty = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    const empty = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, empty, 0);
     const reply = try SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = empty.len } });
     try std.testing.expectEqual(@as(usize, 0), reply.page.count);
@@ -2533,7 +2733,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try maximal.reference.set(&reference);
         try maximal.writeJson(writer);
     }
-    try writer.writeAll("],\"next\":{\"after\":\"19\",\"ceiling\":\"23\"}}");
+    try writer.writeAll(testing_list_facts ++ "{\"after\":\"19\",\"ceiling\":\"23\"}}");
     try writer.flush();
     const length = try file.length(io);
     try std.testing.expect(length > protocol.content_window_bytes);
@@ -2557,12 +2757,12 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 11, .ceiling = 29 }));
     // A next cursor needs a ninth row strictly beyond the eighth row's after.
-    const tail = "],\"next\":{\"after\":\"19\",\"ceiling\":\"23\"}}";
+    const tail = testing_list_facts ++ "{\"after\":\"19\",\"ceiling\":\"23\"}}";
     const prefix_length = length - tail.len;
-    try file.writePositionalAll(io, "],\"next\":{\"after\":\"23\",\"ceiling\":\"23\"}}", prefix_length);
+    try file.writePositionalAll(io, testing_list_facts ++ "{\"after\":\"23\",\"ceiling\":\"23\"}}", prefix_length);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = length } }));
     // Eight rows with no ninth row are valid, as is a terminal request probe.
-    const terminal = "],\"next\":null}";
+    const terminal = testing_list_facts ++ "null}";
     try file.writePositionalAll(io, terminal, prefix_length);
     const last = try SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = prefix_length + terminal.len } });
     try std.testing.expectEqual(@as(usize, 8), last.page.count);

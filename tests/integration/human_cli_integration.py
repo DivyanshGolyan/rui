@@ -2929,7 +2929,8 @@ def saved_capture_cases(state, store, workspace):
         recovered = json.loads(run(home, "request", "recover", rejected_handle, success=False))
         assert recovered["answer"] == {**rejected_answer, "replayed": True}, recovered
         assert rejected_record.read_bytes() == rejected_bytes
-        assert run(home, "session", "list", "--store", store, "--all") == sessions_before
+        # The saved rejection is a commit, so only the listing's token moves.
+        assert json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"] == json.loads(sessions_before)["sessions"]
 
     # Later capture faults update that same allocated Session, so /requests
     # must retain all of its recoverable configuration handles together.

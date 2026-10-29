@@ -36,6 +36,8 @@ RULES = (
      "Model retry waits and maximum; Store SQL and index text derive from them"),
     (("src/bounded.zig", "src/session_work.zig"), ("test-logic", "check"), ("test-logic", "test"),
      "Shared values and the Session work derivation; Store readers and wire encoders follow"),
+    (("src/change_ring.zig",), ("test-logic", "check"), ("test-logic", "test"),
+     "The Session change hint; the Store records into it and list pages read it"),
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),

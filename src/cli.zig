@@ -2424,12 +2424,12 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Requ
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?protocol_reply.SessionListCursor } {
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, first: bool, writer: *std.Io.Writer) !struct { count: usize, more: bool } {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const reply = try client.listSessions(init.io, store, workspace, traversal.cursor, file, &buffer);
+    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, traversal.cursor, reply);
     const page = switch (decoded) {
         .page => |*page| page,
         .failure => |failure| {
@@ -2443,10 +2443,19 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
     };
     if (!first and page.count != 0) try writer.writeByte(',');
     try page.writeRowsJson(writer);
-    return .{ .count = page.count, .next = page.next };
+    return .{ .count = page.count, .more = traversal.advance(page) };
+}
+
+/// A token from an earlier listing's `since`.
+fn sinceArgument(text: []const u8) error{InvalidSince}!protocol.SinceToken {
+    return protocol.SinceToken.parse(text) catch {
+        _ = @import("stderr.zig").write("rui: --since takes the since value of an earlier rui session list, unchanged.\n");
+        return error.InvalidSince;
+    };
 }
 
 fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const since = if (parsed.get("since")) |text| try sinceArgument(text) else null;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -2458,17 +2467,20 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     };
     // Bounded pages stream into one final JSON value; no page population is
     // retained. A failed later page leaves incomplete output and exits nonzero.
-    var cursor: protocol_reply.SessionListCursor = .{};
+    // A changed listing that turns full goes on as that full listing, so a
+    // reference may appear twice; the later row replaces the earlier.
+    var traversal = protocol_reply.SessionTraversal.init(since);
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
     var first = true;
     while (true) {
-        const page = try sessionPage(init, store, workspace, cursor, first, writer);
+        const page = try sessionPage(init, store, workspace, &traversal, first, writer);
         if (page.count != 0) first = false;
-        cursor = page.next orelse break;
+        if (!page.more) break;
     }
-    try writer.writeAll("],\"next\":null}\n");
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    try writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":null}}\n", .{ traversal.delta, traversal.since.?.format(&token) });
     try output.finish();
 }
 

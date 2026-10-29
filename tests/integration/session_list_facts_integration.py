@@ -39,6 +39,10 @@ def main():
                     page["version"] = "2"
                 elif mode == "cursor":
                     page["next"]["after"] = "0" + page["next"]["after"]
+                elif mode == "delta":
+                    # Changed rows answer a token; this listing sent none.
+                    assert page["delta"] == "full", page
+                    page["delta"] = "changed"
                 elif mode == "exhausted" and page["next"] is not None:
                     assert len(page["sessions"]) == 8 and int(page["next"]["after"]) < int(page["next"]["ceiling"]), page
                     page["next"]["after"] = page["next"]["ceiling"]
@@ -53,7 +57,7 @@ def main():
                 return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
                     b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                     + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
-            for mode in ("exhausted", "unknown", "scope", "version", "cursor", "duplicate", "failure"):
+            for mode in ("exhausted", "unknown", "scope", "version", "cursor", "delta", "duplicate", "failure"):
                 proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
                 try:
                     result = invoke("session", "list", "--store", store)

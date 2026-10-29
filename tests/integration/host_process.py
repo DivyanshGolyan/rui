@@ -54,7 +54,8 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # this is not whole-plan capacity or a guarantee against reader starvation.
 OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # Explicit finite native populations, not an execution-duration history.
-# list: 101 configuration + 37 list exchanges, two endpoints each.
+# list: 102 configuration + 42 list exchanges, two endpoints each. Five list
+# exchanges and one relabel are the `--since` cases.
 # status: 12 simultaneous clients + 40 repeated status calls + at most 20
 # setup/guard probes, three phases per connection, two boundaries and two Bash admissions.
 # stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
@@ -90,7 +91,7 @@ OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # bash_pipes: one held leader observation, one permission and one Session stop.
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
-OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
+OBSERVATION_LIMITS = {"list": 2 * (102 + 42), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 3 * 2 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,

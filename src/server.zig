@@ -1322,6 +1322,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
         },
         .list_sessions => |request_value| {
+            // Nothing changed since the token: answered from atomics, with no
+            // Store lock, scratch or SQLite.
+            if (request_value.since) |since| {
+                if (request_value.changed == null and host.store.notModified(since)) {
+                    var response: protocol.ResponseBuffer = .{};
+                    try renderSessionsNotModified(&response, since);
+                    return deliverResponse(host.io, fd, 200, response.slice());
+                }
+            }
             const page = host.store.captureSessionList(request_value, .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
@@ -1901,6 +1910,12 @@ fn renderHostInfo(
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
     try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, model, managed_authentication });
     std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+}
+
+/// Nothing changed since the token: it comes back, with no rows.
+fn renderSessionsNotModified(response: *protocol.ResponseBuffer, since: protocol.SinceToken) !void {
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
 }
 
 fn renderStatic(response: *protocol.ResponseBuffer, kind: protocol.ErrorType, code: []const u8) !void {
@@ -2743,6 +2758,23 @@ test "control response variants fit exact worst-case JSON bounds" {
         interruption_rejected,
         observationBytes(.model_interruption, .{ observation_shapes.code, observation_shapes.model_interruption }),
     );
+}
+
+test "an unchanged listing echoes its token with no rows, as a client reads it" {
+    const protocol_reply = @import("protocol_reply.zig");
+    const io = std.testing.io;
+    const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
+    var response: protocol.ResponseBuffer = .{};
+    try renderSessionsNotModified(&response, since);
+    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, response.slice(), 0);
+    const page = try protocol_reply.SessionListPage.read(io, file, response.len, null, .{ .since = since });
+    try std.testing.expectEqual(protocol.ListDelta.not_modified, page.delta);
+    try std.testing.expectEqual(@as(usize, 0), page.count);
 }
 
 test "every reply renders its exact worst-case bound from the shape it writes" {
