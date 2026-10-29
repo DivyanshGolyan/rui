@@ -535,7 +535,10 @@ pub const HistoricalView = struct {
     active_tool_group_after_ordinal: ?u64 = null,
     active_tool_group_count: u64 = 0,
     outputs_validated: bool = false,
-    coverage: ?Coverage = null,
+    output_frontier: ?u64 = null,
+    // The selected base's Operation, found with the frontier; zero for none.
+    selected_base: u64 = 0,
+    selected_coverage: ?Coverage = null,
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
@@ -554,17 +557,12 @@ pub const HistoricalView = struct {
 
     const entry_batch = 16;
 
-    /// The view's selected Compaction Base, decided once by its first
-    /// validation step. Accepted output is validated from the base's
-    /// admission position, and the base covers output before its anchor.
+    /// The view's selected Compaction Base: its admission position, from
+    /// which accepted output is validated, and the position of its
+    /// compaction item. Interpretation belongs to the caller.
     pub const Coverage = struct {
         frontier: u64,
         anchor: ?u64,
-
-        pub fn coversOutput(self: Coverage, position: u64) bool {
-            const anchor = self.anchor orelse return false;
-            return position < anchor;
-        }
     };
 
     // One population cursor and one private-item validator, independent of
@@ -631,17 +629,18 @@ pub const HistoricalView = struct {
         }
     }
 
-    /// Validated selected base position. Interpretation belongs to the caller.
-    pub fn contextAnchor(self: *HistoricalView) !?u64 {
+    /// The validated selected base. The first validation step finds it;
+    /// its anchor is read once, on the first call.
+    pub fn coverage(self: *HistoricalView) !Coverage {
         std.debug.assert(self.active);
         while (!try self.validateOutputsStep()) {}
-        return self.selectedCoverage().anchor;
-    }
-
-    /// The selected base's coverage. Known once output validation completes.
-    pub fn selectedCoverage(self: *const HistoricalView) Coverage {
-        std.debug.assert(self.active and self.outputs_validated);
-        return self.coverage.?;
+        if (self.selected_coverage) |value| return value;
+        const value: Coverage = .{
+            .frontier = self.output_frontier.?,
+            .anchor = if (self.selected_base == 0) null else try self.store.readCompactionAnchor(self.selected_base),
+        };
+        self.selected_coverage = value;
+        return value;
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -5466,40 +5465,42 @@ pub const Store = struct {
         return access.finish(Ordinary.none, self.validateHistoricalOutputsStepLocked(view));
     }
 
-    /// The newest compacted base admitted before the view's Operation, and
-    /// the position of its one compaction item, with the view's boundary.
-    fn readHistoricalCoverage(self: *Store, view: *HistoricalView) !HistoricalView.Coverage {
-        const boundary = try self.cached("SELECT current.admission_position,(SELECT base.operation_id " ++
-            "FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 " ++
-            "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1) " ++
-            "FROM model_operation current WHERE current.operation_id=?1");
-        defer resetCached(boundary);
-        try bindU64(boundary, 1, view.binding.operation_id);
-        if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
-        view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
-        if (c.sqlite3_column_type(boundary, 1) == c.SQLITE_NULL) return .{ .frontier = 0, .anchor = null };
-        const base_id = c.sqlite3_column_int64(boundary, 1);
-        const anchor = try self.cached("SELECT base.admission_position,anchor.session_position,anchor.content_id FROM model_operation base " ++
-            "JOIN model_output_item anchor INDEXED BY model_output_compaction_anchor ON anchor.operation_id=base.operation_id AND anchor.item_kind=4 " ++
-            "WHERE base.operation_id=?1 ORDER BY anchor.item_ordinal");
+    fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.readCompactionAnchorLocked(base_id));
+    }
+
+    /// The position of the base's one compaction item.
+    fn readCompactionAnchorLocked(self: *Store, base_id: u64) !u64 {
+        const anchor = try self.cached("SELECT session_position,content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
         defer resetCached(anchor);
-        try bindI64(anchor, 1, base_id);
+        try bindU64(anchor, 1, base_id);
         if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
-        const frontier = try readNullableTokens(anchor, 0, true) orelse return error.CorruptStore;
-        const position = c.sqlite3_column_int64(anchor, 1);
-        const content_id = c.sqlite3_column_int64(anchor, 2);
+        const position = c.sqlite3_column_int64(anchor, 0);
+        const content_id = c.sqlite3_column_int64(anchor, 1);
         if (position <= 0 or content_id <= 0) return error.CorruptStore;
         _ = try self.readContentMetadata(content_id);
         if (c.sqlite3_step(anchor) != c.SQLITE_DONE) return error.CorruptStore;
-        return .{ .frontier = frontier, .anchor = @intCast(position) };
+        return @intCast(position);
     }
 
     // Select the producing Operation before its items, so even a completely
     // missing output is detected. No statement or lock survives this one step.
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
         if (view.outputs_validated) return true;
-        if (view.coverage == null) {
-            view.coverage = try self.readHistoricalCoverage(view);
+        if (view.output_frontier == null) {
+            const boundary = try self.cached("SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) " ++
+                "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
+                "FROM model_operation selected INDEXED BY model_operation_compaction_bases WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
+                "AND " ++ resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1) " ++
+                "WHERE current.operation_id=?1");
+            defer resetCached(boundary);
+            try bindU64(boundary, 1, view.binding.operation_id);
+            if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
+            view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
+            view.selected_base = try readNullableTokens(boundary, 1, false) orelse 0;
+            view.output_frontier = try readNullableTokens(boundary, 2, true) orelse return error.CorruptStore;
             return false;
         }
         if (view.output_source == 0) {
@@ -5510,7 +5511,7 @@ pub const Store = struct {
                 "ORDER BY source.admission_position,source.operation_id LIMIT 1");
             defer resetCached(source);
             try bindU64(source, 1, view.binding.operation_id);
-            try bindU64(source, 2, view.coverage.?.frontier);
+            try bindU64(source, 2, view.output_frontier.?);
             try bindU64(source, 3, view.output_cursor);
             try bindU64(source, 4, view.output_boundary);
             try bindU64(source, 5, view.output_cursor_id);
@@ -10592,7 +10593,7 @@ test "compaction pressure uses provider usage appended input and complete call r
             var view = try storage.openHistoricalView(next);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
-            try std.testing.expect((try view.contextAnchor()) == null);
+            try std.testing.expect((try view.coverage()).anchor == null);
             try std.testing.expectEqual(HistoricalEntryKind.user, (try cursor.next(&view)).?.kind);
             for (0..2) |_| try std.testing.expectEqual(HistoricalEntryKind.provider_output, (try cursor.next(&view)).?.kind);
             try std.testing.expectEqual(HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
@@ -10615,7 +10616,7 @@ test "compaction pressure uses provider usage appended input and complete call r
             var view = try storage.openHistoricalView(successor);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
-            const anchor = (try view.contextAnchor()).?;
+            const anchor = (try view.coverage()).anchor.?;
             for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .tool_results }) |kind|
                 try std.testing.expectEqual(kind, (try cursor.next(&view)).?.kind);
             while (try view.nextToolResult()) |_| {}
@@ -17152,7 +17153,7 @@ test "compaction overflow admits a new Operation without losing applied input" {
     var view = try storage.openHistoricalView(next.permit.binding);
     defer view.close();
     try std.testing.expectEqual(ModelOperationKind.compaction, (try view.settings()).operation);
-    try std.testing.expect((try view.contextAnchor()) == null);
+    try std.testing.expect((try view.coverage()).anchor == null);
     const input = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
     try std.testing.expect((try view.nextEntry(input.position)) == null);
@@ -17265,7 +17266,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
         var view = try storage.openHistoricalView(successor);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
-        const anchor = (try view.contextAnchor()).?;
+        const anchor = (try view.coverage()).anchor.?;
         for ([_][]const u8{ "original", "{\"type\":\"reasoning\",\"id\":\"reasoning-0\"}", "{\"type\":\"compaction\",\"id\":\"compaction-1\",\"encrypted_content\":\"opaque\"}", "{\"type\":\"message\",\"id\":\"message-2\",\"content\":[]}", "later" }, 0..) |expected, index| {
             const entry = (try cursor.next(&view)).?;
             if (index == 2) try std.testing.expectEqual(anchor, entry.position);
@@ -17287,7 +17288,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
         var view = try storage.openHistoricalView(exhausted);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
-        const anchor = (try view.contextAnchor()).?;
+        const anchor = (try view.coverage()).anchor.?;
         for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user }) |kind|
             try std.testing.expectEqual(kind, (try cursor.next(&view)).?.kind);
         try std.testing.expectEqual(anchor, (try cursor.next(&view)).?.position);
@@ -17500,7 +17501,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expectEqual(ModelOperationKind.compaction, frozen.operation);
     try std.testing.expectEqual(@as(u64, 1), frozen.compaction_trigger);
     try std.testing.expectEqual(@as(u64, 1), frozen.output_reservation);
-    try std.testing.expect((try view.contextAnchor()) == null);
+    try std.testing.expect((try view.coverage()).anchor == null);
     const input = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
     try std.testing.expect((try view.nextEntry(input.position)) == null);
@@ -17522,7 +17523,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expectEqual(@as(u64, 999), settings.compaction_trigger);
     try std.testing.expectEqual(@as(u64, 8), settings.output_reservation);
     var cursor: TestingHistoryCursor = .{};
-    const anchor = (try later.contextAnchor()).?;
+    const anchor = (try later.coverage()).anchor.?;
     for ([_]HistoricalEntryKind{ .user, .provider_output, .user, .user, .instruction }) |kind| {
         const entry = (try cursor.next(&later)).?;
         try std.testing.expectEqual(kind, entry.kind);
@@ -17686,7 +17687,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
         var view = try storage.openHistoricalView(candidate);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
-        const anchor = (try view.contextAnchor()).?;
+        const anchor = (try view.coverage()).anchor.?;
         for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user }, 0..) |kind, index| {
             const entry = (try cursor.next(&view)).?;
             try std.testing.expectEqual(kind, entry.kind);
@@ -17703,7 +17704,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
     var view = try storage.openHistoricalView(next);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
-    const anchor = (try view.contextAnchor()).?;
+    const anchor = (try view.coverage()).anchor.?;
     for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user, .user }, 0..) |kind, index| {
         const entry = (try cursor.next(&view)).?;
         try std.testing.expectEqual(kind, entry.kind);
@@ -17738,9 +17739,9 @@ test "compaction selected newest base corruption fences rather than using an old
         var view = try storage.openHistoricalView(next);
         defer view.close();
         if (corruption != .payload) {
-            try std.testing.expectError(error.CorruptStore, view.contextAnchor());
+            try std.testing.expectError(error.CorruptStore, view.coverage());
         } else {
-            const anchor = (try view.contextAnchor()).?;
+            const anchor = (try view.coverage()).anchor.?;
             const selected = (try view.nextEntry(anchor - 1)).?;
             try std.testing.expectEqual(anchor, selected.position);
             var reader = try view.openContent(selected.content.?);
@@ -17813,7 +17814,7 @@ test "historical accepted output completeness and provenance fence both read pat
                 var view = try storage.openHistoricalView(next);
                 defer view.close();
                 if (context_read) {
-                    try std.testing.expectError(error.CorruptStore, view.contextAnchor());
+                    try std.testing.expectError(error.CorruptStore, view.coverage());
                 } else {
                     try std.testing.expectError(error.CorruptStore, view.nextEntry(0));
                 }
@@ -17979,7 +17980,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
             defer c.sqlite3_progress_handler(storage.database, 0, null, null);
             while (!try view.validateOutputsStep()) {}
-            try std.testing.expectEqual(with_base, (try view.contextAnchor()) != null);
+            try std.testing.expectEqual(with_base, (try view.coverage()).anchor != null);
             return measured.steps;
         }
     };

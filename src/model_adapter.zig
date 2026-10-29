@@ -1247,6 +1247,8 @@ pub const Preparation = struct {
             },
             .history_validation => {
                 if (!try self.view.validateOutputsStep()) return .pending;
+                // The selected base must be readable before any request byte.
+                _ = try self.view.coverage();
                 self.stage = .instructions;
                 return .{ .item = .settings };
             },
@@ -1262,7 +1264,7 @@ pub const Preparation = struct {
                 const memos = self.memos orelse return .pending;
                 self.span = .{ .start = self.writer.offset };
                 const memo = memos.held(self.settings.?.session.slice()) orelse return .pending;
-                const key = self.memoKey();
+                const key = try self.memoKey();
                 if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
                 try self.writer.flush();
                 const file = memos.open(self.writer.io, &memo) orelse return .pending;
@@ -1274,15 +1276,16 @@ pub const Preparation = struct {
                 const entry = switch (try self.view.nextEntryStep(self.history_position, bytes_left, items_left)) {
                     .pending => return .pending,
                     .ready => |entry| entry orelse {
-                        self.endSpan();
+                        try self.endSpan();
                         self.stage = .compaction_trigger;
                         return .pending;
                     },
                 };
                 self.history_position = entry.position;
-                // Codex keeps every host input the selected base covers and
-                // replays only the output after its anchor.
-                const covered = self.view.selectedCoverage().coversOutput(entry.position);
+                // The selected base replaces the output before its anchor;
+                // Codex keeps every host input it covers.
+                const anchor = (try self.view.coverage()).anchor;
+                const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
                     .user, .instruction => return .{ .item = .{ .message = entry } },
                     .tool_results => self.stage = if (covered) .covered_tool_results else .tool_results,
@@ -1323,11 +1326,11 @@ pub const Preparation = struct {
         return .pending;
     }
 
-    fn memoKey(self: *const Preparation) history_memo.Key {
+    fn memoKey(self: *Preparation) !history_memo.Key {
         return .{
             .session = self.settings.?.session,
             .model = self.settings.?.model,
-            .anchor = self.view.selectedCoverage().anchor,
+            .anchor = (try self.view.coverage()).anchor,
         };
     }
 
@@ -1394,10 +1397,10 @@ pub const Preparation = struct {
 
     /// The span ends after the last entry; keep it as this Session's next
     /// memo once the request seals.
-    fn endSpan(self: *Preparation) void {
+    fn endSpan(self: *Preparation) !void {
         const span = &(self.span orelse return);
         span.next = .{
-            .key = self.memoKey(),
+            .key = try self.memoKey(),
             .admission_position = self.view.admissionPosition(),
             .history_position = self.history_position,
             .tool_group_cursor = self.view.toolGroupCursor(),
