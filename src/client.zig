@@ -25,13 +25,14 @@ pub const Step = enum {
     }
 };
 
-/// A capture or send result that names the step a failure stopped in.
+/// A capture or send result that names the step a failure stopped in. A
+/// cancellation seen before any step begins names none.
 pub fn Attempt(comptime T: type) type {
     return union(enum) {
         done: T,
-        failed: struct { step: Step, err: anyerror },
+        failed: struct { step: ?Step, err: anyerror },
 
-        fn fail(step: Step, err: anyerror) @This() {
+        fn fail(step: ?Step, err: anyerror) @This() {
             return .{ .failed = .{ .step = step, .err = err } };
         }
 
@@ -87,7 +88,7 @@ pub const Requests = struct {
 
     pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) Attempt(protocol_reply.MutationReply) {
         reply_buffer.len = 0;
-        self.check() catch |err| return .fail(.store, err);
+        self.check() catch |err| return .fail(null, err);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
         const reply = switch (sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null)) {
             .done => |reply| reply,
@@ -781,10 +782,6 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !p
     return readCapturedIdentity(io, &file, handle);
 }
 
-pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) !protocol_reply.MutationReply {
-    return (Requests{ .io = io }).sendCaptured(captured, reply_buffer).get();
-}
-
 const CapturedText = struct {
     bytes: u64 = 0,
     digest: [32]u8 = undefined,
@@ -996,7 +993,7 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
-        if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
+        if (value.len > protocol.max_sqlite_content_bytes) return capture.failInput(.input_parse, error.ContentTooLarge);
         try capture.writeJsonString(value);
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
@@ -1252,7 +1249,7 @@ const Capture = struct {
         else
             std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| return self.failInput(read, err);
         defer if (!stdin) file.close(self.io);
-        self.write("\"") catch |err| return self.failInput(read, err);
+        try self.write("\"");
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var validator = Utf8Validator{};
         var decoded_bytes: u64 = 0;
@@ -2124,7 +2121,7 @@ fn testResend(io: std.Io, saved: SavedRecord) !protocol_reply.MutationReply {
     var record = try openCaptured(io, saved);
     defer record.close(io);
     var reply: ReplyBuffer = .{};
-    return sendCaptured(io, &record, &reply);
+    return (Requests{ .io = io }).sendCaptured(&record, &reply).get();
 }
 
 test "retry and generated recovery select captured mutations by kind" {
@@ -2226,7 +2223,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
         try std.testing.expectEqualStrings("message", saved.kind.slice());
         var reply: ReplyBuffer = .{};
-        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, &reply));
+        try std.testing.expectError(error.FileNotFound, (Requests{ .io = io }).sendCaptured(&generated, &reply).get());
         try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
         try std.testing.expectEqualStrings(root, generated.identity().store.slice());
     }
@@ -2272,15 +2269,19 @@ test "capture and send name the step a failure stopped in" {
     try tmp.dir.writeFile(io, .{ .sub_path = "invalid", .data = "bad\xff" });
     var invalid_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const invalid = try std.fmt.bufPrint(&invalid_buffer, "{s}/invalid", .{root});
+    // Only the length of oversized inline text is read before it is refused.
+    const many: [*]const u8 = "x";
+    const oversized = many[0 .. protocol.max_sqlite_content_bytes + 1];
     const Case = struct { input: MessageInput, step: Step, err: anyerror };
     for ([_]Case{
+        .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = "", .text = oversized }, .step = .input_parse, .err = error.ContentTooLarge },
         .{ .input = .{ .store = absent, .session = "k7m2qx", .text_path = "", .text = "x" }, .step = .store, .err = error.FileNotFound },
         .{ .input = .{ .store = root, .session = "K7m2qx", .text_path = "", .text = "x" }, .step = .capture, .err = error.InvalidSession },
         .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = absent }, .step = .input_file_read, .err = error.FileNotFound },
         .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = invalid }, .step = .input_parse, .err = error.InvalidUtf8 },
     }) |case| {
         const failure = captureMessage(io, case.input, .{ .generated = root }).failed;
-        try std.testing.expectEqual(case.step, failure.step);
+        try std.testing.expectEqual(@as(?Step, case.step), failure.step);
         try std.testing.expectEqual(case.err, failure.err);
     }
     // No Host serves this Store: nothing reaches one, so admission is known absent.
@@ -2288,8 +2289,13 @@ test "capture and send name the step a failure stopped in" {
     defer captured.close(io);
     var reply: ReplyBuffer = .{};
     const failure = (Requests{ .io = io }).sendCaptured(&captured, &reply).failed;
-    try std.testing.expectEqual(Step.connect, failure.step);
-    try std.testing.expect(!failure.step.mayHaveReachedHost());
+    try std.testing.expectEqual(@as(?Step, .connect), failure.step);
+    try std.testing.expect(!failure.step.?.mayHaveReachedHost());
+    // A cancellation before the send begins names no step.
+    const stop: Cancellation = .{ .stopped = .init(true) };
+    const cancelled = (Requests{ .io = io, .cancellation = &stop }).sendCaptured(&captured, &reply).failed;
+    try std.testing.expectEqual(@as(?Step, null), cancelled.step);
+    try std.testing.expectEqual(error.Cancelled, cancelled.err);
 }
 
 test "capture retransmits complete original bytes after a lost reply" {
@@ -2367,7 +2373,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         const result = attempt.get();
         peer.join();
         if (Peer.failure) |err| return err;
-        if (response != .reply) try std.testing.expectEqual(Step.admission_response, attempt.failed.step);
+        if (response != .reply) try std.testing.expectEqual(@as(?Step, .admission_response), attempt.failed.step);
         switch (response) {
             .closed => try std.testing.expectError(error.TruncatedResponse, result),
             .silent => try std.testing.expectError(error.ResponseInactive, result),

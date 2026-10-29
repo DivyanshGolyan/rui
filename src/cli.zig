@@ -1079,7 +1079,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
     const reply = blk: {
         defer captured.close(init.io);
         try testGate(init.io, "RUI_TEST_CAPTURE_GATE");
-        break :blk client.sendCaptured(init.io, &captured, &reply_buffer) catch |err| {
+        break :blk (client.Requests{ .io = init.io }).sendCaptured(&captured, &reply_buffer).get() catch |err| {
             TerminalText.diagnostic("rui: configuration not confirmed ({s}); use rui request recover {s}. Do not replace uncertain work.\n", .{ @errorName(err), saved.key.slice() });
             return err;
         };
@@ -1413,15 +1413,13 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
 }
 
 /// The value of a capture or send, after recording the step a failure
-/// stopped in for the command's diagnostic.
+/// stopped in for the command's diagnostic. A failure before any step keeps
+/// the step the command already holds.
 fn takeStep(stage: *?client.Step, attempt: anytype) !@FieldType(@TypeOf(attempt), "done") {
-    return switch (attempt) {
-        .done => |value| value,
-        .failed => |failure| {
-            stage.* = failure.step;
-            return failure.err;
-        },
+    if (attempt == .failed) if (attempt.failed.step) |step| {
+        stage.* = step;
     };
+    return attempt.get();
 }
 
 /// A framed reply leaves nothing to report; an unreadable one leaves
@@ -2394,7 +2392,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try client.sendCaptured(init.io, &captured, &buffer);
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json);
 }
