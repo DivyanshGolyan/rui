@@ -1628,44 +1628,15 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
 }
 
 fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
-    // The grammar admits exactly one of REF, --session and --last.
-    const reference = parsed.positional orelse parsed.get("session");
+    // The grammar admits exactly one of ID and --session, and dispatch has
+    // checked it is a Session ID.
+    const reference = parsed.positional orelse parsed.get("session").?;
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
     try startHost(init, destination, true, null);
-    var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
-    if (reference) |value| {
-        try selected.set(value);
-    } else {
-        var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
-        defer directory.close(init.io);
-        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-        const workspace_length = try directory.realPath(init.io, &workspace_buffer);
-        const workspace = workspace_buffer[0..workspace_length];
-        const file = try renderScratch(init);
-        defer file.close(init.io);
-        var cursor: protocol_reply.SessionListCursor = .{};
-        while (true) {
-            try file.setLength(init.io, 0);
-            try init.io.vtable.fileSeekTo(init.io.userdata, file, 0);
-            var buffer: client.ReplyBuffer = .{};
-            const reply = try client.listSessions(init.io, destination, workspace, cursor, file, &buffer);
-            const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
-            const page = switch (decoded) {
-                .page => |*value| value,
-                .failure => |failure| return failure.err(),
-            };
-            if (page.count != 0) selected = page.rows[page.count - 1].reference;
-            cursor = page.next orelse break;
-        }
-        if (selected.len == 0) {
-            TerminalText.diagnostic("rui: no Session in this Workspace. Run `rui` to start one, or `rui session list --all` to inspect other Workspaces.\n", .{});
-            return error.SessionNotFound;
-        }
-    }
-    return runSession(init, destination, selected.slice(), null);
+    return runSession(init, destination, reference, null);
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {

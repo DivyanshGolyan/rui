@@ -1104,45 +1104,43 @@ def command_entry_cases():
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert json.loads(run(home, "session", "list", "--all"))["sessions"][0]["reference"] == initial_session
-        # More than one eight-row page here; a newer foreign Workspace must not
-        # win --last. Exact resume is independent of that cwd filtering.
+        # Exact resume enters the named Session: a newer Session here, one in
+        # another Workspace and newer activity do not divert it, and a
+        # Workspace alias does not filter it.
         other = state / "other"
         other.mkdir()
-        last_sessions = []
-        for index in range(9):
-            last_sessions.append(create_session(home, "--workspace", workspace,
-                "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask"))
+        newer = create_session(home, "--workspace", workspace,
+            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         create_session(home, "--workspace", other,
             "--provider", "codex", "--model", "gpt-6.1-sol", "--permission-mode", "ask")
-        older = admit(home, "session", "send", "--to", last_sessions[0], input="older activity")
-        fixture.wait_for(lambda: fixture.completed_observation(store, older["request"]), "older Session activity")
+        activity = admit(home, "session", "send", "--to", newer, input="older activity")
+        fixture.wait_for(lambda: fixture.completed_observation(store, activity["request"]), "newer Session activity")
         alias = state / "workspace-alias"
         alias.symlink_to(workspace, target_is_directory=True)
-        for flags, expected in ((("--last",), last_sessions[8]), ((initial_session,), initial_session)):
-            for terminal, no_colour in (("xterm-256color", ""), ("xterm-256color", "1"), ("dumb", "")):
-                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", *flags], cwd=alias,
-                    env={**os.environ, "HOME": str(home), "TERM": terminal, "NO_COLOR": no_colour},
-                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                if terminal == "dumb":
-                    # Without cursor addressing Rui refuses before any Host or
-                    # terminal change, naming the recovery.
-                    _, errors = caller.communicate(timeout=10)
-                    assert caller.returncode == 1, (caller.returncode, errors)
-                    assert b"TERM=dumb does not" in errors and b"No Host or Session changed." in errors, errors
-                    assert not select.select([master], [], [], 0.2)[0], "dumb terminal was drawn"
-                    assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
-                    continue
-                opening = read_terminal(master, "› ")
-                prompt_cell = drawn_style(master, "› ")
-                coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
-                assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
-                status = terminal_step(master, "/status", "Session: ", composer=True)
-                assert f"Session: {expected}\n" in status, status
-                terminal_step(master, "/exit", "Resume: ")
-                _, errors = terminal_exit(caller, master)
-                assert caller.returncode == 0 and not errors, errors
-                actual = termios.tcgetattr(slave)
-                assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
+        for terminal, no_colour in (("xterm-256color", ""), ("xterm-256color", "1"), ("dumb", "")):
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", initial_session], cwd=alias,
+                env={**os.environ, "HOME": str(home), "TERM": terminal, "NO_COLOR": no_colour},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            if terminal == "dumb":
+                # Without cursor addressing Rui refuses before any Host or
+                # terminal change, naming the recovery.
+                _, errors = caller.communicate(timeout=10)
+                assert caller.returncode == 1, (caller.returncode, errors)
+                assert b"TERM=dumb does not" in errors and b"No Host or Session changed." in errors, errors
+                assert not select.select([master], [], [], 0.2)[0], "dumb terminal was drawn"
+                assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+                continue
+            opening = read_terminal(master, "› ")
+            prompt_cell = drawn_style(master, "› ")
+            coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
+            assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
+            status = terminal_step(master, "/status", "Session: ", composer=True)
+            assert f"Session: {initial_session}\n" in status, status
+            terminal_step(master, "/exit", "Resume: ")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0 and not errors, errors
+            actual = termios.tcgetattr(slave)
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
         assert len(endpoint.requests) == 2, "resume submitted or restarted work"
         env = {**os.environ, "HOME": str(home)}
         # Fresh Configure without a selector allocates an ID with concrete
@@ -1292,68 +1290,41 @@ def command_entry_cases():
                 dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
         lookalike_store = state / "lookalike-store"
         lookalike_host = fixture.start_host(lookalike_store, None)
-        pages = [json.loads(line) for line in run(home, "session", "list", "--all").splitlines()]
-        newest = [row["reference"] for page in pages for row in page["sessions"]
-            if row["workspace"] == str(workspace)][-1]
-        for index, (entry, chosen) in enumerate((("last", newest),
-                ("exact", last_sessions[8]))):
-            defaults(home, "--store", store)
-            before_failure = set(records.glob("*.json"))
-            proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
-            arguments = ["session", "resume", "--last"] if entry == "last" else ["session", "resume", "--", chosen]
-            caller = subprocess.Popen([str(fixture.RUI), *arguments], cwd=workspace,
-                env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            output, errors = terminal_exit(caller, master)
-            assert caller.returncode == 1 and b"CanonicalStoreFailure" in errors, (output, errors)
-            assert b"Resume: rui session resume --store " in errors, errors
-            exact_resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
-            assert set(records.glob("*.json")) == before_failure and not proxy.mutations
-            proxy.close()
-            proxy = None
-            caller.stderr.close()
-            # Both selectors now have a plausible different destination.
-            create_session(home, "--store", store,
-                "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
-            create_session(home, "--store", lookalike_store,
-                "--workspace", other, "--provider", "codex", "--model", "gpt-5.6-luna")
-            defaults(home, "--store", lookalike_store)
-            before_resume = set(records.glob("*.json"))
-            caller = subprocess.Popen(["bash", "-c", exact_resume], cwd=workspace,
-                env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
-                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            read_terminal(master, "› ")
-            status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {chosen}\n" in status and shown(f"Store: {store}\n", status), status
-            assert "gpt-5.6-luna" not in status, status
-            terminal_step(master, "/exit", "Resume: ")
-            _, errors = terminal_exit(caller, master)
-            assert caller.returncode == 0 and not errors, errors
-            caller.stderr.close()
-            assert set(records.glob("*.json")) == before_resume
-            assert len(endpoint.requests) == 9, "entry recovery submitted provider work"
         defaults(home, "--store", store)
         before_failure = set(records.glob("*.json"))
-        page_count = 0
-        def fail_later_page(response):
-            nonlocal page_count
-            page_count += 1
-            if page_count == 1:
-                return response
-            return (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
-                + str(len(canonical.ERROR_BYTES)).encode() + b"\r\n\r\n" + canonical.ERROR_BYTES)
-        proxy = canonical.ReplyProxy(host, "/v1/list-sessions", fail_later_page)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--last"], cwd=workspace,
+        proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--", newer], cwd=workspace,
             env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
-        assert caller.returncode == 1 and page_count == 2, (output, errors, page_count)
-        assert b"Resume:" not in errors, "partial last selection escaped as final identity"
+        assert caller.returncode == 1 and b"CanonicalStoreFailure" in errors, (output, errors)
+        assert b"Resume: rui session resume --store " in errors, errors
+        exact_resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
         assert set(records.glob("*.json")) == before_failure and not proxy.mutations
-        caller.stderr.close()
         proxy.close()
         proxy = None
+        caller.stderr.close()
+        # The selector now has a plausible different destination.
+        create_session(home, "--store", store,
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
+        create_session(home, "--store", lookalike_store,
+            "--workspace", other, "--provider", "codex", "--model", "gpt-5.6-luna")
+        defaults(home, "--store", lookalike_store)
+        before_resume = set(records.glob("*.json"))
+        caller = subprocess.Popen(["bash", "-c", exact_resume], cwd=workspace,
+            env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status", "Session: ", composer=True)
+        assert f"Session: {newer}\n" in status and shown(f"Store: {store}\n", status), status
+        assert "gpt-5.6-luna" not in status, status
+        terminal_step(master, "/exit", "Resume: ")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        caller.stderr.close()
+        assert set(records.glob("*.json")) == before_resume
+        assert len(endpoint.requests) == 9, "entry recovery submitted provider work"
         completed = True
-        print("CLI entry/resume/send: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, fresh default Configure, admission-only held send with exact saved answer, stdin, literal dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block and accepted-entry recovery controls passed", flush=True)
+        print("CLI entry/resume/send: literal prompt, exact resume beside newer Sessions and activity, colour/NO_COLOR, fresh default Configure, admission-only held send with exact saved answer, stdin, literal dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block and accepted-entry recovery controls passed", flush=True)
     finally:
         dispose_all(
             held_release.set, permission_release.set,
@@ -3098,7 +3069,7 @@ def opaque_session_commands_case():
             "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         # Wide enough that each printed recovery command is one inspection row.
         master, slave = open_pty(columns=256)
-        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "--last"],
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
             cwd=state, env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
         assert f"Session: {reference}" in terminal_step(master, "/status", "Session: ", composer=True)
@@ -3165,7 +3136,7 @@ def opaque_session_commands_case():
             negatives = [["--session-hex", value] for value in invalid_hex]
             negatives += [[value] if route[1] == "resume" else ["--session", value] for value in invalid_ids]
             negatives += [["--session-hex", "61", "--session-hex", "62"]]
-            negatives += ([["--last", "--session-hex", "61"], ["--session-hex", "61", "other"],
+            negatives += ([["--last"], ["--last", reference], ["--session-hex", "61", "other"],
                            ["other", "--session-hex", "61"]] if route[1] == "resume" else
                           [["--session", "plain", "--session-hex", "61"],
                            ["--session-hex", "61", "--session", "plain"],
@@ -3176,6 +3147,13 @@ def opaque_session_commands_case():
                 rejected = subprocess.run([str(fixture.RUI), *route, "--store", str(store), *flags, *extra],
                     env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and b"InteractiveTerminalRequired" not in rejected.stderr, (route, flags, rejected)
+                if "--last" in flags:
+                    assert b"rui: session resume: unknown option." in rejected.stderr, (flags, rejected)
+        # Retired --last rejects before selecting a Store, starting a Host
+        # or capturing a request; the HOME Store stays absent below.
+        retired = subprocess.run([str(fixture.RUI), "session", "resume", "--last"], cwd=state,
+            env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
+        assert retired.returncode != 0 and b"rui: session resume: unknown option." in retired.stderr, retired
         assert {path: path.read_bytes() for path in before} == before
         assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
         absent = "000000" if reference != "000000" else "111111"

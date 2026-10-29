@@ -44,7 +44,6 @@ Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native 
 Rui calls a saved conversation a **Session**. Bare `rui` always creates a new Session in the current directory. When you leave, Rui prints the exact command that resumes it.
 
 ```sh
-rui session resume --last          # newest Session created in this project
 rui session resume SESSION_REF     # an exact Session
 rui session list                   # this project's Sessions, as JSON
 rui session list --all             # Sessions from every project

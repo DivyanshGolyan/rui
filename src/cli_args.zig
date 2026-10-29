@@ -49,7 +49,7 @@ pub const Command = enum {
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The address remains reusable by later input; acknowledgment is not physical retirement.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
-            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host. --last selects the newest Session created in this Workspace.", .options = destination ++ session ++ &[_]Option{flag("last")}, .positional = "ID", .conflicts = &.{.{ "session", "last" }}, .positional_conflicts = &.{ "session", "last" }, .requires = &.{&.{ "", "session", "last" }} },
+            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{"session"}, .requires = &.{&.{ "", "session" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), value("kind", "configure|message|session-stop|model-interruption|permission-decision") }, .positional = "HANDLE", .positional_conflicts = &.{ "store", "store-hex", "record", "kind" }, .mutation = true, .requires = &.{&.{ "", "record" }} },
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
@@ -480,6 +480,8 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);
     try expectValidation(.session_resume, &.{ "--store", "/s", "REF" }, false);
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
+    // Resume is exact; there is no newest-Session guess.
+    try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--codex" }, false);
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
@@ -573,7 +575,7 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--to", "a", "--key", "k" })).?);
     try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--to", "a", "--record", "r" })).?);
     try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--test-drop-reply", "x" }) == null);
-    try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s", "--last" }) == null);
+    try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s", "--session", "a" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s" }) != null);
     try std.testing.expect(try expectMissing(.request_recover, &.{"HANDLE"}) == null);
     try std.testing.expectEqualStrings("kind", (try expectMissing(.request_recover, &.{ "--record", "r" })).?);
