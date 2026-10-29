@@ -293,6 +293,9 @@ pub const Host = struct {
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
+    /// Host Unix seconds, set once before the execution thread starts. An
+    /// Attempt admitted earlier cannot be held by this Host.
+    started_at: u64 = 0,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,

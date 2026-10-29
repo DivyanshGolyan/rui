@@ -931,6 +931,9 @@ pub fn serve(
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
+    const started_at = std.Io.Clock.real.now(io).toSeconds();
+    if (started_at <= 0) return error.ClockReadFailed;
+    host.started_at = @intCast(started_at);
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
@@ -1151,7 +1154,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, .host_unavailable, "dispatch_fenced");
             var response: protocol.ResponseBuffer = .{};
-            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
+            // Atomics and fixed values only: this reply never touches SQLite.
+            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
             try fd.setJson(200, response.slice());
         },
         .host_stop => {
@@ -1903,12 +1907,14 @@ fn renderHostInfo(
     active_capacity: u64,
     intake_capacity: u64,
     descriptor_soft_limit: ?u64,
+    started_at: u64,
+    custody_occupied: u64,
     model: bool,
     managed_authentication: bool,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, model, managed_authentication });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, model, managed_authentication });
     std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
 }
 
@@ -2864,7 +2870,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, false, false);
+    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, max, max, false, false);
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;

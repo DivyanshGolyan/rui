@@ -24,12 +24,14 @@ pub fn main(init: std.process.Init) !void {
     const status = client.hostStatus(std.Io.Threaded.global_single_threaded.io(), args[1]);
     var buffer: [256]u8 = undefined;
     const line = switch (status) {
-        .ready => |ready| try std.fmt.bufPrint(&buffer, "ready {s} {d} {s} {s} {s}\n", .{
+        .ready => |ready| try std.fmt.bufPrint(&buffer, "ready {s} {d} {s} {s} {s} {d} {d}\n", .{
             std.fmt.bytesToHex(ready.instance, .lower),
             ready.active_capacity,
             if (ready.capabilities.bash) "true" else "false",
             if (ready.capabilities.model) "true" else "false",
             if (ready.capabilities.managed_authentication) "true" else "false",
+            ready.started_at,
+            ready.custody_occupied,
         }),
         else => try std.fmt.bufPrint(&buffer, "{s}\n", .{@tagName(status)}),
     };

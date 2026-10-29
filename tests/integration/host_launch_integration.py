@@ -665,14 +665,19 @@ def main():
             required_fields={"active_capacity": "3"},
         )
         try:
-            before = instance(status(held_store, env), 3)
+            first = status(held_store, env)
+            before = instance(first, 3)
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
             # Attachment reports the existing Host, not the launcher's default.
             reported = json.loads(attached.stdout)
             assert instance(reported, 3) == before, reported
             assert reported["diagnostics"] == f"{held_store.resolve()}/diagnostics", reported
-            assert instance(status(held_store, env), 3) == before
+            later = status(held_store, env)
+            assert instance(later, 3) == before
+            # One Host keeps one start time, and holds no custody while idle.
+            assert reported["started_at"] == later["started_at"] == first["started_at"], (first, later)
+            assert later["custody_occupied"] == "0", later
             same = run_start(held_store, env, "--active-capacity", "3")
             assert same.returncode == 0 and "--active-capacity" not in same.stderr, same
             assert instance(json.loads(same.stdout), 3) == before, same

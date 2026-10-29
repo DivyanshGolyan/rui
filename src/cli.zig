@@ -425,6 +425,7 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
             const instance = std.fmt.bytesToHex(ready.instance, .lower);
             try writer.print(",\"instance\":\"{s}\",\"active_capacity\":\"{d}\",\"intake_capacity\":\"{d}\",\"descriptor_limit\":", .{ &instance, ready.active_capacity, ready.intake_capacity });
             if (ready.descriptor_limit) |limit| try writer.print("\"{d}\"", .{limit}) else try writer.writeAll("null");
+            try writer.print(",\"started_at\":\"{d}\",\"custody_occupied\":\"{d}\"", .{ ready.started_at, ready.custody_occupied });
             try writer.writeAll(",\"capabilities\":");
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;

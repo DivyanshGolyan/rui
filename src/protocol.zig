@@ -398,6 +398,11 @@ pub const HostInfo = struct {
     active_capacity: []const u8,
     intake_capacity: []const u8 = "100",
     descriptor_limit: []const u8 = "unlimited",
+    /// Host Unix seconds, fixed before the execution thread starts.
+    started_at: []const u8,
+    /// Slots in use: held custody records, including detached cleanup. The
+    /// value Current reports as `execution.custody_occupied`.
+    custody_occupied: []const u8,
     capabilities: struct {
         bash: bool,
         model: bool,
@@ -2474,8 +2479,9 @@ pub const max_control_response_bytes = @max(
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), model and managed authentication capabilities.
-pub const host_info_reply = .{ "{\"version\":\"1\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
+/// (decimal or `unlimited`), start time, slots in use, model and managed
+/// authentication capabilities.
+pub const host_info_reply = .{ "{\"version\":\"1\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports

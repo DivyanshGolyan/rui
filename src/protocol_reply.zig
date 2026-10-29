@@ -351,6 +351,8 @@ pub const HostStatus = union(enum) {
         active_capacity: usize,
         intake_capacity: usize = 100,
         descriptor_limit: ?usize = null,
+        started_at: u64,
+        custody_occupied: usize,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -390,7 +392,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         !std.mem.eql(u8, info.store, store))
         return error.InvalidHostInfo;
     const finite_limit: ?[]const u8 = if (std.mem.eql(u8, info.descriptor_limit, "unlimited")) null else info.descriptor_limit;
-    for ([_]?[]const u8{ info.active_capacity, info.intake_capacity, finite_limit }) |field| {
+    for ([_]?[]const u8{ info.active_capacity, info.intake_capacity, finite_limit, info.started_at, info.custody_occupied }) |field| {
         const text = field orelse continue;
         if (text.len == 0 or text.len > 20 or (text.len > 1 and text[0] == '0')) return error.InvalidHostInfo;
         for (text) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
@@ -400,6 +402,11 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     const intake_capacity = std.fmt.parseInt(usize, info.intake_capacity, 10) catch return error.InvalidHostInfo;
     if (intake_capacity < 10 or intake_capacity > 100) return error.InvalidHostInfo;
     const descriptor_limit = if (finite_limit) |text| std.fmt.parseInt(usize, text, 10) catch return error.InvalidHostInfo else null;
+    const started_at = std.fmt.parseInt(u64, info.started_at, 10) catch return error.InvalidHostInfo;
+    if (started_at == 0 or started_at > std.math.maxInt(i64)) return error.InvalidHostInfo;
+    // A slot in use is one of the Host's Active Capacity records.
+    const custody_occupied = std.fmt.parseInt(usize, info.custody_occupied, 10) catch return error.InvalidHostInfo;
+    if (custody_occupied > capacity) return error.InvalidHostInfo;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
     try identity.set(info.store);
     return .{ .ready = .{
@@ -408,29 +415,53 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         .active_capacity = capacity,
         .intake_capacity = intake_capacity,
         .descriptor_limit = descriptor_limit,
+        .started_at = started_at,
+        .custody_occupied = custody_occupied,
         .capabilities = info.capabilities,
     } };
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
+    const golden = "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
     try std.testing.expect(result.ready.capabilities.bash);
     try std.testing.expect(!result.ready.capabilities.model);
+    // The Host's start time and slots in use, which never exceed its capacity.
+    try std.testing.expectEqual(@as(u64, 1792918800), result.ready.started_at);
+    try std.testing.expectEqual(@as(usize, 17), result.ready.custody_occupied);
+    for ([_][2][]const u8{
+        .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"0\"" },
+        .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"01792918800\"" },
+        .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"9223372036854775808\"" },
+        .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"+1792918800\"" },
+        .{ "\"custody_occupied\":\"17\"", "\"custody_occupied\":\"18\"" },
+        .{ "\"custody_occupied\":\"17\"", "\"custody_occupied\":\"\"" },
+        .{ "\"custody_occupied\":\"17\"", "\"custody_occupied\":\"1_7\"" },
+    }) |case| {
+        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, golden, case[0], case[1]);
+        defer std.testing.allocator.free(malformed);
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(malformed, "/one"));
+    }
+    // Both are required: a reply without them is from an incompatible Host.
+    inline for (.{ "\"started_at\":\"1792918800\",", "\"custody_occupied\":\"17\"," }) |field| {
+        const missing = try std.mem.replaceOwned(u8, std.testing.allocator, golden, field, "");
+        defer std.testing.allocator.free(missing);
+        try std.testing.expectError(error.MissingField, parseHostInfo(missing, "/one"));
+    }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
