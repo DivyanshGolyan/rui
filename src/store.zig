@@ -111,7 +111,7 @@ const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{atte
 /// names it; a denial is its `denied` Resolution.
 inline fn actionBypassedSql(comptime action: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM session_revision bypassing WHERE bypassing.session_ref=" ++ action ++ ".session_ref " ++
-        "AND bypassing.revision=" ++ action ++ ".permission_revision AND bypassing.permission_mode!=0)";
+        "AND bypassing.revision=" ++ action ++ ".permission_revision AND bypassing.permission_mode=1)";
 }
 
 inline fn actionAllowedOnceSql(comptime action: []const u8) []const u8 {
@@ -2637,11 +2637,12 @@ pub const Store = struct {
     }
 
     fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(protocol.max_code_bytes)) !MessageProgress {
-        const statement = try self.cached("SELECT count(*),count(*) FILTER (WHERE NOT " ++ actionAuthorizedSql("action") ++ ")," ++
-            "min(CASE WHEN NOT " ++ actionAuthorizedSql("action") ++ " THEN action.action_id END) " ++
+        // Materialized so each unresolved Action derives its permission once.
+        const statement = try self.cached("WITH unresolved AS MATERIALIZED (SELECT action.action_id," ++ actionAuthorizedSql("action") ++ " AS authorized " ++
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
             "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL");
+            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL) " ++
+            "SELECT count(*),count(*) FILTER (WHERE NOT authorized),min(CASE WHEN NOT authorized THEN action_id END) FROM unresolved");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
@@ -7477,7 +7478,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
     ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
-        \\ permission_mode INTEGER NOT NULL,
+        \\ permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
@@ -9288,8 +9289,11 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try submitTestMessage(&storage, &tmp, "bypass-message", "bypass-message", session.slice(), "bypass proposal");
     const bypass_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, bypass_binding, "bypass-metadata");
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN session_revision revision ON revision.session_ref=action.session_ref " ++
-        "AND revision.revision=action.permission_revision WHERE revision.permission_mode=1 AND action.permission_revision=2 AND action.resolution_code IS NULL"));
+    // The ask-mode pair was never authorized: one denied, one stopped.
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action WHERE " ++ actionAuthorizedSql("action") ++
+        " AND action.permission_revision=1"));
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation action WHERE " ++ actionAuthorizedSql("action") ++
+        " AND action.permission_revision=2 AND action.resolution_code IS NULL"));
 
     try storage.close();
     storage_open = false;
@@ -9302,8 +9306,8 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         root[0..root_length],
     );
     defer reopened.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(reopened.database, "SELECT count(*) FROM action_operation action JOIN session_revision revision ON revision.session_ref=action.session_ref " ++
-        "AND revision.revision=action.permission_revision WHERE revision.permission_mode=1 AND action.permission_revision=2 AND action.resolution_code IS NULL"));
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(reopened.database, "SELECT count(*) FROM action_operation action WHERE " ++ actionAuthorizedSql("action") ++
+        " AND action.permission_revision=2 AND action.resolution_code IS NULL"));
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
