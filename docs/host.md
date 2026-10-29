@@ -19,6 +19,8 @@ If startup times out, run `host status` and read the diagnostic log. A timeout d
 
 A new Host can run 100 executions at once. `rui host start --active-capacity 8` starts a new Host with a different capacity. A running Host keeps the capacity it started with, even after you upgrade Rui. If you pass a different `--active-capacity` while a Host is running, `host start` connects to that Host unchanged and says so on stderr. To change the capacity, stop the Host and start it again.
 
+`host status` reports the capacity as `active_capacity`, the slots in use as `custody_occupied` (running work and cleanup that still holds a slot), and the Unix second the Host started as `started_at`.
+
 The Host raises its open-file soft limit as far as the hard limit allows. If that is still too low, the Host accepts fewer simultaneous client requests but keeps all 100 executions. If the hard limit is too low even for that, startup fails and names the limit to raise.
 
 ## Stop the Host
