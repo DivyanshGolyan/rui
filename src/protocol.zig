@@ -709,15 +709,20 @@ pub fn contentDigest(value: []const u8) [32]u8 {
     return hash.finalResult();
 }
 
+/// Injected failures of a request's content capture.
+pub const ContentFaults = struct {
+    acquire: bool = false,
+    write: bool = false,
+    seal: bool = false,
+};
+
 pub const ParseOptions = struct {
     io: std.Io,
     fd: std.posix.fd_t,
     content_length: u64,
     scratch_path: []const u8,
     request_number: u64,
-    fault_content_acquire: bool = false,
-    fault_content_write: bool = false,
-    fault_content_seal: bool = false,
+    content_faults: ContentFaults = .{},
     retained_scratch: *?named_scratch.Owner,
     scratch_budget: ?ScratchBudget = null,
     expected_kind: ?Kind = null,
@@ -1669,7 +1674,7 @@ const ContentCapture = struct {
     transferred: bool = false,
 
     fn init(options: ParseOptions, ordinal: u8) !ContentCapture {
-        if (options.fault_content_acquire) return error.InjectedContentAcquireFailure;
+        if (options.content_faults.acquire) return error.InjectedContentAcquireFailure;
         var capture: ContentCapture = undefined;
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.request.format(&name_buffer, options.request_number, ordinal);
@@ -1689,10 +1694,10 @@ const ContentCapture = struct {
     }
 
     fn seal(self: *ContentCapture) !ContentField {
-        if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
+        if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
         try self.sink.finish();
         self.sink.file.sync(self.options.io) catch return error.ContentSyncFailed;
-        if (self.options.fault_content_seal) return error.InjectedContentSealFailure;
+        if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
         self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
         self.sink.file.close(self.options.io);
         self.writer_open = false;
@@ -3018,7 +3023,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 .scratch_budget = .{ .used = &used, .limit = 8 },
                 .expected_kind = case.kind,
                 // A mismatched kind must fail before file acquisition.
-                .fault_content_acquire = case.kind != .configure,
+                .content_faults = .{ .acquire = case.kind != .configure },
             });
             const result: anyerror!Request = blk: {
                 ingress.feed(case.bytes[0..split]) catch |err| break :blk err;

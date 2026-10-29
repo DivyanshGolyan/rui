@@ -1118,16 +1118,14 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
     const active_capacity = try parsed.number(usize, "active-capacity") orelse product_defaults.active_capacity;
     var limits: server.Limits = .{};
-    var faults: server.Faults = .{};
+    var hooks: server.Hooks = .{};
     if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
     if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
         if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
         limits.retention_entry_capacity = capacity;
     }
-    if (parsed.has("test-retention-removal-failure")) faults.retention_removal = true;
-    for (parsed.all("fault")) |fault| {
-        if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-once")) faults.response_write_once = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-captures")) faults.bash_preparation_after_captures = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
-    }
+    if (parsed.has("test-retention-removal-failure")) hooks.failures.insert(.retention_removal);
+    for (parsed.all("fault")) |fault| try hooks.inject(fault);
     if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
         if (seconds < 1) return error.InvalidProviderInactivity;
         _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
@@ -1136,41 +1134,45 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
     if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
         if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
-        faults.before_launch_delay_ms = delay;
+        hooks.pauses.getPtr(.action_launch).delay_ms = delay;
+        hooks.pauses.getPtr(.model_launch).delay_ms = delay;
     }
     if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
         if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
-        faults.before_result_delay_ms = delay;
+        hooks.pauses.getPtr(.action_result).delay_ms = delay;
+        hooks.pauses.getPtr(.model_result).delay_ms = delay;
     }
-    faults.model_result_gate_path = parsed.get("test-model-result-gate-path");
-    faults.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
-    faults.inspection_reply_gate_path = parsed.get("test-inspection-reply-gate-path");
+    hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
+    hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
+    hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
     if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
         if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
-        faults.inspection_reply_delay_ms = delay;
+        hooks.inspection_reply.delay_ms = delay;
     }
     if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
         if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         limits.client_send_buffer_bytes = bytes;
     }
-    if (parsed.has("test-phase-trace")) faults.test_phase_trace = true;
+    if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
     if (try parsed.number(c_int, "test-observation-fd")) |fd| {
-        faults.test_observation_fd = fd;
-        faults.test_phase_trace = true;
+        hooks.observation_fd = fd;
+        hooks.phase_trace = true;
     }
-    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| faults.test_observation_state_fd = fd;
-    if (parsed.get("test-observation-plan")) |plan| faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
+    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
+    if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
         return error.InvalidTestObservationPlan;
-    if (parsed.get("test-transition")) |transition| {
-        if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
-    }
-    faults.test_transition_gate_path = parsed.get("test-transition-gate-path");
-    faults.bash_observed_exit_gate_path = parsed.get("test-bash-observed-exit-gate-path");
-    faults.bash_cleanup_gate_path = parsed.get("test-bash-cleanup-gate-path");
-    faults.control_gate_keys = parsed.get("test-control-gate-keys");
-    faults.control_gate_path = parsed.get("test-control-gate-path");
-    if (parsed.has("test-suppress-first-control-hint")) faults.suppress_first_control_hint = true;
-    if (parsed.has("test-sqlite-diagnostics")) faults.sqlite_diagnostics = true;
+    if (parsed.get("test-transition")) |name| hooks.transition = .{
+        .transition = server.Hooks.spelled(server.Hooks.Transition, name) orelse return error.UnknownTestTransition,
+        .path = parsed.get("test-transition-gate-path") orelse return error.IncompleteTestTransitionGate,
+    } else if (parsed.has("test-transition-gate-path")) return error.IncompleteTestTransitionGate;
+    hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
+    hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
+    if (parsed.get("test-control-gate-keys")) |keys| hooks.control_gate = .{
+        .keys = keys,
+        .path = parsed.get("test-control-gate-path") orelse return error.IncompleteControlGate,
+    } else if (parsed.has("test-control-gate-path")) return error.IncompleteControlGate;
+    if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
+    if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
     if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
     if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
         if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
@@ -1187,10 +1189,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
         if (delay < 0) return error.InvalidRequestPreparationDelay;
-        faults.request_preparation_advance_delay_ms = delay;
+        hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
     }
-    if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
-    if ((faults.test_transition == null) != (faults.test_transition_gate_path == null)) return error.IncompleteTestTransitionGate;
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1202,7 +1202,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
         limits,
-        faults,
+        hooks,
         if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
         if (credential_path) |path| model_adapter.Authentication{ .path = path, .fixture = fixture_endpoint != null } else null,
