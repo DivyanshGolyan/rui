@@ -7798,6 +7798,14 @@ const StatementCache = struct {
 fn resetCached(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
     _ = c.sqlite3_clear_bindings(statement);
+    // Clearing bindings expires a statement whose plan read a bound value (a
+    // bound LIMIT, or a bind compared with a partial index's WHERE), so every
+    // later use would re-prepare it. Debug covers the Host binaries that
+    // integration tests drive.
+    const builtin = @import("builtin");
+    if ((builtin.is_test or builtin.mode == .debug) and c.sqlite3_expired(statement) != 0) {
+        std.debug.panic("cached statement plan depends on a bound value: {s}", .{c.sqlite3_sql(statement)});
+    }
 }
 
 fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
