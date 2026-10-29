@@ -73,6 +73,9 @@ pub fn outputSchemaRejection(structured: bool, source_length: u64) ?OutputReject
     };
 }
 
+/// Tests' item grammar storage, off their stacks like the Host's.
+var testing_check: Output.ReplayValidationCursor = undefined;
+
 pub fn interpretOutput(
     io: std.Io,
     source: std.Io.File,
@@ -81,10 +84,11 @@ pub fn interpretOutput(
     event_data: *Output.EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
+    check: *Output.ReplayValidationCursor,
     faults: Output.Faults,
 ) OutputInterpretation {
     var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, faults) catch |err| return .{ .rejected = .{
+    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, check, faults) catch |err| return .{ .rejected = .{
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
@@ -217,7 +221,7 @@ test "provider interpretation preserves independently reported model evidence" {
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, .{});
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, &testing_check, .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -281,7 +285,7 @@ test "provider interpretation closes failure variants without granting settlemen
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, .{ .metadata = case.fault });
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, &testing_check, .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -302,7 +306,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, .{});
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, &testing_check, .{});
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -1175,8 +1179,18 @@ pub const Preparation = struct {
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        var owned_view = view;
-        errdefer owned_view.close();
+        // The view moves straight into place: a local copy would add its
+        // ~84 KB to the caller's frame, all resident once probed.
+        self.* = .{
+            .view = view,
+            .route = route,
+            .writer = undefined,
+            .readonly = undefined,
+            .faults = faults,
+            .memos = memos,
+            .active = false,
+        };
+        errdefer self.view.close();
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -1200,19 +1214,14 @@ pub const Preparation = struct {
             retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
-        self.* = .{
-            .view = owned_view,
-            .route = route,
-            .writer = .{
-                .io = io,
-                .file = file,
-                .budget = budget,
-                .fail_write = faults.write,
-            },
-            .readonly = readonly,
-            .faults = faults,
-            .memos = memos,
+        self.writer = .{
+            .io = io,
+            .file = file,
+            .budget = budget,
+            .fail_write = faults.write,
         };
+        self.readonly = readonly;
+        self.active = true;
     }
 
     /// Write the request one item at a time: take the next item from the
@@ -3443,7 +3452,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, .{})) {
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, &testing_check, .{})) {
         .accepted => |value| value,
         .rejected => return error.UnexpectedOutputRejection,
     };

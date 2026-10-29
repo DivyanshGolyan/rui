@@ -329,6 +329,9 @@ const lifecycle_trace_interval_ms = 100;
 const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     bash_window: [bash.copy_window_bytes]u8,
+    /// Response import's item grammar; only the pages one item uses become
+    /// resident.
+    import_check: model_adapter.Output.ReplayValidationCursor,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
 };
@@ -437,6 +440,7 @@ pub fn executionMain(host: *Host) void {
             .bash_preparation = &bash_preparation,
             .model_preparation = model_preparation,
             .bash_window = &workspace[0].bash_window,
+            .import_check = &workspace[0].import_check,
             .measurement = &measurement,
             .fenced = false,
         };
@@ -475,6 +479,9 @@ pub fn executionMain(host: *Host) void {
     traceLifecycleService(host, measurement.maximum_gap_ns);
 }
 
+/// Tests' response import grammar, off their stacks like the Host's.
+var testing_import_check: model_adapter.Output.ReplayValidationCursor = undefined;
+
 const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -482,6 +489,7 @@ const NativeTurn = struct {
     bash_preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
     bash_window: []u8,
+    import_check: *model_adapter.Output.ReplayValidationCursor,
     measurement: *LifecycleMeasurement,
     fenced: bool,
 
@@ -687,7 +695,7 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots);
+        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.import_check);
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -718,7 +726,7 @@ const slotsHaveBash = hasBash;
 
 /// One finished transfer per call, found by address: a Transfer lives
 /// inside exactly one slot.
-fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, import_check: *model_adapter.Output.ReplayValidationCursor) bool {
     const active_reactor = reactor orelse return false;
     const completion = active_reactor.nextCompletion(host.hooks.fails(.response_seal)) catch |err| {
         fenceDispatch(host, "transport completion", err);
@@ -728,7 +736,7 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
         fenceDispatch(host, "transport completion", error.UnknownTransportCompletion);
         return false;
     };
-    completeTransfer(host, slot, completion);
+    completeTransfer(host, slot, completion, import_check);
     return true;
 }
 
@@ -1639,6 +1647,7 @@ fn completeTransfer(
     host: *Host,
     slot: *ExecutionSlot,
     completion: provider.Completion,
+    import_check: *model_adapter.Output.ReplayValidationCursor,
 ) void {
     const active = &slot.provider;
     const owner = active.owner;
@@ -1681,7 +1690,7 @@ fn completeTransfer(
     }
     switch (decision) {
         .interpret_output => {
-            switch (completeSuccessfulTransfer(host, active, http_status.?)) {
+            switch (completeSuccessfulTransfer(host, active, http_status.?, import_check)) {
                 .cleanup => finishCustodyNow(host, slot),
                 .named_scratch => |scratch| {
                     moveSlot(host, slot, .{ .named_scratch = .{
@@ -1745,7 +1754,7 @@ const SuccessfulCompletion = union(enum) {
     named_scratch: named_scratch.Owner,
 };
 
-fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
+fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u16, import_check: *model_adapter.Output.ReplayValidationCursor) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
     const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -1816,7 +1825,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, &event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, .{
+    }, import_check, .{
         .metadata = host.hooks.fails(.response_metadata),
     })) {
         .accepted => |value| value,
@@ -2296,7 +2305,7 @@ test "HTTP error capture retires before execution custody" {
             .transfer = &slot.provider.transfer,
             .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } },
             .queued_after = 0,
-        });
+        }, &testing_import_check);
         try std.testing.expect(Boundary.retirement_observed);
         try std.testing.expectEqual(@as(usize, 1), Boundary.closes);
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());

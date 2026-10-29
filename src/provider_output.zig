@@ -761,7 +761,7 @@ const ItemSource = struct {
 };
 
 fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64, answer_hash: *std.crypto.hash.sha2.Sha256) !ItemValidation {
-    const check = &response.check;
+    const check = response.check;
     check.* = .{ .operation = response.operation };
     var bytes: usize = std.math.maxInt(usize);
     var items: usize = std.math.maxInt(usize);
@@ -1989,6 +1989,9 @@ const AnswerSelection = struct {
     }
 };
 
+/// Tests' item grammar storage, off their stacks like the Host's.
+var testing_check: ReplayValidationCursor = undefined;
+
 /// One response's validation, from its first event to its last.
 const Response = struct {
     metadata: *output_format.OutputMetadataWriter,
@@ -2002,7 +2005,7 @@ const Response = struct {
     answer: AnswerSelection,
     evidence: Evidence = .{},
     /// The item grammar's fixed storage, reused for every item.
-    check: ReplayValidationCursor = undefined,
+    check: *ReplayValidationCursor,
 };
 
 fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u64) !void {
@@ -2106,6 +2109,10 @@ pub fn validate(
     event_data: *EventData,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
+    /// The item grammar's storage, about 66 KB. A caller keeps it off the
+    /// stack: a frame that holds it makes all of its pages resident, while
+    /// one item touches only a few.
+    check: *ReplayValidationCursor,
     faults: Faults,
 ) !Validated {
     if (faults.metadata) metadata.fail_writes = true;
@@ -2114,7 +2121,7 @@ pub fn validate(
     var data: ?Range = null;
     var raw_start: u64 = 0;
     var done_marker = false;
-    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .answer = .{ .digest = protocol.contentDigest("") } };
+    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .check = check, .answer = .{ .digest = protocol.contentDigest("") } };
     if (source_length >= 3 and try rangeEquals(&capture, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
@@ -2255,7 +2262,7 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var data_used: std.atomic.Value(u64) = .init(0);
     var event_data = try EventData.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, .{});
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, &testing_check, .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
@@ -2452,13 +2459,13 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         var rejection: Rejection = .{};
         if (shortfall == 0) {
-            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, .{});
+            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{});
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, .{}));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{}));
             try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -2752,7 +2759,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
         var data = try EventData.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
         var rejection: Rejection = .{};
-        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, .{});
+        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{});
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
