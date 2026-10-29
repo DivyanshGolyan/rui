@@ -524,6 +524,8 @@ pub const Peer = struct {
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
+    /// The Host Unix second the row's owning fact committed.
+    at: u64,
     value: Value,
     pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
     pub const Content = struct {
@@ -545,9 +547,9 @@ pub const ActivityItem = struct {
     pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
     pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(max_code_bytes) };
 
-    /// Holes: position, ordinal; then the value's shape, then `tail`.
-    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
+    /// Holes: position, ordinal, at; then the value's shape, then `tail`.
+    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"at\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
     }
     pub const tail = .{"}}"};
     /// Each value kind's JSON, named by its tag.
@@ -572,6 +574,7 @@ pub const ActivityItem = struct {
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = Peer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     };
     pub const max_json_bytes = blk: {
+        @setEvalBranchQuota(10_000);
         var bytes = 0;
         for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
         break :blk bytes + shapeBytes(tail);
@@ -579,7 +582,7 @@ pub const ActivityItem = struct {
 
     pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
         switch (self.value) {
-            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal }),
+            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
             inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{

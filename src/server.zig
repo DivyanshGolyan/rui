@@ -2935,7 +2935,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_item: protocol.ActivityItem = undefined;
     var longest_item_bytes: usize = 0;
     for (values) |value| {
-        const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .value = value };
+        const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .at = max, .value = value };
         var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         try item.writeJson(&writer);

@@ -211,7 +211,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -255,7 +255,7 @@ pub const ActivityPage = struct {
         var position = cursor.position;
         var ordinal = cursor.ordinal;
         for (wire.items.values[0..wire.items.count], page.facts.items[0..wire.items.count]) |item, *fact| {
-            fact.* = .{ .position = try id(item.position, false), .ordinal = try id(item.ordinal, true), .value = undefined };
+            fact.* = .{ .position = try id(item.position, false), .ordinal = try id(item.ordinal, true), .at = try id(item.at, false), .value = undefined };
             const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
             const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
             if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
@@ -264,9 +264,14 @@ pub const ActivityPage = struct {
                 .admission, .user => |message| {
                     const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
                     if ((value.state == .applied) != (value.turn != null) or (item.value == .user and value.state != .applied)) return error.InvalidActivityPage;
+                    // An admission row is dated by the admission itself.
+                    if (item.value == .admission and fact.at != value.admitted_at) return error.InvalidActivityPage;
                     fact.value = if (item.value == .user) .{ .user = value } else .{ .admission = value };
                 },
-                .sent => |sent| fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } },
+                .sent => |sent| {
+                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
+                    if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
+                },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
@@ -1627,6 +1632,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
+        .at = std.math.maxInt(i64) - index,
         .value = .{ .tool_result = .{ .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
     };
     facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
@@ -1650,7 +1656,46 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
+        try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
     }
+}
+
+test "an activity row carries its time, and a Message's rows carry its admission time" {
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
+    var peer: protocol.Peer = .{ .session = .{} };
+    try peer.session.set("k7m2qx");
+    const sent: protocol.ActivityItem.Sent = .{ .admission = 2, .target = peer, .content = content, .admitted_at = 1792925000 };
+    for ([_]struct { value: protocol.ActivityItem.Value, at: u64, failure: ?anyerror = null }{
+        .{ .value = .{ .admission = message }, .at = 1792925000 },
+        .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
+        .{ .value = .{ .sent = sent }, .at = 1792925000 },
+        .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
+        // Like every ID and time on a page, zero is no time.
+        .{ .value = .{ .assistant = content }, .at = 0, .failure = error.InvalidResponse },
+    }) |case| {
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
+        } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
+    }
+    // A row without its time is refused.
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } }, .revision = 1 } };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = content } };
+    try facts.work.workspace.set("/w");
+    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&writer);
+    const field = ",\"at\":\"7\"";
+    const at = std.mem.indexOf(u8, writer.buffered(), field).?;
+    var missing: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    const bytes = try std.fmt.bufPrint(&missing, "{s}{s}", .{ writer.buffered()[0..at], writer.buffered()[at + field.len ..] });
+    try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
 }
 
 test "a work state reads back exactly the facts its kind owns" {

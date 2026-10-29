@@ -254,7 +254,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     defer job.result.collapsed = output.blocks;
     switch (step) {
         .echo => |echo| {
-            const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .value = .{ .admission = echo.message } };
+            const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
             try View.message(requests, job.store, job.session, item, echo.message, true, &output, job.colour);
             job.result.listing = null;
         },
@@ -950,14 +950,14 @@ test "a live page's beginning precedes its first item, without repeating or skip
     const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
     const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
-        .{ .item = .{ .position = 5, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
-        .{ .item = .{ .position = 7, .ordinal = 2, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },
+        .{ .item = .{ .position = 5, .at = 1, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
+        .{ .item = .{ .position = 7, .ordinal = 2, .at = 1, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },
         // Rows at position 4 that are not conversation items: the
         // Conversation before them ends at 3, so position 4's results stay
         // live and none repeats in the older page.
-        .{ .item = .{ .position = 4, .value = .{ .admission = message } }, .cursor = .{ .end = 3 } },
-        .{ .item = .{ .position = 4, .value = .{ .outcome = outcome } }, .cursor = .{ .end = 3 } },
-        .{ .item = .{ .position = 1, .value = .{ .admission = message } }, .cursor = null },
+        .{ .item = .{ .position = 4, .at = 1, .value = .{ .admission = message } }, .cursor = .{ .end = 3 } },
+        .{ .item = .{ .position = 4, .at = 1, .value = .{ .outcome = outcome } }, .cursor = .{ .end = 3 } },
+        .{ .item = .{ .position = 1, .at = 1, .value = .{ .admission = message } }, .cursor = null },
     }) |case| try std.testing.expectEqualDeep(case.cursor, beginningBefore(case.item, 9));
 }
 

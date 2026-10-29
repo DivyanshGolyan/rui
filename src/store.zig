@@ -2949,7 +2949,9 @@ pub const Store = struct {
 
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
-    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, sender: ?protocol.Bounded(protocol.max_session_bytes) = null } {
+    /// `at` is when the entry was recorded, or, for a Tool Result, when its
+    /// group's last call was accepted.
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, sender: ?protocol.Bounded(protocol.max_session_bytes) = null, at: u64 } {
         if (ordinal == 0) try self.validateAssistantEntries(session, position, position);
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
@@ -2960,7 +2962,7 @@ pub const Store = struct {
                 "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
                 "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal AND source.private=1 " ++
                 "AND " ++ resolutionIn("o.resolution_code", &turn_policy.accepted) ++ ")) THEN 1 ELSE 0 END," ++
-                "CASE WHEN e.entry_kind=1 THEN m.admitted_at END,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+                "CASE WHEN e.entry_kind=1 THEN m.admitted_at END,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END,e.recorded_at FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
                 "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
@@ -2975,7 +2977,11 @@ pub const Store = struct {
                 "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
                 "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
                 "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
-                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal FROM model_operation op " ++
+                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal," ++
+                // A rejected call is accepted when its Operation resolves; an
+                // Action call when the Action does.
+                "(SELECT max(coalesce(a.resolved_at,op.resolved_at)) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id) " ++
+                "FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND " ++ resolutionIs("op.resolution_code", .tool_proposals) ++ " AND call.call_ordinal+1=?3 " ++
@@ -3007,7 +3013,8 @@ pub const Store = struct {
             sender = .{};
             try readText(statement, 3, &sender.?);
         }
-        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at, .sender = sender };
+        const at: u64 = @intCast(try readNullablePositiveI64(statement, 4) orelse return error.CorruptStore);
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at, .sender = sender, .at = at };
     }
 
     const ContentSource = struct {
@@ -3262,7 +3269,8 @@ pub const Store = struct {
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.ContentNotFound;
         if (step != c.SQLITE_ROW) return error.ActivityReadFailed;
-        var result: ActivityIdentity = .{ .item = .{ .position = position, .ordinal = ordinal, .value = undefined } };
+        // Each kind reads `at` from the row that owns its fact.
+        var result: ActivityIdentity = .{ .item = .{ .position = position, .ordinal = ordinal, .at = undefined, .value = undefined } };
         switch (c.sqlite3_column_int(statement, 0)) {
             1, 2 => |kind| {
                 const admission = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
@@ -3271,14 +3279,29 @@ pub const Store = struct {
                 if (kind == 2 and message.state != .applied) return error.CorruptStore;
                 result.item.value = if (kind == 1) .{ .admission = message } else .{ .user = message };
                 result.content_id = owned.content_id;
-                if (kind == 2 and (try self.publicConversationContentLocked(session, position, ordinal)).id != result.content_id.?) return error.CorruptStore;
+                result.item.at = message.admitted_at;
+                if (kind == 2) {
+                    const entry = try self.publicConversationContentLocked(session, position, ordinal);
+                    if (entry.id != result.content_id.?) return error.CorruptStore;
+                    result.item.at = entry.at;
+                }
             },
             3, 5 => |kind| {
                 const content = try self.publicConversationContentLocked(session, position, ordinal);
+                result.item.at = content.at;
                 result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .content = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .presentation = try self.toolPresentationLocked(content.tool_operation orelse return error.CorruptStore, ordinal - 1, position) } };
                 result.content_id = content.id;
             },
-            4 => result.item.value = .{ .call = (try self.proposalLocked(session, position, false)).metadata },
+            4 => {
+                const call = (try self.proposalLocked(session, position, false)).metadata;
+                result.item.value = .{ .call = call };
+                const select = try self.cached("SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2");
+                defer resetCached(select);
+                try bindU64(select, 1, call.operation);
+                try bindText(select, 2, session);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
+                result.item.at = @intCast(try readNullablePositiveI64(select, 0) orelse return error.CorruptStore);
+            },
             8 => {
                 const admission = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
                 const select = try self.cached("SELECT m.session_ref,m.content_id,m.admitted_at,c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
@@ -3298,10 +3321,11 @@ pub const Store = struct {
                     .content = .{ .length = metadata.length, .digest = metadata.digest },
                     .admitted_at = @intCast(try readNullablePositiveI64(select, 2) orelse return error.CorruptStore),
                 } };
+                result.item.at = result.item.value.sent.admitted_at;
                 result.content_id = content_id;
             },
             9 => {
-                const select = try self.cached("SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0 FROM sent_rejection s " ++
+                const select = try self.cached("SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0,s.rejected_at FROM sent_rejection s " ++
                     "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2");
                 defer resetCached(select);
                 try bindText(select, 1, session);
@@ -3314,10 +3338,11 @@ pub const Store = struct {
                 failed.target = .{ .session = target };
                 try readText(select, 2, &failed.code);
                 result.item.value = .{ .send_failed = failed };
+                result.item.at = @intCast(try readNullablePositiveI64(select, 4) orelse return error.CorruptStore);
             },
             6 => {
                 const select = try self.cached("SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
-                    "AND o.resolution_code IS NOT NULL,o.resolution_content_id FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
+                    "AND o.resolution_code IS NOT NULL,o.resolution_content_id,t.outcome_at FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
                 defer resetCached(select);
                 try bindText(select, 1, session);
                 try bindU64(select, 2, position);
@@ -3335,10 +3360,11 @@ pub const Store = struct {
                     outcome.content = .{ .length = content.length, .digest = content.digest };
                 }
                 result.item.value = .{ .outcome = outcome };
+                result.item.at = @intCast(try readNullablePositiveI64(select, 6) orelse return error.CorruptStore);
             },
             7 => {
                 const select = try self.cached("SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
-                    "c.kind=3 AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref) " ++
+                    "c.kind=3 AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref),s.stopped_at " ++
                     "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2");
                 defer resetCached(select);
                 try bindText(select, 1, session);
@@ -3349,6 +3375,7 @@ pub const Store = struct {
                 var stop: protocol.ActivityItem.Stop = .{ .key = .{}, .turn = if (turn) |id| @intCast(id) else null, .cutoff = @intCast(c.sqlite3_column_int64(select, 2)), .completion = if (turn == null or (outcome_position != null and outcome_position.? <= end)) .completed else .pending };
                 try readText(select, 0, &stop.key);
                 result.item.value = .{ .stop = stop };
+                result.item.at = @intCast(try readNullablePositiveI64(select, 5) orelse return error.CorruptStore);
             },
             else => return error.CorruptStore,
         }
@@ -14564,11 +14591,17 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     }
 
     try session.set(sender);
+    try exec(storage.database, "UPDATE sent_rejection SET rejected_at=200+sender_position");
     const own = try storage.activityPage(.{ .session = session, .position = sender_end });
     try std.testing.expectEqual(@as(usize, 3), own.count);
     try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
     const out = own.items[0].value.sent;
     try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
+    // One Message's two rows share its admission time; a refused send is
+    // dated by its refusal.
+    try std.testing.expectEqual(out.admitted_at, own.items[0].at);
+    try std.testing.expectEqual(received.items[0].at, own.items[0].at);
+    for (own.items[1..3]) |failure| try std.testing.expectEqual(200 + failure.position, failure.at);
     try std.testing.expectEqualStrings(allocated_session_1.slice(), out.target.session.slice());
     const failed = own.items[1].value.send_failed;
     try std.testing.expectEqualStrings("absent", failed.target.session.slice());
@@ -17895,6 +17928,50 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).count);
+}
+
+test "every activity row is dated by the fact that owns it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "dated-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "dated-answer", &answer);
+    try submitTestMessage(&storage, &tmp, "dated-input", "dated-input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "dated-calls");
+    var stop = try completeSessionStop("dated-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // Distinct times name the owning fact of each row. Tool Result entries
+    // are recorded too, but a result row is dated by its group's last
+    // acceptance.
+    try exec(storage.database, "UPDATE message_admission SET admitted_at=101;" ++
+        "UPDATE conversation_entry SET recorded_at=CASE entry_kind WHEN 1 THEN 102 WHEN 3 THEN 103 ELSE 109 END;" ++
+        "UPDATE model_operation SET resolved_at=104;" ++
+        "UPDATE action_operation SET resolved_at=CASE call_ordinal WHEN 0 THEN 105 ELSE 106 END;" ++
+        "UPDATE turn SET outcome_at=107;" ++
+        "UPDATE session_stop SET stopped_at=108");
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const page = try storage.activityPage(request);
+    var seen: std.EnumSet(std.meta.Tag(protocol.ActivityItem.Value)) = .empty;
+    for (page.items[0..page.count]) |item| {
+        const expected: u64 = switch (item.value) {
+            .admission => 101,
+            .user => 102,
+            .assistant => 103,
+            .call => 104,
+            .tool_result => 106,
+            .outcome => 107,
+            .stop => 108,
+            .sent, .send_failed => unreachable,
+        };
+        try std.testing.expectEqual(expected, item.at);
+        seen.insert(item.value);
+    }
+    try std.testing.expectEqual(@as(usize, 7), seen.count());
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "persisted tool label corruption fences every publication route" {
