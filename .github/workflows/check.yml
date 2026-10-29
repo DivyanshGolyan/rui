@@ -18,6 +18,9 @@ on:
         description: Qualify current main on Mac, including candidates with no selected native targets
         type: boolean
         default: false
+      targets:
+        description: Hillclimb harness only, a pinned target selection
+        default: ''
 
 permissions:
   contents: read
@@ -47,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Refuse a second open landing stack before native jobs start
-        if: ${{ github.event_name != 'pull_request' && github.ref_name != 'main' }}
+        if: ${{ github.event_name != 'pull_request' && github.ref_name != 'main' && !inputs.targets }}
         run: python3 -B tests/ci/auto_land.py --preflight "$GITHUB_REF_NAME"
       - name: Select existing targets
         id: select
@@ -57,6 +60,7 @@ jobs:
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
           STABLE: ${{ inputs.stable || false }}
+          PIN: ${{ inputs.targets || '' }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = push ]; then
@@ -73,6 +77,8 @@ jobs:
           from qualification import shards
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
+          if os.environ.get('PIN'):
+              p['targets'] = json.loads(os.environ['PIN'])
           if os.environ['STABLE'] == 'true':
               assert os.environ['GITHUB_REF_NAME'] == 'main', 'stable qualifies main only'
               p['targets'] = []
