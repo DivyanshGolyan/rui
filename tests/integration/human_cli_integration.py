@@ -110,16 +110,31 @@ def create_session(home, *args):
     return session
 
 
+def shell_word(text):
+    """Rui's Bash ANSI-C quoting of one argv value."""
+    escaped = "".join("\\'" if byte == 0x27 else "\\\\" if byte == 0x5c else
+        chr(byte) if 32 <= byte <= 126 else f"\\{byte:03o}" for byte in text.encode())
+    return f"$'{escaped}'"
+
+
 def defaults(home, *args, success=True, environment=None):
-    """One defaults JSON value; failures leave stdout empty."""
-    output = run(home, "defaults", "configure" if args else "inspect", *args,
-        success=success, environment=environment)
+    """One defaults JSON value; failures leave stdout empty. Only a saved Store says it became the global default."""
+    env = {**os.environ, "HOME": str(home), **(environment or {})}
+    result = subprocess.run([str(fixture.RUI), "defaults", "configure" if args else "inspect", *map(str, args)],
+        env=env, capture_output=True, text=True, timeout=20)
     if not success:
-        assert output == "", output
+        assert result.returncode != 0 and result.stdout == "", (args, result.stdout, result.stderr)
+        assert "global default Store" not in result.stderr, result.stderr
         return None
-    value = json.loads(output)
+    assert result.returncode == 0, (args, result.stdout, result.stderr)
+    value = json.loads(result.stdout)
     assert value["version"] == "1" and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
+    if "--store" in args:
+        assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
+            "every command without --store now uses it, from any directory.\n"), (args, result.stderr)
+    else:
+        assert "global default Store" not in result.stderr, (args, result.stderr)
     return value
 
 

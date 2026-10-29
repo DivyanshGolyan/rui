@@ -2,7 +2,7 @@
 
 The **Host** is the background process that runs work. The **Store** is its private directory of saved state.
 
-Commands pick a Store in this order: `--store`, your saved default, then `$HOME/.local/share/rui/store`. In scripts, pass `--store` so the destination never depends on saved defaults.
+Commands pick a Store in this order: `--store`, your saved default, then `$HOME/.local/share/rui/store`. `rui defaults configure --store PATH` saves that default for every directory and names it on stderr. In scripts, pass `--store` so the destination never depends on saved defaults.
 
 ## Start and check the Host
 

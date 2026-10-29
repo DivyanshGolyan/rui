@@ -246,6 +246,15 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    // Preferences live in HOME, so a saved Store redirects every Workspace.
+    if (!interactive and edit.store != .keep) notice: {
+        var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.writeAll("rui: saved ") catch break :notice;
+        TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
+        notice.writeAll(" as the global default Store; every command without --store now uses it, from any directory.\n") catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    }
     if (!interactive) return writeDefaultsJson(init.io, .{
         .changed = changed,
         .store = prospective_store,
