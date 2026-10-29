@@ -74,6 +74,14 @@ class CauseTest(unittest.TestCase):
     def test_driver_cases_map_to_their_fixture_files(self):
         self.assertEqual(self.cases['bash'], 'tests/integration/bash_integration.py')
         self.assertEqual(self.cases['host-stop'], 'tests/integration/host_stop_integration.py')
+        # Cases run through `env VAR=… python3` keep their fixture.
+        self.assertEqual(self.cases['terminal-restoration'], 'tests/integration/terminal_restoration_integration.py')
+        self.assertEqual(self.cases['human-cli-renderer'], 'tests/integration/human_cli_integration.py')
+        causes = report_issue.failure_causes(BASH + logged('terminal-restoration failed: exit=1 elapsed=3s'),
+                                             self.cases)
+        self.assertEqual([cause.paths for cause in causes],
+                         [['tests/integration/bash_integration.py'],
+                          ['tests/integration/terminal_restoration_integration.py']])
         for path in self.cases.values():
             self.assertTrue(Path(path).is_file(), path)
 
@@ -226,6 +234,25 @@ class ReportTest(unittest.TestCase):
         self.run_main(fake)
         self.assertEqual([call[-1] for call in fake.calls if call[0] == 'api' and call[-1].endswith('/logs')],
                          ['repos/o/r/actions/jobs/2/logs'])
+
+    def test_an_aggregate_failing_only_on_its_needs_files_nothing_of_its_own(self):
+        require = [dict(name='Set up job', conclusion='success'),
+                   dict(name='Require every selected Apple Silicon part', conclusion='failure')]
+        jobs = [dict(id=1, name='macos suites (check)', conclusion='failure'),
+                dict(id=2, name='macos', conclusion='failure', steps=require)]
+        fake = FakeGitHub(jobs, {1: BASH, 2: logged('test "$NATIVE_RESULT" = success')})
+        self.run_main(fake)
+        [create] = fake.made('create')
+        self.assertIn('bash: assert process_exists', create[create.index('--title') + 1])
+        self.assertNotIn(('api', 'repos/o/r/actions/jobs/2/logs'), fake.calls)
+        # Every aggregate step check.yml runs carries the name the reporter skips.
+        steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
+                           re.M)
+        self.assertEqual(len(steps), 2)
+        # A real gate that fails is still filed.
+        gate = dict(id=3, name='mutations', conclusion='failure',
+                    steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])
+        self.assertFalse(report_issue.aggregate_only(gate))
 
     def test_an_unavailable_log_is_retried_then_filed_without_aborting_the_run(self):
         jobs = [dict(id=1, name='macos / native', conclusion='failure'),

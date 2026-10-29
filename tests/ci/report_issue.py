@@ -21,12 +21,16 @@ from run_selected import RETRIED
 LABEL = "ci-red"
 STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
-FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) \S+ "\$directory/([^"]+)"', re.M)
+# The fixture is the first script after the case name, past any `env VAR=…` wrapper.
+FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) [^\n]*?"\$directory/([^"]+)"', re.M)
 RECORD = re.compile(r"^([a-z0-9-]+) failed: exit=\d+", re.M)
 ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S.*?)\.\.\.FAIL \((\w+)\)$", re.M)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
+# check.yml's linux and macos aggregates only require their needs' results; a
+# suite's failure fails them too, and the suite's own log carries the cause.
+AGGREGATE_STEP = "Require every selected "
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
 
@@ -189,6 +193,12 @@ def run_jobs(repository, run_id):
     return [job for page in pages for job in page["jobs"]]
 
 
+def aggregate_only(job):
+    """A job whose every failed step is an aggregate's check of its needs."""
+    failed = [step["name"] for step in job.get("steps") or () if step.get("conclusion") == "failure"]
+    return bool(failed) and all(name.startswith(AGGREGATE_STEP) for name in failed)
+
+
 def job_causes(log, cases, workflow, job, failed):
     """A failed job's causes, or a passing job's retried failures; a failure always has one."""
     if log is None:
@@ -216,7 +226,7 @@ def main():
     issues, cases = known_issues(repository), fixtures()
     for job in run_jobs(repository, args.run_id):
         failed = job["conclusion"] in ("failure", "timed_out")
-        if job["conclusion"] != "success" if args.retried_only else not failed:
+        if job["conclusion"] != "success" if args.retried_only else not failed or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
         for cause in job_causes(log, cases, args.workflow, job, failed):
