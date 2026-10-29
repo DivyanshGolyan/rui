@@ -394,7 +394,7 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
-    if (command == .host_start) return startHost(init, selected, false);
+    if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"));
     if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
@@ -471,13 +471,11 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     }
 }
 
-fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
+/// Null capacity leaves a new Host on product_defaults.active_capacity.
+fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize) !void {
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
-        .ready => |ready| {
-            if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-            return;
-        },
+        .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
         .unavailable, .owned_unavailable => {},
@@ -497,11 +495,18 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     // these terminated strings and pointer framing through exec/error handoff;
     // all storage is prepared before any detach fork. Omitting
     // --active-capacity keeps product_defaults.active_capacity the only default.
-    const argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex",
+    var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
+    var argv = [_:null]?[*:0]const u8{
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex", null, null,
     };
+    var argc: usize = 6;
+    if (capacity) |value| {
+        argv[6] = "--active-capacity";
+        argv[7] = (try std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0)).ptr;
+        argc = 8;
+    }
     var startup_read: c_int = -1;
-    const launched = rui_launch_detached_observed(argv[0].?, &argv, argv.len, &startup_read);
+    const launched = rui_launch_detached_observed(argv[0].?, &argv, argc, &startup_read);
     defer if (startup_read >= 0) {
         _ = std.c.close(startup_read);
     };
@@ -557,8 +562,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
                     _ = @import("stderr.zig").write(notices);
-                if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-                return;
+                return reportStartedHost(io, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -570,6 +574,20 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
     TerminalText.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
+}
+
+/// A ready Host keeps the capacity it started with, so a different request
+/// is reported rather than dropped; a competing launcher may have won.
+fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+    if (capacity) |requested| if (requested != ready.active_capacity) notice: {
+        var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
+        notice.writeByte('\n') catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    };
+    if (!quiet) try writeHostStatus(io, .{ .ready = ready });
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
@@ -1049,7 +1067,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         try guideProviderLogin(init);
         after_choice = true;
     };
-    try startHost(init, selected_store, true);
+    try startHost(init, selected_store, true, null);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
     const ready = switch (client.hostStatus(init.io, destination)) {
@@ -1585,7 +1603,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
-    try startHost(init, destination, true);
+    try startHost(init, destination, true, null);
     var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
     if (reference) |value| {
         try selected.set(value);

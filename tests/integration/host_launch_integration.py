@@ -164,9 +164,9 @@ def environment(home, credential):
     }
 
 
-def run_start(store, env, **options):
+def run_start(store, env, *arguments, **options):
     return subprocess.run(
-        [RUI, "host", "start", "--store", store],
+        [RUI, "host", "start", "--store", store, *arguments],
         env=env,
         capture_output=True,
         text=True,
@@ -673,9 +673,33 @@ def main():
             assert instance(reported, 3) == before, reported
             assert reported["diagnostics"] == f"{held_store.resolve()}/diagnostics", reported
             assert instance(status(held_store, env), 3) == before
+            same = run_start(held_store, env, "--active-capacity", "3")
+            assert same.returncode == 0 and "--active-capacity" not in same.stderr, same
+            assert instance(json.loads(same.stdout), 3) == before, same
+            # A differing request is reported, not silently dropped or applied.
+            differing = run_start(held_store, env, "--active-capacity", "7")
+            assert differing.returncode == 0, differing.stderr
+            assert instance(json.loads(differing.stdout), 3) == before, differing
+            assert ("rui: the running Host keeps active capacity 3; --active-capacity 7 applies only to a new Host. "
+                    f"Changing it means stopping this Host and all its work: rui host stop --store $'{held_store.resolve()}'\n"
+                    ) in differing.stderr, differing.stderr
+            assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
             stop_process(held)
+
+        unparsed_store = root / "unparsed-capacity"
+        unparsed = run_start(unparsed_store, env, "--active-capacity", "-1")
+        assert unparsed.returncode != 0 and not unparsed.stdout, unparsed
+        assert not unparsed_store.exists(), "unparsed capacity created a candidate Store"
+        sized_store = root / "sized-store"
+        try:
+            sized = run_start(sized_store, env, "--active-capacity", "5")
+            assert sized.returncode == 0, sized.stderr
+            assert instance(json.loads(sized.stdout), 5) == instance(status(sized_store, env), 5)
+            assert len(wait_for_processes(sized_store, 1)) == 1
+        finally:
+            forced_crash_cleanup(sized_store)
 
         # Concurrent spelling aliases may launch candidates, but exactly one
         # default-capacity owner becomes ready and all callers converge on it.
