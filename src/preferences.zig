@@ -32,7 +32,7 @@ pub fn validate(values: *const Values) !void {
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
     }
     // Empty means no pin; any pin follows Codex's one identifier rule.
-    if (values.model.len != 0 and !model_capability.validModel(values.model.slice())) return error.InvalidPreferenceModel;
+    if (values.model.len != 0 and !model_capability.validModelSyntax(values.model.slice())) return error.InvalidPreferenceModel;
     if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
 }
 
@@ -132,7 +132,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Read
         if (!std.mem.eql(u8, edit.provider.set, "codex")) return error.UnsupportedPreferenceProvider;
     }
     if (edit.model == .set) {
-        if (!model_capability.validModel(edit.model.set)) return error.InvalidPreferenceModel;
+        if (!model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
     }
     if (edit.store == .set) {
         const value = edit.store.set;

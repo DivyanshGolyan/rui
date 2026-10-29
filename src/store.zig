@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 36;
+pub const schema_version: u32 = 37;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -106,6 +106,16 @@ const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND r
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
+/// Reads only `action_operation_executable`, so an Action waiting for
+/// permission costs admission nothing.
+const next_action_attempt_sql =
+    "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
+    "INDEXED BY action_operation_executable JOIN model_operation operation " ++
+    "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+    "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+    "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+    "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+    "ORDER BY action.action_id LIMIT 1";
 /// The content row columns a view handle needs, decoded by
 /// `readHistoricalContent` in this order.
 const historical_content_columns_sql = "content.byte_length,content.digest,content.private,typeof(content.payload)!='null'";
@@ -169,28 +179,9 @@ pub const AcceptedConfiguration = struct {
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
 };
 
-pub const ConfigurationRejection = enum {
-    invalid_session_reference,
-    unknown_session,
-    unsupported_permission_mode,
-    unsupported_provider,
-    invalid_model,
-    model_capability_unavailable,
-    invalid_output_schema,
-    invalid_compaction_trigger,
-    invalid_output_reservation,
-    unsupported_reasoning_effort,
-    incomplete_initial_configuration,
-    invalid_workspace,
-    workspace_is_immutable,
-    provider_is_immutable,
-    model_is_immutable,
-    revision_exhausted,
-};
-
 pub const RejectedConfiguration = struct {
     replayed: bool,
-    code: ConfigurationRejection,
+    code: protocol.ConfigurationRejection,
 };
 
 pub const ConfigureReply = union(enum) {
@@ -198,26 +189,6 @@ pub const ConfigureReply = union(enum) {
     rejected: RejectedConfiguration,
     conflict,
     infrastructure_failure,
-};
-
-pub const MessageRejection = enum {
-    invalid_session_reference,
-    unknown_session,
-    invalid_sender_handle,
-    unsupported_permission_mode,
-    unsupported_provider,
-    invalid_model,
-    model_capability_unavailable,
-    invalid_output_schema,
-    invalid_compaction_trigger,
-    invalid_output_reservation,
-    unsupported_reasoning_effort,
-    incomplete_initial_configuration,
-    invalid_workspace,
-    workspace_is_immutable,
-    provider_is_immutable,
-    model_is_immutable,
-    revision_exhausted,
 };
 
 pub const AcceptedMessage = struct {
@@ -229,7 +200,7 @@ pub const AcceptedMessage = struct {
 
 pub const RejectedMessage = struct {
     replayed: bool,
-    code: MessageRejection,
+    code: protocol.MessageRejection,
     content: ContentReference,
 };
 
@@ -240,20 +211,18 @@ pub const MessageReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const CommandKind = enum { configure, message, session_stop, model_interruption, permission_decision };
-
 const StoredAnswer = struct {
     accepted: bool,
-    code: protocol.Bounded(96) = .{},
+    code: protocol.Bounded(protocol.max_code_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
 };
 
 pub const CommandObservation = struct {
-    status: enum { absent, accepted, rejected },
-    kind: CommandKind = .configure,
+    status: protocol.CommandObservationStatus,
+    kind: protocol.CommandKind = .configure,
     target: protocol.Bounded(protocol.max_session_bytes) = .{},
-    code: protocol.Bounded(96) = .{},
+    code: protocol.Bounded(protocol.max_code_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
     message: ?MessageObservation = null,
@@ -268,11 +237,9 @@ pub const SessionStopSelection = struct {
     admission_cutoff: u64,
 };
 
-pub const SessionStopCompletion = enum { pending, completed };
-
 pub const SessionStopObservation = struct {
     selection: SessionStopSelection,
-    completion: SessionStopCompletion,
+    completion: protocol.SessionStopCompletion,
 };
 
 pub const ModelInterruptionTarget = struct {
@@ -281,48 +248,28 @@ pub const ModelInterruptionTarget = struct {
     operation_id: u64,
 };
 
-pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
-
 pub const SessionStopReply = union(enum) {
     accepted: struct {
         replayed: bool,
         selection: SessionStopSelection,
-        completion: SessionStopCompletion,
+        completion: protocol.SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
-    rejected: struct { replayed: bool, code: SessionStopRejection },
+    rejected: struct { replayed: bool, code: protocol.SessionStopRejection },
     conflict,
     infrastructure_failure,
-};
-
-pub const ModelInterruptionRejection = enum {
-    invalid_session_reference,
-    invalid_target,
-    unknown_session,
-    unknown_operation,
-    target_mismatch,
-    operation_resolved,
 };
 
 pub const ModelInterruptionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: ModelInterruptionRejection },
+    rejected: struct { replayed: bool, code: protocol.ModelInterruptionRejection },
     conflict,
     infrastructure_failure,
 };
 
-pub const PermissionDecisionRejection = enum {
-    invalid_session_reference,
-    invalid_target,
-    unknown_session,
-    unknown_action,
-    target_mismatch,
-    action_not_pending,
-};
-
 pub const PermissionDecisionReply = union(enum) {
     accepted: struct { replayed: bool },
-    rejected: struct { replayed: bool, code: PermissionDecisionRejection },
+    rejected: struct { replayed: bool, code: protocol.PermissionDecisionRejection },
     conflict,
     infrastructure_failure,
 };
@@ -371,7 +318,7 @@ pub const ContentReference = struct {
 pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
-    kind: enum { user, assistant, tool_result },
+    kind: protocol.ConversationItemKind,
     content: ContentReference,
     presentation: ?protocol.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
@@ -402,8 +349,7 @@ pub const MessageObservation = struct {
 };
 
 pub const MessageProgress = struct {
-    pub const Status = enum { runnable, in_flight, waiting_for_permission };
-    status: Status,
+    status: protocol.MessageProgressStatus,
     action_id: ?u64 = null,
 };
 
@@ -413,7 +359,7 @@ pub const AcceptedMessageQueue = struct {
 
     pub const State = union(enum) {
         queued,
-        excluded: struct { code: protocol.Bounded(96) },
+        excluded: struct { code: protocol.Bounded(protocol.max_code_bytes) },
         processing: AttemptBinding,
         completed: struct {
             binding: AttemptBinding,
@@ -421,11 +367,11 @@ pub const AcceptedMessageQueue = struct {
         },
         cancelled: struct {
             binding: AttemptBinding,
-            code: protocol.Bounded(96),
+            code: protocol.Bounded(protocol.max_code_bytes),
         },
         failed: struct {
             binding: AttemptBinding,
-            code: protocol.Bounded(96),
+            code: protocol.Bounded(protocol.max_code_bytes),
         },
     };
 };
@@ -677,6 +623,36 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active);
         while (!try self.validateOutputsStep()) {}
         return self.store.selectedContextAnchor(self.binding);
+    }
+
+    /// The Operation's admission position, the exclusive upper bound of this
+    /// view's history. Known once output validation completes.
+    pub fn admissionPosition(self: *const HistoricalView) u64 {
+        std.debug.assert(self.active and self.outputs_validated);
+        return self.output_boundary;
+    }
+
+    /// The last producing Operation the tool-group scan has examined. After
+    /// the final entry, every earlier Operation of this view is examined.
+    pub fn toolGroupCursor(self: *const HistoricalView) u64 {
+        std.debug.assert(self.active);
+        return self.tool_group_source_cursor;
+    }
+
+    /// Start the tool-group scan after `cursor`, before the first entry
+    /// read. The caller resumes after the last position that an earlier view
+    /// of the same Session covered, with that view's final cursor. Every
+    /// Operation at or below that cursor precedes the earlier view's
+    /// Operation, whose admission required each of them resolved and each
+    /// tool group complete (`runnable_eligibility_sql`); that view checked
+    /// each group's position below its admission position and emitted it.
+    /// Resolutions and acceptance positions never change, so those groups
+    /// all lie at or before the covered position and the scan would only skip
+    /// them. The earlier view's own Operation, whose results land after its
+    /// admission position, is above the cursor and is scanned.
+    pub fn resumeToolGroups(self: *HistoricalView, cursor: u64) void {
+        std.debug.assert(self.active and self.outputs_validated and !self.tool_group_initialized);
+        self.tool_group_source_cursor = cursor;
     }
 
     /// A tool-results entry activates one canonical group. Consume it fully
@@ -1203,7 +1179,7 @@ const MessageProjection = struct {
         excluded: protocol.Bounded(128),
         applied: struct {
             binding: AttemptBinding,
-            outcome_code: ?protocol.Bounded(96),
+            outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
             outcome_content_id: ?i64,
         },
     },
@@ -1222,7 +1198,7 @@ const ConfigurationContentAction = enum(u2) {
 };
 
 const ConfigurationUpdatePlan = union(enum) {
-    rejected: ConfigurationRejection,
+    rejected: protocol.ConfigurationRejection,
     update: struct {
         instructions: ConfigurationContentAction,
         output_schema: ConfigurationContentAction,
@@ -1242,7 +1218,7 @@ fn configurationTokens(field: @TypeOf(@as(protocol.Configuration, .{}).compactio
 fn configurationBeforeWorkspace(
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
-) ?ConfigurationRejection {
+) ?protocol.ConfigurationRejection {
     _ = configurationTokens(requested.compaction_trigger, null, false) catch return .invalid_compaction_trigger;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
@@ -1359,7 +1335,8 @@ pub const SqliteDiagnostic = struct {
 };
 
 /// How a Turn ended. `turn.outcome_code` saves `code()`; a completed Turn
-/// also saves its answer's content.
+/// also saves its answer's content. Readers `decode` the saved pair once
+/// and switch on the result, so a new outcome is handled at every reader.
 const TurnOutcome = union(enum) {
     completed: i64,
     cancelled,
@@ -1368,13 +1345,35 @@ const TurnOutcome = union(enum) {
     /// A terminal model failure, saved under its own failure code.
     failed: []const u8,
 
-    fn code(outcome: TurnOutcome) []const u8 {
-        return switch (outcome) {
+    const Tag = std.meta.Tag(TurnOutcome);
+
+    /// The saved code of every outcome but a failure, which saves its own.
+    fn fixedCode(tag: Tag) ?[]const u8 {
+        return switch (tag) {
             .completed => "completed",
             .cancelled => "cancelled",
             .retry_exhausted => "retry_exhausted",
             .resource_exceeded => "ResourceExceeded",
-            .failed => |failure| failure,
+            .failed => null,
+        };
+    }
+
+    fn code(outcome: TurnOutcome) []const u8 {
+        return fixedCode(outcome) orelse outcome.failed;
+    }
+
+    /// The inverse of `code()` with the content `closeTurn` saved beside
+    /// it. A `failed` result borrows `saved`.
+    fn decode(saved: []const u8, content_id: ?i64) error{CorruptStore}!TurnOutcome {
+        if (saved.len == 0) return error.CorruptStore;
+        const tag: Tag = for (std.enums.values(Tag)) |candidate| {
+            if (fixedCode(candidate)) |fixed| if (std.mem.eql(u8, fixed, saved)) break candidate;
+        } else .failed;
+        if ((tag == .completed) != (content_id != null)) return error.CorruptStore;
+        return switch (tag) {
+            .completed => .{ .completed = content_id.? },
+            .failed => .{ .failed = saved },
+            inline .cancelled, .retry_exhausted, .resource_exceeded => |fixed| fixed,
         };
     }
 };
@@ -1789,7 +1788,7 @@ pub const Store = struct {
         const command = &resolved;
         const creating = request.session.len == 0;
         const digest = request.semanticDigest();
-        switch (try self.classifyReplay(ConfigurationRejection, .configure, command.key.slice(), command.session.slice(), &digest)) {
+        switch (try self.classifyReplay(protocol.ConfigurationRejection, .configure, command.key.slice(), command.session.slice(), &digest)) {
             .fresh => {},
             .conflict => return .conflict,
             .accepted => |existing| return .{ .accepted = .{
@@ -1831,7 +1830,7 @@ pub const Store = struct {
             instructions_id: ?i64,
             output_schema_id: ?i64,
         },
-        rejected: ConfigurationRejection,
+        rejected: protocol.ConfigurationRejection,
     } {
         var resolved = request.*;
         const command = &resolved;
@@ -1940,7 +1939,7 @@ pub const Store = struct {
         self: *Store,
         command: *const protocol.ConfigureCommand,
         digest: *const [32]u8,
-        code: ConfigurationRejection,
+        code: protocol.ConfigurationRejection,
         faults: Faults,
     ) !ConfigureReply {
         var answer = StoredAnswer{ .accepted = false };
@@ -1982,7 +1981,7 @@ pub const Store = struct {
             .length = command.text.length,
             .digest = command.text.digest,
         };
-        switch (try self.classifyReplay(MessageRejection, .message, command.key.slice(), command.session.slice(), &digest)) {
+        switch (try self.classifyReplay(protocol.MessageRejection, .message, command.key.slice(), command.session.slice(), &digest)) {
             .fresh => {},
             .conflict => return .conflict,
             .accepted => |existing| {
@@ -2007,7 +2006,7 @@ pub const Store = struct {
         const sender_valid = try self.messageSenderMatchesLocked(command);
         const sender_known = command.sender != null and sender_valid;
         const creating = command.configuration != null;
-        var code: ?MessageRejection = if (creating and command.session.len != 0 or
+        var code: ?protocol.MessageRejection = if (creating and command.session.len != 0 or
             !creating and !protocol.validSessionId(command.session.slice()))
             .invalid_session_reference
         else if (!sender_valid)
@@ -2019,7 +2018,7 @@ pub const Store = struct {
         if (code == null) if (command.configuration) |configuration| {
             const creation = protocol.ConfigureCommand{ .key = command.key, .configuration = configuration };
             switch (try self.applyConfiguration(&creation, faults)) {
-                .rejected => |rejection| code = std.meta.stringToEnum(MessageRejection, @tagName(rejection)).?,
+                .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
                 .accepted => |value| resolved.session = value.session,
             }
         };
@@ -2108,7 +2107,7 @@ pub const Store = struct {
     ) !SessionStopReply {
         try self.execute("BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        switch (try self.classifyReplay(SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
+        switch (try self.classifyReplay(protocol.SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
             .fresh => {},
             .conflict => return .conflict,
             .accepted => {
@@ -2241,7 +2240,7 @@ pub const Store = struct {
         self: *Store,
         command: *const protocol.SessionStopCommand,
         digest: *const [32]u8,
-        code: SessionStopRejection,
+        code: protocol.SessionStopRejection,
         faults: Faults,
     ) !SessionStopReply {
         var answer = StoredAnswer{ .accepted = false };
@@ -2277,7 +2276,7 @@ pub const Store = struct {
     ) !ModelInterruptionReply {
         try self.execute("BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        const replay = try self.classifyReplay(ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
+        const replay = try self.classifyReplay(protocol.ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
         if (replay == .accepted or replay == .rejected) {
             const saved_target = try self.readModelInterruptionTarget(command.key.slice());
             if (!saved_target.session.eql(command.session.slice()) or
@@ -2291,7 +2290,7 @@ pub const Store = struct {
             .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
-        var rejection: ?ModelInterruptionRejection = null;
+        var rejection: ?protocol.ModelInterruptionRejection = null;
         if (!protocol.validSessionId(command.session.slice())) {
             rejection = .invalid_session_reference;
         } else if (command.turn_id == 0 or command.operation_id == 0 or
@@ -2344,7 +2343,7 @@ pub const Store = struct {
                 command,
                 &digest,
                 false,
-                @tagName(ModelInterruptionRejection.target_mismatch),
+                @tagName(protocol.ModelInterruptionRejection.target_mismatch),
                 faults,
             );
         }
@@ -2390,7 +2389,7 @@ pub const Store = struct {
         if (accepted) return .{ .accepted = .{ .replayed = false } };
         return .{ .rejected = .{
             .replayed = false,
-            .code = std.meta.stringToEnum(ModelInterruptionRejection, code) orelse unreachable,
+            .code = std.meta.stringToEnum(protocol.ModelInterruptionRejection, code) orelse unreachable,
         } };
     }
 
@@ -2441,18 +2440,18 @@ pub const Store = struct {
     ) !PermissionDecisionReply {
         try self.execute("BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        switch (try self.classifyReplay(PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
+        switch (try self.classifyReplay(protocol.PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
             .fresh => {},
             .conflict => return .conflict,
             .accepted => return .{ .accepted = .{ .replayed = true } },
             .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
-        var rejection: ?PermissionDecisionRejection = null;
+        var rejection: ?protocol.PermissionDecisionRejection = null;
         if (!protocol.validSessionId(command.session.slice())) rejection = .invalid_session_reference else if (command.action_id == 0 or
             command.action_id > std.math.maxInt(i64)) rejection = .invalid_target else if (try self.readSession(command.session.slice()) == null) rejection = .unknown_session;
         if (rejection == null) {
             const action = try self.cached(
-                "SELECT a.session_ref,a.permission_state,a.resolution_code,t.outcome_code FROM action_operation a " ++
+                "SELECT a.session_ref,a.authorized,a.resolution_code,t.outcome_code FROM action_operation a " ++
                     "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
                     "JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
             );
@@ -2481,9 +2480,7 @@ pub const Store = struct {
         if (rejection == null) {
             switch (command.decision) {
                 .allow_once => {
-                    const update = try self.cached(
-                        "UPDATE action_operation SET permission_state=1 WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
-                    );
+                    const update = try self.cached("UPDATE action_operation SET authorized=1 WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
                     defer resetCached(update);
                     try bindU64(update, 1, command.action_id);
                     try expectDone(update);
@@ -2493,8 +2490,8 @@ pub const Store = struct {
                     const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
                     const position = try self.claimSessionPosition(command.session.slice());
                     const update = try self.cached(
-                        "UPDATE action_operation SET permission_state=2,resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
-                            "WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
+                        "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
+                            "WHERE action_id=?1 AND resolution_code IS NULL",
                     );
                     defer resetCached(update);
                     try bindU64(update, 1, command.action_id);
@@ -2602,25 +2599,24 @@ pub const Store = struct {
         return switch (projection.state) {
             .pending => .{ .admission_id = projection.admission_id, .state = .queued },
             .excluded => blk: {
-                var code: protocol.Bounded(96) = .{};
+                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
                 try code.set("session_stopped");
                 break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
             },
             .applied => |applied| blk: {
                 const outcome = applied.outcome_code orelse
                     break :blk .{ .admission_id = projection.admission_id, .state = .{ .processing = applied.binding } };
-                if (outcome.eql("completed")) {
-                    const answer = try self.readContentMetadata(applied.outcome_content_id orelse return error.CorruptStore);
-                    break :blk .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
-                        .binding = applied.binding,
-                        .answer = .{ .length = answer.length, .digest = answer.digest },
-                    } } };
-                }
-                if (applied.outcome_content_id != null) return error.CorruptStore;
-                break :blk if (outcome.eql("cancelled"))
-                    .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } }
-                else
-                    .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } };
+                break :blk switch (try TurnOutcome.decode(outcome.slice(), applied.outcome_content_id)) {
+                    .completed => |answer_id| completed: {
+                        const answer = try self.readContentMetadata(answer_id);
+                        break :completed .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
+                            .binding = applied.binding,
+                            .answer = .{ .length = answer.length, .digest = answer.digest },
+                        } } };
+                    },
+                    .cancelled => .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } },
+                    .retry_exhausted, .resource_exceeded, .failed => .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } },
+                };
             },
         };
     }
@@ -2641,16 +2637,15 @@ pub const Store = struct {
         if (turn_id <= 0) return error.CorruptStore;
         if (state == .processing and state.processing.turn_id != @as(u64, @intCast(turn_id))) return error.CorruptStore;
         const resolution = if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL) null else blk: {
-            var code: protocol.Bounded(96) = .{};
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
             try readText(statement, 1, &code);
             break :blk code;
         };
         return self.activeMessageProgress(session_ref, resolution);
     }
 
-    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(96)) !MessageProgress {
-        const statement = try self.cached("SELECT count(*),count(*) FILTER (WHERE action.permission_state=0)," ++
-            "min(CASE WHEN action.permission_state=0 THEN action.action_id END) " ++
+    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(protocol.max_code_bytes)) !MessageProgress {
+        const statement = try self.cached("SELECT count(*),count(*) FILTER (WHERE action.authorized=0),min(CASE WHEN action.authorized=0 THEN action.action_id END) " ++
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
             "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
             "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL");
@@ -2666,7 +2661,7 @@ pub const Store = struct {
             break :blk @intCast(id);
         };
         const known = if (resolution) |code| turn_policy.Resolution.parse(code.slice()) else null;
-        const status: MessageProgress.Status = if (known) |current|
+        const status: protocol.MessageProgressStatus = if (known) |current|
             if (turn_policy.contains(&turn_policy.continues_with_input, current)) .runnable else if (current == .tool_proposals and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (current == .tool_proposals and unresolved == 0) .runnable else .in_flight
         else
             .in_flight;
@@ -2696,12 +2691,15 @@ pub const Store = struct {
             return error.ResultFailed;
         }
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return error.ResultNotReady;
-        var outcome: protocol.Bounded(96) = .{};
+        var outcome: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 0, &outcome);
-        if (!outcome.eql("completed")) return error.ResultFailed;
-        const content_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-        const metadata = try self.readContentMetadata(content_id);
-        return .{ .length = metadata.length, .digest = metadata.digest };
+        switch (try TurnOutcome.decode(outcome.slice(), try readNullablePositiveI64(statement, 1))) {
+            .completed => |content_id| {
+                const metadata = try self.readContentMetadata(content_id);
+                return .{ .length = metadata.length, .digest = metadata.digest };
+            },
+            .cancelled, .retry_exhausted, .resource_exceeded, .failed => return error.ResultFailed,
+        }
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8) !SessionObservation {
@@ -2994,7 +2992,7 @@ pub const Store = struct {
     };
 
     fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
-        const statement = try self.cached("SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.permission_state,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+        const statement = try self.cached("SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.authorized,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
         defer resetCached(statement);
         try bindU64(statement, 1, operation);
         try bindU64(statement, 2, ordinal);
@@ -3024,7 +3022,7 @@ pub const Store = struct {
 
     fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
         const presentation = try self.toolPresentationLocked(operation, ordinal, publication_position);
-        var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+        var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         try presentation.writeJson(&writer);
         try capture.append(",\"presentation\":");
@@ -3236,8 +3234,7 @@ pub const Store = struct {
             },
             6 => {
                 const select = try self.cached("SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
-                    "AND o.resolution_code IS NOT NULL AND ((t.outcome_code='completed' AND t.outcome_content_id=o.resolution_content_id) OR " ++
-                    "(t.outcome_code!='completed' AND t.outcome_content_id IS NULL)) FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
+                    "AND o.resolution_code IS NOT NULL,o.resolution_content_id FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
                 defer resetCached(select);
                 try bindText(select, 1, session);
                 try bindU64(select, 2, position);
@@ -3245,6 +3242,11 @@ pub const Store = struct {
                 var outcome: protocol.ActivityItem.Outcome = .{ .turn = @intCast(try readNullablePositiveI64(select, 0) orelse return error.CorruptStore), .operation = @intCast(try readNullablePositiveI64(select, 1) orelse return error.CorruptStore), .code = .{}, .content = null };
                 try readText(select, 2, &outcome.code);
                 result.content_id = try readNullablePositiveI64(select, 3);
+                switch (try TurnOutcome.decode(outcome.code.slice(), result.content_id)) {
+                    // A completed Turn answers with its causing Operation's Resolution.
+                    .completed => |content_id| if (try readNullablePositiveI64(select, 5) != content_id) return error.CorruptStore,
+                    .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
+                }
                 if (result.content_id) |id| {
                     const content = try self.readPublicContentMetadata(id);
                     outcome.content = .{ .length = content.length, .digest = content.digest };
@@ -3682,7 +3684,7 @@ pub const Store = struct {
     /// activity page carries it from the same read as its items.
     fn readWorkLocked(self: *Store, session_ref: []const u8, pending_messages: u64) !struct {
         page: protocol.PageWork,
-        outcome: ?struct { code: protocol.Bounded(96), content_id: ?i64 } = null,
+        outcome: ?struct { code: protocol.Bounded(protocol.max_code_bytes), content_id: ?i64 } = null,
     } {
         const statement = try self.cached(
             "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.resolution_code " ++
@@ -3700,7 +3702,7 @@ pub const Store = struct {
         var page: protocol.PageWork = .{ .turn = @intCast(turn_id), .operation = @intCast(operation_id) };
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
             const resolution = if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) null else blk: {
-                var code: protocol.Bounded(96) = .{};
+                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
                 try readText(statement, 4, &code);
                 break :blk code;
             };
@@ -3711,17 +3713,16 @@ pub const Store = struct {
             page.first_action = progress.action_id;
             return .{ .page = page };
         }
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 2, &code);
-        page.status = if (pending_messages != 0)
-            .runnable
-        else if (code.eql("completed"))
-            .completed
-        else if (code.eql("cancelled"))
-            .cancelled
-        else
-            .failed;
-        return .{ .page = page, .outcome = .{ .code = code, .content_id = try readNullablePositiveI64(statement, 3) } };
+        const content_id = try readNullablePositiveI64(statement, 3);
+        const ended: protocol.PageWork.Status = switch (try TurnOutcome.decode(code.slice(), content_id)) {
+            .completed => .completed,
+            .cancelled => .cancelled,
+            .retry_exhausted, .resource_exceeded, .failed => .failed,
+        };
+        page.status = if (pending_messages != 0) .runnable else ended;
+        return .{ .page = page, .outcome = .{ .code = code, .content_id = content_id } };
     }
 
     fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
@@ -3770,7 +3771,7 @@ pub const Store = struct {
             const id = c.sqlite3_column_int64(statement, 0);
             if (id <= 0) return error.CorruptStore;
             var key: protocol.Bounded(protocol.max_key_bytes) = .{};
-            var code: protocol.Bounded(96) = .{};
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
             try readText(statement, 1, &key);
             try readText(statement, 2, &code);
             try capture.appendFmt("{{\"turn\":\"{d}\",\"message\":", .{id});
@@ -3786,7 +3787,7 @@ pub const Store = struct {
             "SELECT action.action_id,action.permission_revision FROM turn active INDEXED BY turn_one_active_per_session " ++
                 "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
                 "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
-                "AND action.permission_state=0 AND action.resolution_code IS NULL ORDER BY action.action_id",
+                "AND action.resolution_code IS NULL AND action.authorized=0 ORDER BY action.action_id",
         );
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
@@ -3805,21 +3806,17 @@ pub const Store = struct {
         capture: *SessionReportCapture,
     ) !void {
         const statement = try self.cached(
-            "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.permission_state," ++
-                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest," ++
-                "decision.command_key " ++
+            "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
+                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
                 "FROM turn active INDEXED BY turn_one_active_per_session " ++
                 "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
+                "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
                 "CROSS JOIN model_tool_call call ON call.operation_id=a.parent_operation_id " ++
                 "AND call.call_ordinal=a.call_ordinal CROSS JOIN content call_id " ++
                 "ON call_id.content_id=call.call_id_content_id CROSS JOIN content arguments " ++
-                "ON arguments.content_id=call.arguments_content_id LEFT JOIN permission_decision_command decision " ++
-                "ON decision.action_id=CAST(a.action_id AS TEXT) AND decision.decision='allow_once' " ++
-                "AND EXISTS(SELECT 1 FROM core_command command WHERE command.command_key=decision.command_key " ++
-                "AND command.kind=5 AND command.accepted=1) " ++
+                "ON arguments.content_id=call.arguments_content_id " ++
                 "WHERE active.session_ref=?1 " ++
-                "AND active.outcome_code IS NULL AND a.permission_state IN (0,1) " ++
-                "AND a.resolution_code IS NULL ORDER BY a.action_id",
+                "AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
         );
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
@@ -3832,11 +3829,13 @@ pub const Store = struct {
             const parent = c.sqlite3_column_int64(statement, 1);
             const ordinal = c.sqlite3_column_int64(statement, 2);
             const revision = c.sqlite3_column_int64(statement, 3);
-            const permission = c.sqlite3_column_int(statement, 4);
-            const call_id_length = c.sqlite3_column_int64(statement, 5);
-            const arguments_length = c.sqlite3_column_int64(statement, 7);
+            const authorized = c.sqlite3_column_int(statement, 4);
+            const permission_mode = c.sqlite3_column_int(statement, 5);
+            const call_id_length = c.sqlite3_column_int64(statement, 6);
+            const arguments_length = c.sqlite3_column_int64(statement, 8);
+            // The insert authorizes every Action proposed under `bypass`.
             if (action_id <= 0 or parent <= 0 or ordinal < 0 or revision <= 0 or
-                permission < 0 or permission > 1 or call_id_length < 0 or arguments_length < 0)
+                call_id_length < 0 or arguments_length < 0 or (permission_mode == 1 and authorized == 0))
             {
                 return error.CorruptStore;
             }
@@ -3847,16 +3846,16 @@ pub const Store = struct {
                 parent,
                 ordinal,
                 revision,
-                if (permission == 0) "pending" else if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL) "bypass" else "allow_once",
+                if (authorized == 0) "pending" else if (permission_mode == 1) "bypass" else "allow_once",
             });
             try capture.appendContentReference(.{
                 .length = @intCast(call_id_length),
-                .digest = try readDigest(statement, 6),
+                .digest = try readDigest(statement, 7),
             });
             try capture.append(",\"arguments\":");
             try capture.appendContentReference(.{
                 .length = @intCast(arguments_length),
-                .digest = try readDigest(statement, 8),
+                .digest = try readDigest(statement, 9),
             });
             try self.appendToolPresentation(@intCast(parent), @intCast(ordinal), null, capture);
             try capture.append("}");
@@ -4275,7 +4274,8 @@ pub const Store = struct {
     }
 
     fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-        const statement = try self.cached("SELECT action_id,parent_operation_id,call_ordinal,permission_revision,permission_state,resolution_code,resolution_content_id,acceptance_position FROM action_operation WHERE session_ref=?1 ORDER BY action_id");
+        const statement = try self.cached("SELECT action_id,parent_operation_id,call_ordinal,permission_revision," ++
+            "CASE WHEN resolution_code IS 'denied' THEN 'denied' WHEN authorized=1 THEN 'authorized' ELSE 'requested' END,resolution_code,resolution_content_id,acceptance_position FROM action_operation WHERE session_ref=?1 ORDER BY action_id");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
@@ -4284,14 +4284,10 @@ pub const Store = struct {
             const parent = c.sqlite3_column_int64(statement, 1);
             const ordinal = c.sqlite3_column_int64(statement, 2);
             const revision = c.sqlite3_column_int64(statement, 3);
-            const permission = c.sqlite3_column_int(statement, 4);
-            if (action <= 0 or parent <= 0 or ordinal < 0 or revision <= 0 or permission < 0 or permission > 2) return error.CorruptStore;
-            try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{ action, parent, ordinal, revision, switch (permission) {
-                0 => "requested",
-                1 => "authorized",
-                2 => "denied",
-                else => unreachable,
-            } });
+            var permission: protocol.Bounded(16) = .{};
+            try readText(statement, 4, &permission);
+            if (action <= 0 or parent <= 0 or ordinal < 0 or revision <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{ action, parent, ordinal, revision, permission.slice() });
             try appendNullableColumnString(statement, 5, max_action_resolution_code_bytes, capture);
             try capture.append(",\"result\":");
             if (try readNullablePositiveI64(statement, 6)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
@@ -4628,15 +4624,7 @@ pub const Store = struct {
         bash_timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        const select = try self.cached(
-            "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
-                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
-                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-                "ORDER BY action.action_id LIMIT 1",
-        );
+        const select = try self.cached(next_action_attempt_sql);
         defer resetCached(select);
         const step = c.sqlite3_step(select);
         if (step == c.SQLITE_DONE) return null;
@@ -4658,7 +4646,7 @@ pub const Store = struct {
         const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try self.cached(
             "UPDATE action_operation SET " ++ action_attempted_sql ++ ",bash_timeout_ms=?2,sender_handle=?3 " ++
-                "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+                "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer resetCached(update);
         try bindI64(update, 1, action_id);
@@ -4943,7 +4931,7 @@ pub const Store = struct {
         if (result == c.SQLITE_DONE) return .assistant_response;
         if (result != c.SQLITE_ROW) return error.CorruptStore;
         _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
-        var resolution: protocol.Bounded(96) = .{};
+        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(last, 1, &resolution);
         const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
         var facts: turn_policy.CompactionFacts = .{
@@ -6389,7 +6377,7 @@ pub const Store = struct {
                 if (rejection_code == null) {
                     const action_id = try self.nextIdentity("action_operation", "action_id");
                     const insert_action = try self.cached(
-                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,bash_timeout_override_ms,resolution_code) " ++
+                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code) " ++
                             "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL)",
                     );
                     defer resetCached(insert_action);
@@ -6813,11 +6801,11 @@ pub const Store = struct {
     }
 
     const ExistingCommand = struct {
-        kind: CommandKind,
+        kind: protocol.CommandKind,
         target: protocol.Bounded(protocol.max_session_bytes),
         digest: [32]u8,
         accepted: bool,
-        code: protocol.Bounded(96),
+        code: protocol.Bounded(protocol.max_code_bytes),
         revision: u64,
         created: bool,
         primary_content_id: ?i64,
@@ -6838,7 +6826,7 @@ pub const Store = struct {
     fn classifyReplay(
         self: *Store,
         comptime Rejection: type,
-        kind: CommandKind,
+        kind: protocol.CommandKind,
         key: []const u8,
         target: []const u8,
         digest: *const [32]u8,
@@ -6860,7 +6848,7 @@ pub const Store = struct {
         if (step_result == c.SQLITE_DONE) return null;
         if (step_result != c.SQLITE_ROW) return error.CommandReadFailed;
         const kind_value = c.sqlite3_column_int(statement, 0);
-        const kind: CommandKind = switch (kind_value) {
+        const kind: protocol.CommandKind = switch (kind_value) {
             1 => .configure,
             2 => .message,
             3 => .session_stop,
@@ -6873,7 +6861,7 @@ pub const Store = struct {
         const digest = try readDigest(statement, 2);
         const accepted_value = c.sqlite3_column_int(statement, 3);
         if (accepted_value != 0 and accepted_value != 1) return error.CorruptStore;
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 4, &code);
         const revision_value = c.sqlite3_column_int64(statement, 5);
         if (revision_value < 0) return error.CorruptStore;
@@ -7036,7 +7024,7 @@ pub const Store = struct {
         return c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL;
     }
 
-    fn sessionStopCompletion(self: *Store, selection: SessionStopSelection) !SessionStopCompletion {
+    fn sessionStopCompletion(self: *Store, selection: SessionStopSelection) !protocol.SessionStopCompletion {
         const turn_id = selection.selected_turn_id orelse return .completed;
         return if (try self.turnIsComplete(turn_id)) .completed else .pending;
     }
@@ -7119,7 +7107,7 @@ pub const Store = struct {
     fn insertCommand(
         self: *Store,
         key: []const u8,
-        kind: CommandKind,
+        kind: protocol.CommandKind,
         target: []const u8,
         digest: *const [32]u8,
         primary_content_id: ?i64,
@@ -7223,11 +7211,14 @@ pub const Store = struct {
         try readText(select, 0, &session);
         resetCached(select);
         const position = try self.claimSessionPosition(session.slice());
+        const content_id: ?i64 = if (outcome == .completed) outcome.completed else null;
+        // A failure code spelling a fixed outcome would read back as that outcome.
+        std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
         const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4 WHERE turn_id=?1 AND outcome_code IS NULL");
         defer resetCached(update);
         try bindU64(update, 1, turn_id);
         try bindText(update, 2, outcome.code());
-        try bindNullableI64(update, 3, if (outcome == .completed) outcome.completed else null);
+        try bindNullableI64(update, 3, content_id);
         try bindU64(update, 4, position);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
@@ -7480,7 +7471,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
     ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
-        \\ permission_mode INTEGER NOT NULL,
+        \\ permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
@@ -7624,7 +7615,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ tool_kind INTEGER NOT NULL CHECK(tool_kind=1),
         \\ permission_revision INTEGER NOT NULL CHECK(permission_revision>0),
-        \\ permission_state INTEGER NOT NULL CHECK(permission_state IN (0,1,2)),
+        \\ -- Written only by the insert, under a `bypass` revision, and by an
+        \\ -- accepted `allow_once` decision. Stored because it keys the
+        \\ -- admission index, and no partial index can see the revision or grant.
+        \\ authorized INTEGER NOT NULL CHECK(authorized IN (0,1)),
         \\ attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),
         \\ bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),
         \\ bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),
@@ -7636,8 +7630,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
         \\ FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),
-        \\ CHECK((permission_state=2 AND resolution_code IS 'denied' AND attempt_ordinal=0) OR
-        \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code!='denied'))),
+        \\ CHECK(resolution_code IS NOT 'denied' OR (authorized=0 AND attempt_ordinal=0)),
         \\ CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR
         \\       (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
         \\ CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR
@@ -7665,7 +7658,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL;
         \\CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
-        \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
+        \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
         \\
@@ -8010,9 +8003,9 @@ fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const
     if (excluding_stop != null) return error.CorruptStore;
     const operation_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
     const attempt_ordinal = try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore;
-    var outcome_code: ?protocol.Bounded(96) = null;
+    var outcome_code: ?protocol.Bounded(protocol.max_code_bytes) = null;
     if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) {
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 7, &code);
         if (code.len == 0) return error.CorruptStore;
         outcome_code = code;
@@ -8125,12 +8118,12 @@ test "Store allocates six character IDs atomically retries collisions and replay
         try std.testing.expectError(error.StatementFailed, storage.insertSession(invalid, &current));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
-    try std.testing.expectEqual(ConfigurationRejection.unknown_session, storage.configure(&unknown, true, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, true, .{}).rejected.code);
     try std.testing.expect(try storage.readSession("k7m2qx") == null);
     for ([_][]const u8{ "old/name", "K7m2qx", "k7m2qi", "k7\x00qx" }, 0..) |invalid, index| {
         var key: [32]u8 = undefined;
         var bad = try completeConfiguration(try std.fmt.bufPrint(&key, "invalid-id-{d}", .{index}), invalid, workspace, "model-c");
-        try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, storage.configure(&bad, true, .{}).rejected.code);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, storage.configure(&bad, true, .{}).rejected.code);
     }
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
     try std.testing.expect(!storage.isFenced());
@@ -8152,7 +8145,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
         try message.session.set(reference);
         const message_reply = storage.submitMessage(&message, .{});
         try std.testing.expect(message_reply == .rejected);
-        try std.testing.expectEqual(if (canonical_unknown) MessageRejection.unknown_session else .invalid_session_reference, message_reply.rejected.code);
+        try std.testing.expectEqual(if (canonical_unknown) protocol.MessageRejection.unknown_session else .invalid_session_reference, message_reply.rejected.code);
         const message_replay = storage.submitMessage(&message, .{});
         try std.testing.expect(message_replay == .rejected and message_replay.rejected.replayed);
         try std.testing.expectEqual(message_reply.rejected.code, message_replay.rejected.code);
@@ -8160,7 +8153,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
         var stop = try completeSessionStop(try std.fmt.bufPrint(&key, "reference-stop-{d}", .{index}), reference);
         const stop_reply = storage.stopSession(&stop, .{});
         try std.testing.expect(stop_reply == .rejected);
-        try std.testing.expectEqual(if (canonical_unknown) SessionStopRejection.unknown_session else .invalid_session_reference, stop_reply.rejected.code);
+        try std.testing.expectEqual(if (canonical_unknown) protocol.SessionStopRejection.unknown_session else .invalid_session_reference, stop_reply.rejected.code);
         const stop_replay = storage.stopSession(&stop, .{});
         try std.testing.expect(stop_replay == .rejected and stop_replay.rejected.replayed);
         try std.testing.expectEqual(stop_reply.rejected.code, stop_replay.rejected.code);
@@ -8170,7 +8163,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
         try interrupt.session.set(reference);
         const interrupt_reply = storage.interruptModel(&interrupt, .{});
         try std.testing.expect(interrupt_reply == .rejected);
-        try std.testing.expectEqual(if (canonical_unknown) ModelInterruptionRejection.unknown_session else .invalid_session_reference, interrupt_reply.rejected.code);
+        try std.testing.expectEqual(if (canonical_unknown) protocol.ModelInterruptionRejection.unknown_session else .invalid_session_reference, interrupt_reply.rejected.code);
         const interrupt_replay = storage.interruptModel(&interrupt, .{});
         try std.testing.expect(interrupt_replay == .rejected and interrupt_replay.rejected.replayed);
         try std.testing.expectEqual(interrupt_reply.rejected.code, interrupt_replay.rejected.code);
@@ -8180,7 +8173,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
         try permission.session.set(reference);
         const permission_reply = storage.decidePermission(&permission, .{});
         try std.testing.expect(permission_reply == .rejected);
-        try std.testing.expectEqual(if (canonical_unknown) PermissionDecisionRejection.unknown_session else .invalid_session_reference, permission_reply.rejected.code);
+        try std.testing.expectEqual(if (canonical_unknown) protocol.PermissionDecisionRejection.unknown_session else .invalid_session_reference, permission_reply.rejected.code);
         const permission_replay = storage.decidePermission(&permission, .{});
         try std.testing.expect(permission_replay == .rejected and permission_replay.rejected.replayed);
         try std.testing.expectEqual(permission_reply.rejected.code, permission_replay.rejected.code);
@@ -8913,7 +8906,7 @@ test "Current selects active then queued work and bounds recent Message identiti
         }
     }
     try submitTestMessage(&storage, &tmp, "selection-next-file", "selection-next", session.slice(), "next");
-    try std.testing.expectEqual(MessageProgress.Status.runnable, (try storage.observeCommand("selection-next")).message.?.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try storage.observeCommand("selection-next")).message.?.progress.?.status);
     try std.testing.expect((try storage.observeCommand("selection-message-11")).message.?.progress == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
@@ -8926,7 +8919,7 @@ test "Current selects active then queued work and bounds recent Message identiti
     try submitTestMessage(&storage, &tmp, "selection-queued-file", "selection-queued", session.slice(), "queued");
     const queued = (try storage.observeCommand("selection-queued")).message.?;
     try std.testing.expect(queued.queue.?.state == .queued);
-    try std.testing.expectEqual(MessageProgress.Status.in_flight, queued.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, queued.progress.?.status);
     try std.testing.expect(queued.progress.?.action_id == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
@@ -8945,7 +8938,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "empty-key-config");
     try submitTestMessage(&storage, &tmp, "empty-key-file", "", session.slice(), "input");
-    try std.testing.expectEqual(MessageProgress.Status.runnable, (try storage.observeCommand("")).message.?.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try storage.observeCommand("")).message.?.progress.?.status);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -8954,7 +8947,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
         try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
     }
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("")).message.?.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("")).message.?.progress.?.status);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -8993,7 +8986,7 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
         try command.session.set(session.slice());
         const rejected = storage.interruptModel(&command, .{});
         try std.testing.expect(rejected == .rejected);
-        try std.testing.expectEqual(ModelInterruptionRejection.invalid_target, rejected.rejected.code);
+        try std.testing.expectEqual(protocol.ModelInterruptionRejection.invalid_target, rejected.rejected.code);
         const replay = storage.interruptModel(&command, .{});
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
@@ -9243,7 +9236,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var stop = try completeSessionStop("action-stop", session.slice());
     const action_stop = storage.stopSession(&stop, .{});
     try std.testing.expect(action_stop == .accepted);
-    try std.testing.expectEqual(SessionStopCompletion.completed, action_stop.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, action_stop.accepted.completion);
     const settled_page = try storage.publicConversationPage(public_request);
     try std.testing.expectEqual(@as(usize, 3), settled_page.count);
     try std.testing.expect(settled_page.items[0].kind == .tool_result);
@@ -9275,7 +9268,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     stale.decision = .allow_once;
     const rejected = storage.decidePermission(&stale, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
 
     const full_bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
@@ -9292,7 +9285,9 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try submitTestMessage(&storage, &tmp, "bypass-message", "bypass-message", session.slice(), "bypass proposal");
     const bypass_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, bypass_binding, "bypass-metadata");
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE permission_state=1 AND permission_revision=2 AND resolution_code IS NULL"));
+    // The ask-mode pair was never authorized: one denied, one stopped.
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=1"));
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=2 AND resolution_code IS NULL"));
 
     try storage.close();
     storage_open = false;
@@ -9305,7 +9300,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         root[0..root_length],
     );
     defer reopened.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(reopened.database, "SELECT count(*) FROM action_operation WHERE permission_state=1 AND permission_revision=2 AND resolution_code IS NULL"));
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(reopened.database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=2 AND resolution_code IS NULL"));
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
@@ -9346,7 +9341,7 @@ test "allow once survives mode changes and reopen without granting another Attem
     try changed.key.set("allow-again");
     const fresh = storage.decidePermission(&changed, .{});
     try std.testing.expect(fresh == .rejected and !fresh.rejected.replayed);
-    try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, fresh.rejected.code);
+    try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, fresh.rejected.code);
 
     var update: protocol.ConfigureCommand = .{};
     try update.key.set("allow-mode-change");
@@ -9407,7 +9402,7 @@ test "Current reports progress alongside an actionable sibling" {
     try std.testing.expectEqual(@as(usize, 1), mixed.value.object.get("actionable_permissions").?.array.items.len);
     const message = (try storage.observeCommand("mixed-message")).message.?;
     try std.testing.expectEqualStrings("processing", @tagName(message.queue.?.state));
-    try std.testing.expectEqual(MessageProgress.Status.in_flight, message.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.progress.?.status);
     try std.testing.expectEqual(action_id + 1, message.progress.?.action_id.?);
     try pageWorkAgrees(&storage, mixed.value, action_id + 1);
 }
@@ -9463,9 +9458,9 @@ test "Action settlement atomically yields to an earlier Session stop" {
     var stop = try completeSessionStop("settlement-stop", allocated_session_0.slice());
     const pending_stop = storage.stopSession(&stop, .{});
     try std.testing.expect(pending_stop == .accepted);
-    try std.testing.expectEqual(SessionStopCompletion.pending, pending_stop.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.pending, pending_stop.accepted.completion);
     try std.testing.expectEqual(
-        SessionStopCompletion.pending,
+        protocol.SessionStopCompletion.pending,
         (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
     );
     try std.testing.expectEqual(
@@ -9473,13 +9468,13 @@ test "Action settlement atomically yields to an earlier Session stop" {
         try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", .{}),
     );
     try std.testing.expectEqual(
-        SessionStopCompletion.completed,
+        protocol.SessionStopCompletion.completed,
         (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
     );
     const completed_replay = storage.stopSession(&stop, .{});
     try std.testing.expect(completed_replay == .accepted);
     try std.testing.expect(completed_replay.accepted.replayed);
-    try std.testing.expectEqual(SessionStopCompletion.completed, completed_replay.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, completed_replay.accepted.completion);
 
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         storage.database,
@@ -9556,7 +9551,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
     try std.testing.expectEqual(model_binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
-    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expectEqual(original_content_id, try queryU64(
         storage.database,
         "SELECT resolution_content_id FROM action_operation",
@@ -9898,7 +9893,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal WHERE call.rejection_code IS NOT NULL"));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
-        const rejected_action = try prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
+        const rejected_action = try prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
         defer _ = c.sqlite3_finalize(rejected_action);
         try bindU64(rejected_action, 1, binding.operation_id);
         try bindText(rejected_action, 2, allocated_session_0.slice());
@@ -10007,7 +10002,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         reopened.database,
         "SELECT count(*) FROM action_operation WHERE action_id=(SELECT min(action_id) FROM action_operation) " ++
             "AND parent_operation_id=(SELECT min(parent_operation_id) FROM action_operation) " ++
-            "AND call_ordinal=0 AND permission_state=2 AND resolution_code='denied'",
+            "AND call_ordinal=0 AND resolution_code='denied'",
     ));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         reopened.database,
@@ -10052,12 +10047,13 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND permission_state=0 AND resolution_code IS NULL AND attempt_ordinal=0"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'"));
 
-    // Each pair changes only the null-valued field. The valid witness shows the
-    // row satisfies every unrelated constraint, so the invalid write can only
-    // fail on the lifecycle CHECK.
+    // Each pair changes only one field, the null-valued one where a NULL could
+    // pass the CHECK. The valid witness shows the row satisfies every
+    // unrelated constraint, so the invalid write can only fail on the
+    // lifecycle CHECK.
     const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
     const cases = [_]Case{
         // An unresolved Operation needs a retry time; zero marks it uncertain.
@@ -10075,10 +10071,19 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
             .valid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=1 WHERE call_ordinal=1",
             .invalid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=NULL WHERE call_ordinal=1",
         },
-        // A denied permission state requires the denied Resolution.
+        // A denied Action never started an Attempt.
         .{
-            .valid = "UPDATE action_operation SET permission_state=1,resolution_code=NULL WHERE call_ordinal=0",
-            .invalid = "UPDATE action_operation SET permission_state=2,resolution_code=NULL WHERE call_ordinal=0",
+            .valid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1,resolution_code='failed'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
+            .invalid = "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=1,resolution_code='denied'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
+        },
+        // An authorized Action is never denied.
+        .{
+            .valid = "UPDATE action_operation SET authorized=1,resolution_code='failed'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
+            .invalid = "UPDATE action_operation SET authorized=1,resolution_code='denied'," ++
+                "resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1 WHERE call_ordinal=0",
         },
     };
     var outcomes: [cases.len]ConstraintProbe = undefined;
@@ -10087,6 +10092,54 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         outcome.* = try probeConstraint(storage.database, case.invalid);
     }
     try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
+}
+
+test "Action admission never visits an Action waiting for permission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    // Each round adds a Turn with two Actions waiting for permission.
+    var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
+    var steps: [2]i32 = undefined;
+    var allowed: [2]u64 = undefined;
+    for (&sessions, &steps, &allowed, 0..) |*session, *cost, *allowed_id, round| {
+        var name_buffer: [32]u8 = undefined;
+        session.* = try configureTestSessionAsk(&storage, try std.fmt.bufPrint(&name_buffer, "waiting-config-{d}", .{round}));
+        var message_buffer: [32]u8 = undefined;
+        const message = try std.fmt.bufPrint(&message_buffer, "waiting-message-{d}", .{round});
+        try submitTestMessage(&storage, &tmp, message, message, session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var metadata_buffer: [32]u8 = undefined;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{round}));
+        try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+        allowed_id.* = try queryU64(storage.database, "SELECT max(action_id) FROM action_operation");
+
+        const select = try prepare(storage.database, next_action_attempt_sql);
+        defer _ = c.sqlite3_finalize(select);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
+        cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    // Four waiting Actions cost the scan what two did: none is in its index.
+    try std.testing.expectEqual(@as(u64, 4), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL"));
+    try std.testing.expectEqual(steps[0], steps[1]);
+
+    // One allowed Action per Turn enters the index; its sibling stays out.
+    for (sessions, allowed, 0..) |session, action_id, round| {
+        var key_buffer: [32]u8 = undefined;
+        var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+        try allow.key.set(try std.fmt.bufPrint(&key_buffer, "waiting-allow-{d}", .{round}));
+        try allow.session.set(session.slice());
+        try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation INDEXED BY action_operation_executable " ++
+        "WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0"));
+    for (allowed) |action_id| {
+        const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
+        try std.testing.expectEqual(action_id, admitted.permit.binding.action_id);
+    }
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
 }
 
 test "complete call outcomes continue once in call order ahead of pending input" {
@@ -10135,7 +10188,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try stale_denial.session.set(session.slice());
     const stale_reply = storage.decidePermission(&stale_denial, .{});
     try std.testing.expect(stale_reply == .rejected);
-    try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
+    try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
     var view = try storage.openHistoricalView(continuation);
     defer view.close();
@@ -10214,6 +10267,9 @@ test "production turn preserves skipped continuation preference through actual S
     const Context = struct {
         storage: *Store,
         preparation_open: bool = true,
+        /// Counts each preparation slot opening or closing, as setSlot does.
+        slot_changes: u64 = 0,
+        observed_open: bool = true,
         model: ?AttemptBinding = null,
         action: ?ActionAttemptBinding = null,
         failure: ?anyerror = null,
@@ -10228,6 +10284,11 @@ test "production turn preserves skipped continuation preference through actual S
         }
         pub fn commitGeneration(self: *@This()) u64 {
             return self.storage.commitGeneration();
+        }
+        pub fn slotChanges(self: *@This()) u64 {
+            if (self.observed_open != self.preparation_open) self.slot_changes += 1;
+            self.observed_open = self.preparation_open;
+            return self.slot_changes;
         }
         pub fn reconcileControls(_: *@This()) void {}
         pub fn advanceBashPreparation(_: *@This()) bool {
@@ -11062,7 +11123,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(7, 2);
@@ -11119,7 +11180,7 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(1, 1);
@@ -11516,7 +11577,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
     try std.testing.expect(!accepted.accepted.replayed);
-    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
     try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
@@ -11541,7 +11602,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     const rejected_interrupt = storage.interruptModel(&after_stop, .{});
     try std.testing.expect(rejected_interrupt == .rejected);
     try std.testing.expectEqual(
-        ModelInterruptionRejection.operation_resolved,
+        protocol.ModelInterruptionRejection.operation_resolved,
         rejected_interrupt.rejected.code,
     );
 
@@ -11549,7 +11610,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     const replay = storage.stopSession(&stop, .{});
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
-    try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, replay.accepted.completion);
     try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
     try std.testing.expect((try storage.observeCommand("message-b")).message.?.queue.?.state == .queued);
     const later = (try storage.admitNextModelAttempt(.{})).?;
@@ -11575,7 +11636,7 @@ test "later idle stop does not reclassify a completed Message" {
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
     try std.testing.expect(accepted.accepted.selection.selected_turn_id == null);
-    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expect((try storage.observeCommand("completed-stop-message")).message.?.queue.?.state == .completed);
 
     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
@@ -11603,7 +11664,7 @@ test "idle Session stop excludes queued work but not later admissions" {
     try std.testing.expect(!accepted.accepted.replayed);
     try std.testing.expectEqual(@as(?u64, null), accepted.accepted.selection.selected_turn_id);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
-    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expectEqual(@as(?u64, null), accepted.accepted.interrupted_operation_id);
     const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
     try std.testing.expect(excluded.state == .excluded);
@@ -11632,7 +11693,7 @@ test "idle Session stop excludes queued work but not later admissions" {
         const replay = storage.stopSession(&stop, .{});
         try std.testing.expect(replay == .accepted and replay.accepted.replayed);
         try std.testing.expectEqual(accepted.accepted.selection, replay.accepted.selection);
-        try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
+        try std.testing.expectEqual(protocol.SessionStopCompletion.completed, replay.accepted.completion);
         try std.testing.expectEqual(@as(?u64, null), replay.accepted.interrupted_operation_id);
         const newer = (try storage.observeCommand("idle-message-b")).message.?.queue.?.state;
         try std.testing.expect(newer == .processing);
@@ -11719,7 +11780,7 @@ test "exact model interruption rejects stale targets and replays before applicab
     try early.session.set(session.slice());
     const rejected = storage.interruptModel(&early, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ModelInterruptionRejection.unknown_operation, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ModelInterruptionRejection.unknown_operation, rejected.rejected.code);
 
     try submitTestMessage(&storage, &tmp, "rejected-interrupt-a", "rejected-interrupt-message", session.slice(), "first");
     const admitted = (try storage.admitNextModelAttempt(.{})).?;
@@ -11727,7 +11788,7 @@ test "exact model interruption rejects stale targets and replays before applicab
     const replay = storage.interruptModel(&early, .{});
     try std.testing.expect(replay == .rejected);
     try std.testing.expect(replay.rejected.replayed);
-    try std.testing.expectEqual(ModelInterruptionRejection.unknown_operation, replay.rejected.code);
+    try std.testing.expectEqual(protocol.ModelInterruptionRejection.unknown_operation, replay.rejected.code);
 
     early.operation_id = 2;
     try std.testing.expect(storage.interruptModel(&early, .{}) == .conflict);
@@ -11745,7 +11806,7 @@ test "exact model interruption rejects stale targets and replays before applicab
     var after = try completeModelInterruption("after-interrupt", session.slice(), admitted.permit.binding);
     const resolved = storage.interruptModel(&after, .{});
     try std.testing.expect(resolved == .rejected);
-    try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, resolved.rejected.code);
+    try std.testing.expectEqual(protocol.ModelInterruptionRejection.operation_resolved, resolved.rejected.code);
 }
 
 test "controls wait behind an active model settlement transaction" {
@@ -11972,10 +12033,10 @@ test "controls wait behind an active model settlement transaction" {
     const stop_reply = stop_context.reply.?;
     try std.testing.expect(stop_reply == .accepted);
     try std.testing.expectEqual(binding.turn_id, stop_reply.accepted.selection.selected_turn_id.?);
-    try std.testing.expectEqual(SessionStopCompletion.completed, stop_reply.accepted.completion);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, stop_reply.accepted.completion);
     const interrupt_reply = interrupt_context.reply.?;
     try std.testing.expect(interrupt_reply == .rejected);
-    try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, interrupt_reply.rejected.code);
+    try std.testing.expectEqual(protocol.ModelInterruptionRejection.operation_resolved, interrupt_reply.rejected.code);
 
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
     try expectContent(
@@ -12043,7 +12104,7 @@ test "controls remove scheduled retries and replay without cancelling newer work
                 try std.testing.expect(replay == .accepted and replay.accepted.replayed);
                 try std.testing.expectEqual(binding.turn_id, replay.accepted.selection.selected_turn_id.?);
                 try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
-                try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
+                try std.testing.expectEqual(protocol.SessionStopCompletion.completed, replay.accepted.completion);
                 try std.testing.expectEqual(binding.operation_id, replay.accepted.interrupted_operation_id.?);
             } else {
                 const replay = storage.interruptModel(&interrupt, .{});
@@ -12135,7 +12196,7 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
         workspace_requested: bool,
         provider_requested: ?[]const u8,
         model_requested: ?[]const u8,
-        expected: ?ConfigurationRejection,
+        expected: ?protocol.ConfigurationRejection,
     };
     const cases = [_]Case{
         .{
@@ -12252,7 +12313,7 @@ test "Store configuration requires and freezes provider model and workspace" {
             try std.testing.expect(reply == .accepted);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
             try std.testing.expect(!(try storage.inspectSession(command.session.slice())).found);
         }
     }
@@ -12280,7 +12341,7 @@ test "Store configuration requires and freezes provider model and workspace" {
     try different.configuration.model.value.set("model-a ");
     const rejected = storage.configure(&different, true, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.model_is_immutable, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, rejected.rejected.code);
 }
 
 test "unsupported provider rejects mixed configuration atomically and replays exact shape" {
@@ -12311,7 +12372,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     const revision_count = try queryU64(storage.database, "SELECT count(*) FROM session_revision");
     const rejected = storage.configure(&update, true, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.unsupported_provider, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, rejected.rejected.code);
     try std.testing.expectEqual(content_count, try queryU64(storage.database, "SELECT count(*) FROM content"));
     try std.testing.expectEqual(revision_count, try queryU64(storage.database, "SELECT count(*) FROM session_revision"));
     const current = try storage.inspectSession(created_session_0.slice());
@@ -12361,7 +12422,7 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(if (variant == 4) ConfigurationRejection.unsupported_provider else ConfigurationRejection.model_is_immutable, reply.rejected.code);
+            try std.testing.expectEqual(if (variant == 4) protocol.ConfigurationRejection.unsupported_provider else protocol.ConfigurationRejection.model_is_immutable, reply.rejected.code);
         }
         const after = try storage.inspectSession(session);
         try std.testing.expectEqual(before.revision + @as(u64, if (variant < 4) 1 else 0), after.revision);
@@ -12451,7 +12512,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         instructions: InstructionsRequest = .omitted,
         schema: SchemaRequest = .omitted,
         current_revision: u64 = 7,
-        expected_rejection: ?ConfigurationRejection = null,
+        expected_rejection: ?protocol.ConfigurationRejection = null,
         expected_actions: ?Actions = null,
         expected_model: []const u8 = "model-a",
         expected_tools: u8 = 1,
@@ -12632,7 +12693,7 @@ test "configuration rejections bypass content effects and replay committed answe
 
         const rejected = storage.configure(&command, true, .{ .content_import = true });
         try std.testing.expect(rejected == .rejected);
-        try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
         const committed_content = try prepare(
             storage.database,
             "SELECT COUNT(*) FROM core_command WHERE command_key='rejected-content' " ++
@@ -12645,7 +12706,7 @@ test "configuration rejections bypass content effects and replay committed answe
         const replay = storage.configure(&command, true, .{ .content_import = true });
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
-        try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, replay.rejected.code);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, replay.rejected.code);
         const retained_content = try prepare(storage.database, "SELECT COUNT(*) FROM content");
         defer _ = c.sqlite3_finalize(retained_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(retained_content));
@@ -13049,7 +13110,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
     var invalid = try completeConfiguration("invalid-nul-session", "exact\x00reference", workspace, "model-a");
     const rejected = storage.configure(&invalid, true, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession(session.slice())).revision);
     try std.testing.expect(!storage.isFenced());
@@ -13065,7 +13126,7 @@ test "saved incomplete initialization stays rejected after Session creation" {
     try incomplete.key.set("incomplete");
     const rejected = storage.configure(&incomplete, true, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, rejected.rejected.code);
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -13093,7 +13154,7 @@ test "capability-required configuration rejects on replacement and replays its s
 
     const rejected = storage.configure(&command, false, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
     try std.testing.expect(!(try storage.inspectSession(command.session.slice())).found);
     const replay = storage.configure(&command, true, .{});
     try std.testing.expect(replay == .rejected and replay.rejected.replayed);
@@ -13353,7 +13414,7 @@ test "initial Message atomically allocates its Session and replays its original 
         refused.configuration.?.workspace.value = .{};
         const rejected = storage.submitMessage(&refused, .{});
         try std.testing.expect(rejected == .rejected);
-        try std.testing.expectEqual(MessageRejection.invalid_workspace, rejected.rejected.code);
+        try std.testing.expectEqual(protocol.MessageRejection.invalid_workspace, rejected.rejected.code);
         try std.testing.expect(storage.submitMessage(&refused, .{}).rejected.replayed);
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
     }
@@ -13403,7 +13464,7 @@ test "message rejections replay before current Session checks without retained i
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     const rejected = storage.submitMessage(&message, .{});
     try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(MessageRejection.unknown_session, rejected.rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, rejected.rejected.code);
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -13414,7 +13475,7 @@ test "message rejections replay before current Session checks without retained i
     const replay = storage.submitMessage(&message, .{});
     try std.testing.expect(replay == .rejected);
     try std.testing.expect(replay.rejected.replayed);
-    try std.testing.expectEqual(MessageRejection.unknown_session, replay.rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, replay.rejected.code);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &replay.rejected.content.digest);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession(configured.accepted.session.slice())).pending_messages);
 
@@ -13479,11 +13540,11 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     var refused = try Send.make(tmp.dir, "peer-refused", "absent", sender, "lost");
     refused.sender_handle = handle;
     defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expectEqual(MessageRejection.unknown_session, storage.submitMessage(&refused, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessage(&refused, .{}).rejected.code);
 
     var forged = try Send.make(tmp.dir, "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
     defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&forged, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessage(&forged, .{}).rejected.code);
     const forged_replay = storage.submitMessage(&forged, .{});
     try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .invalid_sender_handle);
     // Every invalid binding must leave both receiver admission and the
@@ -13500,7 +13561,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             4 => invalid.sender = null,
             else => unreachable,
         }
-        try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&invalid, .{}).rejected.code);
+        try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessage(&invalid, .{}).rejected.code);
     }
     var changed_handle = sent;
     changed_handle.sender_handle = null;
@@ -13514,7 +13575,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
         var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
         if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
         defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expectEqual(MessageRejection.invalid_session_reference, storage.submitMessage(&empty, .{}).rejected.code);
+        try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessage(&empty, .{}).rejected.code);
     }
     // An unknown sender has no sequence: only the known sender's refusals are kept.
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM sent_rejection"));
@@ -13542,7 +13603,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expect(storage.submitMessage(&sent, .{}).accepted.replayed);
     var stale = sent;
     try stale.key.set("stale-handle");
-    try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&stale, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessage(&stale, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
     var reader = try storage.openActivityContent(.{ .session = session, .position = own.items[0].position });
     reader.close();
@@ -14050,6 +14111,16 @@ test "fresh Store uses current schema and rejects the prior version" {
         defer _ = c.sqlite3_finalize(stored_uncertainty);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stored_uncertainty));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(stored_uncertainty, 0));
+    }
+    {
+        // An Action stores only its authorization; its denial is its Resolution.
+        const stored_permission = try prepare(
+            storage.database,
+            "SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='permission_state'",
+        );
+        defer _ = c.sqlite3_finalize(stored_permission);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stored_permission));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(stored_permission, 0));
     }
     try storage.close();
     // Model the prior format's rollback-journal header; rejection must
@@ -15296,7 +15367,7 @@ test "definite rejections retain decisions without retaining payloads" {
     defer unknown_message.removeTemporaryContent(std.testing.io) catch unreachable;
     const unknown_reply = storage.submitMessage(&unknown_message, .{});
     try std.testing.expect(unknown_reply == .rejected);
-    try std.testing.expectEqual(MessageRejection.unknown_session, unknown_reply.rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_reply.rejected.code);
 
     var incomplete: protocol.ConfigureCommand = .{};
     try incomplete.key.set("incomplete");
@@ -15304,7 +15375,7 @@ test "definite rejections retain decisions without retaining payloads" {
     defer incomplete.removeTemporaryContent(std.testing.io) catch unreachable;
     const incomplete_reply = storage.configure(&incomplete, true, .{});
     try std.testing.expect(incomplete_reply == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
 
     var exhausted: protocol.ConfigureCommand = .{};
     try exhausted.key.set("exhausted");
@@ -15313,7 +15384,7 @@ test "definite rejections retain decisions without retaining payloads" {
     defer exhausted.removeTemporaryContent(std.testing.io) catch unreachable;
     const exhausted_reply = storage.configure(&exhausted, true, .{});
     try std.testing.expect(exhausted_reply == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(
@@ -15395,8 +15466,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
     const first_observation = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const second_observation = (try storage.observeCommand("dispatch-2")).message.?.queue.?;
-    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("dispatch-1")).message.?.progress.?.status);
-    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("dispatch-2")).message.?.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("dispatch-1")).message.?.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("dispatch-2")).message.?.progress.?.status);
     const first_binding = switch (first_observation.state) {
         .processing => |value| value,
         else => return error.ExpectedProcessingObservation,
@@ -15424,7 +15495,7 @@ test "one committed selection freezes its settings and input prefix" {
     const active_update = storage.configure(&update, true, .{});
     try std.testing.expect(active_update == .rejected);
     try std.testing.expectEqual(
-        ConfigurationRejection.model_is_immutable,
+        protocol.ConfigurationRejection.model_is_immutable,
         active_update.rejected.code,
     );
     try expectBindingPreserved(&storage, created_session_0.slice(), "during-work");
@@ -15473,7 +15544,7 @@ test "one committed selection freezes its settings and input prefix" {
     try update.key.set("configure-after-failure");
     const failed_update = storage.configure(&update, true, .{});
     try std.testing.expect(failed_update == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-failure");
 
     var tools_update: protocol.ConfigureCommand = .{};
@@ -15629,7 +15700,7 @@ test "continued accepted output keeps model immutable and public projection read
         defer _ = c.sqlite3_finalize(resolution);
         try bindU64(resolution, 1, binding.operation_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(resolution));
-        var code: protocol.Bounded(96) = .{};
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(resolution, 0, &code);
         try std.testing.expectEqualStrings("answer", code.slice());
     }
@@ -15642,7 +15713,7 @@ test "continued accepted output keeps model immutable and public projection read
     const rejected = storage.configure(&update, true, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(
-        ConfigurationRejection.model_is_immutable,
+        protocol.ConfigurationRejection.model_is_immutable,
         rejected.rejected.code,
     );
 
@@ -15877,7 +15948,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
         var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{} } };
         try failure.correlated.request_id.set(request_id);
         try storage.settleModelAttemptFailure(binding, failure, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
-        var resolution: protocol.Bounded(96) = .{};
+        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
         var recorded: protocol.Bounded(256) = .{};
         {
             const statement = try prepare(storage.database, "SELECT coalesce(resolution_code,''),coalesce(request_id,'') FROM model_operation WHERE operation_id=?1");
@@ -16041,7 +16112,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 0));
         try std.testing.expectEqual(std.math.maxInt(i64), c.sqlite3_column_int64(statement, 1));
-        var failure: protocol.Bounded(96) = .{};
+        var failure: protocol.Bounded(protocol.max_code_bytes) = .{};
         try readText(statement, 2, &failure);
         try std.testing.expectEqualStrings("provider_temporary_http_429", failure.slice());
         try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 3));
@@ -16109,10 +16180,10 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(i64, 4), c.sqlite3_column_int64(statement, 0));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 1));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 2));
-    var last_failure: protocol.Bounded(96) = .{};
+    var last_failure: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(statement, 3, &last_failure);
     try std.testing.expectEqualStrings("provider_transport_failure", last_failure.slice());
-    var resolution: protocol.Bounded(96) = .{};
+    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(statement, 4, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
     try expectDenseSessionPositions(&storage, created_session_0.slice());
@@ -16704,7 +16775,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     defer _ = c.sqlite3_finalize(outcomes);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
     try std.testing.expectEqual(@as(i64, 6100), c.sqlite3_column_int64(outcomes, 0));
-    var resolution: protocol.Bounded(96) = .{};
+    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
     try readText(outcomes, 1, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
@@ -17221,7 +17292,12 @@ test "compaction success retains host inputs and ordered anchor suffix across re
 }
 
 test "compaction defaults nullable overrides and frozen retry survive reopen" {
-    for (product_defaults.supported_models ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
+    const supported_ids = comptime blk: {
+        var ids: [model_capability.models.len][]const u8 = undefined;
+        for (model_capability.models, &ids) |row, *id| id.* = row.id;
+        break :blk ids;
+    };
+    for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage = try testingStore(&tmp, std.testing.io);
@@ -17232,7 +17308,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         const created_session_0_reply = storage.configure(&configure, true, .{});
         try std.testing.expect(created_session_0_reply == .accepted);
         const created_session_0 = created_session_0_reply.accepted.session;
-        const expected: ?u64 = if (model_index < product_defaults.supported_models.len) 244800 else null;
+        const expected: ?u64 = if (model_index < supported_ids.len) 244800 else null;
         const initial = try storage.inspectSession(created_session_0.slice());
         try std.testing.expectEqual(expected, initial.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);
@@ -17465,7 +17541,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
         try invalid_patch.configuration.compaction_trigger.value.set(invalid);
         const rejected = storage.configure(&invalid_patch, true, .{});
         try std.testing.expect(rejected == .rejected);
-        try std.testing.expectEqual(ConfigurationRejection.invalid_compaction_trigger, rejected.rejected.code);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, rejected.rejected.code);
         try std.testing.expectEqual(observed.revision, (try storage.inspectSession(session.slice())).revision);
         if (!std.mem.eql(u8, invalid, "0")) {
             try invalid_patch.key.set(try std.fmt.bufPrint(&key, "invalid-reserve-{d}", .{index}));
@@ -17474,7 +17550,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try invalid_patch.configuration.output_reservation.value.set(invalid);
             const reserve_rejected = storage.configure(&invalid_patch, true, .{});
             try std.testing.expect(reserve_rejected == .rejected);
-            try std.testing.expectEqual(ConfigurationRejection.invalid_output_reservation, reserve_rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_output_reservation, reserve_rejected.rejected.code);
             try std.testing.expectEqual(observed.revision, (try storage.inspectSession(session.slice())).revision);
         }
     }
@@ -17545,7 +17621,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
         var key: [32]u8 = undefined;
         const rejected = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-invalid-{d}", .{index}), session.slice(), .value, invalid);
         try std.testing.expect(rejected == .rejected);
-        try std.testing.expectEqual(ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
         try std.testing.expectEqual(revision, (try storage.inspectSession(session.slice())).revision);
     }
     // An omitted field preserves the saved override.
@@ -17563,7 +17639,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSession(unknown.slice())).reasoning_effort);
     const unknown_rejected = try configureTestEffort(&storage, "effort-unknown-low", unknown.slice(), .value, "low");
     try std.testing.expect(unknown_rejected == .rejected);
-    try std.testing.expectEqual(ConfigurationRejection.unsupported_reasoning_effort, unknown_rejected.rejected.code);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, unknown_rejected.rejected.code);
 
     // A new Operation freezes the effective effort current at its admission,
     // and the frozen value survives reopening.
@@ -18147,7 +18223,7 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
             var stop = try completeSessionStop("stop", session.slice());
             const stopped = storage.stopSession(&stop, .{});
             try std.testing.expect(stopped == .accepted);
-            try std.testing.expectEqual(SessionStopCompletion.completed, stopped.accepted.completion);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, stopped.accepted.completion);
             try storage.close();
             storage = try testingStore(&tmp, std.testing.io);
 
@@ -18179,4 +18255,27 @@ test "compaction purpose admission fences a missing latest Turn Operation" {
     try submitTestMessage(&storage, &tmp, "later", "later", session.slice(), "new input");
     try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
     try std.testing.expect(storage.isFenced());
+}
+
+test "saved Turn outcomes read back as the outcome that closed the Turn" {
+    const Saved = struct { code: []const u8, content_id: ?i64, tag: TurnOutcome.Tag };
+    // The on-disk codes are the Store format; readers branch on the tag.
+    const saved = [_]Saved{
+        .{ .code = "completed", .content_id = 7, .tag = .completed },
+        .{ .code = "cancelled", .content_id = null, .tag = .cancelled },
+        .{ .code = "retry_exhausted", .content_id = null, .tag = .retry_exhausted },
+        .{ .code = "ResourceExceeded", .content_id = null, .tag = .resource_exceeded },
+        .{ .code = "provider_http_401", .content_id = null, .tag = .failed },
+    };
+    for (saved) |row| {
+        const outcome = try TurnOutcome.decode(row.code, row.content_id);
+        try std.testing.expectEqual(row.tag, std.meta.activeTag(outcome));
+        try std.testing.expectEqualStrings(row.code, outcome.code());
+    }
+    try std.testing.expectEqual(@as(i64, 7), (try TurnOutcome.decode("completed", 7)).completed);
+    // Only a completed Turn saves content, and every outcome saves a code.
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("completed", null));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("cancelled", 7));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("provider_http_401", 7));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("", null));
 }

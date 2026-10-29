@@ -28,6 +28,9 @@ pub const Requests = struct {
     stage: ?*FailureStage = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?ReadFailure = null,
+    /// Test hook for mutation sends only: asks the Host to drop its reply at
+    /// this point.
+    drop_reply: ?[]const u8 = null,
 
     pub fn failRead(self: Requests, failure: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         if (self.read_failure) |slot| if (slot.* == null) {
@@ -48,12 +51,12 @@ pub const Requests = struct {
         if (self.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
     }
 
-    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
+    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) !MutationReply {
         reply_buffer.len = 0;
         try self.check();
         markStage(self.stage, .store);
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
-        const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
         result.context.store = captured.saved.store;
         result.context.key = captured.saved.key;
@@ -68,8 +71,8 @@ pub const Requests = struct {
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
+        try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key });
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, reply_buffer, null);
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .observation = try CommandObservation.parse(reply, key) };
     }
@@ -99,7 +102,10 @@ pub const Requests = struct {
         try validateIdentityInputs("", session);
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, profile);
+        switch (profile) {
+            .current => try body.appendShape(protocol.inspect_session_request.current, .{ paths.store.slice(), session }),
+            .full => try body.appendShape(protocol.inspect_session_request.full, .{ paths.store.slice(), session }),
+        }
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -111,9 +117,7 @@ pub const Requests = struct {
         if (selection.operation == 0 or selection.operation > std.math.maxInt(i64) or selection.attempt == 0 or selection.attempt > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.appendFmt(",\"failed_response\":\"{t}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ selection.part, selection.operation, selection.attempt });
+        try body.appendShape(protocol.inspect_session_request.failed_response, .{ paths.store.slice(), session, selection.part, selection.operation, selection.attempt });
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         const head = try readResponseHeadUntil(self, fd, .{}, null);
@@ -137,18 +141,18 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderSessionListRequest(&body, paths.store.slice(), workspace, cursor);
+        try body.appendShape(protocol.list_sessions_request, .{ paths.store.slice(), workspace, cursor.after, cursor.ceiling });
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
     pub fn readActionArguments(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !ResultReply {
-        return readActionContent(self, store_path, session, action_id, "read_action_arguments", "/v1/read-action-arguments", destination, reply_buffer);
+        return readActionContent(self, store_path, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
 
     pub fn readActionCallId(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !ResultReply {
-        return readActionContent(self, store_path, session, action_id, "read_action_call_id", "/v1/read-action-call-id", destination, reply_buffer);
+        return readActionContent(self, store_path, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
     }
 
     pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ConversationCursor) !ConversationPageReply {
@@ -157,9 +161,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "conversation_page", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.appendFmt(",\"end\":\"{d}\",\"before_position\":\"{d}\",\"before_ordinal\":\"{d}\"}}", .{ cursor.end, cursor.before_position, cursor.before_ordinal });
+        try body.appendShape(protocol.conversation_page_request, .{ paths.store.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -184,9 +186,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "conversation_content", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\",\"start\":\"0\",\"stream\":true}}", .{ position, ordinal });
+        try body.appendShape(protocol.conversation_content_request, .{ paths.store.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -199,11 +199,7 @@ pub const Requests = struct {
         try (protocol.ProposalPage{ .end = cursor.end, .after = cursor.after }).validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "proposal_page", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.append(",\"end\":");
-        if (cursor.end) |end| try body.appendFmt("\"{d}\"", .{end}) else try body.append("null");
-        try body.appendFmt(",\"after\":\"{d}\"}}", .{cursor.after});
+        try body.appendShape(protocol.proposal_page_request, .{ paths.store.slice(), session, cursor.end, cursor.after });
         const fd = try openRead(self, &paths, "/v1/proposal-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -228,9 +224,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "proposal_field", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.appendFmt(",\"position\":\"{d}\",\"field\":\"{s}\"}}", .{ position, @tagName(field) });
+        try body.appendShape(protocol.proposal_field_request, .{ paths.store.slice(), session, position, field });
         const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -242,13 +236,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "activity_page", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.append(",\"end\":");
-        if (cursor.end) |end| try body.appendFmt("\"{d}\"", .{end}) else try body.append("null");
-        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":", .{cursor.position});
-        if (cursor.ordinal) |ordinal| try body.appendFmt("\"{d}\"", .{ordinal}) else try body.append("null");
-        try body.appendFmt(",\"direction\":\"{s}\"}}", .{@tagName(cursor.direction)});
+        try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction });
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -272,9 +260,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, "activity_content", paths.store.slice(), "session", session, null, null);
-        body.len -= 1;
-        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\"}}", .{ position, ordinal });
+        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -519,9 +505,9 @@ pub const ActivityPage = struct {
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(96) };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
-        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
+        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
         const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
         const Items = struct {
@@ -766,10 +752,8 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
-    try body.append("{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":");
-    try body.appendJsonString(paths.store.slice());
-    try body.append("}");
-    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
+    try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
+    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, reply_buffer, null);
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -825,13 +809,11 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) Host
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostStatus {
     var body: protocol.RequestBuffer = .{};
-    body.append("{\"version\":\"1\",\"kind\":\"host_info\",\"store\":") catch unreachable;
-    body.appendJsonString(paths.store.slice()) catch unreachable;
-    body.append("}") catch unreachable;
+    body.appendShape(protocol.host_info_request, .{paths.store.slice()}) catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1080,13 +1062,13 @@ pub const Current = struct {
         status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
         turn: OmittableJson(Id) = .{},
         operation: OmittableJson(Id) = .{},
-        latest_outcome: ?struct { code: JsonString(96), content: ?Reference },
+        latest_outcome: ?struct { code: JsonString(protocol.max_code_bytes), content: ?Reference },
 
         pub fn jsonStringify(self: Work, jw: anytype) !void {
             try writeObject(self, jw);
         }
     };
-    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(96) };
+    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(protocol.max_code_bytes) };
     pub const Execution = struct {
         status: JsonEnum(enum { partial, unavailable }),
         reason: OmittableJson(JsonEnum(enum { session_not_found })) = .{},
@@ -1581,38 +1563,6 @@ pub const SessionListPage = struct {
     }
 };
 
-fn renderSessionListRequest(body: *protocol.RequestBuffer, store: []const u8, workspace: ?[]const u8, cursor: SessionListCursor) !void {
-    try body.append("{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":");
-    try body.appendJsonString(store);
-    try body.append(",\"workspace\":");
-    if (workspace) |value| try body.appendJsonString(value) else try body.append("null");
-    try body.appendFmt(",\"after\":\"{d}\",\"ceiling\":\"{d}\"}}", .{ cursor.after, cursor.ceiling });
-}
-
-fn renderReadRequest(
-    body: *protocol.RequestBuffer,
-    kind: []const u8,
-    store: []const u8,
-    target_name: []const u8,
-    target: []const u8,
-    action_id: ?u64,
-    report_profile: ?protocol.ReportProfile,
-) !void {
-    try body.append("{\"version\":\"1\",\"kind\":");
-    try body.appendJsonString(kind);
-    try body.append(",\"store\":");
-    try body.appendJsonString(store);
-    try body.append(",");
-    try body.appendJsonString(target_name);
-    try body.append(":");
-    try body.appendJsonString(target);
-    if (action_id) |id| try body.appendFmt(",\"action\":\"{d}\"", .{id});
-    if (report_profile) |profile| {
-        if (profile == .full) try body.append(",\"profile\":\"full\"");
-    }
-    try body.append("}");
-}
-
 pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1646,7 +1596,7 @@ pub fn retry(
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or binding.target != selected) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
+    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
     result.context.store = binding.saved.store;
     result.context.key = binding.saved.key;
@@ -1686,13 +1636,13 @@ pub const CommandObservation = struct {
     status: enum { absent, accepted, rejected },
     kind: ?MutationKind = null,
     target: ?protocol.Bounded(protocol.max_session_bytes) = null,
-    code: ?protocol.Bounded(96) = null,
+    code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
     created: ?bool = null,
     input: ?ContentReference = null,
     queue: ?struct { status: enum { queued, processing, excluded, completed, failed, cancelled }, admission: u64 } = null,
     processing: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
-    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(96), text: ?ContentReference } = null,
+    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(protocol.max_code_bytes), text: ?ContentReference } = null,
     progress: ?Progress = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     completion: ?enum { pending, completed } = null,
@@ -1809,20 +1759,20 @@ pub const CommandObservation = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
             kind: OmittableJson(JsonEnum(MutationKind)) = .{},
             target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(96)) = .{},
+            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
             input: OmittableJson(Ref) = .{},
             queue: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "queue")).optional.child, "status")), admission: JsonString(20) }) = .{},
             processing: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
-            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(96)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
+            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
             progress: OmittableJson(struct { status: JsonEnum(@FieldType(Progress, "status")), action: ?JsonString(20) }) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(96)) = .{}, answer: OmittableJson(struct {}) = .{} };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
         const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
         var storage: [capacity]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -1937,7 +1887,7 @@ fn readResultWithSink(
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, "read_result", paths.store.slice(), "key", key, null, null);
+    try body.appendShape(protocol.read_result_request, .{ paths.store.slice(), key });
     const fd = try openRead(requests, &paths, "/v1/read-result", body.slice());
     defer closeSocket(io, fd);
     return switch (try readResultResponseSink(requests, fd, sink, reply_buffer)) {
@@ -1999,7 +1949,7 @@ fn readActionContent(
     store_path: []const u8,
     session: []const u8,
     action_id: u64,
-    comptime kind: []const u8,
+    comptime shape: anytype,
     comptime route: []const u8,
     destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
@@ -2010,7 +1960,7 @@ fn readActionContent(
     if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id, null);
+    try body.appendShape(shape, .{ paths.store.slice(), session, action_id });
     const fd = try openRead(requests, &paths, route, body.slice());
     defer closeSocket(io, fd);
     return readResultResponseSink(requests, fd, destination, reply_buffer);
@@ -2078,7 +2028,7 @@ pub const MutationAnswer = struct {
             model_interruption,
             permission_decision,
         },
-        rejected: protocol.Bounded(96),
+        rejected: protocol.Bounded(protocol.max_code_bytes),
         conflict,
     },
     replayed: bool,
@@ -2086,7 +2036,7 @@ pub const MutationAnswer = struct {
 
 pub const InvocationDiagnostic = struct {
     type: protocol.Bounded(32),
-    code: protocol.Bounded(96),
+    code: protocol.Bounded(protocol.max_code_bytes),
 };
 
 /// Owned facts and original request context survive buffer reuse and capture
@@ -2220,7 +2170,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
     try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
-    var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try maximum.value.value.writeJson(&writer);
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
@@ -2339,7 +2289,7 @@ fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
-        code: JsonString(96),
+        code: JsonString(protocol.max_code_bytes),
         observation: OmittableJson(struct {}) = .{},
         answer: OmittableJson(struct {}) = .{},
     };
@@ -2374,12 +2324,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
-        code: OmittableJson(JsonString(96)) = .{},
+        code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
         answer: OmittableJson(struct {
             status: JsonString(16),
             replayed: bool,
             session: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(96)) = .{},
+            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
             admission: OmittableJson(JsonString(20)) = .{},
@@ -2681,8 +2631,8 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !C
     return readCapturedIdentity(io, &file, handle);
 }
 
-pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
-    return (Requests{ .io = io }).sendCaptured(captured, drop_reply, reply_buffer);
+pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) !MutationReply {
+    return (Requests{ .io = io }).sendCaptured(captured, reply_buffer);
 }
 
 const CapturedText = struct {
@@ -2845,15 +2795,12 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     var capture = try Capture.open(io, location.record, &output_buffer);
     capture.stage = input.stage;
     errdefer capture.abort();
-    try capture.writeHeader(.configure);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(session);
-    try capture.write(",\"configuration\":");
+    try capture.writeRequest(protocol.configure_request.head, .{ paths.store.slice(), location.key, session });
     try capture.writeConfiguration(input);
-    try capture.write(if (input.require_model) ",\"require_model\":true}" else "}");
+    if (input.require_model)
+        try capture.writeRequest(protocol.configure_request.require_model_tail, .{})
+    else
+        try capture.writeRequest(protocol.configure_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
 }
 
@@ -2863,7 +2810,7 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     markStage(input.stage, .capture);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    if (input.sender_handle) |handle| if (handle.len > 32) return error.InvalidSenderHandle;
+    if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     // Validate the full sender before resolving or opening any capture.
     // The Host authenticates admission, including legitimate self-sends.
     if (input.sender) |sender| {
@@ -2880,36 +2827,23 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     var capture = try Capture.open(io, location.record, &output_buffer);
     capture.stage = input.stage;
     errdefer capture.abort();
-    try capture.writeHeader(.message);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
-    try capture.write(",\"sender\":");
     if (input.sender) |sender| {
-        try capture.write("{\"store\":");
-        try capture.writeJsonString(sender.store.?);
-        try capture.write(",\"session\":");
-        try capture.writeJsonString(sender.session);
-        try capture.write("}");
-    } else try capture.write("null");
-    try capture.write(",\"sender_handle\":");
-    if (input.sender_handle) |handle| try capture.writeJsonString(handle) else try capture.write("null");
+        try capture.writeRequest(protocol.message_request.sender_head, .{ paths.store.slice(), location.key, input.session, sender.store.?, sender.session, input.sender_handle });
+    } else try capture.writeRequest(protocol.message_request.head, .{ paths.store.slice(), location.key, input.session, input.sender_handle });
     if (input.configuration) |configuration| {
         // Creation intent is visible in the bounded metadata prefix, before
         // either variable payload. Inspection never scans Message content.
-        try capture.write(",\"configuration\":");
+        try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
     }
-    try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
+    try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
         try capture.writeJsonString(value);
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
-    try capture.write("}}");
+    try capture.writeRequest(protocol.message_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
@@ -2917,13 +2851,7 @@ fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: Sess
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.writeHeader(.session_stop);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
-    try capture.write("}");
+    try capture.writeRequest(protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session });
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .session_stop);
 }
 
@@ -2936,18 +2864,7 @@ fn writeModelInterruptionCapture(
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.writeHeader(.model_interruption);
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(location.key);
-    try capture.write(",\"target\":{\"session\":");
-    try capture.writeJsonString(input.session);
-    var ids: [96]u8 = undefined;
-    const suffix = try std.fmt.bufPrint(&ids, ",\"turn\":\"{d}\",\"operation\":\"{d}\"}}}}", .{
-        input.turn_id,
-        input.operation_id,
-    });
-    try capture.write(suffix);
+    try capture.writeRequest(protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id });
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .model_interruption);
 }
 
@@ -3087,22 +3004,35 @@ const Capture = struct {
             return self.writer.err orelse error.WriteFailed;
     }
 
-    fn writeHeader(self: *Capture, comptime kind: MutationKind) !void {
-        try self.write("{\"version\":\"1\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"store\":");
+    /// Writes request JSON from its shape. Every string argument must be UTF-8.
+    fn writeRequest(self: *Capture, comptime shape: anytype, args: anytype) !void {
+        inline for (args) |argument| {
+            const T = @TypeOf(argument);
+            if (comptime isByteString(T)) {
+                if (!std.unicode.utf8ValidateSlice(argument)) return error.InvalidUtf8;
+            } else if (comptime @typeInfo(T) == .optional and isByteString(@typeInfo(T).optional.child)) {
+                if (argument) |value| if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+            } else switch (@typeInfo(T)) {
+                .int, .comptime_int, .bool, .@"enum", .null => {},
+                else => @compileError("writeRequest cannot check a " ++ @typeName(T) ++ " argument"),
+            }
+        }
+        protocol.writeShape(&self.writer.interface, shape, args) catch return self.writer.err orelse error.WriteFailed;
+    }
+
+    fn isByteString(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .pointer => |pointer| switch (pointer.size) {
+                .slice => pointer.child == u8,
+                .one => @typeInfo(pointer.child) == .array and @typeInfo(pointer.child).array.child == u8,
+                else => false,
+            },
+            else => false,
+        };
     }
 
     fn writePermissionDecision(self: *Capture, store: []const u8, key: []const u8, input: PermissionDecisionInput) !void {
-        try self.writeHeader(.permission_decision);
-        try self.writeJsonString(store);
-        try self.write(",\"key\":");
-        try self.writeJsonString(key);
-        try self.write(",\"session\":");
-        try self.writeJsonString(input.session);
-        var suffix: [96]u8 = undefined;
-        try self.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
-            input.action_id,
-            @tagName(input.decision),
-        }));
+        try self.writeRequest(protocol.permission_decision_request, .{ store, key, input.session, input.action_id, input.decision });
     }
 
     fn writeOptionalPolicy(self: *Capture, value: OptionalPolicy) !void {
@@ -3255,7 +3185,6 @@ fn sendSource(
     length: u64,
     file: ?*std.Io.File,
     bytes: ?[]const u8,
-    drop_reply: ?[]const u8,
     instance: ?*const protocol.InstanceId,
     reply_buffer: *ReplyBuffer,
     until: ?i128,
@@ -3272,7 +3201,8 @@ fn sendSource(
     if (instance) |id| {
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
     }
-    if (drop_reply) |drop| {
+    if (requests.drop_reply) |drop| {
+        std.debug.assert(std.meta.eql(timing, ResponseTiming.mutation));
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Test-Drop-Reply: {s}\r\n", .{drop})).len;
     }
     used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
@@ -4309,7 +4239,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
         try std.testing.expectEqualStrings("message", saved.kind.slice());
         var reply: ReplyBuffer = .{};
-        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, null, &reply));
+        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, &reply));
         try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
         try std.testing.expectEqualStrings(root, generated.identity().store.slice());
     }
@@ -4414,7 +4344,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const result = sendCaptured(connected_io, &captured, null, &buffer);
+        const result = sendCaptured(connected_io, &captured, &buffer);
         peer.join();
         if (Peer.failure) |err| return err;
         switch (response) {
@@ -4795,32 +4725,68 @@ test "bounded read requests retain escaped key capacities and canonical Session 
     const session = "k7m2qx";
     const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     const cases = .{
-        .{ "observe_command", "key", &escaped_key, null, null, protocol.max_observe_command_request_bytes },
-        .{ "read_result", "key", &escaped_key, null, null, protocol.max_read_result_request_bytes },
-        .{ "read_action_call_id", "session", session, std.math.maxInt(u64), null, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
-        .{ "read_action_arguments", "session", session, std.math.maxInt(u64), null, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
+        .{ protocol.observe_command_request, .{ &escaped_store, &escaped_key }, protocol.max_observe_command_request_bytes },
+        .{ protocol.read_result_request, .{ &escaped_store, &escaped_key }, protocol.max_read_result_request_bytes },
+        .{ protocol.read_action_call_id_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
+        .{ protocol.read_action_arguments_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
+        .{ protocol.inspect_session_request.failed_response, .{ &escaped_store, session, protocol.FailedResponsePart.metadata, std.math.maxInt(u64), std.math.maxInt(u64) }, protocol.max_inspect_session_request_bytes - session_encoding_slack },
     };
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, case[0], &escaped_store, case[1], case[2], case[3], case[4]);
-        try std.testing.expectEqual(@as(usize, case[5]), body.len);
+        try body.appendShape(case[0], case[1]);
+        try std.testing.expectEqual(@as(usize, case[2]), body.len);
     }
     var inspection: protocol.RequestBuffer = .{};
-    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", session, null, .full);
+    try inspection.appendShape(protocol.inspect_session_request.full, .{ &escaped_store, session });
     try std.testing.expect(inspection.len <= protocol.max_inspect_session_request_bytes);
-    inspection.len = 0;
-    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", session, null, null);
-    inspection.len -= 1;
-    try inspection.appendFmt(",\"failed_response\":\"metadata\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ std.math.maxInt(i64), std.math.maxInt(i64) });
-    try std.testing.expectEqual(protocol.max_inspect_session_request_bytes - session_encoding_slack, inspection.len);
     var full: protocol.RequestBuffer = .{};
     full.len = full.bytes.len;
     try std.testing.expectError(error.BufferTooLarge, full.append("x"));
 }
 
+test "every request renders its exact worst-case bound from the shape it writes" {
+    const store = @as([protocol.max_store_bytes]u8, @splat(1));
+    const key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const session = @as([protocol.max_session_bytes]u8, @splat(1));
+    const workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
+    const id: u64 = std.math.maxInt(u64);
+    const optional_id: ?u64 = std.math.maxInt(u64);
+    const Direction = @FieldType(protocol.ActivityPage, "direction");
+    const cases = .{
+        .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
+        .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
+        .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
+        .{ protocol.observe_command_request, .{ &store, &key }, protocol.max_observe_command_request_bytes },
+        .{ protocol.host_info_request, .{&store}, protocol.max_host_info_request_bytes },
+        .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
+        .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
+        .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, protocol.max_inspect_session_request_bytes },
+        .{ protocol.list_sessions_request, .{ &store, @as(?[]const u8, &workspace), id, id }, protocol.max_list_sessions_request_bytes },
+        .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
+        .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
+        .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
+        .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
+        .{ protocol.proposal_page_request, .{ &store, &session, optional_id, id }, protocol.max_proposal_page_request_bytes },
+        .{ protocol.proposal_field_request, .{ &store, &session, id, protocol.ProposalField.arguments }, protocol.max_proposal_field_request_bytes },
+        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
+        .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+    };
+    var largest: usize = 0;
+    inline for (cases, 0..) |case, index| {
+        var body: protocol.FixedJsonBuffer(case[2]) = .{};
+        try body.appendShape(case[0], case[1]);
+        try std.testing.expectEqual(@as(usize, case[2]), body.len);
+        try std.testing.expect(try std.json.validate(std.testing.allocator, body.slice()));
+        // The first three are control requests, captured to a record file.
+        if (index >= 3) largest = @max(largest, body.len);
+    }
+    try std.testing.expectEqual(protocol.max_client_request_bytes, largest);
+    try std.testing.expectEqual(protocol.max_control_request_bytes, protocol.max_model_interruption_request_bytes);
+}
+
 test "Session list client renders exact cursor and maximum escaped workspace without truncation" {
     var empty: protocol.RequestBuffer = .{};
-    try renderSessionListRequest(&empty, "/store", null, .{});
+    try empty.appendShape(protocol.list_sessions_request, .{ "/store", @as(?[]const u8, null), 0, 0 });
     try std.testing.expectEqualStrings(
         "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}",
         empty.slice(),
@@ -4828,12 +4794,9 @@ test "Session list client renders exact cursor and maximum escaped workspace wit
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     var maximum: protocol.RequestBuffer = .{};
-    try renderSessionListRequest(&maximum, &escaped_store, &escaped_workspace, .{
-        .after = std.math.maxInt(i64),
-        .ceiling = std.math.maxInt(i64),
-    });
-    try std.testing.expectEqual(protocol.max_list_sessions_request_bytes - 1, maximum.len);
-    try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"after\":\"9223372036854775807\",\"ceiling\":\"9223372036854775807\"}"));
+    try maximum.appendShape(protocol.list_sessions_request, .{ &escaped_store, @as(?[]const u8, &escaped_workspace), std.math.maxInt(u64), std.math.maxInt(u64) });
+    try std.testing.expectEqual(protocol.max_list_sessions_request_bytes, maximum.len);
+    try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"after\":\"18446744073709551615\",\"ceiling\":\"18446744073709551615\"}"));
 }
 
 test "Session list facts own complete rows and render semantic output after scratch reuse" {
@@ -5716,7 +5679,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{}, .target = .configure };
     try captured.saved.store.set("/never-open");
     var buffer: ReplyBuffer = .{};
-    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, null, &buffer));
+    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, &buffer));
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), captured.file.handle);
     const file = captured.file;
     const address = try MessageAddress.init("/never-open", "k7m2qx", "k");
@@ -5742,7 +5705,7 @@ test "transport cancellation returns before silent peer release and retains pinn
         done: std.atomic.Value(bool) = .init(false),
         fn run(self: *@This()) void {
             var reply: ReplyBuffer = .{};
-            _ = self.requests.sendCaptured(self.captured, null, &reply) catch |err| {
+            _ = self.requests.sendCaptured(self.captured, &reply) catch |err| {
                 self.failure = err;
             };
             self.done.store(true, .release);

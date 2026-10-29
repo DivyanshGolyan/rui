@@ -31,23 +31,19 @@ jobs:
       suite: ${{ inputs.suite || 'native' }}
   report:
     needs: qualify
-    # Daily runs on main catch drift and flakes after landing; red files an issue.
+    # Daily runs on main catch drift and flakes after landing; red files issues by cause.
     if: ${{ always() && !github.event.repository.private && github.event_name == 'schedule' && needs.qualify.result != 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: File an issue for the failed daily run
+      - name: File each failure under its cause
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ needs.qualify.result }}
-          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          python3 -B tests/ci/report_issue.py \
-            --title "Daily Linux qualification failed" \
-            --body "Daily Linux native qualification on main $GITHUB_SHA: $RESULT. $URL"
+        run: python3 -B tests/ci/report_issue.py --workflow "Daily Linux qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA"

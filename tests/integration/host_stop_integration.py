@@ -140,10 +140,14 @@ def mixed_effect_drain(provider_first):
         thread.start()
         host = None
         diagnostics = None
+        # Shutdown holds after signalling every effect until the trap has run:
+        # the 100 ms grace KILL must not race Bash's scheduling.
+        signalled = ReleaseGate(state / "shutdown-signalled")
         try:
             host = fixture.start_host(
                 store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                "--test-phase-trace", active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
+                "--test-phase-trace", "--test-shutdown-signalled-gate-path", signalled.path,
+                active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
             )
             diagnostics = HostDiagnostics(host)
             bash_session = bash_fixture.configure(state, store, "configure-bash")
@@ -175,10 +179,13 @@ def mixed_effect_drain(provider_first):
 
             # Both admission orders must retire Bash, and stop cancels the
             # provider stream while its peer still holds the response.
+            diagnostics.wait("test_gate_waiting", subject=str(signalled.path), timeout=3)
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
                              f"{order}: Bash TERM with provider held", timeout=2)
+            signalled.release()
             diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
             assert host.wait(timeout=10) == 1, host.returncode
+            assert events.read_text().count("TERM\n") == 1, "Bash was not signalled exactly once"
             assert not provider_release.is_set(), "the peer released the provider before Host exit"
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
@@ -201,7 +208,7 @@ def mixed_effect_drain(provider_first):
                 diagnostics.snapshot_failure(lambda: {"case": "mixed_effect_drain", "order": order,
                     "provider_released": provider_release.is_set()})
             errors = []
-            for dispose in (lambda: stop_process(host) if host is not None else None,
+            for dispose in (signalled.release, lambda: stop_process(host) if host is not None else None,
                             provider_release.set, endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
                 try:
                     dispose()

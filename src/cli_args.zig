@@ -1,6 +1,7 @@
 //! Installed command grammar. Help and pre-effect syntax validation use the
 //! same definitions; semantic values remain with the client/Store owners.
 const std = @import("std");
+const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 
 pub const Resource = enum { session, request, action, host, defaults, auth };
@@ -81,7 +82,10 @@ pub const compaction_policy =
 pub const reasoning_help =
     \\--reasoning-effort VALUE selects a model-supported effort; default clears the Session override.
     \\Omission preserves an existing choice. New Sessions and resets use the model's catalog default.
-    \\Supported efforts are low, medium, high, xhigh and max (except gpt-5.5). No listed model supports none.
+    \\
+++ "Supported efforts are low, medium, high, xhigh and max" ++
+    (if (model_capability.ids_without_max_effort.len == 0) "" else " (except " ++ model_capability.ids_without_max_effort ++ ")") ++
+    ". No listed model supports none.\n" ++
     \\The setting applies to new model requests, including compaction; retries keep their frozen effort.
     \\
 ;
@@ -90,7 +94,7 @@ const compaction_help = reasoning_help ++ compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
-++ product_defaults.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
+++ model_capability.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
 
 const Option = struct {
     name: []const u8,
@@ -168,6 +172,7 @@ const serve_test = &[_]Option{
     hiddenValue("test-transition"),
     hiddenValue("test-transition-gate-path"),
     hiddenValue("test-bash-observed-exit-gate-path"),
+    hiddenValue("test-shutdown-signalled-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),
     hiddenValue("test-control-gate-keys"),
     hiddenValue("test-control-gate-path"),

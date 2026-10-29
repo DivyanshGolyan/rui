@@ -210,9 +210,16 @@ class SelectionTest(unittest.TestCase):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, 'failure', result))
         for result in ('success', 'failure'):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, 'failure', result))
-        for targets, plan, policy, build, native, private, expected, typecheck in cases:
+        # The unit producer runs exactly when the plan splits the Linux build.
+        cases = [(*case, 'false', 'skipped') for case in cases]
+        green = ('["check"]', 'success', 'success', 'success', 'success', False)
+        cases.append((*green, 'success', 'success', 'true', 'success'))
+        for result in ('failure', 'cancelled', 'skipped'):
+            cases.append((*green, 'failure', 'success', 'true', result))
+        cases.append((*green, 'failure', 'success', 'false', 'success'))
+        for targets, plan, policy, build, native, private, expected, typecheck, split, unit in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
-                              typecheck=typecheck):
+                              typecheck=typecheck, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
                 github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
@@ -226,9 +233,17 @@ class SelectionTest(unittest.TestCase):
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
                                             env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
-                                                 'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck})
+                                                 'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
+                                                 'SPLIT': split, 'UNIT_RESULT': unit})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
+
+    def test_linux_producer_splits_only_beside_other_compiles(self):
+        from qualification import split_linux
+        self.assertTrue(split_linux(["check"]))
+        self.assertTrue(split_linux(["test", "test-logic"]))
+        self.assertFalse(split_linux(["test"]))
+        self.assertFalse(split_linux(["test-logic", "admission-debug-integration"]))
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):

@@ -27,7 +27,7 @@ pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones.
     accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null },
-    rejected: struct { kind: Kind, code: protocol.Bounded(96) },
+    rejected: struct { kind: Kind, code: protocol.Bounded(protocol.max_code_bytes) },
     failed: struct { err: anyerror },
 
     pub fn failure(self: End) ?anyerror {
@@ -293,7 +293,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission } };
     }
     self.state = .rejected;
-    var code: protocol.Bounded(96) = .{};
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     if (answer.result == .rejected) code = answer.result.rejected else try code.set("request conflict");
     return .{ .rejected = .{ .kind = kind, .code = code } };
 }
@@ -334,7 +334,7 @@ fn submit(raw: *anyopaque, task: *Task) !void {
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -501,7 +501,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         }
         self.publication = .published;
     }
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
 }
 
 test "submission settles wire Admission only after join and releases only accepted or discarded intent" {
