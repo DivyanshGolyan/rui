@@ -980,10 +980,10 @@ fn finishBashPreparationFailure(
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
-    finishCustodyNow(host, slot, token);
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }
+    finishCustodyNow(host, slot, token);
 }
 
 // Discarding an unlaunched effect changes only local custody. In particular,
@@ -1019,8 +1019,8 @@ fn launchPreparedBash(
         return;
     }
     host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
-        discardBashResources(host, slot, token, prepared.takeCleanup());
         fenceDispatch(host, "Bash launch authority", err);
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
     var launched: ?bash.Execution = null;
@@ -1142,19 +1142,16 @@ fn completeBash(host: *Host, active: *BashSlot) void {
 }
 
 fn failBash(host: *Host, active: *BashSlot, phase: []const u8, err: anyerror) bool {
-    var closed = false;
-    if (active.delivery == .open) {
-        active.execution.releaseOutputReservation(host.retention);
-        closeBashDelivery(host, active);
-        closed = true;
-    }
     fenceDispatch(host, phase, err);
-    return closed;
+    if (active.delivery != .open) return false;
+    active.execution.releaseOutputReservation(host.retention);
+    closeBashDelivery(host, active);
+    return true;
 }
 
 fn closeBashDelivery(host: *Host, active: *BashSlot) void {
     std.debug.assert(active.delivery == .open);
-    host.custody.detach(active.token) catch unreachable;
+    detachCustody(host, active.token);
     traceAction(host, "cleanup_started", active.binding);
     active.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
 }
@@ -1199,14 +1196,14 @@ fn retainBashPreparedCleanup(
     cleanup: bash.PreparedCleanup,
     err: anyerror,
 ) void {
-    host.custody.detach(token) catch unreachable;
+    retainDispatchFence(host, "Bash preparation cleanup", err);
+    detachCustody(host, token);
     const work = &host.bash_work[token.index];
     work.* = .{ .prepared_cleanup = cleanup };
     slot.* = .{ .bash_prepared_cleanup = .{
         .token = token,
         .cleanup = &work.prepared_cleanup,
     } };
-    retainDispatchFence(host, "Bash preparation cleanup", err);
 }
 
 fn settleActionFailure(
@@ -2056,6 +2053,14 @@ fn settleFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
+/// An Action leaves custody unsettled only once dispatch is fenced or the Host
+/// is shutting down, and neither admits work again, so uncertain Actions come
+/// only from an earlier Host and the lifecycle owner stops scanning for them.
+fn detachCustody(host: *Host, token: execution.CustodyToken) void {
+    std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.launchAllowed());
+    host.custody.detach(token) catch unreachable;
+}
+
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
@@ -2067,7 +2072,7 @@ fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyT
         host.custody.actionBinding(token) catch unreachable
     else
         null;
-    host.custody.detach(token) catch unreachable;
+    detachCustody(host, token);
     host.custody.cleanupComplete(token) catch unreachable;
     slot.* = .free;
     if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
@@ -2373,6 +2378,8 @@ test "cleanup publication follows complete execution retirement" {
             } };
             const binding = try host.custody.attachAction(token, &permit);
             if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
+            // An Action leaves custody after its settlement claims delivery.
+            try std.testing.expect(host.custody.claimTerminalDelivery(token));
             finishCustodyNow(&host, &slot, token);
         }
         try std.testing.expect(boundary.observed);
@@ -2899,6 +2906,7 @@ test "closed Bash delivery retains its payload with detached custody" {
 
     // The real delivery-close transition detaches custody while retaining
     // the .bash payload for reclamation: the checker must accept it.
+    try std.testing.expect(host.custody.claimTerminalDelivery(token));
     closeBashDelivery(&host, &slots[0].bash);
     try std.testing.expect(slots[0].bash.delivery == .closed);
     try host.custody.checkDetachedAction(token, binding);
