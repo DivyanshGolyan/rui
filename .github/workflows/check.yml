@@ -359,6 +359,31 @@ jobs:
           test "$PLAN_RESULT" = success
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
+  report:
+    # Stable reds are filed by cause; a landing tip's own red is its author's,
+    # so it files only the failures its passing jobs retried.
+    needs: [linux, macos, cache_execution]
+    if: ${{ always() && !github.event.repository.private && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && (needs.linux.result != 'success' || needs.macos.result != 'success')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/wip/land-'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE: ${{ inputs.stable && 'true' || '' }}
+        run: |
+          if [ -n "$STABLE" ]; then
+            python3 -B tests/ci/report_issue.py --workflow "Stable qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --label stable-red
+          else
+            python3 -B tests/ci/report_issue.py --workflow "Selected checks" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --retried-only
+          fi
   completion:
     # Explicit dispatch is supported for GITHUB_TOKEN; workflow_run is suppressed.
     needs: [linux, macos, cache_execution]

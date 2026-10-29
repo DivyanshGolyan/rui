@@ -8,6 +8,9 @@ import time
 
 from select_tests import execution_batches
 
+# Marks a batch's retry in the job log; report_issue.py files the failure before it.
+RETRIED = "one automatic retry"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -21,7 +24,7 @@ def main():
     for batch in execution_batches(targets, args.check_part):
         returncode = execute(batch, args.ci_artifacts)
         if returncode and args.retry:
-            note = (f"{' '.join(batch)} failed (exit {returncode}); one automatic retry. "
+            note = (f"{' '.join(batch)} failed (exit {returncode}); {RETRIED}. "
                     "A pass after this retry is a flake to fix, not a clean pass.")
             print(f"::warning::{note}", flush=True)
             summarize(note)
