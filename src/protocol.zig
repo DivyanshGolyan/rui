@@ -12,6 +12,8 @@ pub const max_session_bytes = 128;
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = model_capability.max_model_bytes;
+// Resolution, rejection and failure codes.
+pub const max_code_bytes = 96;
 pub const max_tool_description_bytes = 100;
 pub const Provider = enum { codex };
 pub const ReasoningEffort = model_capability.ReasoningEffort;
@@ -234,6 +236,68 @@ pub const ModelInterruptionCommand = struct {
 
 pub const PermissionDecision = enum { allow_once, deny };
 
+// Reply and observation vocabulary. The Store produces these values and the
+// Host renders their tag names, so each reply's JSON shape can bound them.
+pub const ConfigurationRejection = enum {
+    invalid_session_reference,
+    unknown_session,
+    unsupported_permission_mode,
+    unsupported_provider,
+    invalid_model,
+    model_capability_unavailable,
+    invalid_output_schema,
+    invalid_compaction_trigger,
+    invalid_output_reservation,
+    unsupported_reasoning_effort,
+    incomplete_initial_configuration,
+    invalid_workspace,
+    workspace_is_immutable,
+    provider_is_immutable,
+    model_is_immutable,
+    revision_exhausted,
+};
+pub const MessageRejection = enum {
+    invalid_session_reference,
+    unknown_session,
+    invalid_sender_handle,
+    unsupported_permission_mode,
+    unsupported_provider,
+    invalid_model,
+    model_capability_unavailable,
+    invalid_output_schema,
+    invalid_compaction_trigger,
+    invalid_output_reservation,
+    unsupported_reasoning_effort,
+    incomplete_initial_configuration,
+    invalid_workspace,
+    workspace_is_immutable,
+    provider_is_immutable,
+    model_is_immutable,
+    revision_exhausted,
+};
+pub const CommandKind = enum { configure, message, session_stop, model_interruption, permission_decision };
+pub const CommandObservationStatus = enum { absent, accepted, rejected };
+pub const SessionStopCompletion = enum { pending, completed };
+pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
+pub const ModelInterruptionRejection = enum {
+    invalid_session_reference,
+    invalid_target,
+    unknown_session,
+    unknown_operation,
+    target_mismatch,
+    operation_resolved,
+};
+pub const PermissionDecisionRejection = enum {
+    invalid_session_reference,
+    invalid_target,
+    unknown_session,
+    unknown_action,
+    target_mismatch,
+    action_not_pending,
+};
+pub const MessageProgressStatus = enum { runnable, in_flight, waiting_for_permission };
+pub const ConversationItemKind = enum { user, assistant, tool_result };
+
 pub const PermissionDecisionCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
@@ -393,119 +457,102 @@ pub const ToolPresentation = struct {
     publication_position: ?u64,
     pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
 
+    /// Holes: description, code, publication position.
+    pub const json_shape = .{ "{\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"code\":\"", Hole{ .tag = Code }, "\",\"publication_position\":", Hole.optional_id, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
     pub fn writeJson(self: ToolPresentation, out: *std.Io.Writer) !void {
-        try out.writeAll("{\"description\":");
-        if (self.description) |description| try std.json.Stringify.value(description.slice(), .{}, out) else try out.writeAll("null");
-        try out.print(",\"code\":\"{s}\",\"publication_position\":", .{@tagName(self.code)});
-        if (self.publication_position) |position| try out.print("\"{d}\"", .{position}) else try out.writeAll("null");
-        try out.writeByte('}');
+        try writeShape(out, json_shape, .{ if (self.description) |description| description.slice() else null, self.code, self.publication_position });
     }
 };
 
-pub const max_tool_presentation_json_bytes =
-    "{\"description\":".len + maximumJsonStringBytes(max_tool_description_bytes) +
-    ",\"code\":\"infrastructure_shutdown\",\"publication_position\":\"".len + 20 + "\"}".len;
+pub const max_tool_presentation_json_bytes = ToolPresentation.max_json_bytes;
 
 /// A peer Session named on a Message, in the same Store.
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
 
+    pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
     pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
-        try out.writeAll("{\"session\":");
-        try std.json.Stringify.value(self.session.slice(), .{}, out);
-        try out.writeAll("}");
+        try writeShape(out, json_shape, .{self.session.slice()});
     }
 };
 
-pub const max_peer_json_bytes = "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
+pub const max_peer_json_bytes = Peer.max_json_bytes;
 
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
-    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed },
+    value: Value,
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
+        pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
         pub fn writeJson(self: Content, out: *std.Io.Writer) !void {
-            try out.print("{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ self.length, std.fmt.bytesToHex(self.digest, .lower) });
+            try writeShape(out, json_shape, .{ self.length, self.digest });
         }
     };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
     // A null `sender` means a human or script sent the Message.
     pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?Peer = null };
     pub const Call = ProposalMetadata;
-    pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(96), content: ?Content };
-    pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: enum { pending, completed } };
+    pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(max_code_bytes), content: ?Content };
+    pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
-    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(96) };
+    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(max_code_bytes) };
+
+    /// Holes: position, ordinal; then the value's, then `json_end`.
+    pub fn jsonHead(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
+    }
+    pub const json_end = .{"}}"};
+    /// Each value kind's JSON, named by its tag. Holes follow field order.
+    pub const value_shapes = struct {
+        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        pub const admission = message;
+        pub const user = message;
+        pub const assistant = .{Hole{ .json = Content }};
+        pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
+        pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+        pub const outcome = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
+        pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = Peer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    };
+    pub const max_json_bytes = blk: {
+        var bytes = 0;
+        for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(jsonHead(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
+        break :blk bytes + shapeBytes(json_end);
+    };
 
     pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
-        try out.print("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"value\":{{\"{s}\":", .{ self.position, self.ordinal, @tagName(self.value) });
         switch (self.value) {
-            .admission, .user => |message| {
-                try out.print("{{\"admission\":\"{d}\",\"key\":", .{message.admission});
-                try std.json.Stringify.value(message.key.slice(), .{}, out);
-                try out.writeAll(",\"turn\":");
-                if (message.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
-                try out.print(",\"state\":\"{s}\",\"admitted_at\":\"{d}\",\"sender\":", .{ @tagName(message.state), message.admitted_at });
-                if (message.sender) |sender| try sender.writeJson(out) else try out.writeAll("null");
-                try out.writeAll(",\"content\":");
-                try message.content.writeJson(out);
-                try out.writeByte('}');
-            },
-            .sent => |sent| {
-                try out.print("{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\",\"target\":", .{ sent.admission, sent.admitted_at });
-                try sent.target.writeJson(out);
-                try out.writeAll(",\"content\":");
-                try sent.content.writeJson(out);
-                try out.writeByte('}');
-            },
-            .send_failed => |failed| {
-                try out.writeAll("{\"key\":");
-                try std.json.Stringify.value(failed.key.slice(), .{}, out);
-                try out.writeAll(",\"target\":");
-                try failed.target.writeJson(out);
-                try out.writeAll(",\"code\":");
-                try std.json.Stringify.value(failed.code.slice(), .{}, out);
-                try out.writeByte('}');
-            },
-            .assistant => |content| try content.writeJson(out),
-            .tool_result => |result| {
-                try out.writeAll("{\"content\":");
-                try result.content.writeJson(out);
-                try out.writeAll(",\"presentation\":");
-                try result.presentation.writeJson(out);
-                try out.writeByte('}');
-            },
-            .call => |call| {
-                try out.print("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"call_ordinal\":\"{d}\",\"action\":", .{ call.operation, call.turn, call.call_ordinal });
-                if (call.action) |action| try out.print("\"{d}\"", .{action}) else try out.writeAll("null");
-                try out.writeAll(",\"rejection\":");
-                if (call.rejection) |code| try std.json.Stringify.value(@tagName(code), .{}, out) else try out.writeAll("null");
-                try out.writeAll(",\"fields\":[");
-                for (call.fields, 0..) |field, index| {
-                    if (index != 0) try out.writeByte(',');
-                    try (Content{ .length = field.length, .digest = field.digest }).writeJson(out);
-                }
-                try out.writeAll("]}");
-            },
-            .outcome => |outcome| {
-                try out.print("{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"code\":", .{ outcome.turn, outcome.operation });
-                try std.json.Stringify.value(outcome.code.slice(), .{}, out);
-                try out.writeAll(",\"content\":");
-                if (outcome.content) |content| try content.writeJson(out) else try out.writeAll("null");
-                try out.writeByte('}');
-            },
-            .stop => |stop| {
-                try out.writeAll("{\"key\":");
-                try std.json.Stringify.value(stop.key.slice(), .{}, out);
-                try out.writeAll(",\"turn\":");
-                if (stop.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
-                try out.print(",\"cutoff\":\"{d}\",\"completion\":\"{s}\"}}", .{ stop.cutoff, @tagName(stop.completion) });
-            },
+            inline else => |_, kind| try writeShape(out, jsonHead(kind), .{ self.position, self.ordinal }),
         }
-        try out.writeAll("}}");
+        switch (self.value) {
+            inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
+                message.admission,   message.key.slice(), message.turn,    message.state,
+                message.admitted_at, message.sender,      message.content,
+            }),
+            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
+            .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
+            .assistant => |content| try writeShape(out, value_shapes.assistant, .{content}),
+            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
+            .call => |call| {
+                comptime std.debug.assert(call.fields.len == 4);
+                var fields: [4]Content = undefined;
+                for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
+                try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2], fields[3] });
+            },
+            .outcome => |outcome| try writeShape(out, value_shapes.outcome, .{ outcome.turn, outcome.operation, outcome.code.slice(), outcome.content }),
+            .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
+        }
+        try writeShape(out, json_end, .{});
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
@@ -516,15 +563,20 @@ pub const CallActivity = struct {
     count: usize = 0,
     total: u64 = 0,
 
+    /// Hole: total.
+    pub const json_head = .{ "{\"total\":\"", Hole.decimal, "\",\"entries\":[" };
+    /// Holes: operation, ordinal, presentation.
+    pub const entry_shape = .{ "{\"operation\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+    pub const json_end = .{"]}"};
+    pub const max_json_bytes = shapeBytes(json_head) + jsonListBytes(@typeInfo(@FieldType(CallActivity, "entries")).array.len, shapeBytes(entry_shape)) + shapeBytes(json_end);
+
     pub fn writeJson(self: *const CallActivity, out: *std.Io.Writer) !void {
-        try out.print("{{\"total\":\"{d}\",\"entries\":[", .{self.total});
+        try writeShape(out, json_head, .{self.total});
         for (self.entries[0..self.count], 0..) |entry, index| {
             if (index != 0) try out.writeByte(',');
-            try out.print("{{\"operation\":\"{d}\",\"ordinal\":\"{d}\",\"presentation\":", .{ entry.operation, entry.ordinal });
-            try entry.presentation.writeJson(out);
-            try out.writeByte('}');
+            try writeShape(out, entry_shape, .{ entry.operation, entry.ordinal, entry.presentation });
         }
-        try out.writeAll("]}");
+        try writeShape(out, json_end, .{});
     }
 };
 
@@ -539,15 +591,12 @@ pub const PageWork = struct {
     revision: u64 = 0,
     workspace: Bounded(max_workspace_bytes) = .{},
 
+    /// Holes follow field order.
+    pub const json_shape = .{ "{\"status\":\"", Hole{ .tag = Status }, "\",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id, ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
     pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
-        try out.print("{{\"status\":\"{s}\",\"turn\":", .{@tagName(self.status)});
-        inline for (.{ self.turn, self.operation, self.first_action }, .{ ",\"operation\":", ",\"first_action\":", ",\"revision\":" }) |id, next| {
-            if (id) |value| try out.print("\"{d}\"", .{value}) else try out.writeAll("null");
-            try out.writeAll(next);
-        }
-        try out.print("\"{d}\",\"workspace\":", .{self.revision});
-        try std.json.Stringify.value(self.workspace.slice(), .{}, out);
-        try out.writeByte('}');
+        try writeShape(out, json_shape, .{ self.status, self.turn, self.operation, self.first_action, self.revision, self.workspace.slice() });
     }
 };
 
@@ -560,17 +609,19 @@ pub const ActivityFacts = struct {
     call_activity: CallActivity = .{},
     work: PageWork = .{},
 
+    /// Holes: end, direction; then the items, then `json_end`.
+    pub const json_head = .{ "{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
+    /// Holes: more, call activity, work.
+    pub const json_end = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    pub const max_json_bytes = shapeBytes(json_head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(json_end);
+
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
-        try out.print("{{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"{d}\",\"direction\":\"{s}\",\"items\":[", .{ self.end, @tagName(self.direction) });
+        try writeShape(out, json_head, .{ self.end, self.direction });
         for (self.items[0..self.count], 0..) |*item, index| {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try out.print("],\"more\":{},\"call_activity\":", .{self.more});
-        try self.call_activity.writeJson(out);
-        try out.writeAll(",\"work\":");
-        try self.work.writeJson(out);
-        try out.writeByte('}');
+        try writeShape(out, json_end, .{ self.more, &self.call_activity, &self.work });
     }
 };
 
@@ -1771,6 +1822,117 @@ pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
 
+/// A placeholder in a JSON shape: the argument type it renders and the most
+/// bytes that argument can produce.
+pub const Hole = union(enum) {
+    /// A `bool`.
+    boolean,
+    /// A `u64` in decimal.
+    decimal,
+    /// A `?u64` as a quoted decimal or `null`, the spelling of an optional ID.
+    optional_id,
+    /// A value of this enum, as its bare tag name.
+    tag: type,
+    /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
+    optional_tag: type,
+    /// At most this many bytes, as a JSON string.
+    string: usize,
+    /// A `?[]const u8` of at most this many bytes, as a JSON string or `null`.
+    optional_string: usize,
+    /// At most this many bytes, written unchanged.
+    text: usize,
+    /// A `[N]u8` of this length, as lowercase hex.
+    hex: usize,
+    /// A value of, or pointer to, this type, which has `max_json_bytes` and `writeJson`.
+    json: type,
+    /// A `?T` for this type `T`, as `T` would render it or `null`.
+    optional_json: type,
+
+    fn maxBytes(comptime hole: Hole) usize {
+        return switch (hole) {
+            .boolean => "false".len,
+            .decimal => std.fmt.count("{d}", .{std.math.maxInt(u64)}),
+            .optional_id => @max("null".len, 2 + (comptime Hole.maxBytes(.decimal))),
+            .tag => |T| maxTagBytes(T),
+            .optional_tag => |T| @max("null".len, 2 + maxTagBytes(T)),
+            .string => |bytes| maximumJsonStringBytes(bytes),
+            .optional_string => |bytes| @max("null".len, maximumJsonStringBytes(bytes)),
+            .text => |bytes| bytes,
+            .hex => |bytes| 2 * bytes,
+            .json => |T| T.max_json_bytes,
+            .optional_json => |T| @max("null".len, T.max_json_bytes),
+        };
+    }
+
+    fn maxTagBytes(comptime T: type) usize {
+        var bytes = 0;
+        for (std.meta.tags(T)) |tag| bytes = @max(bytes, @tagName(tag).len);
+        return bytes;
+    }
+};
+
+/// A JSON shape is a tuple of literal JSON text and `Hole`s, in output order.
+/// Its renderer writes it with `writeShape` and its bound is `shapeBytes`, so
+/// a reply's text and its maximum size have one source.
+pub fn shapeBytes(comptime shape: anytype) usize {
+    comptime var bytes = 0;
+    inline for (shape) |part| bytes += if (comptime isLiteral(part)) part.len else (comptime Hole.maxBytes(part));
+    return bytes;
+}
+
+/// The largest of a tuple of shapes, for a reply with alternative variants.
+pub fn maxShapeBytes(comptime shapes: anytype) usize {
+    comptime var bytes = 0;
+    inline for (shapes) |shape| bytes = @max(bytes, comptime shapeBytes(shape));
+    return bytes;
+}
+
+/// Writes `shape` with one argument per hole, in order. A string or text
+/// argument longer than its hole is a programmer error.
+pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !void {
+    comptime var next = 0;
+    inline for (shape) |part| {
+        if (comptime isLiteral(part)) {
+            try out.writeAll(part);
+        } else {
+            const argument = args[next];
+            next += 1;
+            switch (comptime @as(Hole, part)) {
+                .boolean => try out.writeAll(if (@as(bool, argument)) "true" else "false"),
+                .decimal => try out.print("{d}", .{@as(u64, argument)}),
+                .optional_id => if (@as(?u64, argument)) |id| try out.print("\"{d}\"", .{id}) else try out.writeAll("null"),
+                .tag => |T| try out.writeAll(@tagName(@as(T, argument))),
+                .optional_tag => |T| if (@as(?T, argument)) |tag| try out.print("\"{s}\"", .{@tagName(tag)}) else try out.writeAll("null"),
+                .string => |bytes| {
+                    const value: []const u8 = argument;
+                    std.debug.assert(value.len <= bytes);
+                    try std.json.Stringify.encodeJsonString(value, .{}, out);
+                },
+                .optional_string => |bytes| if (@as(?[]const u8, argument)) |value| {
+                    std.debug.assert(value.len <= bytes);
+                    try std.json.Stringify.encodeJsonString(value, .{}, out);
+                } else try out.writeAll("null"),
+                .text => |bytes| {
+                    const value: []const u8 = argument;
+                    std.debug.assert(value.len <= bytes);
+                    try out.writeAll(value);
+                },
+                .hex => |bytes| try out.writeAll(&std.fmt.bytesToHex(@as([bytes]u8, argument), .lower)),
+                .json => |T| {
+                    const value: *const T = if (@TypeOf(argument) == T) &argument else argument;
+                    try value.writeJson(out);
+                },
+                .optional_json => |T| if (@as(?T, argument)) |value| try value.writeJson(out) else try out.writeAll("null"),
+            }
+        }
+    }
+    comptime if (next != args.len) @compileError("a JSON shape needs one argument per hole");
+}
+
+fn isLiteral(comptime part: anytype) bool {
+    return @typeInfo(@TypeOf(part)) == .pointer;
+}
+
 pub const max_session_stop_request_bytes =
     "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -1855,139 +2017,209 @@ pub const max_client_request_bytes = @max(
 
 // Both proposal requests are smaller than the existing Conversation page
 // maximum (two shorter cursor keys or one position and a closed field).
-pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
-// Worst row: four complete field references, identities, or an escaped key
-// or code with an escaped peer.
-pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes + max_peer_json_bytes) + max_tool_presentation_json_bytes) +
-    64 + 3 * (100 + max_tool_presentation_json_bytes) +
-    // The page's work: four ids, its status and an escaped Workspace.
-    160 + 6 * max_workspace_bytes;
+/// Separated by commas, `count` JSON values of at most `item_bytes` each.
+pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
+    return count * item_bytes + count -| 1;
+}
 
-const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
-const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
-const max_permission_decision_rejection_code_bytes = "invalid_session_reference".len;
+/// A Message or answer's content reference in an observation. Holes: length, digest.
+pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
-pub const max_session_stop_accepted_reply_bytes =
-    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"selection\":{\"turn\":\"".len + 20 +
-    "\",\"admission_cutoff\":\"".len + 20 +
-    "\"}},\"completion\":{\"status\":\"completed\"}}".len;
-pub const max_session_stop_rejected_reply_bytes =
-    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"".len + max_session_stop_rejection_code_bytes +
-    "\"},\"completion\":{\"status\":\"unavailable\"}}".len;
-pub const max_session_stop_conflict_reply_bytes =
-    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":false,\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}".len;
-pub const max_session_stop_reply_bytes = @max(
-    @max(max_session_stop_accepted_reply_bytes, max_session_stop_rejected_reply_bytes),
-    max_session_stop_conflict_reply_bytes,
-);
+pub const proposal_page_reply = struct {
+    /// Hole: the page end.
+    pub const head = .{ "{\"version\":\"1\",\"type\":\"proposal_page\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
+    /// Holes: position, operation, turn, call ordinal, Action and rejection.
+    pub const item_head = .{ "{\"position\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":{" };
+    /// One field's reference, in `ProposalField` order. Holes: length, digest.
+    pub fn field(comptime name: ProposalField) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
+        const separator = if (name == std.meta.tags(ProposalField)[0]) "" else ",";
+        return .{ separator ++ "\"" ++ @tagName(name) ++ "\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\"}" };
+    }
+    pub const item_end = .{"}}"};
+    /// Hole: whether more items follow.
+    pub const tail = .{ "],\"more\":", Hole.boolean, "}" };
+};
 
-const max_model_interruption_target_bytes =
-    "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\"}".len;
-const model_interruption_reply_prefix_bytes =
-    "{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"".len;
-pub const max_model_interruption_accepted_reply_bytes =
-    model_interruption_reply_prefix_bytes + "accepted".len +
-    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes + "}}".len;
-pub const max_model_interruption_rejected_reply_bytes =
-    model_interruption_reply_prefix_bytes + "rejected".len +
-    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
-    ",\"code\":\"".len + max_model_interruption_rejection_code_bytes + "\"}}".len;
-pub const max_model_interruption_conflict_reply_bytes =
-    model_interruption_reply_prefix_bytes + "conflict".len +
-    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
-    ",\"code\":\"idempotency_key_conflict\"}}".len;
-pub const max_model_interruption_reply_bytes = @max(
-    @max(max_model_interruption_accepted_reply_bytes, max_model_interruption_rejected_reply_bytes),
-    max_model_interruption_conflict_reply_bytes,
-);
+pub const max_proposal_page_response_bytes = blk: {
+    const page = proposal_page_reply;
+    var item = shapeBytes(page.item_head) + shapeBytes(page.item_end);
+    for (std.meta.tags(ProposalField)) |name| item += shapeBytes(page.field(name));
+    break :blk shapeBytes(page.head) + jsonListBytes(proposal_page_items, item) + shapeBytes(page.tail);
+};
 
-const permission_decision_reply_prefix_bytes =
-    "{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"".len;
-const max_permission_decision_target_bytes =
-    "\",\"replayed\":false,\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"".len;
-pub const max_permission_decision_reply_bytes =
-    permission_decision_reply_prefix_bytes + "rejected".len + max_permission_decision_target_bytes +
-    ",\"code\":\"".len + max_permission_decision_rejection_code_bytes + "\"}}".len;
+pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
 
-const control_observation_prefix_bytes =
-    "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":".len +
-    maximumJsonStringBytes(max_key_bytes) + ",\"observation\":{\"status\":\"".len;
-pub const max_session_stop_accepted_observation_bytes =
-    control_observation_prefix_bytes + "accepted".len +
-    "\",\"kind\":\"session_stop\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"selection\":{\"turn\":\"".len + 20 +
-    "\",\"admission_cutoff\":\"".len + 20 +
-    "\"},\"completion\":{\"status\":\"completed\"}}}".len;
-pub const max_session_stop_rejected_observation_bytes =
-    control_observation_prefix_bytes + "rejected".len +
-    "\",\"kind\":\"session_stop\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"".len + max_session_stop_rejection_code_bytes + "\"}}".len;
-pub const max_model_interruption_accepted_observation_bytes =
-    control_observation_prefix_bytes + "accepted".len +
-    "\",\"kind\":\"model_interruption\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"interruption_target\":".len + max_model_interruption_target_bytes + "}}".len;
-pub const max_model_interruption_rejected_observation_bytes =
-    control_observation_prefix_bytes + "rejected".len +
-    "\",\"kind\":\"model_interruption\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"".len + max_model_interruption_rejection_code_bytes +
-    "\",\"interruption_target\":".len + max_model_interruption_target_bytes + "}}".len;
-pub const max_permission_decision_observation_bytes =
-    control_observation_prefix_bytes + "rejected".len +
-    "\",\"kind\":\"permission_decision\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"".len + max_permission_decision_rejection_code_bytes +
-    "\",\"permission_target\":{\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"}}}".len;
-pub const max_control_observation_bytes = @max(
-    @max(@max(max_session_stop_accepted_observation_bytes, max_session_stop_rejected_observation_bytes), max_permission_decision_observation_bytes),
-    @max(max_model_interruption_accepted_observation_bytes, max_model_interruption_rejected_observation_bytes),
-);
+pub const configuration_reply = struct {
+    const head = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
+    const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    /// Holes: replayed, Session, revision, created.
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
+    /// Holes: replayed, Session, code.
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\"" ++ execution };
+    /// Hole: Session.
+    pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
 
-const max_content_reference_bytes =
-    "{\"type\":\"text\",\"bytes\":\"".len + 20 + "\",\"sha256\":\"".len + 64 + "\"}".len;
-pub const max_message_observation_bytes = control_observation_prefix_bytes +
-    "accepted\",\"kind\":\"message\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"input\":".len + max_content_reference_bytes +
-    ",\"queue\":{\"status\":\"completed\",\"admission\":\"".len + 20 + "\"}".len +
-    ",\"processing\":{\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\",\"attempt\":\"".len + 20 + "\"}".len +
-    ",\"result\":{\"status\":\"completed\",\"text\":".len + max_content_reference_bytes + "}".len +
-    ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"".len + 20 + "\"}}}".len;
+pub const message_reply = struct {
+    const head = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":";
+    const execution = ",\"execution\":{\"status\":\"queued\"}}";
+    /// Holes: replayed, Session, admission, input length and digest, admission.
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
+        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    /// Holes: replayed, Session, code, input length and digest.
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\"},\"input\":" } ++
+        content_reference_shape ++ .{execution};
+    /// Hole: Session.
+    pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
 
-pub const max_control_error_response_bytes =
-    "{\"version\":\"1\",\"type\":".len + maximumJsonStringBytes(32) +
-    ",\"code\":".len + maximumJsonStringBytes(96) + "}".len;
+pub const session_stop_reply = struct {
+    const head = "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":";
+    /// Holes: replayed, Session, selected Turn, admission cutoff, completion.
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"}},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
+    /// Holes: replayed, Session, code.
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionStopRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
+    /// Hole: Session.
+    pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+/// Holes: Session, Turn, Operation.
+pub const model_interruption_target_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}" };
+
+pub const model_interruption_reply = struct {
+    const head = "{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":";
+    /// Holes: replayed, then the target's.
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{"}}"};
+    /// Holes: replayed, the target's, code.
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"target\":" } ++ model_interruption_target_shape ++ .{ ",\"code\":\"", Hole{ .tag = ModelInterruptionRejection }, "\"}}" };
+    /// Holes: the target's.
+    pub const conflict = .{head ++ "\"conflict\",\"replayed\":false,\"target\":"} ++ model_interruption_target_shape ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const permission_decision_reply = struct {
+    const head = "{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":";
+    const target = .{ ",\"session\":", Hole{ .string = max_session_bytes }, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"" };
+    /// Holes: replayed, Session, Action, decision.
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ .{"}}"};
+    /// Holes: replayed, Session, Action, decision, code.
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean } ++ target ++ .{ ",\"code\":\"", Hole{ .tag = PermissionDecisionRejection }, "\"}}" };
+    /// Holes: Session, Action, decision.
+    pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+/// One command's observation. A reply is `absent`, or `head`, then `code`
+/// when the command has one, then its kind's parts, then `tail`.
+pub const command_observation_reply = struct {
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":";
+    /// Hole: key.
+    pub const absent = .{ prefix, Hole{ .string = max_key_bytes }, ",\"observation\":{\"status\":\"absent\"}}" };
+    /// Holes: key, status, target Session.
+    pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
+        return .{ prefix, .{ .string = max_key_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
+    }
+    /// Hole: code.
+    pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
+    /// An accepted configuration. Holes: revision, created.
+    pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
+    /// A Message's input reference. Holes: its length and digest.
+    pub const input = .{",\"input\":"} ++ content_reference_shape;
+    // Holes: the Attempt binding's Turn, Operation and Attempt.
+    const binding = .{ ",\"processing\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
+    /// Queue states. Holes: admission, then the binding's, then the result's.
+    pub const queued = .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" };
+    pub const excluded = .{ ",\"queue\":{\"status\":\"excluded\",\"admission\":\"", Hole.decimal, "\"},\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    pub const processing = .{ ",\"queue\":{\"status\":\"processing\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding;
+    pub const completed = .{ ",\"queue\":{\"status\":\"completed\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
+        .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
+    pub const cancelled = .{ ",\"queue\":{\"status\":\"cancelled\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
+        .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    pub const failed = .{ ",\"queue\":{\"status\":\"failed\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
+        .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    /// A queued Message's progress. Holes: status, Action.
+    pub const progress = .{ ",\"progress\":{\"status\":\"", Hole{ .tag = MessageProgressStatus }, "\",\"action\":", Hole.optional_id, "}" };
+    /// Holes: selected Turn, admission cutoff, completion.
+    pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
+    /// Holes: the interruption target's.
+    pub const model_interruption = .{",\"interruption_target\":"} ++ model_interruption_target_shape;
+    /// Holes: Action, decision.
+    pub const permission_decision = .{ ",\"permission_target\":{\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+    pub const tail = .{"}}"};
+
+    /// The largest observation of this kind.
+    pub fn maxBytes(comptime kind: CommandKind) usize {
+        const body = switch (kind) {
+            .configure => shapeBytes(revision),
+            .message => shapeBytes(input) + maxShapeBytes(.{ queued, excluded, processing, completed, cancelled, failed }) + shapeBytes(progress),
+            .session_stop => shapeBytes(session_stop),
+            .model_interruption => shapeBytes(model_interruption),
+            .permission_decision => shapeBytes(permission_decision),
+        };
+        return shapeBytes(head(kind)) + shapeBytes(code) + body + shapeBytes(tail);
+    }
+
+    pub const max_bytes = blk: {
+        var bytes = shapeBytes(absent);
+        for (std.meta.tags(CommandKind)) |kind| bytes = @max(bytes, maxBytes(kind));
+        break :blk bytes;
+    };
+};
+
+/// Holes: error type and code.
+pub const error_reply = .{ "{\"version\":\"1\",\"type\":", Hole{ .string = 32 }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_control_response_bytes = @max(
-    @max(@max(max_session_stop_reply_bytes, max_model_interruption_reply_bytes), max_permission_decision_reply_bytes),
-    @max(@max(max_control_observation_bytes, max_message_observation_bytes), max_control_error_response_bytes),
+    @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
+    @max(@max(permission_decision_reply.max_bytes, command_observation_reply.max_bytes), max_control_error_response_bytes),
 );
 
+/// Holes: Store, instance, Active and intake capacity, descriptor limit
+/// (decimal or `unlimited`), model and managed authentication capabilities.
+pub const host_info_reply = .{ "{\"version\":\"1\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
+pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
+pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_host_info_response_bytes =
-    "{\"version\":\"1\",\"type\":\"host_info\",\"store\":".len +
-    maximumJsonStringBytes(max_store_bytes) +
-    ",\"instance\":\"".len + 32 +
-    "\",\"active_capacity\":\"".len + 20 +
-    "\",\"intake_capacity\":\"".len + 20 +
-    "\",\"descriptor_limit\":\"".len + 20 +
-    "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
-pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
-pub const max_conversation_page_response_bytes =
-    "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
-    "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
-        "\",\"kind\":\"tool_result\",\"content\":{\"bytes\":\"".len + 20 +
-        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len + 16 +
-        @max(max_tool_presentation_json_bytes, ",\"admitted_at\":\"\",\"sender\":".len + 20 + max_peer_json_bytes)) +
-    "],\"more\":true,\"before_position\":\"".len + 20 +
-    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
+
+pub const conversation_page_reply = struct {
+    /// Hole: the page end.
+    pub const head = .{ "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
+    /// Holes: position, ordinal, content length and digest.
+    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
+    }
+    /// A User item's admission. Holes: second, sending peer.
+    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer } };
+    /// A Tool Result item's presentation. Hole: it.
+    pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentation } };
+    pub const item_end = .{"}"};
+
+    /// The largest item of this kind, with what only that kind carries.
+    pub fn itemBytes(comptime kind: ConversationItemKind) usize {
+        const extra = switch (kind) {
+            .user => shapeBytes(admission),
+            .tool_result => shapeBytes(presentation),
+            .assistant => 0,
+        };
+        return shapeBytes(item(kind)) + extra + shapeBytes(item_end);
+    }
+    pub const last = .{"],\"more\":false}"};
+    /// Holes: the last item's position and ordinal.
+    pub const more = .{ "],\"more\":true,\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
+};
+
+pub const max_conversation_page_response_bytes = blk: {
+    const page = conversation_page_reply;
+    var item = 0;
+    for (std.meta.tags(ConversationItemKind)) |kind| item = @max(item, page.itemBytes(kind));
+    break :blk shapeBytes(page.head) + jsonListBytes(public_conversation_page_items, item) + maxShapeBytes(.{ page.last, page.more });
+};
 
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {
@@ -2004,6 +2236,12 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
             const value = std.fmt.bufPrint(self.bytes[self.len..], format, args) catch
                 return error.BufferTooLarge;
             self.len += value.len;
+        }
+
+        pub fn appendShape(self: *@This(), comptime shape: anytype, args: anytype) !void {
+            var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
+            defer self.len += writer.end;
+            writeShape(&writer, shape, args) catch return error.BufferTooLarge;
         }
 
         pub fn appendJsonString(self: *@This(), value: []const u8) !void {
