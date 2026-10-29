@@ -2,7 +2,7 @@
 
 The **Host** is the background process that runs work. The **Store** is its private directory of saved state.
 
-Commands pick a Store in this order: `--store`, your saved default, then `$HOME/.local/share/rui/store`. In scripts, pass `--store` so the destination never depends on saved defaults.
+Commands pick a Store in this order: `--store`, your saved default, then `$HOME/.local/share/rui/store`. `rui defaults configure --store PATH` saves that default for every directory and names it on stderr. In scripts, pass `--store` so the destination never depends on saved defaults.
 
 ## Start and check the Host
 
@@ -17,7 +17,7 @@ If startup times out, run `host status` and read the diagnostic log. A timeout d
 
 ### Capacity and file limits
 
-A new Host can run 100 executions at once. A running Host keeps the capacity it started with, even after you upgrade Rui. To use a new default, stop the Host and start it again.
+A new Host can run 100 executions at once. `rui host start --active-capacity 8` starts a new Host with a different capacity. A running Host keeps the capacity it started with, even after you upgrade Rui. If you pass a different `--active-capacity` while a Host is running, `host start` connects to that Host unchanged and says so on stderr. To change the capacity, stop the Host and start it again.
 
 The Host raises its open-file soft limit as far as the hard limit allows. If that is still too low, the Host accepts fewer simultaneous client requests but keeps all 100 executions. If the hard limit is too low even for that, startup fails and names the limit to raise.
 

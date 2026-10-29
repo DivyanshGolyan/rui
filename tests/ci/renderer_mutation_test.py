@@ -212,6 +212,12 @@ class MutationGateTests(unittest.TestCase):
                     gate.apply(root, mutation)
                 self.assertEqual((root / "source").read_text(), content)
 
+    def test_every_protection_anchor_occurs_exactly_once_in_current_source(self):
+        root = Path(gate.__file__).resolve().parents[2]
+        for mutation in gate.MUTATIONS:
+            with self.subTest(mutation=mutation.name):
+                self.assertEqual((root / mutation.path).read_text().count(mutation.before), 1)
+
     def test_target_partition_runs_each_protection_once_and_rejects_empty_selection(self):
         seen = []
         for target in ("test", "test-logic", "sequence-model"):

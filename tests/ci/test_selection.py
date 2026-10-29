@@ -976,7 +976,6 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 raise OSError("injected diagnostic read failure")
             return read_text(path, *args, **kwargs)
 
-        killpg = os.killpg
         for fault in ("diagnostic", "retirement"):
             with self.subTest(fault=fault):
                 try:
@@ -993,14 +992,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
                                   else "driver group retirement unconfirmed", notes)
                 finally:
-                    # Injected group failure deliberately leaves descendants;
-                    # the outer test retains independent disposal authority.
+                    # Injected group failure leaves the held descendant until
+                    # run_part closes its release FIFO; retirement is observed,
+                    # never signaled, before the retained root is removed.
                     if fault == "retirement" and rejected.exception.__notes__:
                         pid = int(rejected.exception.__notes__[0].split("=")[1])
-                        try:
-                            killpg(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
                         self.wait_for_group_retirement(pid, time.monotonic() + 5)
                         for note in rejected.exception.__notes__:
                             if note.startswith("retained driver root: "):
@@ -1083,14 +1079,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         self.assertFalse(root.exists())
                 finally:
                     if group is not None:
-                        try:
-                            killpg(group, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        deadline = time.monotonic() + 5
-                        while live_members():
-                            self.assertLess(time.monotonic(), deadline)
-                            time.sleep(.005)
+                        self.wait_for_group_retirement(group, time.monotonic() + 5)
                     if root is not None and root.exists():
                         rmtree(root)
 
