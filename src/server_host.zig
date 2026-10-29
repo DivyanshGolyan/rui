@@ -32,74 +32,207 @@ pub const Limits = struct {
     sqlite_cache_kib: u32 = (store_module.OpenOptions{}).cache_kib,
 };
 
-/// Injected failures, delays, gates and test observation only.
-pub const Faults = struct {
-    content_acquire: bool = false,
-    content_write: bool = false,
-    content_seal: bool = false,
-    content_read: bool = false,
-    content_import: bool = false,
-    before_commit: bool = false,
-    startup_cleanup: bool = false,
-    shutdown_after_accept: bool = false,
-    attempt_before_commit: bool = false,
-    result_before_commit: bool = false,
-    request_first_step: bool = false,
-    request_write: bool = false,
-    request_seal: bool = false,
-    request_scratch_acquire: bool = false,
-    request_preparation_advance_delay_ms: i64 = 0,
-    request_read: bool = false,
-    request_unlink: bool = false,
-    provider_prepare: bool = false,
-    response_acquire: bool = false,
-    response_unlink: bool = false,
-    response_write: bool = false,
-    /// Fails the next launched Transfer's response writes, then disarms.
-    response_write_once: bool = false,
-    response_seal: bool = false,
-    response_metadata: bool = false,
-    response_metadata_unlink: bool = false,
-    response_read: bool = false,
-    response_import: bool = false,
-    response_commit: bool = false,
-    bash_preparation: bool = false,
-    bash_preparation_after_captures: bool = false,
-    bash_spawn: bool = false,
-    bash_service: bool = false,
-    bash_capture_read: bool = false,
-    bash_capture_write: bool = false,
-    bash_seal: bool = false,
-    bash_cleanup: bool = false,
-    bash_lifecycle_fault: bash.LifecycleFault = .none,
-    bash_fault_gated: bool = false,
-    retention_removal: bool = false,
-    before_launch_delay_ms: i64 = 0,
-    before_result_delay_ms: i64 = 0,
-    model_result_gate_path: ?[]const u8 = null,
+/// Test hooks: injected failures, holds and observation, set only by the
+/// hidden `host serve` test options and empty in production. Work consults
+/// them at named points, and the owner views below say which failures reach
+/// which owner, so no work site copies them field by field.
+pub const Hooks = struct {
+    failures: std.EnumSet(Failure) = .empty,
+    bash_lifecycle: bash.LifecycleFault = .none,
+    pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
+    transition: ?TransitionGate = null,
+    /// Presence gates: the owner waits while the path exists.
+    bash_reclaim_gate_path: ?[]const u8 = null,
     retry_recovery_gate_path: ?[]const u8 = null,
-    inspection_reply_delay_ms: i64 = 0,
-    inspection_reply_gate_path: ?[]const u8 = null,
-    report_unlink: bool = false,
-    test_phase_trace: bool = false,
-    test_observation_fd: ?c_int = null,
-    test_observation_state_fd: ?c_int = null,
-    test_observation_plan: ?TestObservation.Plan = null,
-    test_transition: ?TestTransition = null,
-    test_transition_gate_path: ?[]const u8 = null,
-    bash_observed_exit_gate_path: ?[]const u8 = null,
-    bash_cleanup_gate_path: ?[]const u8 = null,
-    control_gate_keys: ?[]const u8 = null,
-    control_gate_path: ?[]const u8 = null,
+    /// Fails the Output Retention queue's removals.
+    retention_removal: bool = false,
+    inspection_reply: Hold = .{},
+    control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
+    phase_trace: bool = false,
+    observation_fd: ?c_int = null,
+    observation_state_fd: ?c_int = null,
+    observation_plan: ?TestObservation.Plan = null,
     sqlite_diagnostics: bool = false,
+
+    /// Spelled with hyphens by `--fault`.
+    pub const Failure = enum {
+        content_acquire,
+        content_write,
+        content_seal,
+        content_read,
+        content_import,
+        before_commit,
+        startup_cleanup,
+        shutdown_after_accept,
+        attempt_before_commit,
+        result_before_commit,
+        request_first_step,
+        request_write,
+        request_seal,
+        request_scratch_acquire,
+        request_read,
+        request_unlink,
+        provider_prepare,
+        response_acquire,
+        response_unlink,
+        response_write,
+        /// Fails the next launched Transfer's response writes, then disarms.
+        response_write_once,
+        response_seal,
+        response_metadata,
+        response_metadata_unlink,
+        response_read,
+        response_import,
+        response_commit,
+        bash_preparation,
+        bash_preparation_after_captures,
+        bash_spawn,
+        bash_service,
+        bash_capture_read,
+        bash_capture_write,
+        bash_seal,
+        bash_cleanup,
+        /// Bash faults strike only while the scratch fault gate exists.
+        bash_fault_gated,
+        report_unlink,
+    };
+
+    /// Where a test may hold an owner for a delay, at a gate, or both. A
+    /// held launch or result is traced for the Attempt it holds.
+    pub const Pause = union(enum) {
+        action_launch: store_module.ActionAttemptBinding,
+        model_launch: store_module.AttemptBinding,
+        action_result: store_module.ActionAttemptBinding,
+        model_result: store_module.AttemptBinding,
+        preparation_advanced,
+        bash_exit_observed,
+    };
+
+    pub const Hold = struct {
+        delay_ms: i64 = 0,
+        gate_path: ?[]const u8 = null,
+    };
+
+    pub const Transition = enum {
+        action_attempt_admitted,
+        prepared_before_handoff,
+        action_result_ready,
+        action_result_committed,
+    };
+
+    /// Traces one Action transition and holds it at the gate.
+    pub const TransitionGate = struct { transition: Transition, path: []const u8 };
+
+    /// Holds the listed control command keys once they hold the Store.
+    pub const ControlGate = struct { keys: []const u8, path: []const u8 };
+
+    /// The Store commits a Host makes, each reached by its own failures.
+    pub const StoreCommit = union(enum) {
+        command,
+        control: ?store_module.ControlTrace,
+        attempt_admission,
+        action_result,
+        model_failure,
+        model_output: ?store_module.SettlementTrace,
+    };
+
+    pub fn fails(self: *const Hooks, failure: Failure) bool {
+        return self.failures.contains(failure);
+    }
+
+    /// The tag of `E` that test options spell with hyphens for underscores.
+    pub fn fromOptionName(comptime E: type, name: []const u8) ?E {
+        var buffer: [64]u8 = undefined;
+        if (name.len > buffer.len or std.mem.indexOfScalar(u8, name, '_') != null) return null;
+        _ = std.mem.replace(u8, name, "-", "_", buffer[0..name.len]);
+        return std.meta.stringToEnum(E, buffer[0..name.len]);
+    }
+
+    /// Adds one `--fault` name: a Failure or a Bash lifecycle fault.
+    pub fn inject(self: *Hooks, name: []const u8) error{UnknownFault}!void {
+        if (std.mem.startsWith(u8, name, "bash-")) {
+            if (fromOptionName(bash.LifecycleFault, name["bash-".len..])) |lifecycle| if (lifecycle != .none) {
+                self.bash_lifecycle = lifecycle;
+                return;
+            };
+        }
+        self.failures.insert(fromOptionName(Failure, name) orelse return error.UnknownFault);
+    }
+
+    pub fn contentFaults(self: *const Hooks) protocol.ContentFaults {
+        return .{
+            .acquire = self.fails(.content_acquire),
+            .write = self.fails(.content_write),
+            .seal = self.fails(.content_seal),
+        };
+    }
+
+    pub fn storeFaults(self: *const Hooks, commit: StoreCommit) store_module.Faults {
+        return switch (commit) {
+            .command => .{
+                .content_read = self.fails(.content_read),
+                .content_import = self.fails(.content_import),
+                .before_commit = self.fails(.before_commit),
+            },
+            .control => |trace| .{ .before_commit = self.fails(.before_commit), .control_trace = trace },
+            .attempt_admission => .{ .attempt_before_commit = self.fails(.attempt_before_commit) },
+            .action_result => .{
+                .content_import = self.fails(.content_import),
+                .before_commit = self.fails(.result_before_commit),
+            },
+            .model_failure => .{ .before_commit = self.fails(.result_before_commit) },
+            .model_output => |trace| .{
+                .output_read = self.fails(.response_read),
+                .output_import = self.fails(.response_import),
+                .output_commit = self.fails(.response_commit),
+                .settlement_trace = trace,
+            },
+        };
+    }
+
+    pub fn preparationFaults(self: *const Hooks) model_adapter.PreparationFaults {
+        return .{
+            .first_step = self.fails(.request_first_step),
+            .write = self.fails(.request_write),
+            .seal = self.fails(.request_seal),
+            .unlink = self.fails(.request_unlink),
+        };
+    }
+
+    /// `write_once_spent`: an earlier Transfer started with the one-shot
+    /// response write failure, which the execution owner records.
+    pub fn transferFaults(self: *const Hooks, write_once_spent: bool) provider.Faults {
+        return .{
+            .request_read = self.fails(.request_read),
+            .response_acquire = self.fails(.response_acquire),
+            .response_unlink = self.fails(.response_unlink),
+            .response_write = self.fails(.response_write) or (self.fails(.response_write_once) and !write_once_spent),
+        };
+    }
+
+    pub fn bashFaults(self: *const Hooks) bash.Faults {
+        return .{
+            .preparation = self.fails(.bash_preparation),
+            .preparation_after_captures = self.fails(.bash_preparation_after_captures),
+            .spawn = self.fails(.bash_spawn),
+            .service = self.fails(.bash_service),
+            .capture_read = self.fails(.bash_capture_read),
+            .capture_write = self.fails(.bash_capture_write),
+            .seal = self.fails(.bash_seal),
+            .cleanup = self.fails(.bash_cleanup),
+            .lifecycle = self.bash_lifecycle,
+            .fault_gated = self.fails(.bash_fault_gated),
+        };
+    }
 };
 
-const TestTransition = enum {
-    action_attempt_admitted,
-    prepared_before_handoff,
-    action_result_ready,
-    action_result_committed,
+/// The execution owner's progress through the fixed Hooks, so Hooks stay
+/// read-only for every thread once the Host starts.
+pub const HookProgress = struct {
+    /// A Transfer started with the one-shot response write failure.
+    response_write_once_spent: bool = false,
+    retry_recovery: enum { initial, held, released } = .initial,
 };
 
 /// How far a Host has shut down. It only moves forward, under the launch
@@ -116,7 +249,7 @@ pub const Host = struct {
     lease: *platform.StoreLease,
     store: *store_module.Store,
     instance: protocol.InstanceId = undefined,
-    faults: Faults,
+    hooks: Hooks = .{},
     limits: Limits = .{},
     provider_endpoint: ?[]const u8 = null,
     provider_ca_file: ?[]const u8 = null,
@@ -130,8 +263,13 @@ pub const Host = struct {
     /// Execution-thread-owned history memos: an index preallocated at
     /// start, with span bytes in scratch files deleted at stop.
     history_memos: model_adapter.HistoryMemos = .{},
+    /// Execution-thread-owned progress through the fixed hooks.
+    hook_progress: HookProgress = .{},
     /// Execution-thread-owned, one per custody record and zero-mapped.
     bash_work: []BashWork = &.{},
+    /// Execution-thread-owned count of execution slot writes; it moves on
+    /// every slot change and nothing else.
+    slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
@@ -154,7 +292,6 @@ pub const Host = struct {
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
-    test_retry_recovery: enum { initial, held, released } = .initial,
 
     // Canonical permission belongs to Store; process-local permission belongs
     // to Host. The Store handoff must enter this gate, in that lock order, for
@@ -374,7 +511,7 @@ pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8
 }
 
 pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     if (publication.*) |*value| value.record(trace.slice());
     if (!stderr.tryAcquire()) {
         host.trace_lost.store(true, .release);
@@ -403,7 +540,7 @@ pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication:
 }
 
 pub fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, subject);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -418,7 +555,7 @@ pub fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, su
 }
 
 pub fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -445,7 +582,7 @@ pub fn executionFacts(host: *Host) store_module.SessionReportExecution {
 }
 
 pub fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, "lifecycle_boundary", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -457,7 +594,7 @@ pub fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u6
 }
 
 pub fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, "lifecycle_service_observation", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -469,7 +606,7 @@ pub fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
 }
 
 pub fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -490,7 +627,7 @@ pub fn tracePreparationAdvance(
     stats: model_adapter.PreparationAdvanceStats,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -510,7 +647,7 @@ pub fn tracePreparationAdvanceError(
     stats: model_adapter.PreparationAdvanceStats,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -526,7 +663,7 @@ pub fn tracePreparationAdvanceError(
 }
 
 pub fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, "provider_completion_removed", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -538,7 +675,7 @@ pub fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_mod
 }
 
 pub fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -559,7 +696,7 @@ pub fn traceOperationControl(
     command_key: []const u8,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -581,7 +718,7 @@ pub fn traceActionControl(
     command_key: []const u8,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -605,7 +742,7 @@ pub fn traceActionControlOutcome(
     failed: bool,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -630,7 +767,7 @@ pub fn traceActionDeadline(
     failed: bool,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -647,10 +784,54 @@ pub fn traceActionDeadline(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn testTransition(host: *Host, transition: TestTransition, binding: store_module.ActionAttemptBinding) void {
-    if (host.faults.test_transition != transition) return;
+pub fn testTransition(host: *Host, transition: Hooks.Transition, binding: store_module.ActionAttemptBinding) void {
+    const gate = host.hooks.transition orelse return;
+    if (gate.transition != transition) return;
     traceAction(host, @tagName(transition), binding);
-    waitAtTestGate(host, host.faults.test_transition_gate_path.?);
+    waitAtTestGate(host, gate.path);
+}
+
+/// Holds the calling owner at `point` for the test's delay and gate, if any.
+pub fn pause(host: *Host, point: Hooks.Pause) void {
+    const hold = host.hooks.pauses.get(point);
+    if (hold.delay_ms == 0 and hold.gate_path == null) return;
+    switch (point) {
+        .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
+        .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
+        .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
+        .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
+        .preparation_advanced, .bash_exit_observed => {},
+    }
+    if (hold.gate_path) |path| waitAtTestGate(host, path);
+    if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
+}
+
+/// The retry recovery gate lets one exhausted-retry recovery run, then holds
+/// later recoveries while the gate exists, never admission or the execution
+/// turn. One real call first preserves the full-drain counterexample.
+pub fn retryRecoveryHeld(host: *Host) bool {
+    if (host.hook_progress.retry_recovery != .held) return false;
+    if (testGateActive(host, host.hooks.retry_recovery_gate_path.?)) return true;
+    host.hook_progress.retry_recovery = .released;
+    return false;
+}
+
+pub fn retryRecovered(host: *Host) void {
+    if (host.hook_progress.retry_recovery != .initial) return;
+    const path = host.hooks.retry_recovery_gate_path orelse return;
+    if (!testGateActive(host, path)) return;
+    host.hook_progress.retry_recovery = .held;
+    traceSubject(host, "exhausted_retry_recovery_held", "path", path);
+}
+
+/// The Bash reclaim gate holds closed Bash custody while the path exists.
+/// Its release is one owner transition, traced once, not reclamation retry
+/// history: `attempted` says whether this owner already tried to reclaim.
+pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
+    const path = host.hooks.bash_reclaim_gate_path orelse return false;
+    if (testGateActive(host, path)) return true;
+    if (!attempted) traceAction(host, "cleanup_release_observed", binding);
+    return false;
 }
 
 pub fn waitAtTestGate(host: *Host, path: []const u8) void {
@@ -694,7 +875,7 @@ pub fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) vo
         if (previous == count) return;
     }
     host.last_unprocessed_completions = count;
-    if (!host.faults.test_phase_trace) return;
+    if (!host.hooks.phase_trace) return;
     var publication = beginTestObservation(host, "native_completions_unprocessed", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -729,8 +910,28 @@ fn appendOptionalSigned(
     } else try trace.append("null");
 }
 
+/// A managed Transfer's connection reuse and request correlation, for tests.
+pub fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+    if (host.authentication == null or !host.hooks.phase_trace) return;
+    var publication = beginTestObservation(host, "codex_transfer", null);
+    defer if (publication) |*value| value.finish();
+    const observation = transfer.protocolObservation();
+    const correlation = transfer.requestId();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
+        binding.operation_id,
+        observation.new_connections,
+        observation.replays,
+        if (correlation.len != 0) "true" else "false",
+        digest,
+    }) catch unreachable;
+    writeTestTrace(host, &trace, &publication);
+}
+
 pub fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
-    if (!host.faults.test_phase_trace or !host.faults.sqlite_diagnostics) return;
+    if (!host.hooks.phase_trace or !host.hooks.sqlite_diagnostics) return;
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
     defer if (publication) |*value| value.finish();
     const value = host.store.sqliteDiagnostic();
@@ -780,7 +981,7 @@ pub const SettlementTrace = struct {
     }
 
     pub fn storeTrace(self: *SettlementTrace) ?store_module.SettlementTrace {
-        if (!self.host.faults.test_phase_trace) return null;
+        if (!self.host.hooks.phase_trace) return null;
         return .{ .context = self, .mark_fn = markStore };
     }
 
@@ -795,6 +996,37 @@ pub const SettlementTrace = struct {
     }
 };
 
+test "every --fault name reaches its own hook and nothing else" {
+    for (std.enums.values(Hooks.Failure)) |failure| {
+        var buffer: [64]u8 = undefined;
+        const name = buffer[0..@tagName(failure).len];
+        _ = std.mem.replace(u8, @tagName(failure), "_", "-", name);
+        var hooks: Hooks = .{};
+        try hooks.inject(name);
+        try std.testing.expect(hooks.failures.eql(.initOne(failure)));
+        try std.testing.expectEqual(bash.LifecycleFault.none, hooks.bash_lifecycle);
+    }
+    const lifecycles = [_]struct { []const u8, bash.LifecycleFault }{
+        .{ "bash-observe", .observe },
+        .{ "bash-reap", .reap },
+        .{ "bash-reap-watchdog", .reap_watchdog },
+        .{ "bash-group-probe", .group_probe },
+        .{ "bash-tail-snapshot", .tail_snapshot },
+        .{ "bash-signal", .signal },
+        .{ "bash-cleanup-watchdog", .cleanup_watchdog },
+    };
+    for (lifecycles) |case| {
+        var hooks: Hooks = .{};
+        try hooks.inject(case[0]);
+        try std.testing.expectEqual(case[1], hooks.bash_lifecycle);
+        try std.testing.expect(hooks.failures.eql(.empty));
+    }
+    var hooks: Hooks = .{};
+    for ([_][]const u8{ "bash-none", "none", "retention-removal", "content_acquire", "content-acquire-", "" }) |name|
+        try std.testing.expectError(error.UnknownFault, hooks.inject(name));
+    try std.testing.expectEqual(Hooks.Transition.action_result_committed, Hooks.fromOptionName(Hooks.Transition, "action-result-committed").?);
+}
+
 test "inspection counts held custody, not an in-flight admission reservation" {
     // The execution owner reserves before each admission probe and releases
     // when nothing is runnable. Inspection reads from another thread, so it
@@ -805,7 +1037,6 @@ test "inspection counts held custody, not an in-flight admission reservation" {
         .allocator = std.testing.allocator,
         .lease = undefined,
         .store = undefined,
-        .faults = .{},
         .custody = execution.CustodyPool.initialize(&records),
     };
     const cleanup = host.custody.reserve().?;
@@ -842,7 +1073,7 @@ test "required Bash observations publish while optional stderr custody is held" 
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .faults = .{ .test_phase_trace = true },
+            .hooks = .{ .phase_trace = true },
             .test_observation = &observation,
         };
         try std.testing.expect(stderr.tryAcquire());
@@ -889,7 +1120,6 @@ test "effect launch gate rechecks every Host phase" {
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .faults = .{},
         };
         // The preflight result is deliberately stale before the real gate.
         try std.testing.expect(host.launchAllowed());
@@ -913,7 +1143,6 @@ test "Host phases only move forward" {
                 .allocator = std.testing.allocator,
                 .lease = undefined,
                 .store = undefined,
-                .faults = .{},
             };
             try std.testing.expectEqual(Phase.open, host.advance(start));
             try std.testing.expectEqual(start, host.advance(target));
@@ -932,7 +1161,6 @@ test "effect launch gate releases its mutex after native failure" {
         .allocator = std.testing.allocator,
         .lease = undefined,
         .store = undefined,
-        .faults = .{},
     };
     const Launch = struct {
         fn fail(calls: *usize) !void {

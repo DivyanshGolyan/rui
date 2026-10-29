@@ -334,7 +334,7 @@ fn submit(raw: *anyopaque, task: *Task) !void {
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -501,7 +501,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         }
         self.publication = .published;
     }
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
 }
 
 test "submission settles wire Admission only after join and releases only accepted or discarded intent" {

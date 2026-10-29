@@ -21,9 +21,10 @@ pub const Outcome = union(enum) {
     terminate,
 };
 
-/// Every fact the Bash, message and tool-continuation scans depend on
-/// besides Store rows; the rows move the commit generation.
-const AdmissionKey = struct { generation: u64, free_slots: usize, bash_open: bool, model_open: bool };
+/// The Bash, message and tool-continuation scans read Store rows, which move
+/// the commit generation, and execution slots (free count, open shared
+/// preparations), which move the slot change count.
+const AdmissionKey = struct { generation: u64, slot_changes: u64 };
 
 pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
@@ -37,8 +38,9 @@ pub const State = struct {
     uncertain_action_scan_exhausted: bool = false,
     /// Admission facts before the last pass whose Bash, message and
     /// tool-continuation scans all found nothing. Those scans read only
-    /// Store rows, so they rerun only once a fact changes. Retry admission
-    /// is due by time instead and keeps its own poll.
+    /// Store rows and slots, so they rerun only once a commit or slot change
+    /// moves the key. Retry admission is due by time instead and keeps its
+    /// own poll.
     idle_admission: ?AdmissionKey = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
@@ -93,9 +95,7 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
     }
     const admission_key: AdmissionKey = .{
         .generation = context.commitGeneration(),
-        .free_slots = context.freeSlots(),
-        .bash_open = context.bashPreparationOpen(),
-        .model_open = context.modelPreparationOpen(),
+        .slot_changes = context.slotChanges(),
     };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
@@ -175,6 +175,8 @@ fn timestamp(ns: i96) std.Io.Clock.Timestamp {
     return std.Io.Timestamp.fromNanoseconds(ns).withClock(.awake);
 }
 
+const SlotFacts = struct { free: usize, bash_open: bool, model_open: bool };
+
 const Recording = struct {
     now_ns: i96 = 0,
     auto_advance: i96 = 1,
@@ -187,6 +189,8 @@ const Recording = struct {
     free: usize = 1,
     bash_prep_open: bool = true,
     model_prep_open: bool = true,
+    slot_changes: u64 = 0,
+    observed_slots: ?SlotFacts = null,
     transport: bool = false,
     bash: bool = false,
     recover_action: bool = false,
@@ -281,6 +285,17 @@ const Recording = struct {
 
     fn providerConfigured(self: *const Recording) bool {
         return self.provider;
+    }
+
+    /// Like the production setSlot, any change to the modelled slot facts
+    /// counts as a slot change; a test may also count one that leaves them.
+    fn slotChanges(self: *Recording) u64 {
+        const facts: SlotFacts = .{ .free = self.free, .bash_open = self.bash_prep_open, .model_open = self.model_prep_open };
+        if (self.observed_slots) |observed| {
+            if (!std.meta.eql(facts, observed)) self.slot_changes += 1;
+        }
+        self.observed_slots = facts;
+        return self.slot_changes;
     }
 
     fn freeSlots(self: *const Recording) usize {
@@ -700,6 +715,31 @@ test "admission scans rerun only after a commit, a released slot or a reopened p
     context.bash_prep_open = true;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 6), context.count(.admit_bash));
+}
+
+test "admission rescans after any slot change or commit and skips while both stand still" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // A slot moved between states that keep the free count and both
+    // preparations open, such as a retained cleanup changing hands.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_continuation));
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.generation += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
 }
 
 test "an admission that must retry later keeps scanning without a commit" {

@@ -28,6 +28,9 @@ pub const Requests = struct {
     stage: ?*FailureStage = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?ReadFailure = null,
+    /// Test hook for mutation sends only: asks the Host to drop its reply at
+    /// this point.
+    drop_reply: ?[]const u8 = null,
 
     pub fn failRead(self: Requests, failure: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         if (self.read_failure) |slot| if (slot.* == null) {
@@ -48,12 +51,12 @@ pub const Requests = struct {
         if (self.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
     }
 
-    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
+    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) !MutationReply {
         reply_buffer.len = 0;
         try self.check();
         markStage(self.stage, .store);
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
-        const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
         result.context.store = captured.saved.store;
         result.context.key = captured.saved.key;
@@ -69,7 +72,7 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key });
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, reply_buffer, null);
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .observation = try CommandObservation.parse(reply, key) };
     }
@@ -750,7 +753,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     const paths = try platform.resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
     try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
-    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
+    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, reply_buffer, null);
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -810,7 +813,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1593,7 +1596,7 @@ pub fn retry(
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or binding.target != selected) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
+    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
     result.context.store = binding.saved.store;
     result.context.key = binding.saved.key;
@@ -2628,8 +2631,8 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !C
     return readCapturedIdentity(io, &file, handle);
 }
 
-pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
-    return (Requests{ .io = io }).sendCaptured(captured, drop_reply, reply_buffer);
+pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) !MutationReply {
+    return (Requests{ .io = io }).sendCaptured(captured, reply_buffer);
 }
 
 const CapturedText = struct {
@@ -3182,7 +3185,6 @@ fn sendSource(
     length: u64,
     file: ?*std.Io.File,
     bytes: ?[]const u8,
-    drop_reply: ?[]const u8,
     instance: ?*const protocol.InstanceId,
     reply_buffer: *ReplyBuffer,
     until: ?i128,
@@ -3199,7 +3201,8 @@ fn sendSource(
     if (instance) |id| {
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
     }
-    if (drop_reply) |drop| {
+    if (requests.drop_reply) |drop| {
+        std.debug.assert(std.meta.eql(timing, ResponseTiming.mutation));
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Test-Drop-Reply: {s}\r\n", .{drop})).len;
     }
     used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
@@ -4236,7 +4239,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
         try std.testing.expectEqualStrings("message", saved.kind.slice());
         var reply: ReplyBuffer = .{};
-        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, null, &reply));
+        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, &reply));
         try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
         try std.testing.expectEqualStrings(root, generated.identity().store.slice());
     }
@@ -4341,7 +4344,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const result = sendCaptured(connected_io, &captured, null, &buffer);
+        const result = sendCaptured(connected_io, &captured, &buffer);
         peer.join();
         if (Peer.failure) |err| return err;
         switch (response) {
@@ -5676,7 +5679,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{}, .target = .configure };
     try captured.saved.store.set("/never-open");
     var buffer: ReplyBuffer = .{};
-    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, null, &buffer));
+    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, &buffer));
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), captured.file.handle);
     const file = captured.file;
     const address = try MessageAddress.init("/never-open", "k7m2qx", "k");
@@ -5702,7 +5705,7 @@ test "transport cancellation returns before silent peer release and retains pinn
         done: std.atomic.Value(bool) = .init(false),
         fn run(self: *@This()) void {
             var reply: ReplyBuffer = .{};
-            _ = self.requests.sendCaptured(self.captured, null, &reply) catch |err| {
+            _ = self.requests.sendCaptured(self.captured, &reply) catch |err| {
                 self.failure = err;
             };
             self.done.store(true, .release);
