@@ -282,7 +282,7 @@ class SelectionTest(unittest.TestCase):
     def test_build_changes_keep_long_and_debug_checks(self):
         result = select(["build.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertTrue({"admission-debug-integration", "evaluator-churn",
+            self.assertTrue({"admission-debug-integration",
                              "test-full", "current-facts-integration", "server-delivery-integration"}
                             <= set(result[family]))
         # Mac check-full belongs to the daily macOS workflow, not Selected.
@@ -321,7 +321,7 @@ class SelectionTest(unittest.TestCase):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertTrue({"admission-debug-integration", "test-full",
-                                 "evaluator-churn", "transport-h2-integration",
+                                 "transport-h2-integration",
                                  "codex-h2-integration"} <= set(result[family]))
             self.assertIn("check-full", result["targets"])
 
@@ -581,14 +581,12 @@ class SelectionTest(unittest.TestCase):
 
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
-                   "test-full", "evaluator-churn", "admission-debug-integration",
-                   "host-launch-integration", "check-full", "workflow-check",
-                   "evaluator-host-integration"]
+                   "test-full", "admission-debug-integration",
+                   "host-launch-integration", "check-full"]
         self.assertEqual(execution_batches(targets), [
-            ["workflow-check", "evaluator-host-integration"],
             ["test", "dispatch-integration"],
             ["transport-h2-integration"],
-            ["test-full"], ["evaluator-churn"], ["admission-debug-integration"],
+            ["test-full"], ["admission-debug-integration"],
             ["host-launch-integration"], ["check-full"],
         ])
         self.assertEqual(execution_batches([]), [])
@@ -608,13 +606,13 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
-        targets = ["admission-debug-integration", "check-full", "evaluator-churn", "test-full"]
+        targets = ["admission-debug-integration", "check-full", "test-full"]
         self.assertEqual(execution_batches(targets, "execution"),
                          [["check-full", "-Dcheck-part=execution"],
-                          ["admission-debug-integration"], ["evaluator-churn"], ["test-full"]])
+                          ["admission-debug-integration"], ["test-full"]])
         self.assertEqual(execution_batches(targets, "callers"), [
             ["admission-debug-integration"], ["check-full", "-Dcheck-part=callers"],
-            ["evaluator-churn"], ["test-full"],
+            ["test-full"],
         ])
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "execution")

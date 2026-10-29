@@ -44,12 +44,10 @@ else
 fi
 
 prefix="$HOME/.local"
-for name in rui rui-evaluator; do
-    if [ -d "$prefix/bin/$name" ]; then
-        printf 'Cannot replace directory: %s\n' "$prefix/bin/$name" >&2
-        exit 1
-    fi
-done
+if [ -d "$prefix/bin/rui" ]; then
+    printf 'Cannot replace directory: %s\n' "$prefix/bin/rui" >&2
+    exit 1
+fi
 mkdir -p "$prefix/lib/rui" "$prefix/bin"
 release=$(mktemp -d "$prefix/lib/rui/install.XXXXXX")
 links=
@@ -85,17 +83,14 @@ case $reported in
     "rui $version ("*) ;;
     *) printf 'Downloaded command reports %s, not Rui %s. No installation changed.\n' "$reported" "$version" >&2; exit 1 ;;
 esac
-test -x "$release/bin/rui-evaluator"
 test -f "$release/THIRD_PARTY_NOTICES.md"
 
-# Keep each complete build: running processes may still use its sibling helper.
+# Keep each complete build: running processes may still use its files.
 # Publish with rename rather than modifying an executable already in use.
 published=1
 links=$(mktemp -d "$prefix/bin/.rui-install.XXXXXX")
-for name in rui-evaluator rui; do
-    ln -s "$release/bin/$name" "$links/$name"
-    mv -f "$links/$name" "$prefix/bin/$name"
-done
+ln -s "$release/bin/rui" "$links/rui"
+mv -f "$links/rui" "$prefix/bin/rui"
 printf '\nInstalled %s at %s/bin/rui.\n' "$reported" "$prefix"
 printf 'Previous builds, Stores and credentials were preserved.\n'
 resolved=$(command -v rui || true)

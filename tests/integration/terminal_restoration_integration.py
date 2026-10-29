@@ -2773,7 +2773,7 @@ def host_diagnostic_cases(state, library):
                     fixture.wait_for(lambda: host.poll() is not None, "canonical fence exits")
                     assert host.returncode != 0
                     with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
-                        assert database.execute("SELECT uncertain,resolution_code FROM model_operation").fetchone() == (1, None)
+                        assert database.execute("SELECT (resolution_code IS NULL AND retry_due_at_ms IS 0),resolution_code FROM model_operation").fetchone() == (1, None)
                         assert database.execute("SELECT count(*) FROM model_output_item").fetchone() == (0,)
                     break
                 if fault == "response-unlink":
@@ -2807,7 +2807,7 @@ def host_diagnostic_cases(state, library):
                     assert host.wait(timeout=8) == -signal.SIGKILL
                     assert leftovers[0].exists()
                     with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
-                        assert database.execute("SELECT uncertain,resolution_code FROM model_operation").fetchone() == (1, None)
+                        assert database.execute("SELECT (resolution_code IS NULL AND retry_due_at_ms IS 0),resolution_code FROM model_operation").fetchone() == (1, None)
                         assert database.execute("SELECT count(*) FROM model_output_item").fetchone() == (0,)
                     fresh = fixture.start_host(store, None)
                     try:

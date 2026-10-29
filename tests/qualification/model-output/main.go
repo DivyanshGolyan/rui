@@ -456,7 +456,7 @@ func readSpillFacts(deadline measurement.Deadline, store string) (spillFacts, er
 		"(SELECT count(*) FROM model_operation) AS operation_count," +
 		"(SELECT attempt_ordinal FROM model_operation ORDER BY operation_id LIMIT 1) AS attempt_ordinal," +
 		"(SELECT resolution_code FROM model_operation ORDER BY operation_id LIMIT 1) AS resolution_code," +
-		"(SELECT uncertain FROM model_operation ORDER BY operation_id LIMIT 1) AS uncertain," +
+		"(SELECT (resolution_code IS NULL AND retry_due_at_ms IS 0) FROM model_operation ORDER BY operation_id LIMIT 1) AS uncertain," +
 		"(SELECT retry_due_at_ms FROM model_operation ORDER BY operation_id LIMIT 1) AS retry_due_at_ms," +
 		"(SELECT last_failure_code FROM model_operation ORDER BY operation_id LIMIT 1) AS last_failure_code;"
 	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "rui.sqlite3"), query)
@@ -1042,7 +1042,7 @@ func auditCapacity(deadline measurement.Deadline, store string, keys, sessions [
 	prefixEnd := strings.LastIndex(keys[0], "-") + 1
 	prefix := strings.ReplaceAll(keys[0][:prefixEnd], "'", "''")
 	query := "SELECT ma.command_key AS key,ma.session_ref AS session,CAST(c.payload AS TEXT) AS input_text," +
-		"t.outcome_code AS turn_outcome,mo.session_ref AS operation_session,mo.attempt_ordinal,mo.uncertain," +
+		"t.outcome_code AS turn_outcome,mo.session_ref AS operation_session,mo.attempt_ordinal,(mo.resolution_code IS NULL AND mo.retry_due_at_ms IS 0) AS uncertain," +
 		"mo.resolution_code,mo.response_id,hex(mo.model_evidence) AS model_evidence,mo.request_id,mo.last_failure_code," +
 		"(SELECT count(*) FROM model_output_item oi WHERE oi.operation_id=mo.operation_id) AS output_items," +
 		"(SELECT count(*) FROM model_output_item oi JOIN content private_content ON private_content.content_id=oi.content_id WHERE oi.operation_id=mo.operation_id AND private_content.private=1) AS private_output_items," +

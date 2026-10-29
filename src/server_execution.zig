@@ -15,6 +15,7 @@ const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
 const signal_stack = @import("signal_stack.zig");
+const tools = @import("tools.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const mapZeroed = server_host.mapZeroed;
@@ -970,12 +971,12 @@ fn finishBashPreparationFailure(
     if (failure.cause == error.BashCommandTooLong) {
         settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
             "Bash was not started: the decoded command exceeds {d} bytes. Split long content across several smaller commands.",
-            .{bash.max_command_bytes},
+            .{tools.bash_max_command_bytes},
         ));
     } else if (failure.cause == error.BashStdinTooLong) {
         settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
             "Bash was not started: decoded stdin exceeds {d} bytes. Split the input across smaller calls or read an existing file.",
-            .{bash.max_stdin_bytes},
+            .{tools.bash_max_stdin_bytes},
         ));
     } else if (!canonical_failure) {
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");

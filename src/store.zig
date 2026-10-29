@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 35;
+pub const schema_version: u32 = 36;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -101,6 +101,8 @@ const pending_message_count_sql =
     "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 /// Matches the partial retry indexes' text, which the schema fixes.
 const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
+/// An unresolved last Attempt with no retry due: its outcome is uncertain.
+const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal={d}", .{retry_policy.maximum_attempts});
 const retry_admission_select_sql =
     "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
     "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
@@ -1321,6 +1323,27 @@ pub const SqliteDiagnostic = struct {
     journal_mode: ?protocol.Bounded(16) = null,
 };
 
+/// How a Turn ended. `turn.outcome_code` saves `code()`; a completed Turn
+/// also saves its answer's content.
+const TurnOutcome = union(enum) {
+    completed: i64,
+    cancelled,
+    retry_exhausted,
+    resource_exceeded,
+    /// A terminal model failure, saved under its own failure code.
+    failed: []const u8,
+
+    fn code(outcome: TurnOutcome) []const u8 {
+        return switch (outcome) {
+            .completed => "completed",
+            .cancelled => "cancelled",
+            .retry_exhausted => "retry_exhausted",
+            .resource_exceeded => "ResourceExceeded",
+            .failed => |failure| failure,
+        };
+    }
+};
+
 pub const Store = struct {
     io: std.Io,
     database: *c.sqlite3,
@@ -2144,8 +2167,8 @@ pub const Store = struct {
             const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
             if (unresolved_count < 0) return error.CorruptStore;
             if (unresolved_count != 0) {
-                var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
                 const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
+                const first_position = try self.claimSessionPositions(command.session.slice(), @intCast(unresolved_count));
                 const cancel_actions = try self.cached(
                     "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
                         "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
@@ -2157,12 +2180,9 @@ pub const Store = struct {
                 defer resetCached(cancel_actions);
                 try bindU64(cancel_actions, 1, current_operation_id.?);
                 try bindI64(cancel_actions, 2, cancellation_content_id);
-                try bindU64(cancel_actions, 3, current.next_position);
+                try bindU64(cancel_actions, 3, first_position);
                 try expectDone(cancel_actions);
-                const cancelled_count = c.sqlite3_changes(self.database);
-                if (cancelled_count != unresolved_count) return error.StopSelectionChanged;
-                current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
-                try self.updateSession(command.session.slice(), &current);
+                if (c.sqlite3_changes(self.database) != unresolved_count) return error.StopSelectionChanged;
             }
             try self.completeStoppedTurnIfReady(turn_id);
         }
@@ -2298,15 +2318,7 @@ pub const Store = struct {
         try self.insertModelInterruptionCommand(command, &digest, .{ .accepted = true });
         try self.interruptOperation(command.operation_id, command.key.slice());
         if (!try self.hasApplicablePendingMessage(command.session.slice())) {
-            const settle_turn = try self.cached(
-                "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND operation_id=?2 AND outcome_code IS NULL",
-            );
-            defer resetCached(settle_turn);
-            try bindU64(settle_turn, 1, command.turn_id);
-            try bindU64(settle_turn, 2, command.operation_id);
-            try expectDone(settle_turn);
-            if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
-            try self.recordTurnOutcomePosition(command.turn_id);
+            if (!try self.closeTurn(command.turn_id, command.operation_id, .cancelled)) return error.InterruptionTargetChanged;
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try self.execute("COMMIT");
@@ -2317,7 +2329,7 @@ pub const Store = struct {
     // The caller owns the Store lock and transaction, including the causing command.
     fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) !void {
         const update = try self.cached(
-            "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL," ++ resolutionIs("resolution_code", .interrupted) ++ "," ++
+            "UPDATE model_operation SET retry_due_at_ms=NULL," ++ resolutionIs("resolution_code", .interrupted) ++ "," ++
                 "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
         );
         defer resetCached(update);
@@ -2443,8 +2455,8 @@ pub const Store = struct {
                     if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
                 },
                 .deny => {
-                    var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
                     const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
+                    const position = try self.claimSessionPosition(command.session.slice());
                     const update = try self.cached(
                         "UPDATE action_operation SET permission_state=2,resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
                             "WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
@@ -2452,11 +2464,9 @@ pub const Store = struct {
                     defer resetCached(update);
                     try bindU64(update, 1, command.action_id);
                     try bindI64(update, 2, result_content_id);
-                    try bindU64(update, 3, current.next_position);
+                    try bindU64(update, 3, position);
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-                    current.next_position = try std.math.add(u64, current.next_position, 1);
-                    try self.updateSession(command.session.slice(), &current);
                 },
             }
         }
@@ -4788,8 +4798,8 @@ pub const Store = struct {
         if (stopped != 0 and stopped != 1) return error.CorruptStore;
         const effective_code: ActionResolutionCode = if (stopped == 1) .cancelled else code;
         const effective_result = if (stopped == 1) "Cancelled by Session stop." else result;
-        var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const content_id = try self.importBytesContent(effective_result, false, faults.content_import);
+        const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
             "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL " ++
                 "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND resolution_code IS NULL",
@@ -4798,13 +4808,11 @@ pub const Store = struct {
         try bindU64(update, 1, binding.action_id);
         try bindText(update, 2, @tagName(effective_code));
         try bindI64(update, 3, content_id);
-        try bindU64(update, 4, current.next_position);
+        try bindU64(update, 4, position);
         try bindU64(update, 5, binding.parent_operation_id);
         try bindU64(update, 6, binding.attempt_ordinal);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
-        current.next_position = try std.math.add(u64, current.next_position, 1);
-        try self.updateSession(session_ref.slice(), &current);
         try self.completeStoppedTurnIfReady(binding.turn_id);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try self.execute("COMMIT");
@@ -4850,12 +4858,12 @@ pub const Store = struct {
         if (c.sqlite3_step(action) != c.SQLITE_ROW) return error.ActionSelectionChanged;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(action, 0, &session_ref);
-        var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const content_id = try self.importBytesContent(
             "Bash outcome is indeterminate after Host recovery; the command was not replayed.",
             false,
             false,
         );
+        const position = try self.claimSessionPosition(session_ref.slice());
         const update = try self.cached(
             "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3 " ++
                 "WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1",
@@ -4863,11 +4871,9 @@ pub const Store = struct {
         defer resetCached(update);
         try bindU64(update, 1, action_id);
         try bindI64(update, 2, content_id);
-        try bindU64(update, 3, current.next_position);
+        try bindU64(update, 3, position);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-        current.next_position = try std.math.add(u64, current.next_position, 1);
-        try self.updateSession(session_ref.slice(), &current);
         const turn_statement = try self.cached(
             "SELECT operation.turn_id FROM action_operation action JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id WHERE action.action_id=?1",
@@ -4883,16 +4889,21 @@ pub const Store = struct {
     }
 
     fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
-        const update = try self.cached(
-            "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND outcome_code IS NULL " ++
+        const ready = try self.cached(
+            "SELECT 1 FROM turn WHERE turn_id=?1 AND outcome_code IS NULL " ++
                 "AND EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=turn.turn_id) " ++
                 "AND NOT EXISTS(SELECT 1 FROM action_operation action " ++
                 "WHERE action.parent_operation_id=turn.operation_id AND action.resolution_code IS NULL)",
         );
-        defer resetCached(update);
-        try bindU64(update, 1, turn_id);
-        try expectDone(update);
-        if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
+        defer resetCached(ready);
+        try bindU64(ready, 1, turn_id);
+        switch (c.sqlite3_step(ready)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return,
+            else => return error.TurnReadFailed,
+        }
+        resetCached(ready);
+        if (!try self.closeTurn(turn_id, null, .cancelled)) return error.CorruptStore;
     }
 
     fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
@@ -5144,20 +5155,15 @@ pub const Store = struct {
             if (c.sqlite3_changes(self.database) != instruction_count) return error.InstructionSelectionFailed;
             next_position = try std.math.add(u64, next_position, @intCast(instruction_count));
         }
-        {
-            const update = try self.cached("UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
-            defer resetCached(update);
-            try bindText(update, 1, session_ref.slice());
-            try bindU64(update, 2, try std.math.add(u64, next_position, 1));
-            try bindI64(update, 3, initial_position);
-            try expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
-        }
+        // Claim the positions the projections above took from the selection's
+        // read of the counter.
+        const claimed_count = try std.math.add(u64, next_position - @as(u64, @intCast(initial_position)), 1);
+        if (try self.claimSessionPositions(session_ref.slice(), claimed_count) != initial_position) return error.SelectionChanged;
         {
             const insert = try self.cached(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,uncertain,retry_due_at_ms) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,1,0)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,0)",
             );
             defer resetCached(insert);
             try bindU64(insert, 1, operation_id);
@@ -5243,7 +5249,7 @@ pub const Store = struct {
         if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
         const replacement_ordinal = current.attempt_ordinal + 1;
         const update = try self.cached(
-            "UPDATE model_operation SET attempt_ordinal=?2,uncertain=1,retry_due_at_ms=0 " ++
+            "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0 " ++
                 "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
                 "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
         );
@@ -5882,7 +5888,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(binding);
         const update = try self.cached(
             "UPDATE model_operation SET auth_refresh_claimed=1 " ++
-                "WHERE operation_id=?1 AND resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=?2 " ++
+                "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 " ++
                 "AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
         );
         defer resetCached(update);
@@ -5932,13 +5938,13 @@ pub const Store = struct {
             .ordinary, .context_overflow => {
                 const compact = disposition == .context_overflow and try self.overflowCanCompact(binding);
                 const resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code;
-                const outcome = if (disposition == .context_overflow) "ResourceExceeded" else code;
+                const outcome: TurnOutcome = if (disposition == .context_overflow) .resource_exceeded else .{ .failed = code };
                 const diagnostic_id = if (failure.diagnostic()) |detail|
                     try self.importBytesContent(detail, false, faults.content_import)
                 else
                     null;
                 const update = try self.cached(
-                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
+                    "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
                         "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                 );
@@ -5958,20 +5964,11 @@ pub const Store = struct {
                     return;
                 }
 
-                const settle_turn = try self.cached(
-                    "UPDATE turn SET outcome_code=?2 WHERE turn_id=?1 AND operation_id=?3 AND outcome_code IS NULL",
-                );
-                defer resetCached(settle_turn);
-                try bindU64(settle_turn, 1, binding.turn_id);
-                try bindText(settle_turn, 2, outcome);
-                try bindU64(settle_turn, 3, binding.operation_id);
-                try expectDone(settle_turn);
-                if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
-                try self.recordTurnOutcomePosition(binding.turn_id);
+                if (!try self.closeTurn(binding.turn_id, binding.operation_id, outcome)) return error.StaleAttemptBinding;
             },
             .refreshed => {
                 const update = try self.cached(
-                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=?2,last_failure_code=?3 " ++
+                    "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3 " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4 " ++
                         "AND auth_refresh_claimed=1 AND " ++ retry_allowance_open_sql,
                 );
@@ -5986,7 +5983,7 @@ pub const Store = struct {
             .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io), retry_random)) {
                 .schedule_at_ms => |due_at_ms| {
                     const update = try self.cached(
-                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=?2,last_failure_code=?3 " ++
+                        "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3 " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4",
                     );
                     defer resetCached(update);
@@ -6003,7 +6000,7 @@ pub const Store = struct {
                     else
                         null;
                     const update = try self.cached(
-                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5 " ++
+                        "UPDATE model_operation SET retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5 " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                     );
                     defer resetCached(update);
@@ -6016,16 +6013,7 @@ pub const Store = struct {
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
 
-                    const settle_turn = try self.cached(
-                        "UPDATE turn SET outcome_code='retry_exhausted' " ++
-                            "WHERE turn_id=?1 AND operation_id=?2 AND outcome_code IS NULL",
-                    );
-                    defer resetCached(settle_turn);
-                    try bindU64(settle_turn, 1, binding.turn_id);
-                    try bindU64(settle_turn, 2, binding.operation_id);
-                    try expectDone(settle_turn);
-                    if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
-                    try self.recordTurnOutcomePosition(binding.turn_id);
+                    if (!try self.closeTurn(binding.turn_id, binding.operation_id, .retry_exhausted)) return error.StaleAttemptBinding;
                 },
             },
         }
@@ -6054,7 +6042,7 @@ pub const Store = struct {
         if (scan_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
         const select = try self.cached(
             "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
-                "WHERE resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=4 AND retry_due_at_ms=0 " ++
+                "WHERE " ++ retry_exhausted_sql ++ " " ++
                 "ORDER BY operation_id LIMIT ?1",
         );
         defer resetCached(select);
@@ -6082,8 +6070,8 @@ pub const Store = struct {
         try self.execute("BEGIN IMMEDIATE");
         {
             const update_operation = try self.cached(
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
-                    "WHERE operation_id=?1 AND resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=?2",
+                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
+                    "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2",
             );
             defer resetCached(update_operation);
             try bindI64(update_operation, 1, binding.operation_id);
@@ -6091,18 +6079,7 @@ pub const Store = struct {
             try expectDone(update_operation);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
-        {
-            const update_turn = try self.cached(
-                "UPDATE turn SET outcome_code='retry_exhausted' " ++
-                    "WHERE turn_id=?1 AND operation_id=?2 AND outcome_code IS NULL",
-            );
-            defer resetCached(update_turn);
-            try bindI64(update_turn, 1, binding.turn_id);
-            try bindI64(update_turn, 2, binding.operation_id);
-            try expectDone(update_turn);
-            if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
-        }
-        try self.recordTurnOutcomePosition(@intCast(binding.turn_id));
+        if (!try self.closeTurn(@intCast(binding.turn_id), @intCast(binding.operation_id), .retry_exhausted)) return error.SelectionChanged;
         try self.execute("COMMIT");
         return true;
     }
@@ -6146,7 +6123,7 @@ pub const Store = struct {
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(operation, 0, &session_ref);
         const frozen_tools = try toolSet(c.sqlite3_column_int(operation, 1));
-        var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const purpose = try self.readModelOperationKind(binding.operation_id);
         // Validate the explicit candidate before imports, projections or effects.
         var candidate_metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
@@ -6162,6 +6139,7 @@ pub const Store = struct {
             if (compaction_count != 1 or output.call_count != 0) return error.InvalidProviderEnvelope;
         } else if (compaction_count != 0) return error.InvalidProviderEnvelope;
 
+        const first_item_position = try self.claimSessionPositions(session_ref.slice(), output.item_count);
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         var imported_items: u64 = 0;
         var usage_id: ?i64 = null;
@@ -6212,13 +6190,12 @@ pub const Store = struct {
             try bindU64(insert, 1, binding.operation_id);
             try bindU64(insert, 2, record.ordinal);
             try bindText(insert, 3, session_ref.slice());
-            try bindU64(insert, 4, current.next_position);
+            try bindU64(insert, 4, first_item_position + imported_items);
             try bindI64(insert, 5, @backingInt(record.kind));
             try bindI64(insert, 6, content_id);
             try bindU64(insert, 7, binding.attempt_ordinal);
             try bindBlob(insert, 8, &record.id_digest);
             try expectDone(insert);
-            current.next_position = try std.math.add(u64, current.next_position, 1);
             imported_items += 1;
         }
         if (imported_items != output.item_count) return error.CorruptOutputMetadata;
@@ -6315,11 +6292,10 @@ pub const Store = struct {
                     try self.importBytesContent(text, false, faults.output_import)
                 else
                     null;
-                const acceptance_position = if (rejection_code != null) position: {
-                    const position = current.next_position;
-                    current.next_position = try std.math.add(u64, current.next_position, 1);
-                    break :position position;
-                } else null;
+                const acceptance_position = if (rejection_code != null)
+                    try self.claimSessionPosition(session_ref.slice())
+                else
+                    null;
                 const insert_call = try self.cached(
                     "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id," ++
                         "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
@@ -6376,7 +6352,7 @@ pub const Store = struct {
         const resolution_code = @tagName(turn_policy.Resolution.of(output_fact));
         {
             const update = try self.cached(
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
+                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer resetCached(update);
@@ -6396,25 +6372,8 @@ pub const Store = struct {
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
         if (turn_policy.completesTurn(output_fact, pending)) {
-            const update = try self.cached(
-                "UPDATE turn SET outcome_code='completed',outcome_content_id=?2 WHERE turn_id=?1 AND operation_id=?3 AND outcome_code IS NULL",
-            );
-            defer resetCached(update);
-            try bindU64(update, 1, binding.turn_id);
-            try bindI64(update, 2, answer_id.?);
-            try bindU64(update, 3, binding.operation_id);
-            try expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+            if (!try self.closeTurn(binding.turn_id, binding.operation_id, .{ .completed = answer_id.? })) return error.StaleAttemptBinding;
         }
-        {
-            const update = try self.cached("UPDATE session SET next_position=?2 WHERE session_ref=?1");
-            defer resetCached(update);
-            try bindText(update, 1, session_ref.slice());
-            try bindU64(update, 2, current.next_position);
-            try expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
-        }
-        if (turn_policy.completesTurn(output_fact, pending)) try self.recordTurnOutcomePosition(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try self.execute("COMMIT");
     }
@@ -7041,15 +7000,16 @@ pub const Store = struct {
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
         const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(session_ref) DO NOTHING");
         defer resetCached(statement);
-        try bindCurrent(statement, session_ref, current);
+        try bindSettings(statement, session_ref, current);
+        try bindU64(statement, 9, current.next_position);
         try expectDone(statement);
         return c.sqlite3_changes(self.database) == 1;
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13 WHERE session_ref=?1");
+        const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13 WHERE session_ref=?1");
         defer resetCached(statement);
-        try bindCurrent(statement, session_ref, current);
+        try bindSettings(statement, session_ref, current);
         try expectDone(statement);
         if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
     }
@@ -7149,32 +7109,53 @@ pub const Store = struct {
         return admission_id;
     }
 
-    // Called only inside the owning write transaction; no separate frontier.
-    fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
-        const statement = try self.cached("UPDATE session SET next_position=next_position+1 " ++
-            "WHERE session_ref=?1 AND next_position<9223372036854775807 RETURNING next_position-1");
+    /// The only code that advances `session.next_position`. Claims `count`
+    /// consecutive positions and returns the first. Called only inside the
+    /// owning write transaction; no separate frontier.
+    fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
+        if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
+        const statement = try self.cached("UPDATE session SET next_position=next_position+?2 " ++
+            "WHERE session_ref=?1 AND next_position<=9223372036854775807-?2 RETURNING next_position-?2");
         defer resetCached(statement);
         try bindText(statement, 1, session);
+        try bindU64(statement, 2, count);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionPositionExhausted;
         const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
         try expectDone(statement);
         return @intCast(position);
     }
 
-    fn recordTurnOutcomePosition(self: *Store, turn_id: u64) !void {
-        const select = try self.cached("SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL AND outcome_position IS NULL");
+    fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
+        return self.claimSessionPositions(session, 1);
+    }
+
+    /// Ends an open Turn, saving its outcome and the position that orders it
+    /// in Session activity together. `operation_id` names the Operation the
+    /// caller expects the Turn to own. Returns false when the Turn is already
+    /// closed or owned by another Operation.
+    fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOutcome) !bool {
+        const select = try self.cached("SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NULL AND (?2 IS NULL OR operation_id=?2)");
         defer resetCached(select);
         try bindU64(select, 1, turn_id);
-        if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
-        var session: protocol.Bounded(128) = .{};
+        try bindNullableU64(select, 2, operation_id);
+        switch (c.sqlite3_step(select)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return false,
+            else => return error.TurnReadFailed,
+        }
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session);
+        resetCached(select);
         const position = try self.claimSessionPosition(session.slice());
-        const update = try self.cached("UPDATE turn SET outcome_position=?2 WHERE turn_id=?1 AND outcome_position IS NULL");
+        const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4 WHERE turn_id=?1 AND outcome_code IS NULL");
         defer resetCached(update);
         try bindU64(update, 1, turn_id);
-        try bindU64(update, 2, position);
+        try bindText(update, 2, outcome.code());
+        try bindNullableI64(update, 3, if (outcome == .completed) outcome.completed else null);
+        try bindU64(update, 4, position);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
+        return true;
     }
 
     fn importEmptyContent(self: *Store) !i64 {
@@ -7485,9 +7466,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),
         \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
-        \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),
+        \\
+    ++ std.fmt.comptimePrint(" attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND {d}),\n", .{retry_policy.maximum_attempts}) ++
         \\ auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),
-        \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
         \\ retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),
         \\ last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),
@@ -7499,8 +7480,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ usage_tokens INTEGER CHECK(usage_tokens IS NULL OR (usage_tokens>=0 AND usage_content_id IS NOT NULL)),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
-        \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms IS 0) OR (uncertain=0 AND retry_due_at_ms IS NOT NULL AND retry_due_at_ms>0))) OR
-        \\       (resolution_code IS NOT NULL AND uncertain=0 AND retry_due_at_ms IS NULL)),
+        \\ CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),
         \\ CHECK((resolution_code IS 'interrupted' AND interrupted_by_command_key IS NOT NULL) OR
         \\       (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),
         \\ UNIQUE(operation_id,session_ref)
@@ -7615,7 +7595,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\
     ++ "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND " ++
         retry_allowance_open_sql ++ ";\n" ++
-        std.fmt.comptimePrint("CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND attempt_ordinal={d} AND retry_due_at_ms=0;\n", .{retry_policy.maximum_attempts}) ++
+        "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE " ++ retry_exhausted_sql ++ ";\n" ++
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\
@@ -7712,7 +7692,9 @@ fn readUnixMilliseconds(io: std.Io) !i64 {
     return value;
 }
 
-fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
+/// Binds every session column except `next_position` (?9), which only
+/// `claimSessionPositions` advances.
+fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
     try bindText(statement, 1, session_ref);
     try bindText(statement, 2, current.workspace.slice());
     try bindText(statement, 3, current.model.slice());
@@ -7721,7 +7703,6 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindI64(statement, 6, current.permission_mode);
     try bindNullableI64(statement, 7, current.output_schema_id);
     try bindU64(statement, 8, current.revision);
-    try bindU64(statement, 9, current.next_position);
     try bindText(statement, 10, @tagName(current.provider));
     try bindNullableU64(statement, 11, current.compaction_trigger);
     try bindNullableU64(statement, 12, current.output_reservation);
@@ -8832,6 +8813,7 @@ test "Current selects active then queued work and bounds recent Message identiti
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     }
+    try expectDenseSessionPositions(&storage, session.slice());
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -9434,6 +9416,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
         "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='cancelled'",
         allocated_session_0.slice(),
     ));
+    try expectDenseSessionPositions(&storage, allocated_session_0.slice());
 }
 
 test "earlier Action settlement remains authoritative after Session stop" {
@@ -9774,6 +9757,35 @@ test "canonical step faults fence rather than reading as ordinary misses" {
     }
 }
 
+/// Every claimed Session position is used exactly once: the claims, from
+/// every table that saves one, are exactly 1 through `next_position - 1`.
+fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
+    // Each compound keeps within the Store's four-term limit.
+    const statement = try prepare(storage.database, "WITH messages(position) AS (" ++
+        "SELECT admission_position FROM message_admission WHERE session_ref=?1 AND admission_position IS NOT NULL " ++
+        "UNION ALL SELECT sender_position FROM message_admission WHERE sender_session_ref=?1 " ++
+        "UNION ALL SELECT sender_position FROM sent_rejection WHERE sender_session_ref=?1 " ++
+        "UNION ALL SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind!=3), " ++
+        "model(position) AS (SELECT admission_position FROM model_operation WHERE session_ref=?1 " ++
+        "UNION ALL SELECT session_position FROM model_output_item WHERE session_ref=?1 " ++
+        "UNION ALL SELECT call.acceptance_position FROM model_tool_call call JOIN model_operation op ON op.operation_id=call.operation_id " ++
+        "WHERE op.session_ref=?1 AND call.acceptance_position IS NOT NULL), " ++
+        "settled(position) AS (SELECT acceptance_position FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NOT NULL " ++
+        "UNION ALL SELECT outcome_position FROM turn WHERE session_ref=?1 AND outcome_position IS NOT NULL " ++
+        "UNION ALL SELECT position FROM session_stop WHERE session_ref=?1), " ++
+        "claimed(position) AS (SELECT position FROM messages UNION ALL SELECT position FROM model UNION ALL SELECT position FROM settled) " ++
+        "SELECT count(*),count(DISTINCT position),coalesce(min(position),1),coalesce(max(position),0)," ++
+        "(SELECT next_position FROM session WHERE session_ref=?1) FROM claimed");
+    defer _ = c.sqlite3_finalize(statement);
+    try bindText(statement, 1, session);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+    const count = c.sqlite3_column_int64(statement, 0);
+    try std.testing.expectEqual(count, c.sqlite3_column_int64(statement, 1));
+    try std.testing.expectEqual(@as(i64, 1), c.sqlite3_column_int64(statement, 2));
+    try std.testing.expectEqual(count, c.sqlite3_column_int64(statement, 3));
+    try std.testing.expectEqual(count + 1, c.sqlite3_column_int64(statement, 4));
+}
+
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9801,6 +9813,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal WHERE call.rejection_code IS NOT NULL"));
+    try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
         const rejected_action = try prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
         defer _ = c.sqlite3_finalize(rejected_action);
@@ -9964,15 +9977,15 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     // fail on the lifecycle CHECK.
     const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
     const cases = [_]Case{
-        // An unresolved uncertain Operation needs the zero retry sentinel.
+        // An unresolved Operation needs a retry time; zero marks it uncertain.
         .{
-            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=0",
-            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=NULL",
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=NULL",
         },
         // Interruption linkage requires the interrupted Resolution.
         .{
-            .valid = "UPDATE model_operation SET resolution_code='interrupted',uncertain=0,retry_due_at_ms=NULL,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
-            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=0,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
+            .valid = "UPDATE model_operation SET resolution_code='interrupted',retry_due_at_ms=NULL,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,retry_due_at_ms=0,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
         },
         // A call without rejection fields must be an Action call.
         .{
@@ -11069,9 +11082,9 @@ test "historical accepted output selection work excludes failed Operation popula
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-                "attempt_ordinal,output_reservation,uncertain,resolution_code) " ++
+                "attempt_ordinal,output_reservation,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-                "1,0,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -11470,7 +11483,7 @@ test "later idle stop does not reclassify a completed Message" {
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try exec(
         storage.database,
-        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='answer'," ++
+        "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='answer'," ++
             "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message')",
     );
     try execSessionSql(storage.database, "UPDATE turn SET outcome_code='completed',outcome_content_id=(SELECT content_id FROM message_admission " ++
@@ -13945,13 +13958,15 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(removed_index, 0));
     }
     {
-        const duplicated_action_uncertainty = try prepare(
+        // Uncertainty is derived from resolution and retry facts, not stored.
+        const stored_uncertainty = try prepare(
             storage.database,
-            "SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='uncertain'",
+            "SELECT (SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='uncertain')+" ++
+                "(SELECT count(*) FROM pragma_table_info('model_operation') WHERE name='uncertain')",
         );
-        defer _ = c.sqlite3_finalize(duplicated_action_uncertainty);
-        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(duplicated_action_uncertainty));
-        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(duplicated_action_uncertainty, 0));
+        defer _ = c.sqlite3_finalize(stored_uncertainty);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stored_uncertainty));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(stored_uncertainty, 0));
     }
     try storage.close();
     // Model the prior format's rollback-journal header; rejection must
@@ -15935,7 +15950,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     {
         const statement = try prepare(
             storage.database,
-            "SELECT uncertain,retry_due_at_ms,last_failure_code,resolution_code " ++
+            "SELECT resolution_code IS NULL AND retry_due_at_ms IS 0,retry_due_at_ms,last_failure_code,resolution_code " ++
                 "FROM model_operation WHERE operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -16002,7 +16017,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try prepare(
         storage.database,
-        "SELECT attempt_ordinal,uncertain,retry_due_at_ms,last_failure_code,resolution_code " ++
+        "SELECT attempt_ordinal,resolution_code IS NULL AND retry_due_at_ms IS 0,retry_due_at_ms,last_failure_code,resolution_code " ++
             "FROM model_operation WHERE operation_id=?1",
     );
     defer _ = c.sqlite3_finalize(statement);
@@ -16017,6 +16032,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     var resolution: protocol.Bounded(96) = .{};
     try readText(statement, 4, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
+    try expectDenseSessionPositions(&storage, created_session_0.slice());
 }
 
 test "canonical historical read failure fences dispatch without a fabricated outcome" {
@@ -16278,8 +16294,7 @@ test "retry admission and exhausted recovery use their selection indexes" {
         },
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id FROM model_operation " ++
-                "INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL " ++
-                "AND uncertain=1 AND attempt_ordinal=4 AND retry_due_at_ms=0 " ++
+                "INDEXED BY model_operation_retry_exhausted WHERE " ++ retry_exhausted_sql ++ " " ++
                 "ORDER BY operation_id LIMIT 64",
             .index = "model_operation_retry_exhausted",
             .no_temporary_sort = true,
@@ -16345,11 +16360,11 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,0,9223372036854775807,0 FROM sequence; " ++
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0 FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
-                "({1},{1},'0der00',1,1,1,1,0,99,0),({2},{2},'ear1er',1,1,1,1,0,1,0)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) VALUES" ++
+                "({1},{1},'0der00',1,1,1,1,99,0),({2},{2},'ear1er',1,1,1,1,1,0)",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -16369,8 +16384,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,0,1,0 FROM sequence",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0 FROM sequence",
             .{due_count},
             0,
         );
@@ -16385,10 +16400,10 @@ test "retry due index excludes future population and preserves age ordering" {
     try exec(
         storage.database,
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
-            "(1,1,'000001',1,1,1,1,0,99,0)," ++
-            "(2,2,'000002',1,1,1,1,0,50,0)," ++
-            "(3,3,'000003',1,1,1,1,0,1,0)",
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) VALUES" ++
+            "(1,1,'000001',1,1,1,1,99,0)," ++
+            "(2,2,'000002',1,1,1,1,50,0)," ++
+            "(3,3,'000003',1,1,1,1,1,0)",
     );
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -16407,7 +16422,7 @@ const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401
 
 fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptBinding {
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_503" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
-    try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL AND uncertain=0");
+    try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL AND retry_due_at_ms!=0");
     return (try admitRetryForTesting(storage)).?.permit.binding;
 }
 
@@ -16424,12 +16439,12 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try submitTestMessage(&storage, &tmp, "refresh-a", "refresh-a", session.slice(), "a");
     const a1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expect(try storage.claimModelAuthRefresh(a1));
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE uncertain=1 AND retry_due_at_ms=0 AND auth_refresh_claimed=1"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND auth_refresh_claimed=1"));
     try std.testing.expect(!try storage.claimModelAuthRefresh(a1));
     // A completed refresh makes the one replacement immediately eligible,
     // without generic backoff, and records the 401.
     try storage.settleModelAttemptFailure(a1, testing_401, .refreshed, .{});
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE uncertain=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms!=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)"));
     const a2 = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(@as(u64, 2), a2.attempt_ordinal);
     // Counterexample A: a transient failure intervenes; the next 401 must
@@ -16485,8 +16500,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
-            "SELECT value,value,printf('%06d',value),1,1,1,1,0," ++
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1," ++
             "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0 FROM sequence",
     );
 
@@ -16546,8 +16561,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try bindText(insert_turn, 2, session.slice());
         try expectDone(insert_turn);
         const insert_operation = try prepare(storage.database, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
-            "VALUES(?1,?1,?2,1,1,1,4,1,0,0)");
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) " ++
+            "VALUES(?1,?1,?2,1,1,1,4,0,0)");
         defer _ = c.sqlite3_finalize(insert_operation);
         try bindU64(insert_operation, 1, value);
         try bindText(insert_operation, 2, session.slice());
@@ -17750,9 +17765,9 @@ test "historical context selection work excludes nonmatching Operation populatio
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,uncertain,resolution_code) " ++
+                "output_reservation,attempt_ordinal,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -17798,9 +17813,9 @@ test "model admission work excludes failed historical Operation population" {
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,uncertain,resolution_code) " ++
+                "output_reservation,attempt_ordinal,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);

@@ -137,9 +137,7 @@ case $1 in
     *) echo '{version}' ;;
 esac
 ''')
-        (stage / "bin/rui-evaluator").write_text("#!/bin/sh\n")
-        for binary in stage.glob("bin/*"):
-            binary.chmod(0o755)
+        (stage / "bin/rui").chmod(0o755)
         (stage / "THIRD_PARTY_NOTICES.md").write_text("notices")
         path = self.served / f"v{version}" / f"{name}.tar.gz"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,15 +167,25 @@ esac
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "0.35.1\n")
         self.assertEqual(subprocess.check_output([previous], text=True), "0.35.0\n")
-        self.assertTrue((self.bin / "rui-evaluator").resolve().is_relative_to(self.home.resolve() / ".local/lib/rui"))
         self.assertEqual([path.read_text() for path in sentinels], ["keep"] * 3)
         self.assertEqual(list(self.bin.glob(".rui-install.*")), [])
         self.assertEqual(len(list((self.home / ".local/lib/rui").glob("install.*/bin/rui"))), 2)
         self.assertIn("running Host keeps its old executable", second.stdout)
 
-    def test_rejected_download_preserves_installed_commands(self):
+    def test_update_over_a_release_with_the_retired_evaluator_leaves_it_untouched(self):
+        earlier = self.home / ".local/lib/rui/install.earlier/bin"
+        earlier.mkdir(parents=True)
         for name in ("rui", "rui-evaluator"):
-            (self.bin / name).write_text("previous " + name)
+            (earlier / name).write_text("#!/bin/sh\necho earlier\n")
+            (earlier / name).chmod(0o755)
+            (self.bin / name).symlink_to(earlier / name)
+        result = self.install("0.35.0", self.archive("0.35.0"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "0.35.0\n")
+        self.assertEqual((self.bin / "rui-evaluator").resolve(), (earlier / "rui-evaluator").resolve())
+
+    def test_rejected_download_preserves_installed_commands(self):
+        (self.bin / "rui").write_text("previous rui")
         good = self.archive("0.35.0")
         cases = {
             "digest": ("0.35.0", "f" * 64, "does not match"),
@@ -189,8 +197,7 @@ esac
                 result = self.install(version, digest)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(message, result.stderr)
-                for name in ("rui", "rui-evaluator"):
-                    self.assertEqual((self.bin / name).read_text(), "previous " + name)
+                self.assertEqual((self.bin / "rui").read_text(), "previous rui")
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
 
     def test_help_is_read_only_and_bad_arguments_fail(self):
