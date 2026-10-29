@@ -73,9 +73,6 @@ const runnable_eligibility_sql =
     "))";
 const content_lookup_sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3";
 
-const runnable_probe_sql =
-    "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
-    runnable_eligibility_sql ++ " LIMIT 1";
 const runnable_selection_sql =
     "WITH candidate AS (" ++
     "SELECT m.session_ref FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
@@ -5053,17 +5050,19 @@ pub const Store = struct {
     }
 
     fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        if (!try self.hasRunnableWorkLocked(kind)) return null;
-        try self.execute("BEGIN IMMEDIATE");
-
         const select = switch (kind) {
             .message => try self.cached(runnable_selection_sql),
             .tool_continuation => try self.cached(tool_continuation_selection_sql),
         };
         defer resetCached(select);
-        const step_result = c.sqlite3_step(select);
-        if (step_result == c.SQLITE_DONE) return error.RunnableSelectionFailed;
-        if (step_result != c.SQLITE_ROW) return error.RunnableSelectionFailed;
+        switch (c.sqlite3_step(select)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => {
+                try self.validateBlockedToolCalls();
+                return null;
+            },
+            else => return error.RunnableSelectionFailed,
+        }
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session_ref);
         const first_admission = c.sqlite3_column_int64(select, 1);
@@ -5075,6 +5074,9 @@ pub const Store = struct {
         if (first_admission <= 0 or cutoff < first_admission or selected < 0 or revision <= 0 or initial_position <= 0) {
             return error.CorruptStore;
         }
+        // The Store's one exclusive connection is held under its mutex, so the
+        // row read above is still the selection inside the write transaction.
+        try self.execute("BEGIN IMMEDIATE");
         const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         const purpose = try self.nextModelOperationKind(session_ref.slice(), first_admission, &current, policy);
@@ -5293,22 +5295,6 @@ pub const Store = struct {
             .operation_id = current.operation_id,
             .attempt_ordinal = replacement_ordinal,
         } } };
-    }
-
-    fn hasRunnableWorkLocked(self: *Store, kind: ModelAdmissionKind) !bool {
-        const statement = switch (kind) {
-            .message => try self.cached(runnable_probe_sql),
-            .tool_continuation => try self.cached(tool_continuation_selection_sql),
-        };
-        defer resetCached(statement);
-        return switch (c.sqlite3_step(statement)) {
-            c.SQLITE_ROW => true,
-            c.SQLITE_DONE => {
-                try self.validateBlockedToolCalls();
-                return false;
-            },
-            else => error.RunnableSelectionFailed,
-        };
     }
 
     /// Before declaring the Store idle, distinguish valid permission waits
@@ -10258,6 +10244,23 @@ test "kind-specific admission selects a tool continuation despite fresh input an
     const fresh = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
     try std.testing.expect(fresh.turn_id != first.turn_id);
     try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
+}
+
+test "tool continuation admission runs its selection once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "config");
+    try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "start");
+    const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
+
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    try std.testing.expectEqual(first.turn_id, continued.turn_id);
+    const selection = try storage.cached(tool_continuation_selection_sql);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0));
 }
 
 test "production turn preserves skipped continuation preference through actual Store admissions" {
@@ -16223,30 +16226,6 @@ test "canonical historical read failure fences dispatch without a fabricated out
     );
 }
 
-test "idle runnable probe uses the pending-only admission index" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-
-    const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ runnable_probe_sql);
-    defer _ = c.sqlite3_finalize(statement);
-    var uses_pending_index = false;
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
-            const length = c.sqlite3_column_bytes(statement, 3);
-            if (length < 0) return error.InvalidQueryPlan;
-            const detail = pointer[0..@intCast(length)];
-            uses_pending_index = uses_pending_index or
-                std.mem.indexOf(u8, detail, "message_admission_pending") != null;
-        },
-        c.SQLITE_DONE => break,
-        else => return error.InvalidQueryPlan,
-    };
-    try std.testing.expect(uses_pending_index);
-}
-
 test "runnable selection finds age through pending index then groups one session" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -16337,14 +16316,6 @@ test "runnable discovery measures eligible ineligible and history populations in
             }
         }
 
-        fn measureProbe(database: *c.sqlite3) !i32 {
-            const statement = try prepare(database, runnable_probe_sql);
-            defer _ = c.sqlite3_finalize(statement);
-            if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.RunnableSelectionFailed;
-            if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.RunnableSelectionFailed;
-            return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
-        }
-
         fn measureSelection(database: *c.sqlite3) !Result {
             const statement = try prepare(database, runnable_selection_sql);
             defer _ = c.sqlite3_finalize(statement);
@@ -16383,31 +16354,23 @@ test "runnable discovery measures eligible ineligible and history populations in
         }
     };
 
-    var history_probe_costs: [3]i32 = undefined;
     var history_selection_costs: [3]i32 = undefined;
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |history, index| {
         try QueryCost.reset(storage.database, 1, 0, history);
-        history_probe_costs[index] = try QueryCost.measureProbe(storage.database);
         const measured = try QueryCost.measureSelection(storage.database);
         try std.testing.expectEqual(@as(i64, 1), measured.first_admission);
         history_selection_costs[index] = measured.steps;
     }
-    try std.testing.expect(@max(history_probe_costs[0], history_probe_costs[1], history_probe_costs[2]) -
-        @min(history_probe_costs[0], history_probe_costs[1], history_probe_costs[2]) <= 16);
     try std.testing.expect(@max(history_selection_costs[0], history_selection_costs[1], history_selection_costs[2]) -
         @min(history_selection_costs[0], history_selection_costs[1], history_selection_costs[2]) <= 32);
 
-    var ineligible_probe_costs: [3]i32 = undefined;
     var ineligible_selection_costs: [3]i32 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |ineligible, index| {
         try QueryCost.reset(storage.database, 1, ineligible, 0);
-        ineligible_probe_costs[index] = try QueryCost.measureProbe(storage.database);
         const measured = try QueryCost.measureSelection(storage.database);
         try std.testing.expectEqual(@as(i64, @intCast(ineligible + 1)), measured.first_admission);
         ineligible_selection_costs[index] = measured.steps;
     }
-    try std.testing.expect(ineligible_probe_costs[1] > ineligible_probe_costs[0]);
-    try std.testing.expect(ineligible_probe_costs[2] > ineligible_probe_costs[1]);
     try std.testing.expect(ineligible_selection_costs[1] > ineligible_selection_costs[0]);
     try std.testing.expect(ineligible_selection_costs[2] > ineligible_selection_costs[1]);
 
