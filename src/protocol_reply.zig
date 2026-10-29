@@ -502,17 +502,6 @@ pub const ReadFailure = struct {
     status: u16,
     diagnostic: InvocationDiagnostic,
 
-    pub fn writeDiagnostic(self: ReadFailure, out: *std.Io.Writer) !void {
-        const Text = @import("TerminalText.zig");
-        try out.print("HTTP {d}; type: ", .{self.status});
-        var text: Text = .{ .mode = .line };
-        try text.feed(out, self.diagnostic.type.slice());
-        try text.finish(out);
-        try out.writeAll("; code: ");
-        try text.feed(out, self.diagnostic.code.slice());
-        try text.finish(out);
-    }
-
     pub fn err(self: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         return if (self.diagnostic.code.eql("canonical_store_failure")) error.CanonicalStoreFailure else error.HostInvocationFailed;
     }
@@ -1478,7 +1467,7 @@ pub const JsonToolPresentation = struct {
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         const position = if (wire.publication_position) |p| mutationId(p, false) catch return error.InvalidCharacter else null;
         if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
-        if (wire.description) |d| if (!@import("tools.zig").validDescription(d.slice())) return error.InvalidCharacter;
+        if (wire.description) |d| if (!protocol.ToolPresentation.validDescription(d.slice())) return error.InvalidCharacter;
         if (wire.description == null) switch (wire.code.value) {
             .unknown_tool, .invalid_arguments => {},
             else => return error.InvalidCharacter,

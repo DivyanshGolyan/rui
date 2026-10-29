@@ -2975,7 +2975,7 @@ pub const Store = struct {
         if (c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL) {
             var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
             try readText(statement, 0, &description);
-            if (!tool_catalog.validDescription(description.slice())) return error.CorruptStore;
+            if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
             result.description = description;
         }
         if (c.sqlite3_column_type(statement, 1) != c.SQLITE_NULL) {

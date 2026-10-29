@@ -1245,7 +1245,33 @@ fn joinReader(self: *Self) ReadEnd {
 }
 
 fn writePendingDiagnostic(self: *const Self, out: *std.Io.Writer) !void {
-    try self.reading.pending_diagnostic.?.failure.writeDiagnostic(out);
+    try writeReadDiagnostic(self.reading.pending_diagnostic.?.failure, out);
+}
+
+/// The Host's words reach the terminal only as escaped single-line text.
+fn writeReadDiagnostic(failure: protocol_reply.ReadFailure, out: *std.Io.Writer) !void {
+    try out.print("HTTP {d}; type: ", .{failure.status});
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(out, failure.diagnostic.type.slice());
+    try text.finish(out);
+    try out.writeAll("; code: ");
+    try text.feed(out, failure.diagnostic.code.slice());
+    try text.finish(out);
+}
+
+test "read diagnostic shows the Host's type and code as escaped line text" {
+    var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+    try failure.diagnostic.type.set("busy");
+    var bytes: [1024]u8 = undefined;
+    for ([_][2][]const u8{
+        .{ "classification_capacity_exhausted", "HTTP 503; type: busy; code: classification_capacity_exhausted" },
+        .{ "other\x1b\n", "HTTP 503; type: busy; code: other\\x1b\\n" },
+    }) |case| {
+        try failure.diagnostic.code.set(case[0]);
+        var out = std.Io.Writer.fixed(&bytes);
+        try writeReadDiagnostic(failure, &out);
+        try std.testing.expectEqualStrings(case[1], out.buffered());
+    }
 }
 
 fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
