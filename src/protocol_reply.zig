@@ -1396,7 +1396,7 @@ pub const InvocationDiagnostic = struct {
 pub const MutationReply = struct {
     status: u16,
     diagnostic: ?InvocationDiagnostic = null,
-    context: MutationIdentity = .{},
+    context: MutationIdentity,
     target: MutationTarget,
     answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
 
@@ -1663,7 +1663,7 @@ pub fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
 /// One operation boundary for synchronous callers and a later worker. No
 /// workflow, terminal, retry or certainty transition is made by this decoder.
 pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
-    var result: MutationReply = .{ .status = reply.status, .target = target, .answer = error.InvalidResponse };
+    var result: MutationReply = .{ .status = reply.status, .context = .{ .kind = target }, .target = target, .answer = error.InvalidResponse };
     result.context.session.set(session) catch return result;
     var resolved = result.context.session;
     result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic, &resolved);
@@ -1896,11 +1896,7 @@ pub const MutationIdentity = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    kind: protocol.Bounded(32) = .{},
-
-    pub fn isKind(self: *const MutationIdentity, kind: MutationKind) bool {
-        return self.kind.eql(@tagName(kind));
-    }
+    kind: MutationKind,
 };
 
 // Shared authority rule for operation replies and static read/error envelopes.

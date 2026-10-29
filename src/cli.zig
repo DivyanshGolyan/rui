@@ -1739,15 +1739,15 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
             else => continue,
         };
         if (!saved.store.eql(canonical.store.slice())) continue;
-        if ((saved.isKind(.configure) or saved.isKind(.message)) and saved.session.len == 0) {
+        if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ReplyBuffer = .{};
             const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
-            if (observed.status != .accepted or !saved.kind.eql(@tagName(observed.kind.?)) or !observed.target.?.eql(session_ref)) continue;
+            if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
         try writeSafeTextTo(out, handle);
         try out.writeAll(" (");
-        try writeSafeTextTo(out, saved.kind.slice());
+        try writeSafeTextTo(out, @tagName(saved.kind));
         try out.writeAll(")\n");
     }
 }
@@ -2161,7 +2161,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .store = reply.context.store.slice(),
         .session = reply.context.session.slice(),
         .key = reply.context.key.slice(),
-        .kind = reply.context.kind.slice(),
+        .kind = @tagName(reply.context.kind),
     }, .{}, writer);
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -2219,7 +2219,7 @@ test "mutation presentation renders owned diagnostics and context with bounded w
     var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
     try reply.context.key.set("original\"key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     @memset(&bytes, 'x');
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2253,7 +2253,7 @@ test "mutation presentation complete modes preserve escaped original context" {
         var reply = protocol_reply.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
         try reply.context.store.set("/store");
         try reply.context.key.set("key/µ\"\n\x1b");
-        try reply.context.kind.set("configure");
+        reply.context.kind = .configure;
         for (modes, 0..) |mode, index| {
             var buffer: [2048]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
@@ -2279,7 +2279,7 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     var buffer: [1024]u8 = undefined;
     for ([_]MutationPresentation{ .human, .interactive_configuration }) |mode| {
         var writer = std.Io.Writer.fixed(&buffer);
@@ -2298,9 +2298,18 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
-fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !SavedRequest {
-    if (parsed.positional) |handle| return savedRequest(init, handle);
-    var identity: SavedRequest = .{};
+/// The Store and key a request command names, from a saved handle or flags.
+const RequestIdentity = struct {
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+};
+
+fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
+    if (parsed.positional) |handle| {
+        const saved = try savedRequest(init, handle);
+        return .{ .store = saved.store, .key = saved.key };
+    }
+    var identity: RequestIdentity = .{};
     try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
