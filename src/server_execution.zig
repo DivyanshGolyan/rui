@@ -1372,8 +1372,8 @@ fn beginAdmittedAttempt(
         view,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
+        if (host.authentication != null) .managed else .endpoint,
         .{
-            .managed_route = host.authentication != null,
             .first_step = host.faults.request_first_step,
             .write = host.faults.request_write,
             .seal = host.faults.request_seal,
@@ -3102,7 +3102,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3351,6 +3351,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .{ .store = undefined, .binding = binding },
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
+            .endpoint,
             .{},
             &retained,
         );
