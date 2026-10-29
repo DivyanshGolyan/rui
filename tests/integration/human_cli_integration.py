@@ -132,7 +132,7 @@ def defaults(home, *args, success=True, environment=None):
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
-            "every command without --store now uses it, from any directory.\n"), (args, result.stderr)
+            "commands without --store now use it from any directory, and saved requests keep their recorded Store.\n"), (args, result.stderr)
     else:
         assert "global default Store" not in result.stderr, (args, result.stderr)
     return value

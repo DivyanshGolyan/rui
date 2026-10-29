@@ -252,7 +252,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         var notice = std.Io.Writer.fixed(&bytes);
         notice.writeAll("rui: saved ") catch break :notice;
         TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
-        notice.writeAll(" as the global default Store; every command without --store now uses it, from any directory.\n") catch break :notice;
+        notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
         TerminalText.diagnostic("{s}", .{notice.buffered()});
     }
     if (!interactive) return writeDefaultsJson(init.io, .{
@@ -502,17 +502,18 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     const store_z = try std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0);
     // Application policy lives here. The synchronous native launcher borrows
     // these terminated strings and pointer framing through exec/error handoff;
-    // all storage is prepared before any detach fork. Omitting
-    // --active-capacity keeps product_defaults.active_capacity the only default.
+    // all storage is prepared before any detach fork. Without a requested
+    // capacity the flag is omitted, so product_defaults.active_capacity stays
+    // the only default.
     var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
     var argv = [_:null]?[*:0]const u8{
         @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex", null, null,
     };
-    var argc: usize = 6;
+    var argc: usize = argv.len - 2;
     if (capacity) |value| {
-        argv[6] = "--active-capacity";
-        argv[7] = (try std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0)).ptr;
-        argc = 8;
+        argv[argc] = "--active-capacity";
+        argv[argc + 1] = (try std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0)).ptr;
+        argc += 2;
     }
     var startup_read: c_int = -1;
     const launched = rui_launch_detached_observed(argv[0].?, &argv, argc, &startup_read);
@@ -1362,7 +1363,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .{ .json = target }) catch |err| {
+    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .{ .json = .of(target) }) catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
@@ -1426,7 +1427,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
-    if (!reply.isAccepted()) return writeMutationReply(io, reply, .{ .json = target });
+    if (!reply.isAccepted()) return writeMutationReply(io, reply, .{ .json = .of(target) });
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
@@ -1847,7 +1848,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
         if (target == .generated) try announceCapture(io, captured.identity().key.slice());
         break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
     };
-    try writeMutationReply(io, reply, .{ .json = target });
+    try writeMutationReply(io, reply, .{ .json = .of(target) });
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -2101,9 +2102,22 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
+/// How a caller replays a saved answer: by its generated handle, or by the
+/// explicit record it captured to.
+const Replay = union(enum) {
+    generated,
+    explicit: []const u8,
+
+    fn of(target: client.CaptureTarget) Replay {
+        return switch (target) {
+            .generated => .generated,
+            .explicit => |explicit| .{ .explicit = explicit.record },
+        };
+    }
+};
+
 const MutationPresentation = union(enum) {
-    /// Where the request was captured, which decides how it replays.
-    json: client.CaptureTarget,
+    json: Replay,
     human,
     interactive_configuration,
 };
@@ -2129,23 +2143,23 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
 
 /// Names the replay the caller actually holds: a generated handle, or the
 /// explicit record, since repeating its capture refuses the existing --record.
-fn reportNotAccepted(context: protocol_reply.MutationIdentity, saved: client.CaptureTarget) void {
+fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: Replay) void {
     var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
-    writeNotAccepted(&notice, context, saved) catch return;
+    writeNotAccepted(&notice, context, replay) catch return;
     TerminalText.diagnostic("{s}", .{notice.buffered()});
 }
 
-fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, saved: client.CaptureTarget) !void {
+fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: Replay) !void {
     try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
-    switch (saved) {
+    switch (replay) {
         // validRequestHandle admits only shell-inert handle bytes.
         .generated => try notice.writeAll(context.key.slice()),
-        .explicit => |explicit| {
+        .explicit => |record| {
             try notice.writeAll("--store ");
             try TerminalText.writeShellWord(notice, context.store.slice());
             try notice.writeAll(" --record ");
-            try TerminalText.writeShellWord(notice, explicit.record);
+            try TerminalText.writeShellWord(notice, record);
             switch (context.kind) {
                 inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
             }
@@ -2298,7 +2312,7 @@ test "mutation presentation complete modes preserve escaped original context" {
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
-    const modes = [_]MutationPresentation{ .{ .json = .{ .generated = "/requests" } }, .human, .interactive_configuration };
+    const modes = [_]MutationPresentation{ .{ .json = .generated }, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
         human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
@@ -2347,7 +2361,7 @@ test "mutation presentation wrong binding keeps caller context even interactivel
         try std.testing.expectEqualStrings("Store: /original-store\nSession: original\nkey: original-key\ninvocation: RequestBindingMismatch (HTTP 200); outcome unconfirmed\n", writer.buffered());
     }
     var writer = std.Io.Writer.fixed(&buffer);
-    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .{ .json = .{ .generated = "/requests" } }));
+    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .{ .json = .generated }));
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
@@ -2358,10 +2372,10 @@ test "not-accepted guidance names the generated handle or the quoted explicit re
     var buffer: [512]u8 = undefined;
     const prefix = "rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ";
     var generated = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&generated, context, .{ .generated = "/requests" });
+    try writeNotAccepted(&generated, context, .generated);
     try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e\n", generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&explicit, context, .{ .explicit = .{ .record = "stop\x1b.json", .key = "any" } });
+    try writeNotAccepted(&explicit, context, .{ .explicit = "stop\x1b.json" });
     try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop\n", explicit.buffered());
 }
 
@@ -2484,11 +2498,10 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         defer captured.close(init.io);
         break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
-    const target: client.CaptureTarget = switch (saved) {
-        .generated => |generated| .{ .generated = generated.directory },
-        .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .key = reply.context.key.slice() } },
-    };
-    try writeMutationReply(init.io, reply, .{ .json = target });
+    try writeMutationReply(init.io, reply, .{ .json = switch (saved) {
+        .generated => .generated,
+        .explicit => |explicit| .{ .explicit = explicit.record },
+    } });
 }
 
 /// A command kind in its `rui request recover --kind` spelling.
