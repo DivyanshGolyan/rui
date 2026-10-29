@@ -121,13 +121,14 @@ def unpack(archive, receipt, targets):
         for member in source:
             path = PurePosixPath(member.name)
             if (path.is_absolute() or ".." in path.parts or len(path.parts) < 2
-                    or path.parts[0] not in destinations or member.name in seen | present):
+                    or path.parts[0] not in destinations or member.name in seen or member.name in present):
                 raise ValueError("Unsafe compiled path")
             seen.add(member.name)
             if not member.isfile():
                 raise ValueError("Unsafe compiled file")
-        for name in seen | present:
-            if any(str(parent) in seen | present for parent in PurePosixPath(name).parents):
+        names = seen | present
+        for name in names:
+            if any(str(parent) in names for parent in PurePosixPath(name).parents):
                 raise ValueError("Compiled file used as parent")
         # A second streaming pass avoids retaining archive payloads in RAM.
     with tarfile.open(archive, "r:gz") as source:
