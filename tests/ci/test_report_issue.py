@@ -157,6 +157,19 @@ class CauseTest(unittest.TestCase):
                           ["codex_h2_integration: assert goaway_sent raised AssertionError"]])
         self.assertEqual(signatures[0][0].paths, ["tests/integration/codex_h2_integration.py"])
 
+    def test_zig_failures_keep_their_names_across_assertion_diagnostics(self):
+        log = logged("1/4 store.test.opens...OK",
+                     "2/4 store.test.claims a position...expected 3, found 4",
+                     "FAIL (TestExpectedEqual)",
+                     "3/4 h2.test.resets a stream...OK",
+                     "4/4 h2.test.sends goaway...expected true, found false",
+                     "  extra diagnostic line",
+                     "FAIL (TestUnexpectedResult)",
+                     "native failed: exit=1 elapsed=9s")
+        self.assertEqual([cause.signature for cause in report_issue.failure_causes(log, self.cases)],
+                         ["zig test 'store.test.claims a position' failed (TestExpectedEqual)",
+                          "zig test 'h2.test.sends goaway' failed (TestUnexpectedResult)"])
+
     def test_a_record_without_a_traceback_still_names_its_fixture(self):
         [cause] = report_issue.failure_causes(logged('host-stop failed: exit=124 elapsed=60.000s'), self.cases)
         self.assertEqual(cause.signature, 'host-stop: exit without a parsed traceback')

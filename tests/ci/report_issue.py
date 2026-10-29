@@ -28,7 +28,9 @@ RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 COMMAND = re.compile(r"^failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
 ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
-ZIG_FAIL = re.compile(r"^\d+/\d+ (\S.*?)\.\.\.FAIL \((\w+)\)$", re.M)
+# A failing assertion can print its diagnostics between the test's name and its
+# FAIL record; the record never lies past the next numbered test.
+ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 # check.yml's linux and macos aggregates only require their needs' results; a
