@@ -218,7 +218,7 @@ def main():
             valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
-                "items": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
+                "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
             for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
@@ -250,7 +250,7 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
             for turn, completion, ok in ((None, "completed", True), ("1", "pending", True), (None, "pending", False)):
                 wire = copy.deepcopy(valid)
-                wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
+                wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
             # Pages carry complete canonical IDs, never renderer abbreviations.
             for session in (SESSION, foreign, "k7m2qx"):
@@ -264,8 +264,11 @@ def main():
                 wire = copy.deepcopy(valid)
                 wire["items"][0]["value"]["admission"]["sender"] = {"session": session}
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
-            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender"):
+            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender", "undated", "dated"):
                 wire = copy.deepcopy(valid)
+                # Every row is dated, and an admission by its own admission.
+                if fault == "undated": del wire["items"][0]["at"]
+                if fault == "dated": wire["items"][0]["at"] = "1"
                 if fault == "order": wire["items"][1]["position"] = "1"
                 if fault == "union": wire["items"][0]["value"]["stop"] = {}
                 if fault == "digest": wire["items"][0]["value"]["admission"]["content"]["sha256"] = "z"*64
