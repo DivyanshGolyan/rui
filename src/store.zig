@@ -512,19 +512,13 @@ pub const HistoricalSettings = struct {
 
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results };
 
-/// The one replay pass over a provider output item in a model call, run by
-/// the Store before it serves the entry: whether today's adapter rules still
-/// accept the item, and whether replay drops its private reasoning text.
-pub const ReplayCheck = struct { compatible: bool, omit_content: bool };
+/// How the one output item grammar judged a saved item under today's rules.
+pub const ReplayVerdict = provider_output.ReplayValidationCursor.Verdict;
 
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
-    /// Every call, and every other output item at or after the selected
-    /// anchor. Output below the anchor is never replayed, so only its calls
-    /// are authenticated.
-    replay: ?ReplayCheck = null,
     requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null,
     // A User entry's peer sender, in this view's Store.
     sender: ?protocol.Bounded(protocol.max_session_bytes) = null,
@@ -559,7 +553,6 @@ pub const HistoricalView = struct {
     output_expected: u64 = 0,
     output_count: u64 = 0,
     output_previous_position: u64 = 0,
-    selected_anchor: ?u64 = null,
     group_scan: GroupScan = .{},
     output_check: OutputCheck = .{},
     next_tool_group_count: u64 = 0,
@@ -585,13 +578,15 @@ pub const HistoricalView = struct {
         position: u64 = 0,
     };
 
-    // The output item being checked before it is served, with its own
-    // reader; one at a time, independent of item size or count.
+    // The one output item being read by the grammar, with its own reader;
+    // one at a time, independent of item size or count.
     const OutputCheck = struct {
         entry: HistoricalEntry = undefined,
         reader: ?ContentReader = null,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-        validation: @import("provider_output.zig").ReplayValidationCursor = .{},
+        validation: provider_output.ReplayValidationCursor = .{},
+        /// The last item the grammar finished, kept until the next one starts.
+        judged: ?struct { position: u64, verdict: ReplayVerdict } = null,
     };
 
     pub const EntryProgress = union(enum) { pending, ready: ?HistoricalEntry };
@@ -645,7 +640,23 @@ pub const HistoricalView = struct {
     pub fn contextAnchor(self: *HistoricalView) !?u64 {
         std.debug.assert(self.active);
         while (!try self.validateOutputsStep()) {}
-        return self.selected_anchor;
+        return self.store.selectedContextAnchor(self.binding);
+    }
+
+    /// The verdict of the one output item grammar on a served provider output
+    /// entry that the caller replays. The Store reads a call before serving
+    /// it, so its verdict is already known; any other item is read now, under
+    /// the caller's allowances, and its content is marked verified. Each item
+    /// is read once per view. Null while pending.
+    pub fn replayVerdictStep(self: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !?ReplayVerdict {
+        std.debug.assert(self.active and entry.kind == .provider_output and entry.content.?.belongsTo(self));
+        if (self.output_check.judged) |judged| if (judged.position == entry.position) return judged.verdict;
+        std.debug.assert(entry.content.?.item_identity.?.kind != .function_call);
+        if (bytes_left.* == 0 or items_left.* == 0) return null;
+        return self.store.readReplayVerdict(self, entry, bytes_left, items_left) catch |err| switch (err) {
+            error.HistoricalPending => null,
+            else => return err,
+        };
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -5373,6 +5384,12 @@ pub const Store = struct {
         };
     }
 
+    fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.selectedContextAnchorLocked(binding));
+    }
+
     fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
         const statement = try self.cached("SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
             "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
@@ -5511,7 +5528,6 @@ pub const Store = struct {
             try bindU64(source, 5, view.output_cursor_id);
             const result = c.sqlite3_step(source);
             if (result == c.SQLITE_DONE) {
-                view.selected_anchor = try self.selectedContextAnchorLocked(view.binding);
                 view.outputs_validated = true;
                 return true;
             }
@@ -5581,27 +5597,48 @@ pub const Store = struct {
         if (view.next_tool_group) |group| {
             if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
         }
-        if (ordinary.kind != .provider_output) return ordinary;
-        const content = ordinary.content.?;
-        if (content.item_identity.?.kind != .function_call) {
-            if (view.selected_anchor) |anchor| if (ordinary.position < anchor) return ordinary;
-        }
+        // A call's certified fields bind its Tool Results, so its bytes are
+        // authenticated before it is served, replayed or not.
+        if (ordinary.kind != .provider_output or ordinary.content.?.item_identity.?.kind != .function_call) return ordinary;
+        try self.startHistoricalOutput(view, ordinary);
+        return error.HistoricalPending;
+    }
+
+    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: HistoricalEntry) !void {
+        const content = entry.content.?;
         const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
         view.output_check = .{
-            .entry = ordinary,
+            .entry = entry,
             .reader = if (content.raw)
                 .{ .store = self, .reference = identity, .content_id = content.content_id, .representation = .raw }
             else
                 try self.openProjectionLocked(content.content_id, identity),
         };
         // The next step reads it, after preparing the read outside Store access.
-        return error.HistoricalPending;
     }
 
-    /// Run the item's one replay pass under the caller's allowance:
+    fn readReplayVerdict(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
+        if (view.output_check.reader) |*reader| reader.prepareRead();
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.historical_entry, self.readReplayVerdictLocked(view, entry, bytes_left, items_left));
+    }
+
+    fn readReplayVerdictLocked(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
+        if (view.output_check.reader == null) {
+            items_left.* -= 1;
+            try self.startHistoricalOutput(view, entry.*);
+            return error.HistoricalPending;
+        }
+        std.debug.assert(view.output_check.entry.position == entry.position);
+        entry.* = try self.checkHistoricalOutput(view, bytes_left, items_left);
+        return view.output_check.judged.?.verdict;
+    }
+
+    /// Run the item's one grammar pass under the caller's allowance:
     /// authenticate its bytes, type, ID and a call's certified fields, and
-    /// judge it under today's rules. Corrupt bytes fence; incompatible ones
-    /// are the caller's to refuse.
+    /// judge it under today's rules. Corrupt bytes fence; an incompatible
+    /// verdict is the caller's to act on.
     fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !HistoricalEntry {
         const check = &view.output_check;
         const Source = struct {
@@ -5620,12 +5657,7 @@ pub const Store = struct {
                 return destination.len;
             }
         };
-        var compatible = true;
-        const complete = check.validation.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
-            error.ContinuationUnavailable => done: {
-                compatible = false;
-                break :done true;
-            },
+        const judged = check.validation.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
             // Canonical items passed this grammar's syntax before acceptance.
             error.SyntaxError,
             error.UnexpectedEndOfInput,
@@ -5636,15 +5668,15 @@ pub const Store = struct {
             => return error.CorruptStore,
             else => return err,
         };
-        if (!complete) return error.HistoricalPending;
+        const verdict = judged orelse return error.HistoricalPending;
         var entry = check.entry;
         const identity = entry.content.?.item_identity.?;
         try check.validation.authenticateIdentity(identity.kind, identity.id_digest);
         if (identity.kind == .function_call) try check.validation.authenticate(identity.call_fields orelse return error.CorruptStore);
         check.reader.?.close();
         check.reader = null;
+        check.judged = .{ .position = entry.position, .verdict = verdict };
         entry.content.?.verified = true;
-        entry.replay = .{ .compatible = compatible, .omit_content = compatible and check.validation.replaysReasoningText() };
         return entry;
     }
 
@@ -11051,27 +11083,35 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 try std.testing.expect(storage.isFenced());
                 continue :cases;
             })) {}
-            // Row faults fail while discovery walks the group. A call's bytes
-            // are read, and matched with its certified fields, when its entry
-            // is served, which precedes its results.
+            // Row faults fail while discovery walks the group, before any
+            // entry is served. A call's bytes are read, and matched with its
+            // certified fields, before that call is served: only the user
+            // input is served, the first call fences, and no results follow.
             const bytes_fault = std.mem.indexOf(u8, fault, "payload") != null or std.mem.indexOf(u8, fault, "field_metadata") != null;
-            var after: u64 = 0;
+            var served: ?HistoricalEntry = null;
             while (true) {
                 var bytes: usize = 1;
                 var items: usize = 1;
-                const progress = view.nextEntryStep(after, &bytes, &items) catch |err| {
+                const progress = view.nextEntryStep(if (served) |entry| entry.position else 0, &bytes, &items) catch |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
                     break;
                 };
                 if (!bytes_fault and view.tool_group_initialized) return error.MissingCorruptionFailure;
                 switch (progress) {
                     .pending => {},
-                    .ready => |served| {
-                        const entry = served orelse return error.MissingCorruptionFailure;
-                        if (entry.kind == .tool_results) return error.MissingCorruptionFailure;
-                        after = entry.position;
+                    .ready => |entry| {
+                        // The view never reaches its end, so no request seals.
+                        if (!bytes_fault or served != null) return error.MissingCorruptionFailure;
+                        try std.testing.expectEqual(HistoricalEntryKind.user, entry.?.kind);
+                        served = entry;
                     },
                 }
+            }
+            if (bytes_fault) {
+                try std.testing.expect(served != null);
+                const first_call = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+                try std.testing.expect(served.?.position < first_call);
+                try std.testing.expectEqual(first_call, view.output_check.entry.position);
             }
             try std.testing.expect(storage.isFenced());
         }
@@ -17128,20 +17168,15 @@ test "completed tool labels trust admission while model replay authenticates pay
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view = try storage.openHistoricalView(next);
     defer view.close();
-    try std.testing.expectEqual(@as(?anyerror, error.CorruptStore), testingHistoricalFailure(&view));
+    // Discovery trusts the labels; the first call's bytes are read, and
+    // fence, before that call is served.
+    const first = (try view.nextEntry(0)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.user, first.kind);
+    try std.testing.expectError(error.CorruptStore, view.nextEntry(first.position));
+    const first_call = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+    try std.testing.expect(first.position < first_call);
+    try std.testing.expectEqual(first_call, view.output_check.entry.position);
     try std.testing.expect(storage.isFenced());
-}
-
-/// Walk the whole history in preparation order, returning the first error.
-fn testingHistoricalFailure(view: *HistoricalView) ?anyerror {
-    while (!(view.validateOutputsStep() catch |err| return err)) {}
-    var after: u64 = 0;
-    while (after != std.math.maxInt(u64)) {
-        var bytes: usize = 64 * 1024;
-        var items: usize = 1024;
-        testingHistoricalStep(view, &after, &bytes, &items) catch |err| return err;
-    }
-    return null;
 }
 
 test "live tool activity survives completed Turns and split result pages" {
@@ -17811,9 +17846,13 @@ test "compaction selected newest base corruption fences rather than using an old
         if (corruption != .payload) {
             try std.testing.expectError(error.CorruptStore, view.contextAnchor());
         } else {
-            // The Store reads the selected anchor's bytes before serving it.
             const anchor = (try view.contextAnchor()).?;
-            try std.testing.expectError(error.CorruptStore, view.nextEntry(anchor - 1));
+            const selected = (try view.nextEntry(anchor - 1)).?;
+            try std.testing.expectEqual(anchor, selected.position);
+            var reader = try view.openContent(selected.content.?);
+            defer reader.close();
+            var bytes: [4096]u8 = undefined;
+            try std.testing.expectError(error.CorruptStore, reader.read(0, &bytes));
         }
         try std.testing.expect(storage.isFenced());
     }

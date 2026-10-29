@@ -976,6 +976,7 @@ pub const Preparation = struct {
         compaction_trigger,
         entry_comma,
         entry_prefix,
+        replay_verdict,
         peer_part,
         entry_content,
         entry_suffix,
@@ -1218,16 +1219,7 @@ pub const Preparation = struct {
                 .entry_prefix => {
                     const entry = self.current_entry.?;
                     if (entry.kind == .provider_output) {
-                        // The Store checked the item before serving it.
-                        // Unusable output stays private; no partial request can seal.
-                        const check = entry.replay.?;
-                        if (!check.compatible) self.continuation_unavailable = true;
-                        if (self.continuation_unavailable) {
-                            self.phase = .entry_suffix;
-                            continue;
-                        }
-                        const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
-                        self.emitReplay(reader, check.omit_content, .entry_suffix);
+                        self.phase = .replay_verdict;
                     } else {
                         const prefix = if (entry.kind == .user)
                             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
@@ -1236,6 +1228,26 @@ pub const Preparation = struct {
                         self.peer_part = 0;
                         self.emitFixed(prefix, if (entry.sender != null) .peer_part else .entry_content);
                     }
+                },
+                // Every replayed item is judged, even once continuation is
+                // unavailable: compatibility never excuses unauthenticated
+                // later items. Unusable output stays private; no partial
+                // request can seal.
+                .replay_verdict => {
+                    items_left += 1; // The Store charges its own reading work.
+                    const entry = &self.current_entry.?;
+                    const verdict = (self.view.replayVerdictStep(entry, &bytes_left, &items_left) catch |err| return .{ .failed = err }) orelse continue;
+                    switch (verdict) {
+                        .incompatible => self.continuation_unavailable = true,
+                        .compatible => {},
+                    }
+                    if (self.continuation_unavailable) {
+                        self.phase = .entry_suffix;
+                        continue;
+                    }
+                    const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
+                    // Private reasoning text is never replay input.
+                    self.emitReplay(reader, verdict.compatible.reasoning_text, .entry_suffix);
                 },
                 // A peer Message's sender is its own leading part, separate
                 // from the text the peer wrote.
@@ -3183,17 +3195,16 @@ test "request preparation resumes large private replay validation before emissio
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 100000);
-            // The Store checks the item before serving it, so no replay
-            // emission starts while its check is pending.
-            const check = &preparation.view.output_check;
-            const before = if (check.reader != null) check.validation.position else 0;
+            // While the item is judged, nothing of it is emitted.
+            const judging = preparation.phase == .replay_verdict;
+            const written = preparation.writer.offset;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (check.reader != null) {
+            if (judging and preparation.phase == .replay_verdict) {
                 validation_turns += 1;
-                try std.testing.expect(check.validation.position - before <= 7);
-                try std.testing.expect(preparation.emission != .replay);
+                try std.testing.expectEqual(written, preparation.writer.offset);
+                try std.testing.expect(preparation.emission == .none);
                 try preparation.checkIntegrity(binding);
             }
             switch (progress) {
