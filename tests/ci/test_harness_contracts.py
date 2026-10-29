@@ -107,6 +107,7 @@ ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
 ZIG_LOOP = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?(?:while|for)\b")
 ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
 ZIG_EXIT = re.compile(r"\breturn\b|\bbreak\b(?:\s*:\s*(\w+))?")
+ZIG_CONTAINER = re.compile(r"\b(\w+)\s*=\s*(?:(?:extern|packed)\s+)?(?:struct|union|enum)\b[^=]*$")
 ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
 ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
@@ -201,9 +202,21 @@ def zig_sleep_ordering(path, text):
                     return ZIG_RETRY.match(header) is not None and exits(header, start, end)
         return False
 
+    def container(scope):
+        """The name a member helper is qualified by: its enclosing `const Name = struct`."""
+        holders = [(head, start) for head, start, end in blocks if start < scope.start < end]
+        if not holders:
+            return None
+        head, start = max(holders, key=lambda block: block[1])
+        named = ZIG_CONTAINER.search(code[head:start])
+        return named[1] if named else None
+
     def references(scope):
-        return [match.start() for match in re.finditer(rf"(?<![\w@]){scope.name}\b", code)
-                if not scope.head <= match.start() <= scope.end]
+        """Bare calls, or calls qualified by the helper's own container; other members share only a name."""
+        qualifiers = {None, container(scope)}
+        return [match.start(2) for match in re.finditer(rf"(?<![\w@.])(?:(\w+)\s*\.\s*)?({scope.name})\b", code)
+                if match[1] in qualifiers and not re.search(r"\bfn\s+$", code[max(0, match.start() - 16):match.start()])
+                and not scope.head <= match.start() <= scope.end]
 
     test_code = {}
 
@@ -270,6 +283,8 @@ def python_sleep_ordering(path, text):
                     child_name = child.name
                 elif isinstance(node, ast.ClassDef) and "." not in name:
                     child_name = f"{name}.{child.name}"
+                child_polling = False
+            elif isinstance(child, ast.Lambda):
                 child_polling = False
             elif isinstance(child, ast.While):
                 child_polling = True
@@ -492,6 +507,23 @@ test "an inner loop's exit does not make its outer loop poll" {
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
 }
+fn nap() void {
+    std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+}
+pub fn drive(thing: anytype) void {
+    thing.nap();
+}
+test "an unrelated member call does not make a helper production code" {
+    nap();
+}
+const Helper = struct {
+    fn doze() void {
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+};
+test "a container-qualified helper call charges its test" {
+    Helper.doze();
+}
 test "a labeled break from an inner loop leaves the retry" {
     outer: for (0..10) |_| {
         for (items) |item| if (item) break :outer;
@@ -506,6 +538,8 @@ test "a labeled break from an inner loop leaves the retry" {
             ("src/a.zig", "a peer declared inside a poll still sleeps first"): 1,
             ("src/a.zig", "unnamed test 1"): 1,
             ("src/a.zig", "an inner loop's exit does not make its outer loop poll"): 4,
+            ("src/a.zig", "an unrelated member call does not make a helper production code"): 1,
+            ("src/a.zig", "a container-qualified helper call charges its test"): 1,
         })
 
     def test_python_straight_line_sleeps_are_charged_to_their_function(self):
@@ -542,6 +576,9 @@ def inner_exits():
         else:
             break
         time.sleep(0.01)
+def lambda_peer():
+    while not ready():
+        threading.Thread(target=lambda: time.sleep(1)).start()
 def after_the_loop():
     while not ready():
         time.sleep(0.01)
@@ -558,6 +595,7 @@ def after_the_loop():
             ("tests/integration/x.py", "scenario"): 2,
             ("tests/integration/x.py", "inner_exits"): 2,
             ("tests/integration/x.py", "after_the_loop"): 2,
+            ("tests/integration/x.py", "lambda_peer"): 1,
             ("tests/integration/x.py", "Handler.do_POST"): 1,
         })
 
