@@ -6,6 +6,8 @@
 
 Integration fixtures require Python 3.11 or newer on PATH, with the packages pinned in [tests/integration/requirements.txt](tests/integration/requirements.txt) (python-h2 serves every loopback fixture over h2c); the composed driver rejects older interpreters and records the one selected. On macOS, do not use `/usr/bin/python3`. Diagnose interpreter failures apart from product assertions.
 
+Run fixtures as a non-root user. Root bypasses the file and socket permission denials that fixtures assert, so a root run fails them or proves nothing. Every build step that launches a built Rui or fixture actor first runs [fixture_user.py](tests/integration/fixture_user.py), which stops a root run with that instruction before any fixture starts; a fixture started directly with `python3` has no such guard. Where the shell is root, as in many containers, use an ordinary account that owns its checkout, Zig caches and Python environment.
+
 | Change class | Required gate or evidence |
 | --- | --- |
 | Documentation | References, consistency and `git diff --check` |
