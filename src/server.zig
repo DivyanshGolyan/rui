@@ -920,7 +920,7 @@ pub fn serve(
         lease.paths.scratch.slice(),
         .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
         retention_entries,
-        if (hooks.fails(.retention_removal)) .injected_failure else .native,
+        if (hooks.retention_removal) .injected_failure else .native,
     );
     host.retention = &retention;
     defer retention.cleanupAll();

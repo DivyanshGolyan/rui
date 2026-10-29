@@ -39,12 +39,13 @@ pub const Limits = struct {
 pub const Hooks = struct {
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
-    pauses: std.EnumArray(Pause, Hold) = .initFill(.{}),
+    pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
     transition: ?TransitionGate = null,
     /// Presence gates: the owner waits while the path exists.
     bash_reclaim_gate_path: ?[]const u8 = null,
     retry_recovery_gate_path: ?[]const u8 = null,
-    retry_recovery: enum { initial, held, released } = .initial,
+    /// Fails the Output Retention queue's removals.
+    retention_removal: bool = false,
     inspection_reply: Hold = .{},
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
@@ -95,26 +96,17 @@ pub const Hooks = struct {
         /// Bash faults strike only while the scratch fault gate exists.
         bash_fault_gated,
         report_unlink,
-        /// Set by its own option, `--test-retention-removal-failure`.
-        retention_removal,
     };
 
-    /// Where a test may hold an owner for a delay, at a gate, or both.
-    pub const Pause = enum {
-        action_launch,
-        model_launch,
-        action_result,
-        model_result,
+    /// Where a test may hold an owner for a delay, at a gate, or both. A
+    /// held launch or result is traced for the Attempt it holds.
+    pub const Pause = union(enum) {
+        action_launch: store_module.ActionAttemptBinding,
+        model_launch: store_module.AttemptBinding,
+        action_result: store_module.ActionAttemptBinding,
+        model_result: store_module.AttemptBinding,
         preparation_advanced,
         bash_exit_observed,
-
-        fn phase(self: Pause) ?[]const u8 {
-            return switch (self) {
-                .action_launch, .model_launch => "prepared_before_handoff",
-                .action_result, .model_result => "sealed_before_settlement",
-                .preparation_advanced, .bash_exit_observed => null,
-            };
-        }
     };
 
     pub const Hold = struct {
@@ -150,7 +142,7 @@ pub const Hooks = struct {
     }
 
     /// The tag of `E` that test options spell with hyphens for underscores.
-    pub fn spelled(comptime E: type, name: []const u8) ?E {
+    pub fn fromOptionName(comptime E: type, name: []const u8) ?E {
         var buffer: [64]u8 = undefined;
         if (name.len > buffer.len or std.mem.indexOfScalar(u8, name, '_') != null) return null;
         _ = std.mem.replace(u8, name, "-", "_", buffer[0..name.len]);
@@ -160,14 +152,12 @@ pub const Hooks = struct {
     /// Adds one `--fault` name: a Failure or a Bash lifecycle fault.
     pub fn inject(self: *Hooks, name: []const u8) error{UnknownFault}!void {
         if (std.mem.startsWith(u8, name, "bash-")) {
-            if (spelled(bash.LifecycleFault, name["bash-".len..])) |lifecycle| if (lifecycle != .none) {
+            if (fromOptionName(bash.LifecycleFault, name["bash-".len..])) |lifecycle| if (lifecycle != .none) {
                 self.bash_lifecycle = lifecycle;
                 return;
             };
         }
-        const failure = spelled(Failure, name) orelse return error.UnknownFault;
-        if (failure == .retention_removal) return error.UnknownFault;
-        self.failures.insert(failure);
+        self.failures.insert(fromOptionName(Failure, name) orelse return error.UnknownFault);
     }
 
     pub fn contentFaults(self: *const Hooks) protocol.ContentFaults {
@@ -210,12 +200,14 @@ pub const Hooks = struct {
         };
     }
 
-    pub fn transferFaults(self: *const Hooks) provider.Faults {
+    /// `write_once_spent`: an earlier Transfer started with the one-shot
+    /// response write failure, which the execution owner records.
+    pub fn transferFaults(self: *const Hooks, write_once_spent: bool) provider.Faults {
         return .{
             .request_read = self.fails(.request_read),
             .response_acquire = self.fails(.response_acquire),
             .response_unlink = self.fails(.response_unlink),
-            .response_write = self.fails(.response_write) or self.fails(.response_write_once),
+            .response_write = self.fails(.response_write) or (self.fails(.response_write_once) and !write_once_spent),
         };
     }
 
@@ -233,6 +225,14 @@ pub const Hooks = struct {
             .fault_gated = self.fails(.bash_fault_gated),
         };
     }
+};
+
+/// The execution owner's progress through the fixed Hooks, so Hooks stay
+/// read-only for every thread once the Host starts.
+pub const HookProgress = struct {
+    /// A Transfer started with the one-shot response write failure.
+    response_write_once_spent: bool = false,
+    retry_recovery: enum { initial, held, released } = .initial,
 };
 
 /// How far a Host has shut down. It only moves forward, under the launch
@@ -260,6 +260,8 @@ pub const Host = struct {
     scratch_budget: ?provider.ScratchBudget = null,
     /// Execution-thread-owned Codex sticky routing; in memory only.
     turn_states: model_adapter.TurnStates = .{},
+    /// Execution-thread-owned progress through the fixed hooks.
+    hook_progress: HookProgress = .{},
     /// Execution-thread-owned, one per custody record and zero-mapped.
     bash_work: []BashWork = &.{},
     /// Execution-thread-owned count of execution slot writes; it moves on
@@ -787,13 +789,16 @@ pub fn testTransition(host: *Host, transition: Hooks.Transition, binding: store_
 }
 
 /// Holds the calling owner at `point` for the test's delay and gate, if any.
-pub fn pause(host: *Host, point: Hooks.Pause, subject: execution.CustodyBinding) void {
+pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
     if (hold.delay_ms == 0 and hold.gate_path == null) return;
-    if (point.phase()) |phase| switch (subject) {
-        .model => |binding| traceOperation(host, phase, binding),
-        .action => |binding| traceAction(host, phase, binding),
-    };
+    switch (point) {
+        .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
+        .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
+        .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
+        .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
+        .preparation_advanced, .bash_exit_observed => {},
+    }
     if (hold.gate_path) |path| waitAtTestGate(host, path);
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
@@ -802,17 +807,17 @@ pub fn pause(host: *Host, point: Hooks.Pause, subject: execution.CustodyBinding)
 /// later recoveries while the gate exists, never admission or the execution
 /// turn. One real call first preserves the full-drain counterexample.
 pub fn retryRecoveryHeld(host: *Host) bool {
-    if (host.hooks.retry_recovery != .held) return false;
+    if (host.hook_progress.retry_recovery != .held) return false;
     if (testGateActive(host, host.hooks.retry_recovery_gate_path.?)) return true;
-    host.hooks.retry_recovery = .released;
+    host.hook_progress.retry_recovery = .released;
     return false;
 }
 
 pub fn retryRecovered(host: *Host) void {
-    if (host.hooks.retry_recovery != .initial) return;
+    if (host.hook_progress.retry_recovery != .initial) return;
     const path = host.hooks.retry_recovery_gate_path orelse return;
     if (!testGateActive(host, path)) return;
-    host.hooks.retry_recovery = .held;
+    host.hook_progress.retry_recovery = .held;
     traceSubject(host, "exhausted_retry_recovery_held", "path", path);
 }
 
@@ -902,6 +907,26 @@ fn appendOptionalSigned(
     } else try trace.append("null");
 }
 
+/// A managed Transfer's connection reuse and request correlation, for tests.
+pub fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+    if (host.authentication == null or !host.hooks.phase_trace) return;
+    var publication = beginTestObservation(host, "codex_transfer", null);
+    defer if (publication) |*value| value.finish();
+    const observation = transfer.protocolObservation();
+    const correlation = transfer.requestId();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
+        binding.operation_id,
+        observation.new_connections,
+        observation.replays,
+        if (correlation.len != 0) "true" else "false",
+        digest,
+    }) catch unreachable;
+    writeTestTrace(host, &trace, &publication);
+}
+
 pub fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     if (!host.hooks.phase_trace or !host.hooks.sqlite_diagnostics) return;
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
@@ -974,13 +999,9 @@ test "every --fault name reaches its own hook and nothing else" {
         const name = buffer[0..@tagName(failure).len];
         _ = std.mem.replace(u8, @tagName(failure), "_", "-", name);
         var hooks: Hooks = .{};
-        if (failure == .retention_removal) {
-            try std.testing.expectError(error.UnknownFault, hooks.inject(name));
-        } else {
-            try hooks.inject(name);
-            try std.testing.expect(hooks.failures.eql(.initOne(failure)));
-            try std.testing.expectEqual(bash.LifecycleFault.none, hooks.bash_lifecycle);
-        }
+        try hooks.inject(name);
+        try std.testing.expect(hooks.failures.eql(.initOne(failure)));
+        try std.testing.expectEqual(bash.LifecycleFault.none, hooks.bash_lifecycle);
     }
     const lifecycles = [_]struct { []const u8, bash.LifecycleFault }{
         .{ "bash-observe", .observe },
@@ -998,9 +1019,9 @@ test "every --fault name reaches its own hook and nothing else" {
         try std.testing.expect(hooks.failures.eql(.empty));
     }
     var hooks: Hooks = .{};
-    for ([_][]const u8{ "bash-none", "none", "content_acquire", "content-acquire-", "" }) |name|
+    for ([_][]const u8{ "bash-none", "none", "retention-removal", "content_acquire", "content-acquire-", "" }) |name|
         try std.testing.expectError(error.UnknownFault, hooks.inject(name));
-    try std.testing.expectEqual(Hooks.Transition.action_result_committed, Hooks.spelled(Hooks.Transition, "action-result-committed").?);
+    try std.testing.expectEqual(Hooks.Transition.action_result_committed, Hooks.fromOptionName(Hooks.Transition, "action-result-committed").?);
 }
 
 test "inspection counts held custody, not an in-flight admission reservation" {

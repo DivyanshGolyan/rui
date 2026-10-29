@@ -1124,7 +1124,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
         limits.retention_entry_capacity = capacity;
     }
-    if (parsed.has("test-retention-removal-failure")) hooks.failures.insert(.retention_removal);
+    if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
     for (parsed.all("fault")) |fault| try hooks.inject(fault);
     if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
         if (seconds < 1) return error.InvalidProviderInactivity;
@@ -1161,16 +1161,15 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
     if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
         return error.InvalidTestObservationPlan;
-    if (parsed.get("test-transition")) |name| hooks.transition = .{
-        .transition = server.Hooks.spelled(server.Hooks.Transition, name) orelse return error.UnknownTestTransition,
-        .path = parsed.get("test-transition-gate-path") orelse return error.IncompleteTestTransitionGate,
-    } else if (parsed.has("test-transition-gate-path")) return error.IncompleteTestTransitionGate;
+    const transition: ?server.Hooks.Transition = if (parsed.get("test-transition")) |name|
+        server.Hooks.fromOptionName(server.Hooks.Transition, name) orelse return error.UnknownTestTransition
+    else
+        null;
+    const transition_gate_path = parsed.get("test-transition-gate-path");
     hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
     hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
-    if (parsed.get("test-control-gate-keys")) |keys| hooks.control_gate = .{
-        .keys = keys,
-        .path = parsed.get("test-control-gate-path") orelse return error.IncompleteControlGate,
-    } else if (parsed.has("test-control-gate-path")) return error.IncompleteControlGate;
+    const control_gate_keys = parsed.get("test-control-gate-keys");
+    const control_gate_path = parsed.get("test-control-gate-path");
     if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
     if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
     if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
@@ -1191,6 +1190,10 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         if (delay < 0) return error.InvalidRequestPreparationDelay;
         hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
     }
+    if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
+    if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
+    if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
+    if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;

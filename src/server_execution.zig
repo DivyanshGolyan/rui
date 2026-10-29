@@ -40,6 +40,7 @@ const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
 const testTransition = server_host.testTransition;
+const traceCodexTransfer = server_host.traceCodexTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecoveryHeld = server_host.retryRecoveryHeld;
@@ -908,7 +909,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                pause(host, .bash_exit_observed, .{ .action = active.binding });
+                pause(host, .bash_exit_observed);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -1068,7 +1069,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     const token = slot.bash_preparing.token;
     const action_binding = slot.bash_preparing.binding;
     testTransition(host, .prepared_before_handoff, action_binding);
-    pause(host, .action_launch, .{ .action = action_binding });
+    pause(host, .{ .action_launch = action_binding });
     if (!host.launchAllowed()) {
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
@@ -1177,7 +1178,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         _ = failBash(host, slot, "Bash outcome materialization", err);
         return;
     };
-    pause(host, .action_result, .{ .action = binding });
+    pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
     if (host.custody.claimTerminalDelivery(token)) {
         const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
@@ -1361,7 +1362,7 @@ fn advanceModelPreparation(
     switch (progress) {
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            pause(host, .preparation_advanced, .{ .model = owner.binding });
+            pause(host, .preparation_advanced);
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
@@ -1525,12 +1526,7 @@ fn launchPreparedRequest(
         return;
     }
     var retained_response: ?named_scratch.Owner = null;
-    if (host.hooks.fails(.provider_prepare)) {
-        request.deinit(host.io, host.scratch_budget.?);
-        settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
-        finishCustodyNow(host, slot);
-        return;
-    }
+    if (failedAtProviderPrepare(host, slot, token, binding, request)) return;
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
     var turn_state: provider.TurnStateKey = .{};
@@ -1557,7 +1553,7 @@ fn launchPreparedRequest(
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
         .turn_state = turn_state,
-        .faults = host.hooks.transferFaults(),
+        .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
@@ -1578,8 +1574,8 @@ fn launchPreparedRequest(
         return;
     };
     // Spent only by a Transfer that started, so a failed start keeps it armed.
-    host.hooks.failures.remove(.response_write_once);
-    pause(host, .model_launch, .{ .model = binding });
+    host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
@@ -1631,23 +1627,7 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    if (host.authentication != null and host.hooks.phase_trace) {
-        var publication = beginTestObservation(host, "codex_transfer", null);
-        defer if (publication) |*value| value.finish();
-        const observation = active.transfer.protocolObservation();
-        const correlation = active.transfer.requestId();
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-        var trace: protocol.ResponseBuffer = .{};
-        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
-            owner.binding.operation_id,
-            observation.new_connections,
-            observation.replays,
-            if (correlation.len != 0) "true" else "false",
-            digest,
-        }) catch unreachable;
-        writeTestTrace(host, &trace, &publication);
-    }
+    traceCodexTransfer(host, &active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
     var http_status: ?u16 = null;
@@ -1835,7 +1815,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     };
     const validated = accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
-    pause(host, .model_result, .{ .model = owner.binding });
+    pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
     host.store.settleModelSuccess(owner.binding, &.{
@@ -2025,6 +2005,22 @@ fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: f
 
 /// A failure with no provider answer to correlate. Answered paths settle
 /// through `AnsweredAttempt` instead.
+/// The provider_prepare hook fails a launch as a transport failure before any
+/// header or Transfer exists. Returns whether it did.
+fn failedAtProviderPrepare(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    binding: store_module.AttemptBinding,
+    request: *provider.PreparedRequest,
+) bool {
+    if (!host.hooks.fails(.provider_prepare)) return false;
+    request.deinit(host.io, host.scratch_budget.?);
+    settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
+    finishCustodyNow(host, slot);
+    return true;
+}
+
 fn settleUnansweredFailure(
     host: *Host,
     token: execution.CustodyToken,

@@ -28,7 +28,8 @@ pub const Requests = struct {
     stage: ?*FailureStage = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?ReadFailure = null,
-    /// Test hook: asks the Host to drop its reply at this point.
+    /// Test hook for mutation sends only: asks the Host to drop its reply at
+    /// this point.
     drop_reply: ?[]const u8 = null,
 
     pub fn failRead(self: Requests, failure: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
@@ -3201,6 +3202,7 @@ fn sendSource(
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
     }
     if (requests.drop_reply) |drop| {
+        std.debug.assert(std.meta.eql(timing, ResponseTiming.mutation));
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Test-Drop-Reply: {s}\r\n", .{drop})).len;
     }
     used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
