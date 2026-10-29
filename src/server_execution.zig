@@ -21,7 +21,6 @@ const AuthWorker = server_host.AuthWorker;
 const mapZeroed = server_host.mapZeroed;
 const unmapZeroed = server_host.unmapZeroed;
 const Limits = server_host.Limits;
-const Faults = server_host.Faults;
 const SettlementTrace = server_host.SettlementTrace;
 const default_bash_path = server_host.default_bash_path;
 const fenceDispatch = server_host.fenceDispatch;
@@ -41,8 +40,11 @@ const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
 const testTransition = server_host.testTransition;
-const waitAtTestGate = server_host.waitAtTestGate;
-const testGateActive = server_host.testGateActive;
+const traceCodexTransfer = server_host.traceCodexTransfer;
+const pause = server_host.pause;
+const bashReclaimHeld = server_host.bashReclaimHeld;
+const retryRecoveryHeld = server_host.retryRecoveryHeld;
+const retryRecovered = server_host.retryRecovered;
 const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
 
 const AttemptOwner = struct {
@@ -380,7 +382,7 @@ pub fn executionMain(host: *Host) void {
         unmapZeroed(bash_work);
     }
     const budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
+        if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
     var reactor_storage: provider.Reactor = undefined;
     // With no slots no Transfer can start, so a zero-capacity Host runs no
@@ -592,10 +594,7 @@ const NativeTurn = struct {
     }
 
     pub fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
-        if (self.host.test_retry_recovery == .held) {
-            if (testGateActive(self.host, self.host.faults.retry_recovery_gate_path.?)) return false;
-            self.host.test_retry_recovery = .released;
-        }
+        if (retryRecoveryHeld(self.host)) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
             .context = &active_slots,
@@ -607,16 +606,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        // Hold only later recovery calls, never admission or the execution
-        // turn. One real call first preserves the full-drain counterexample.
-        if (recovered and self.host.test_retry_recovery == .initial) {
-            if (self.host.faults.retry_recovery_gate_path) |path| {
-                if (testGateActive(self.host, path)) {
-                    self.host.test_retry_recovery = .held;
-                    traceSubject(self.host, "exhausted_retry_recovery_held", "path", path);
-                }
-            }
-        }
+        if (recovered) retryRecovered(self.host);
         return recovered;
     }
 
@@ -721,7 +711,7 @@ const slotsHaveBash = hasBash;
 /// inside exactly one slot.
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
     const active_reactor = reactor orelse return false;
-    const completion = active_reactor.nextCompletion(host.faults.response_seal) catch |err| {
+    const completion = active_reactor.nextCompletion(host.hooks.fails(.response_seal)) catch |err| {
         fenceDispatch(host, "transport completion", err);
         return false;
     } orelse return false;
@@ -919,7 +909,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                if (host.faults.bash_observed_exit_gate_path) |path| waitAtTestGate(host, path);
+                pause(host, .bash_exit_observed);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -948,9 +938,7 @@ fn admitBashAttempt(
 ) AdmissionProgress {
     std.debug.assert(preparation.* == null);
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, .{
-        .attempt_before_commit = host.faults.attempt_before_commit,
-    }) catch |err| {
+    var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash Attempt admission", err);
         return .retry_later;
@@ -987,18 +975,7 @@ fn admitBashAttempt(
         host.bash_path,
         input.timeout_ms,
         action_binding.action_id,
-        .{
-            .preparation = host.faults.bash_preparation,
-            .preparation_after_captures = host.faults.bash_preparation_after_captures,
-            .spawn = host.faults.bash_spawn,
-            .service = host.faults.bash_service,
-            .capture_read = host.faults.bash_capture_read,
-            .capture_write = host.faults.bash_capture_write,
-            .seal = host.faults.bash_seal,
-            .cleanup = host.faults.bash_cleanup,
-            .lifecycle = host.faults.bash_lifecycle_fault,
-            .fault_gated = host.faults.bash_fault_gated,
-        },
+        host.hooks.bashFaults(),
     );
     switch (started) {
         .preparing => |value| {
@@ -1092,10 +1069,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     const token = slot.bash_preparing.token;
     const action_binding = slot.bash_preparing.binding;
     testTransition(host, .prepared_before_handoff, action_binding);
-    if (host.faults.before_launch_delay_ms != 0) {
-        traceAction(host, "prepared_before_handoff", action_binding);
-        _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
-    }
+    pause(host, .{ .action_launch = action_binding });
     if (!host.launchAllowed()) {
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
@@ -1204,16 +1178,10 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         _ = failBash(host, slot, "Bash outcome materialization", err);
         return;
     };
-    if (host.faults.before_result_delay_ms != 0) {
-        traceAction(host, "sealed_before_settlement", binding);
-        _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
-    }
+    pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
     if (host.custody.claimTerminalDelivery(token)) {
-        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), .{
-            .content_import = host.faults.content_import,
-            .before_commit = host.faults.result_before_commit,
-        }) catch |err| {
+        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
             active.execution.releaseOutputReservation(host.retention);
             _ = failBash(host, slot, "Bash result settlement", err);
             return;
@@ -1242,26 +1210,16 @@ fn closeBashDelivery(host: *Host, slot: *ExecutionSlot) void {
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
     const active = &slot.bash;
-    if (host.faults.bash_cleanup_gate_path) |path| {
-        if (testGateActive(host, path)) {
-            active.delivery.closed.reclaim_at = now.addDuration(.{
-                .raw = .fromMilliseconds(100),
-                .clock = .awake,
-            });
-            return false;
-        }
-        // A released gate is one owner transition, not reclamation retry history.
-        // reclaim_failed already remembers whether this owner attempted reclaim.
-        if (!active.delivery.closed.reclaim_failed)
-            traceAction(host, "cleanup_release_observed", active.binding);
+    const closed = &active.delivery.closed;
+    const retry_at = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
+    if (bashReclaimHeld(host, active.binding, closed.reclaim_failed)) {
+        closed.reclaim_at = retry_at;
+        return false;
     }
     active.execution.reclaim(bashScratch(host), host.retention) catch |err| {
-        const first_failure = !active.delivery.closed.reclaim_failed;
-        active.delivery.closed.reclaim_failed = true;
-        active.delivery.closed.reclaim_at = now.addDuration(.{
-            .raw = .fromMilliseconds(100),
-            .clock = .awake,
-        });
+        const first_failure = !closed.reclaim_failed;
+        closed.reclaim_failed = true;
+        closed.reclaim_at = retry_at;
         if (first_failure) retainDispatchFence(host, "Bash resource reclamation", err);
         return first_failure;
     };
@@ -1295,10 +1253,7 @@ fn settleActionFailure(
     result: []const u8,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    _ = host.store.settleActionAttempt(binding, code, result, .{
-        .content_import = host.faults.content_import,
-        .before_commit = host.faults.result_before_commit,
-    }) catch |err| {
+    _ = host.store.settleActionAttempt(binding, code, result, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "Bash failure settlement", err);
         return;
     };
@@ -1311,9 +1266,7 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitModelAttempt(kind, .{
-        .attempt_before_commit = host.faults.attempt_before_commit,
-    }) catch |err| {
+    var admission = host.store.admitModelAttempt(kind, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1331,10 +1284,7 @@ fn admitRetryAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.tryAdmitNextModelRetry(
-        active,
-        .{ .attempt_before_commit = host.faults.attempt_before_commit },
-    ) catch |err| {
+    var admission = host.store.tryAdmitNextModelRetry(active, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "retry Attempt admission", err);
         return .retry_later;
@@ -1372,13 +1322,8 @@ fn beginAdmittedAttempt(
         view,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
-        .{
-            .managed_route = host.authentication != null,
-            .first_step = host.faults.request_first_step,
-            .write = host.faults.request_write,
-            .seal = host.faults.request_seal,
-            .unlink = host.faults.request_unlink,
-        },
+        if (host.authentication != null) .managed else .endpoint,
+        host.hooks.preparationFaults(),
         &retained_scratch,
     ) catch |err| {
         finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
@@ -1417,9 +1362,7 @@ fn advanceModelPreparation(
     switch (progress) {
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            if (host.faults.request_preparation_advance_delay_ms != 0) {
-                _ = host.io.sleep(.fromMilliseconds(host.faults.request_preparation_advance_delay_ms), .awake) catch {};
-            }
+            pause(host, .preparation_advanced);
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
@@ -1583,12 +1526,7 @@ fn launchPreparedRequest(
         return;
     }
     var retained_response: ?named_scratch.Owner = null;
-    if (host.faults.provider_prepare) {
-        request.deinit(host.io, host.scratch_budget.?);
-        settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
-        finishCustodyNow(host, slot);
-        return;
-    }
+    if (failedAtProviderPrepare(host, slot, token, binding, request)) return;
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
     var turn_state: provider.TurnStateKey = .{};
@@ -1611,17 +1549,11 @@ fn launchPreparedRequest(
         .transfer = undefined,
     } });
     const active = &slot.provider;
-    const write_once = host.faults.response_write_once;
     active.transfer.start(reactor, request.*, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
         .turn_state = turn_state,
-        .faults = .{
-            .request_read = host.faults.request_read,
-            .response_acquire = host.faults.response_acquire,
-            .response_unlink = host.faults.response_unlink,
-            .response_write = host.faults.response_write or write_once,
-        },
+        .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
@@ -1642,11 +1574,8 @@ fn launchPreparedRequest(
         return;
     };
     // Spent only by a Transfer that started, so a failed start keeps it armed.
-    if (write_once) host.faults.response_write_once = false;
-    if (host.faults.before_launch_delay_ms != 0) {
-        traceOperation(host, "prepared_before_handoff", binding);
-        _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
-    }
+    host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }) catch |err| {
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
@@ -1698,23 +1627,7 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    if (host.authentication != null and host.faults.test_phase_trace) {
-        var publication = beginTestObservation(host, "codex_transfer", null);
-        defer if (publication) |*value| value.finish();
-        const observation = active.transfer.protocolObservation();
-        const correlation = active.transfer.requestId();
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-        var trace: protocol.ResponseBuffer = .{};
-        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
-            owner.binding.operation_id,
-            observation.new_connections,
-            observation.replays,
-            if (correlation.len != 0) "true" else "false",
-            digest,
-        }) catch unreachable;
-        writeTestTrace(host, &trace, &publication);
-    }
+    traceCodexTransfer(host, &active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
     var http_status: ?u16 = null;
@@ -1848,7 +1761,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         host.lease.paths.scratch.slice(),
         metadata_name,
         metadata_budget,
-        host.faults.response_metadata_unlink,
+        host.hooks.fails(.response_metadata_unlink),
         &retained_metadata,
     ) catch |err| {
         if (retained_metadata) |retained| {
@@ -1887,7 +1800,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
     }, .{
-        .metadata = host.faults.response_metadata,
+        .metadata = host.hooks.fails(.response_metadata),
     })) {
         .accepted => |value| value,
         .rejected => |rejection| {
@@ -1902,11 +1815,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     };
     const validated = accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
-    if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
-        traceOperation(host, "sealed_before_settlement", owner.binding);
-        if (host.faults.model_result_gate_path) |path| waitAtTestGate(host, path);
-        _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
-    }
+    pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
     host.store.settleModelSuccess(owner.binding, &.{
@@ -1921,12 +1830,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         .response_id = validated.evidence.response_id,
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
-    }, .{
-        .output_read = host.faults.response_read,
-        .output_import = host.faults.response_import,
-        .output_commit = host.faults.response_commit,
-        .settlement_trace = settlement_trace.storeTrace(),
-    }) catch |err| {
+    }, host.hooks.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
@@ -1937,9 +1841,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
                 diagnostic,
-            ), .ordinary, .{
-                .before_commit = host.faults.result_before_commit,
-            }) catch |failure_err| if (failure_err != error.SupersededByControl)
+            ), .ordinary, host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
             fenceDispatch(host, "model output import", err);
@@ -2103,6 +2005,22 @@ fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: f
 
 /// A failure with no provider answer to correlate. Answered paths settle
 /// through `AnsweredAttempt` instead.
+/// The provider_prepare hook fails a launch as a transport failure before any
+/// header or Transfer exists. Returns whether it did.
+fn failedAtProviderPrepare(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    binding: store_module.AttemptBinding,
+    request: *provider.PreparedRequest,
+) bool {
+    if (!host.hooks.fails(.provider_prepare)) return false;
+    request.deinit(host.io, host.scratch_budget.?);
+    settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
+    finishCustodyNow(host, slot);
+    return true;
+}
+
 fn settleUnansweredFailure(
     host: *Host,
     token: execution.CustodyToken,
@@ -2121,9 +2039,7 @@ fn settleFailure(
     disposition: store_module.ModelFailureClass,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelAttemptFailure(binding, failure, disposition, .{
-        .before_commit = host.faults.result_before_commit,
-    }) catch |err| if (err != error.SupersededByControl)
+    host.store.settleModelAttemptFailure(binding, failure, disposition, host.hooks.storeFaults(.model_failure)) catch |err| if (err != error.SupersededByControl)
         fenceDispatch(host, "model failure save", err);
 }
 
@@ -2131,7 +2047,7 @@ fn settleFailure(
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
-    const traced = if (host.faults.test_phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
+    const traced = if (host.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
     moveSlot(host, slot, .free);
     if (traced) |binding| switch (binding) {
         .model => |model| traceOperation(host, "cleanup_completed", model),
@@ -2201,7 +2117,6 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .faults = .{},
             .custody = execution.CustodyPool.initialize(&records),
             .auth_worker = &worker,
         };
@@ -2303,7 +2218,7 @@ test "HTTP error capture retires before execution custody" {
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .faults = .{ .test_phase_trace = true },
+            .hooks = .{ .phase_trace = true },
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;
@@ -2409,7 +2324,7 @@ test "cleanup publication follows complete execution retirement" {
         .allocator = std.testing.allocator,
         .lease = undefined,
         .store = undefined,
-        .faults = .{ .test_phase_trace = true },
+        .hooks = .{ .phase_trace = true },
         .custody = execution.CustodyPool.initialize(&records),
     };
     var slot: ExecutionSlot = .free;
@@ -2549,7 +2464,7 @@ test "cleanup publication follows complete execution retirement" {
     boundary.token = token;
     boundary.observed = false;
     var gate_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
-    host.faults.bash_cleanup_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
+    host.hooks.bash_reclaim_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
     // A released gate grants one reclamation transition, even if removal
     // fails repeatedly. The same charged capture and custody survive retry.
     slot.bash.execution.stdout_capture.cleanup_fault = .persistent;
@@ -2596,7 +2511,6 @@ test "named scratch retry releases custody through the shutdown owner path" {
         .allocator = std.testing.allocator,
         .lease = &lease,
         .store = undefined,
-        .faults = .{},
         .custody = execution.CustodyPool.initialize(&records),
     };
     const token = host.custody.reserve().?;
@@ -2782,7 +2696,6 @@ test "no-work admission restores only its temporary custody reservation" {
                 .allocator = std.testing.allocator,
                 .lease = undefined,
                 .store = &storage,
-                .faults = .{},
                 .custody = execution.CustodyPool.initialize(&records),
             };
             var slots = [_]ExecutionSlot{ .free, .free, .free };
@@ -2886,7 +2799,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .allocator = std.testing.allocator,
                 .lease = undefined,
                 .store = &storage,
-                .faults = .{ .attempt_before_commit = kind == .message },
+                .hooks = .{ .failures = if (kind == .message) .initOne(.attempt_before_commit) else .empty },
                 .custody = execution.CustodyPool.initialize(&records),
             };
             var slots = [_]ExecutionSlot{ .free, .free, .free };
@@ -2944,7 +2857,6 @@ test "closed Bash delivery retains its payload with detached custody" {
         .allocator = std.testing.allocator,
         .lease = &lease,
         .store = undefined,
-        .faults = .{},
         .custody = execution.CustodyPool.initialize(&records),
     };
     const token = host.custody.reserve().?;
@@ -3102,7 +3014,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3200,7 +3112,6 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
         .allocator = std.testing.allocator,
         .lease = &lease,
         .store = undefined,
-        .faults = .{},
         .custody = execution.CustodyPool.initialize(&records),
     };
     const token = host.custody.reserve().?;
@@ -3334,7 +3245,6 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined, // The suppression path must not query or settle.
-            .faults = .{},
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;
@@ -3351,6 +3261,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .{ .store = undefined, .binding = binding },
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
+            .endpoint,
             .{},
             &retained,
         );
@@ -3386,7 +3297,6 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .allocator = std.testing.allocator,
             .lease = undefined,
             .store = undefined,
-            .faults = .{},
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;
@@ -3442,7 +3352,6 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .allocator = std.testing.allocator,
                 .lease = &lease,
                 .store = undefined, // No canonical query, cancellation, or result.
-                .faults = .{},
                 .custody = execution.CustodyPool.initialize(&records),
             };
             const token = host.custody.reserve().?;

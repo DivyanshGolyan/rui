@@ -11093,7 +11093,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(7, 2);
@@ -11150,7 +11150,7 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(1, 1);
