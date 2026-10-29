@@ -1,4 +1,5 @@
 const std = @import("std");
+const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
@@ -884,7 +885,6 @@ pub const Preparation = struct {
     bash_path: []const u8,
     timeout_ms: u64,
     action_id: u64,
-    attempt_ordinal: u64,
     faults: Faults,
     source: ContentSource,
     parser: tools.BashParser = .{},
@@ -944,7 +944,7 @@ pub const Preparation = struct {
 
     fn ensureInput(self: *Preparation) !void {
         if (self.cleanup.stdin_capture != null) return;
-        self.cleanup.stdin_capture = try createOwnedFile(self.scratch, .@"bash-stdin", self.action_id, self.attempt_ordinal, .none);
+        self.cleanup.stdin_capture = try createOwnedFile(self.scratch, .@"bash-stdin", self.action_id, attempt.action_attempt_ordinal, .none);
         const input = &self.cleanup.stdin_capture.?;
         const io = self.scratch.io;
         var directory = try std.Io.Dir.cwd().openDir(io, self.scratch.path, .{});
@@ -1004,7 +1004,6 @@ pub fn startPreparation(
     bash_path: []const u8,
     timeout_ms: u64,
     action_id: u64,
-    attempt_ordinal: u64,
     faults: Faults,
 ) PreparationStart {
     var cleanup = PreparedCleanup{};
@@ -1017,7 +1016,7 @@ pub fn startPreparation(
         .{ &cleanup.stdout_capture, .@"bash-stdout" },
         .{ &cleanup.stderr_capture, .@"bash-stderr" },
     }) |capture| {
-        capture[0].* = createOwnedFile(scratch, capture[1], action_id, attempt_ordinal, cleanupFault(faults)) catch |err| {
+        capture[0].* = createOwnedFile(scratch, capture[1], action_id, attempt.action_attempt_ordinal, cleanupFault(faults)) catch |err| {
             owned_reader.close();
             return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
         };
@@ -1035,7 +1034,6 @@ pub fn startPreparation(
         .bash_path = bash_path,
         .timeout_ms = timeout_ms,
         .action_id = action_id,
-        .attempt_ordinal = attempt_ordinal,
         .faults = faults,
         .source = .{ .reader = owned_reader, .length = arguments_length },
         .cleanup = cleanup,

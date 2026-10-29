@@ -1275,7 +1275,7 @@ def prove_bash_cleanup_population():
     # A model owner completes once; the Bash owner starts, releases and completes.
     records = [dict(rui_test_phase="cleanup_completed", turn="7", operation="11", attempt="1", action=None)]
     for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
-        records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action="19"))
+        records.append(dict(rui_test_phase=phase, turn="7", operation="11", action="19"))
     records.append(dict(rui_test_phase="inspection_captured"))
     for case in ("normal", "missing", "duplicate", "wrong-owner", "extra-phase", "inspection-overflow"):
         values = [dict(r) for r in records]
