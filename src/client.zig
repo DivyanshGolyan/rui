@@ -90,7 +90,7 @@ pub const Requests = struct {
         reply_buffer.len = 0;
         self.check() catch |err| return .fail(null, err);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -661,7 +661,7 @@ pub const Binding = struct {
     store: ?[]const u8 = null,
     session: ?[]const u8 = null,
     key: ?[]const u8 = null,
-    kind: ?protocol_reply.MutationKind = null,
+    kind: ?protocol.CommandKind = null,
     /// The exact target, payload included.
     target: ?protocol_reply.MutationTarget = null,
 
@@ -737,11 +737,10 @@ fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const
 }
 
 /// A saved record to resend: a generated handle in its request directory,
-/// or an explicit record that must belong to `store` and carry `kind`, in
-/// its `rui request recover --kind` spelling.
+/// or an explicit record that must belong to `store` and carry `kind`.
 pub const SavedRecord = union(enum) {
     generated: struct { directory: []const u8, handle: []const u8 },
-    explicit: struct { store: []const u8, record: []const u8, kind: []const u8 },
+    explicit: struct { store: []const u8, record: []const u8, kind: protocol.CommandKind },
 };
 
 /// Reopens a saved record to resend its original bytes. A generated record
@@ -759,7 +758,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .explicit => |explicit| blk: {
             paths = try platform.resolveClientPaths(io, explicit.store);
             expected.store = paths.store.slice();
-            expected.kind = protocol_reply.MutationKind.parseRetryName(explicit.kind) orelse return error.InvalidRetryKind;
+            expected.kind = explicit.kind;
             break :blk explicit.record;
         },
     };
@@ -849,7 +848,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
     if (!fields.version.eql("1")) return error.InvalidRequestRecord;
-    const kind = std.meta.stringToEnum(protocol_reply.MutationKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
     if (kind == .model_interruption) {
         if (fields.session != null) return error.InvalidRequestRecord;
@@ -917,7 +916,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     var key: @FieldType(protocol_reply.MutationIdentity, "key") = .{};
     try key.set(parsed.value.key);
     const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
-    const kind = std.meta.stringToEnum(protocol_reply.MutationKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(protocol.CommandKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
     var identity: protocol_reply.MutationIdentity = .{ .store = store, .key = key, .kind = kind };
     const creation = session.len == 0 and (kind == .configure or
         kind == .message and std.mem.startsWith(u8, prefix[kind_marker..], ",\"configuration\":"));
@@ -1038,7 +1037,7 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .permission_decision);
 }
 
-fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: protocol_reply.MutationKind) !CapturedRecord {
+fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
     // Pin the temporary inode under capture custody, before exposing its name.
     // This reader observes the final flush, not a later public-path replacement.
     var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
@@ -1969,7 +1968,7 @@ test "client capture rejects noncanonical Session references before publication"
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/invalid-record", .{root});
     const target: CaptureTarget = .{ .explicit = .{ .record = path, .key = "key\x00雪" } };
     for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }) |session| {
-        inline for (comptime std.meta.tags(protocol_reply.MutationKind)) |kind| {
+        inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
             const result: anyerror!CapturedRecord = switch (kind) {
                 .configure => captureConfigure(io, .{ .store = root, .session = .{ .named = session } }, target).get(),
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
@@ -1999,7 +1998,7 @@ test "client recovery rejects noncanonical Session references without retransmis
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(root, handle, &path_buffer);
     for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", handle }) |session| {
-        inline for (comptime std.meta.tags(protocol_reply.MutationKind)) |kind| {
+        inline for (comptime std.meta.tags(protocol.CommandKind)) |kind| {
             // Empty Configure is creation intent, not an invalid reference.
             if (kind != .configure or session.len != 0) {
                 var body: protocol.RequestBuffer = .{};
@@ -2025,7 +2024,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     return error.AcceptedInvalidSession;
                 } else |err| try std.testing.expectEqual(error.InvalidRequestRecord, err);
                 try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, handle));
-                try std.testing.expectError(error.InvalidRequestRecord, testResend(io, .{ .explicit = .{ .store = root, .record = path, .kind = comptime protocol_reply.MutationKind.retryName(kind) } }));
+                try std.testing.expectError(error.InvalidRequestRecord, testResend(io, .{ .explicit = .{ .store = root, .record = path, .kind = kind } }));
             }
         }
     }
@@ -2154,7 +2153,7 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expect(stop_recovered.target == .session_stop);
     stop_recovered.close(io);
     const stop_saved = try inspectCaptured(io, root, stop_key);
-    try std.testing.expectEqual(protocol_reply.MutationKind.session_stop, stop_saved.kind);
+    try std.testing.expectEqual(protocol.CommandKind.session_stop, stop_saved.kind);
     try std.testing.expectEqualStrings("k7m2qx", stop_saved.session.slice());
     var interruption_recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = interruption_key.slice() } });
     try std.testing.expectEqual(@as(u64, 5), interruption_recovered.target.model_interruption.operation);
@@ -2162,15 +2161,14 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectEqualStrings("09azvw", (try inspectCaptured(io, root, interruption_key.slice())).session.slice());
     var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = message_key.slice() } });
     recovered.close(io);
-    try std.testing.expectEqual(protocol_reply.MutationKind.message, (try inspectCaptured(io, root, message_key.slice())).kind);
+    try std.testing.expectEqual(protocol.CommandKind.message, (try inspectCaptured(io, root, message_key.slice())).kind);
 
-    // Retry accepts only the hyphenated command spelling of the record's own
-    // kind. A matching kind reaches transmission, which fails without a Host.
-    try std.testing.expectError(error.InvalidRetryKind, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = "session_stop" } }));
-    try std.testing.expectError(error.RequestBindingMismatch, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = "model-interruption" } }));
-    try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = "session-stop" } }));
-    try std.testing.expectError(error.RequestBindingMismatch, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = "permission-decision" } }));
-    try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = "message" } }));
+    // Retry accepts only the record's own kind. A matching kind reaches
+    // transmission, which fails without a Host.
+    try std.testing.expectError(error.RequestBindingMismatch, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = .model_interruption } }));
+    try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = .session_stop } }));
+    try std.testing.expectError(error.RequestBindingMismatch, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = .permission_decision } }));
+    try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = .message } }));
 }
 
 test "a peer capture preserves the full sender including self and leaves foreign Store admission to the Host" {
@@ -2222,7 +2220,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expect(std.mem.indexOfScalar(u8, "89ab", saved.key.slice()[19]) != null);
         try std.testing.expectEqualStrings(root, saved.store.slice());
         try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
-        try std.testing.expectEqual(protocol_reply.MutationKind.message, saved.kind);
+        try std.testing.expectEqual(protocol.CommandKind.message, saved.kind);
         var reply: ReplyBuffer = .{};
         try std.testing.expectError(error.FileNotFound, (Requests{ .io = io }).sendCaptured(&generated, &reply).get());
         try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());

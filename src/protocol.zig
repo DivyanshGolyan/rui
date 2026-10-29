@@ -276,7 +276,24 @@ pub const MessageRejection = enum {
     model_is_immutable,
     revision_exhausted,
 };
-pub const CommandKind = enum { configure, message, session_stop, model_interruption, permission_decision };
+pub const CommandKind = enum {
+    configure,
+    message,
+    session_stop,
+    model_interruption,
+    permission_decision,
+
+    /// The route a command's request is sent to and served from.
+    pub fn route(self: CommandKind) []const u8 {
+        return switch (self) {
+            .configure => "/v1/configure",
+            .message => "/v1/message",
+            .session_stop => "/v1/control/session-stop",
+            .model_interruption => "/v1/control/model-interruption",
+            .permission_decision => "/v1/control/permission-decision",
+        };
+    }
+};
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };

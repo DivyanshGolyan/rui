@@ -1109,7 +1109,7 @@ pub const MessageAddress = struct {
 pub const CommandObservation = struct {
     key: protocol.Bounded(protocol.max_key_bytes),
     status: enum { absent, accepted, rejected },
-    kind: ?MutationKind = null,
+    kind: ?protocol.CommandKind = null,
     target: ?protocol.Bounded(protocol.max_session_bytes) = null,
     code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
@@ -1232,7 +1232,7 @@ pub const CommandObservation = struct {
         const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
         const Facts = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
-            kind: OmittableJson(JsonEnum(MutationKind)) = .{},
+            kind: OmittableJson(JsonEnum(protocol.CommandKind)) = .{},
             target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
             code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
@@ -1325,50 +1325,12 @@ pub const CommandObservation = struct {
 
 /// The five durable mutations. Tag names are the captured-record and
 /// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
-pub const MutationKind = enum {
-    configure,
-    message,
-    session_stop,
-    model_interruption,
-    permission_decision,
-
-    pub fn route(self: MutationKind) []const u8 {
-        return switch (self) {
-            .configure => "/v1/configure",
-            .message => "/v1/message",
-            .session_stop => "/v1/control/session-stop",
-            .model_interruption => "/v1/control/model-interruption",
-            .permission_decision => "/v1/control/permission-decision",
-        };
-    }
-
-    pub fn parseRetryName(name: []const u8) ?MutationKind {
-        inline for (comptime std.enums.values(MutationKind)) |kind| {
-            if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
-        }
-        return null;
-    }
-
-    pub fn retryName(comptime kind: MutationKind) []const u8 {
-        comptime {
-            var name = @tagName(kind)[0..@tagName(kind).len].*;
-            std.mem.replaceScalar(u8, &name, '_', '-');
-            const final = name;
-            return &final;
-        }
-    }
-};
-
-pub const MutationTarget = union(MutationKind) {
+pub const MutationTarget = union(protocol.CommandKind) {
     configure,
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
-
-    pub fn route(self: MutationTarget) []const u8 {
-        return std.meta.activeTag(self).route();
-    }
 };
 
 pub const MutationAnswer = struct {
@@ -1896,7 +1858,7 @@ pub const MutationIdentity = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    kind: MutationKind,
+    kind: protocol.CommandKind,
 };
 
 // Shared authority rule for operation replies and static read/error envelopes.

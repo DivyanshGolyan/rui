@@ -1476,20 +1476,13 @@ const HeaderReader = struct {
         {
             return error.InvalidRequestLine;
         }
+        inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
+            if (std.mem.eql(u8, path, kind.route())) return @field(Route, @tagName(kind));
+        }
         return if (std.mem.eql(u8, path, "/v1/host-info"))
             .host_info
         else if (std.mem.eql(u8, path, "/v1/control/host-stop"))
             .host_stop
-        else if (std.mem.eql(u8, path, "/v1/configure"))
-            .configure
-        else if (std.mem.eql(u8, path, "/v1/message"))
-            .message
-        else if (std.mem.eql(u8, path, "/v1/control/session-stop"))
-            .session_stop
-        else if (std.mem.eql(u8, path, "/v1/control/model-interruption"))
-            .model_interruption
-        else if (std.mem.eql(u8, path, "/v1/control/permission-decision"))
-            .permission_decision
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))

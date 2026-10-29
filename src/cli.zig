@@ -2395,8 +2395,15 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     // The grammar requires --store, --record and --kind together.
     const saved: client.SavedRecord = if (parsed.positional) |handle|
         .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
-    else
-        .{ .explicit = .{ .store = parsed.get("store").?, .record = parsed.get("record").?, .kind = parsed.get("kind").? } };
+    else blk: {
+        const store = parsed.get("store").?;
+        const kind = parseRetryName(parsed.get("kind").?) orelse {
+            // The Store is resolved before the kind is read, so its failure stays first.
+            _ = try platform.resolveClientPaths(init.io, store);
+            return error.InvalidRetryKind;
+        };
+        break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
+    };
     var captured = try client.openCaptured(init.io, saved);
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
@@ -2404,6 +2411,30 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json);
+}
+
+/// A command kind in its `rui request recover --kind` spelling.
+fn parseRetryName(name: []const u8) ?protocol.CommandKind {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
+        if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
+    }
+    return null;
+}
+
+fn retryName(comptime kind: protocol.CommandKind) []const u8 {
+    comptime {
+        var name = @tagName(kind)[0..@tagName(kind).len].*;
+        std.mem.replaceScalar(u8, &name, '_', '-');
+        const final = name;
+        return &final;
+    }
+}
+
+test "recover accepts only the hyphenated spelling of each command kind" {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, kind), parseRetryName(comptime retryName(kind)));
+    inline for (.{ "session_stop", "model_interruption", "permission_decision", "Message", "", "configure-" }) |name|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, null), parseRetryName(name));
 }
 
 fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
