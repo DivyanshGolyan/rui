@@ -32,6 +32,7 @@ ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", r
 # FAIL record; the record never lies past the next numbered test.
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
+CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 # check.yml's linux and macos aggregates only require their needs' results; a
 # suite's failure fails them too, and the suite's own log carries the cause.
@@ -62,7 +63,7 @@ def fixtures(check_sh=Path("tests/integration/check.sh")):
 
 
 def tracebacks(log):
-    """Each Python traceback as (frames of (file, first source line), exception line)."""
+    """Each Python traceback as (frames of (file, source statement), exception line)."""
     lines = log.splitlines()
     for start, line in enumerate(lines):
         if line != "Traceback (most recent call last):":
@@ -70,12 +71,14 @@ def tracebacks(log):
         frames, index = [], start + 1
         while index < len(lines) and (frame := FRAME.match(lines[index])):
             index += 1
-            # Source lines, a multi-line statement's continuations and caret markers.
+            # The whole statement, so assertions sharing a first line stay
+            # distinct; caret markers are dropped.
             source = []
             while index < len(lines) and lines[index].startswith("    "):
-                source.append(lines[index].strip())
+                if not CARETS.fullmatch(lines[index]):
+                    source.append(lines[index].strip())
                 index += 1
-            frames.append((frame[1], source[0] if source else ""))
+            frames.append((frame[1], " ".join(source)))
         if frames and index < len(lines) and lines[index][:1] not in ("", " "):
             yield frames, lines[index]
 

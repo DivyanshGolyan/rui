@@ -94,7 +94,7 @@ class CauseTest(unittest.TestCase):
         [cause] = report_issue.failure_causes(BASH, self.cases)
         self.assertEqual(cause.signature, 'bash: assert process_exists(child_pid) raised AssertionError')
 
-    def test_a_multi_line_raising_statement_keeps_its_first_line(self):
+    def test_a_multi_line_raising_statement_keeps_the_whole_statement(self):
         log = logged(
             "Traceback (most recent call last):",
             '  File "/w/tests/integration/bash_integration.py", line 900, in main',
@@ -106,8 +106,12 @@ class CauseTest(unittest.TestCase):
             "bash failed: exit=1 elapsed=2.000s",
         )
         [cause] = report_issue.failure_causes(log, self.cases)
-        self.assertEqual(cause.signature, 'bash: assert states == { raised AssertionError')
+        self.assertEqual(cause.signature, 'bash: assert states == { "running": 1, }, states raised AssertionError')
         self.assertEqual(cause.detail, "AssertionError: {'running': 0}")
+        # Two assertions sharing a first line keep separate signatures.
+        other = log.replace('"running": 1,', '"held": 1,')
+        [second] = report_issue.failure_causes(other, self.cases)
+        self.assertNotEqual(second.signature, cause.signature)
 
     def test_zig_tests_and_gates_carry_their_own_cause(self):
         [crash] = report_issue.failure_causes(ZIG_CRASH, self.cases)
