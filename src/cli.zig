@@ -113,13 +113,10 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return err;
         }
-        if (err == error.MutationNotAccepted) {
-            TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
-            return err;
-        }
         // Model rejection already names the ID, supported IDs and repair;
         // Pre-admission refusals have one diagnostic, with no recovery handle.
-        if (err == error.UnsupportedModel or err == error.EmptyMessageInput) return err;
+        // A saved rejection or conflict already named its replay.
+        if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
@@ -249,6 +246,15 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    // Preferences live in HOME, so a saved Store redirects every Workspace.
+    if (!interactive and edit.store != .keep) notice: {
+        var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.writeAll("rui: saved ") catch break :notice;
+        TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
+        notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    }
     if (!interactive) return writeDefaultsJson(init.io, .{
         .changed = changed,
         .store = prospective_store,
@@ -397,7 +403,7 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
-    if (command == .host_start) return startHost(init, selected, false);
+    if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"));
     if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
@@ -474,13 +480,11 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     }
 }
 
-fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
+/// Null capacity leaves a new Host on product_defaults.active_capacity.
+fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize) !void {
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
-        .ready => |ready| {
-            if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-            return;
-        },
+        .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
         .unavailable, .owned_unavailable => {},
@@ -498,13 +502,21 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     const store_z = try std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0);
     // Application policy lives here. The synchronous native launcher borrows
     // these terminated strings and pointer framing through exec/error handoff;
-    // all storage is prepared before any detach fork. Omitting
-    // --active-capacity keeps product_defaults.active_capacity the only default.
-    const argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex",
+    // all storage is prepared before any detach fork. Without a requested
+    // capacity the flag is omitted, so product_defaults.active_capacity stays
+    // the only default.
+    var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
+    var argv = [_:null]?[*:0]const u8{
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex", null, null,
     };
+    var argc: usize = argv.len - 2;
+    if (capacity) |value| {
+        argv[argc] = "--active-capacity";
+        argv[argc + 1] = (try std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0)).ptr;
+        argc += 2;
+    }
     var startup_read: c_int = -1;
-    const launched = rui_launch_detached_observed(argv[0].?, &argv, argv.len, &startup_read);
+    const launched = rui_launch_detached_observed(argv[0].?, &argv, argc, &startup_read);
     defer if (startup_read >= 0) {
         _ = std.c.close(startup_read);
     };
@@ -560,8 +572,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
                     _ = @import("stderr.zig").write(notices);
-                if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-                return;
+                return reportStartedHost(io, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -573,6 +584,20 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
     TerminalText.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
+}
+
+/// A ready Host keeps the capacity it started with, so a different request
+/// is reported rather than dropped; a competing launcher may have won.
+fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+    if (capacity) |requested| if (requested != ready.active_capacity) notice: {
+        var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
+        notice.writeByte('\n') catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    };
+    if (!quiet) try writeHostStatus(io, .{ .ready = ready });
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
@@ -1052,7 +1077,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         try guideProviderLogin(init);
         after_choice = true;
     };
-    try startHost(init, selected_store, true);
+    try startHost(init, selected_store, true, null);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
     const ready = switch (client.hostStatus(init.io, destination)) {
@@ -1338,7 +1363,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json) catch |err| {
+    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .{ .json = .of(target) }) catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
@@ -1397,12 +1422,12 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(&step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, target, &step);
     defer captured.close(io);
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
-    if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
+    if (!reply.isAccepted()) return writeMutationReply(io, reply, .{ .json = .of(target) });
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
@@ -1588,7 +1613,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
-    try startHost(init, destination, true);
+    try startHost(init, destination, true, null);
     var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
     if (reference) |value| {
         try selected.set(value);
@@ -1796,7 +1821,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1808,22 +1833,22 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, target: client.CaptureTarget, reported: ?*?client.Step) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
-        if (generated) try announceCapture(io, captured.identity().key.slice());
+        if (target == .generated) try announceCapture(io, captured.identity().key.slice());
         break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
     };
-    try writeMutationReply(io, reply, .json);
+    try writeMutationReply(io, reply, .{ .json = .of(target) });
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -1840,7 +1865,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2077,8 +2102,22 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-const MutationPresentation = enum {
-    json,
+/// How a caller replays a saved answer: by its generated handle, or by the
+/// explicit record it captured to.
+const Replay = union(enum) {
+    generated,
+    explicit: []const u8,
+
+    fn of(target: client.CaptureTarget) Replay {
+        return switch (target) {
+            .generated => .generated,
+            .explicit => |explicit| .{ .explicit = explicit.record },
+        };
+    }
+};
+
+const MutationPresentation = union(enum) {
+    json: Replay,
     human,
     interactive_configuration,
 };
@@ -2090,12 +2129,43 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
     } else |_| {}
     if (presentation == .json) {
         var output: JsonOutput = undefined;
-        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
+        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| {
+            const cause = output.failure(err);
+            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, presentation.json);
+            return cause;
+        };
         return output.finish();
     }
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(io, &buffer);
     presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
+}
+
+/// Names the replay the caller actually holds: a generated handle, or the
+/// explicit record, since repeating its capture refuses the existing --record.
+fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: Replay) void {
+    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&bytes);
+    writeNotAccepted(&notice, context, replay) catch return;
+    TerminalText.diagnostic("{s}", .{notice.buffered()});
+}
+
+fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: Replay) !void {
+    try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
+    switch (replay) {
+        // validRequestHandle admits only shell-inert handle bytes.
+        .generated => try notice.writeAll(context.key.slice()),
+        .explicit => |record| {
+            try notice.writeAll("--store ");
+            try TerminalText.writeShellWord(notice, context.store.slice());
+            try notice.writeAll(" --record ");
+            try TerminalText.writeShellWord(notice, record);
+            switch (context.kind) {
+                inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
+            }
+        },
+    }
+    try notice.writeByte('\n');
 }
 
 fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -2242,7 +2312,7 @@ test "mutation presentation complete modes preserve escaped original context" {
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
-    const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
+    const modes = [_]MutationPresentation{ .{ .json = .generated }, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
         human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
@@ -2291,8 +2361,22 @@ test "mutation presentation wrong binding keeps caller context even interactivel
         try std.testing.expectEqualStrings("Store: /original-store\nSession: original\nkey: original-key\ninvocation: RequestBindingMismatch (HTTP 200); outcome unconfirmed\n", writer.buffered());
     }
     var writer = std.Io.Writer.fixed(&buffer);
-    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .json));
+    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .{ .json = .generated }));
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
+}
+
+test "not-accepted guidance names the generated handle or the quoted explicit recover form" {
+    var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
+    try context.store.set("/it's \\store");
+    try context.key.set("0f8fad5b-d9cb-469f-a165-70867728950e");
+    var buffer: [512]u8 = undefined;
+    const prefix = "rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ";
+    var generated = std.Io.Writer.fixed(&buffer);
+    try writeNotAccepted(&generated, context, .generated);
+    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e\n", generated.buffered());
+    var explicit = std.Io.Writer.fixed(&buffer);
+    try writeNotAccepted(&explicit, context, .{ .explicit = "stop\x1b.json" });
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop\n", explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
@@ -2414,7 +2498,10 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         defer captured.close(init.io);
         break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
-    try writeMutationReply(init.io, reply, .json);
+    try writeMutationReply(init.io, reply, .{ .json = switch (saved) {
+        .generated => .generated,
+        .explicit => |explicit| .{ .explicit = explicit.record },
+    } });
 }
 
 /// A command kind in its `rui request recover --kind` spelling.
