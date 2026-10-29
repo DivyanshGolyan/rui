@@ -34,7 +34,7 @@ pub const State = struct {
     reconciled_generation: ?u64 = null,
     /// An Action loses custody unsettled only once dispatch is fenced or the
     /// Host shuts down, so uncertain Actions come only from an earlier Host.
-    uncertain_actions_recovered: bool = false,
+    uncertain_action_scan_exhausted: bool = false,
     /// Admission facts before the last pass whose Bash, message and
     /// tool-continuation scans all found nothing. Those scans read only
     /// Store rows, so they rerun only once a fact changes. Retry admission
@@ -78,8 +78,8 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
         last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
     else
         true;
-    if (!state.uncertain_actions_recovered) {
-        if (try context.recoverUncertainAction()) made_progress = true else state.uncertain_actions_recovered = true;
+    if (!state.uncertain_action_scan_exhausted) {
+        if (try context.recoverUncertainAction()) made_progress = true else state.uncertain_action_scan_exhausted = true;
     }
     const maintain_retries = context.providerConfigured() and (retry_poll_due or capacity_released);
     if (maintain_retries) {
