@@ -105,6 +105,7 @@ ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'
 ZIG_WHILE = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?while\b")
 ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
 ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.[^)]*\)\s*\|_\|")
+ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
 ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
 ZIG_FN = re.compile(r"\b(pub\s+)?(?:(?:export|extern|inline)\s+)?fn\s+(\w+)\s*\(")
 Scope = namedtuple("Scope", "head start end kind name public")
@@ -120,15 +121,24 @@ def zig_sleep_ordering(path, text):
     """
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
     declarations = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] in "\"'" else " " * len(match[0]), text)
+    # `.{` literals and `error{` sets are expressions, not bodies, so they keep
+    # the enclosing statement's header.
     blocks, open_blocks, head = [], [], 0
     for index, char in enumerate(code):
         if char == "{":
-            open_blocks.append((head, index))
+            last = index - 1
+            while last >= 0 and code[last].isspace():
+                last -= 1
+            expression = code[last] == "." or ZIG_ERROR_SET.match(code, max(0, last - 5), last + 1) is not None
+            open_blocks.append((head, index, expression))
             head = index + 1
         elif char == "}":
-            block_head, start = open_blocks.pop()
-            blocks.append((block_head, start, index))
-            head = index + 1
+            block_head, start, expression = open_blocks.pop()
+            if expression:
+                head = block_head
+            else:
+                blocks.append((block_head, start, index))
+                head = index + 1
         elif char == ";":
             head = index + 1
     scopes = []
@@ -379,11 +389,21 @@ test "polls wait on a condition" {
     while (!done()) {
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
+    while (!ready(.{})) {
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+fn settle() error{Oops}!void {
+    try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+}
+test "an error-set helper still charges its test" {
+    try settle();
 }
 '''
         self.assertEqual(zig_sleep_ordering("src/a.zig", source), {
             ("src/a.zig", "peer sleeps before it replies"): 2,
             ("src/a.zig", "polls wait on a condition"): 2,
+            ("src/a.zig", "an error-set helper still charges its test"): 1,
         })
 
     def test_python_straight_line_sleeps_are_charged_to_their_function(self):
