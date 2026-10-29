@@ -342,8 +342,15 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
-    host.history_memos = .{ .capacity = slots.len, .scratch_path = host.lease.paths.scratch.slice() };
-    defer host.history_memos.deinit(host.io);
+    const history_memos = mapZeroed(model_adapter.HistoryMemos.Entry, slots.len) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    host.history_memos = .{ .entries = history_memos, .scratch_path = host.lease.paths.scratch.slice() };
+    defer {
+        host.history_memos.deinit(host.io);
+        unmapZeroed(history_memos);
+    }
     const bash_work = mapZeroed(server_host.BashWork, slots.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
@@ -799,7 +806,7 @@ test "an execution slot is sized for a model Attempt, not for Bash" {
     try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
 }
 
-test "zeroed pages are free slots and empty Turn entries" {
+test "zeroed pages are free slots and empty Turn and history memo entries" {
     const slots = try mapZeroed(ExecutionSlot, 3);
     defer unmapZeroed(slots);
     for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
@@ -815,6 +822,13 @@ test "zeroed pages are free slots and empty Turn entries" {
     var states: model_adapter.TurnStates = .{ .entries = entries };
     defer states.deinit();
     try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
+    const memos = try mapZeroed(model_adapter.HistoryMemos.Entry, 2);
+    defer unmapZeroed(memos);
+    for (memos) |entry| {
+        try std.testing.expect(entry.memo == null);
+        try std.testing.expectEqual(@as(u64, 0), entry.file_bytes);
+        try std.testing.expectEqual(@as(u64, 0), entry.used);
+    }
     try std.testing.expectEqual(@as(usize, 0), (try mapZeroed(ExecutionSlot, 0)).len);
 }
 
@@ -1343,12 +1357,12 @@ fn beginAdmittedAttempt(
             .seal = host.faults.request_seal,
             .unlink = host.faults.request_unlink,
         },
+        &host.history_memos,
         &retained_scratch,
     ) catch |err| {
         finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
         return .admitted;
     };
-    preparation.memos = &host.history_memos;
     traceOperation(host, "preparation_started", binding);
     return .admitted;
 }
@@ -3067,7 +3081,7 @@ test "preparing slots belong to their live preparations" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, null, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3317,6 +3331,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
             .{},
+            null,
             &retained,
         );
         // Real file aliases and a real reservation are owned before fencing.

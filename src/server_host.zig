@@ -127,7 +127,8 @@ pub const Host = struct {
     scratch_budget: ?provider.ScratchBudget = null,
     /// Execution-thread-owned Codex sticky routing; in memory only.
     turn_states: model_adapter.TurnStates = .{},
-    /// Execution-thread-owned history memos; in memory only.
+    /// Execution-thread-owned history memos: an index preallocated at
+    /// start, with span bytes in scratch files deleted at stop.
     history_memos: model_adapter.HistoryMemos = .{},
     /// Execution-thread-owned, one per custody record and zero-mapped.
     bash_work: []BashWork = &.{},

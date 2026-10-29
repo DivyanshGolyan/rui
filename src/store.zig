@@ -630,10 +630,16 @@ pub const HistoricalView = struct {
     }
 
     /// Start the tool-group scan after `cursor`, before the first entry
-    /// read. The caller resumes after a position that an earlier view of the
-    /// same Session covered, with that view's final cursor: those Operations'
-    /// groups all lie at or before the covered position, so the scan would
-    /// only skip them.
+    /// read. The caller resumes after the last position that an earlier view
+    /// of the same Session covered, with that view's final cursor. Every
+    /// Operation at or below that cursor precedes the earlier view's
+    /// Operation, whose admission required each of them resolved and each
+    /// tool group complete (`runnable_eligibility_sql`); that view checked
+    /// each group's position below its admission position and emitted it.
+    /// Resolutions and acceptance positions never change, so those groups
+    /// all lie at or before the covered position and the scan would only skip
+    /// them. The earlier view's own Operation, whose results land after its
+    /// admission position, is above the cursor and is scanned.
     pub fn resumeToolGroups(self: *HistoricalView, cursor: u64) void {
         std.debug.assert(self.active and self.outputs_validated and !self.tool_group_initialized);
         self.tool_group_source_cursor = cursor;
@@ -11022,7 +11028,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, null, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(7, 2);
@@ -11079,7 +11085,7 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, null, &retained);
         defer if (preparation.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(1, 1);
