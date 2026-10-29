@@ -1342,12 +1342,13 @@ pub const Preparation = struct {
         return count;
     }
 
-    /// Copy the memo's bytes into the request, hashing as they go. Returns
-    /// true once the copy ends, matched or lost.
-    fn advanceMemoCopy(self: *Preparation, bytes_left: *usize) !bool {
+    /// Copy the memo's bytes into the request, hashing as they go, one
+    /// item per chunk. Returns true once the copy ends, matched or lost.
+    fn advanceMemoCopy(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
         const copy = &self.span.?.copy.?;
         while (copy.copied != copy.memo.length) {
-            if (bytes_left.* == 0) return false;
+            if (bytes_left.* == 0 or items_left.* == 0) return false;
+            items_left.* -= 1;
             const destination = try self.writer.reserve(@intCast(@min(bytes_left.*, copy.memo.length - copy.copied)));
             const count = self.readMemo(copy, destination) catch {
                 self.abandonMemoCopy();
@@ -1482,7 +1483,7 @@ pub const Preparation = struct {
                 }
                 replay.reader.close();
             },
-            .history_memo => if (!try self.advanceMemoCopy(bytes_left)) return false,
+            .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
         }
         // Naming the void field stores only the tag; `.none` lowers to a
         // memset of the whole union, replay validation window included.
