@@ -912,11 +912,13 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     if (!std.mem.eql(u8, parsed.value.version, "1") or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
-    const kind = std.meta.stringToEnum(protocol_reply.MutationKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
-    var identity: protocol_reply.MutationIdentity = .{ .kind = kind };
-    try identity.store.set(parsed.value.store);
-    try identity.key.set(parsed.value.key);
+    var store: @FieldType(protocol_reply.MutationIdentity, "store") = .{};
+    try store.set(parsed.value.store);
+    var key: @FieldType(protocol_reply.MutationIdentity, "key") = .{};
+    try key.set(parsed.value.key);
     const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(protocol_reply.MutationKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
+    var identity: protocol_reply.MutationIdentity = .{ .store = store, .key = key, .kind = kind };
     const creation = session.len == 0 and (kind == .configure or
         kind == .message and std.mem.startsWith(u8, prefix[kind_marker..], ",\"configuration\":"));
     if (!creation and !protocol.validSessionId(session)) return error.InvalidRequestRecord;
@@ -992,7 +994,7 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
-        if (value.len > protocol.max_sqlite_content_bytes) return capture.failInput(.input_parse, error.ContentTooLarge);
+        if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
         try capture.writeJsonString(value);
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
@@ -1248,7 +1250,7 @@ const Capture = struct {
         else
             std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| return self.failInput(read, err);
         defer if (!stdin) file.close(self.io);
-        try self.write("\"");
+        self.write("\"") catch |err| return self.failInput(read, err);
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var validator = Utf8Validator{};
         var decoded_bytes: u64 = 0;
@@ -2273,7 +2275,7 @@ test "capture and send name the step a failure stopped in" {
     const oversized = many[0 .. protocol.max_sqlite_content_bytes + 1];
     const Case = struct { input: MessageInput, step: Step, err: anyerror };
     for ([_]Case{
-        .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = "", .text = oversized }, .step = .input_parse, .err = error.ContentTooLarge },
+        .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = "", .text = oversized }, .step = .capture, .err = error.ContentTooLarge },
         .{ .input = .{ .store = absent, .session = "k7m2qx", .text_path = "", .text = "x" }, .step = .store, .err = error.FileNotFound },
         .{ .input = .{ .store = root, .session = "K7m2qx", .text_path = "", .text = "x" }, .step = .capture, .err = error.InvalidSession },
         .{ .input = .{ .store = root, .session = "k7m2qx", .text_path = absent }, .step = .input_file_read, .err = error.FileNotFound },
