@@ -267,16 +267,27 @@ pub const CustodyToken = struct {
 };
 
 const State = enum(u8) { free, reserved, attached, detached };
-const BindingKind = enum(u8) { model, action };
+
+/// The Attempt a custody record holds: a model Attempt or an Action's.
+pub const CustodyBinding = union(enum) {
+    model: attempt.AttemptBinding,
+    action: attempt.ActionAttemptBinding,
+
+    fn of(binding: anytype) CustodyBinding {
+        return switch (@TypeOf(binding)) {
+            attempt.AttemptBinding => .{ .model = binding },
+            attempt.ActionAttemptBinding => .{ .action = binding },
+            else => @compileError("not an Attempt binding: " ++ @typeName(@TypeOf(binding))),
+        };
+    }
+};
 
 pub const CustodyRecord = struct {
     state: std.atomic.Value(State) = .init(.free),
     generation: std.atomic.Value(u64) = .init(0),
     delivered: std.atomic.Value(bool) = .init(false),
     launch_available: std.atomic.Value(bool) = .init(false),
-    binding_kind: BindingKind = .model,
-    binding: attempt.AttemptBinding = undefined,
-    action_binding: attempt.ActionAttemptBinding = undefined,
+    binding: CustodyBinding = undefined,
 };
 
 pub const CustodyPool = struct {
@@ -299,47 +310,29 @@ pub const CustodyPool = struct {
         return null;
     }
 
+    /// Consumes a model or Action dispatch permit into the reserved record
+    /// and returns the permit's binding.
     pub fn attach(
         self: *CustodyPool,
         token: CustodyToken,
-        permit: *attempt.DispatchPermit,
-    ) !attempt.AttemptBinding {
+        permit: anytype,
+    ) !@TypeOf(permit.binding) {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const attempt_binding = try permit.consume();
-        record.binding = attempt_binding;
-        record.binding_kind = .model;
+        record.binding = .of(attempt_binding);
         record.launch_available.store(true, .release);
         record.state.store(.attached, .release);
         return attempt_binding;
     }
 
-    pub fn attachAction(
-        self: *CustodyPool,
-        token: CustodyToken,
-        permit: *attempt.ActionDispatchPermit,
-    ) !attempt.ActionAttemptBinding {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
-        const action_binding = try permit.consume();
-        record.action_binding = action_binding;
-        record.binding_kind = .action;
-        record.launch_available.store(true, .release);
-        record.state.store(.attached, .release);
-        return action_binding;
-    }
-
     pub fn consumeLaunchAuthority(
         self: *CustodyPool,
         token: CustodyToken,
-        attempt_binding: attempt.AttemptBinding,
+        expected: CustodyBinding,
     ) !void {
         const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached or record.binding_kind != .model or
-            record.binding.turn_id != attempt_binding.turn_id or
-            record.binding.operation_id != attempt_binding.operation_id or
-            record.binding.attempt_ordinal != attempt_binding.attempt_ordinal)
-        {
+        if (record.state.load(.acquire) != .attached or !std.meta.eql(record.binding, expected)) {
             return error.ForeignLaunchAuthority;
         }
         if (record.launch_available.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
@@ -347,34 +340,10 @@ pub const CustodyPool = struct {
         }
     }
 
-    pub fn consumeActionLaunchAuthority(
-        self: *CustodyPool,
-        token: CustodyToken,
-        action_binding: attempt.ActionAttemptBinding,
-    ) !void {
+    pub fn binding(self: *CustodyPool, token: CustodyToken) !CustodyBinding {
         const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached or record.binding_kind != .action or
-            record.action_binding.turn_id != action_binding.turn_id or
-            record.action_binding.action_id != action_binding.action_id or
-            record.action_binding.parent_operation_id != action_binding.parent_operation_id)
-        {
-            return error.ForeignLaunchAuthority;
-        }
-        if (record.launch_available.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
-            return error.DispatchPermitConsumed;
-        }
-    }
-
-    pub fn binding(self: *CustodyPool, token: CustodyToken) !attempt.AttemptBinding {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached or record.binding_kind != .model) return error.CustodyDetached;
+        if (record.state.load(.acquire) != .attached) return error.CustodyDetached;
         return record.binding;
-    }
-
-    pub fn actionBinding(self: *CustodyPool, token: CustodyToken) !attempt.ActionAttemptBinding {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached or record.binding_kind != .action) return error.CustodyDetached;
-        return record.action_binding;
     }
 
     pub fn claimTerminalDelivery(self: *CustodyPool, token: CustodyToken) bool {
@@ -387,7 +356,7 @@ pub const CustodyPool = struct {
     /// it leaves the Action unsettled.
     pub fn holdsUndeliveredAction(self: *CustodyPool, token: CustodyToken) bool {
         const record = self.current(token) catch return false;
-        return record.state.load(.acquire) == .attached and record.binding_kind == .action and
+        return record.state.load(.acquire) == .attached and record.binding == .action and
             !record.delivered.load(.acquire);
     }
 
@@ -423,73 +392,23 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
     }
 
-    pub fn checkAttachedModel(
-        self: *CustodyPool,
-        token: CustodyToken,
-        expected: attempt.AttemptBinding,
-    ) !void {
+    pub fn checkAttached(self: *CustodyPool, token: CustodyToken, expected: CustodyBinding) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached) return error.InvalidCustodyTransition;
-        if (record.binding_kind != .model) return error.CustodyDetached;
-        if (record.binding.turn_id != expected.turn_id or
-            record.binding.operation_id != expected.operation_id or
-            record.binding.attempt_ordinal != expected.attempt_ordinal)
-        {
-            return error.ForeignLaunchAuthority;
-        }
+        try checkBinding(record, expected);
     }
 
-    pub fn checkAttachedAction(
-        self: *CustodyPool,
-        token: CustodyToken,
-        expected: attempt.ActionAttemptBinding,
-    ) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached) return error.InvalidCustodyTransition;
-        if (record.binding_kind != .action) return error.CustodyDetached;
-        if (record.action_binding.turn_id != expected.turn_id or
-            record.action_binding.action_id != expected.action_id or
-            record.action_binding.parent_operation_id != expected.parent_operation_id)
-        {
-            return error.ForeignLaunchAuthority;
-        }
-    }
-
-    pub fn checkDetached(self: *CustodyPool, token: CustodyToken) !void {
+    /// A null `expected` checks only that the token's record is detached,
+    /// for retained owners that keep no Attempt identity.
+    pub fn checkDetached(self: *CustodyPool, token: CustodyToken, expected: ?CustodyBinding) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
+        if (expected) |value| try checkBinding(record, value);
     }
 
-    pub fn checkDetachedModel(
-        self: *CustodyPool,
-        token: CustodyToken,
-        expected: attempt.AttemptBinding,
-    ) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
-        if (record.binding_kind != .model) return error.CustodyDetached;
-        if (record.binding.turn_id != expected.turn_id or
-            record.binding.operation_id != expected.operation_id or
-            record.binding.attempt_ordinal != expected.attempt_ordinal)
-        {
-            return error.ForeignLaunchAuthority;
-        }
-    }
-
-    pub fn checkDetachedAction(
-        self: *CustodyPool,
-        token: CustodyToken,
-        expected: attempt.ActionAttemptBinding,
-    ) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
-        if (record.binding_kind != .action) return error.CustodyDetached;
-        if (record.action_binding.turn_id != expected.turn_id or
-            record.action_binding.action_id != expected.action_id or
-            record.action_binding.parent_operation_id != expected.parent_operation_id)
-        {
-            return error.ForeignLaunchAuthority;
-        }
+    fn checkBinding(record: *const CustodyRecord, expected: CustodyBinding) !void {
+        if (std.meta.activeTag(record.binding) != std.meta.activeTag(expected)) return error.CustodyDetached;
+        if (!std.meta.eql(record.binding, expected)) return error.ForeignLaunchAuthority;
     }
 
     pub fn checkFree(self: *CustodyPool, token: CustodyToken) !void {
@@ -545,21 +464,21 @@ test "custody remains occupied through detachment and rejects late delivery afte
         .attempt_ordinal = 1,
     } };
     const first_binding = try pool.attach(first, &first_permit);
-    try pool.checkAttachedModel(first, first_binding);
+    try pool.checkAttached(first, .{ .model = first_binding });
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.checkAttachedModel(first, .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }),
+        pool.checkAttached(first, .{ .model = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } }),
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeLaunchAuthority(first, .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }),
+        pool.consumeLaunchAuthority(first, .{ .model = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } }),
     );
     // Rejected launch leaves valid authority unconsumed.
-    try pool.checkAttachedModel(first, first_binding);
-    try pool.consumeLaunchAuthority(first, first_binding);
+    try pool.checkAttached(first, .{ .model = first_binding });
+    try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
     try std.testing.expectError(
         error.DispatchPermitConsumed,
-        pool.consumeLaunchAuthority(first, first_binding),
+        pool.consumeLaunchAuthority(first, .{ .model = first_binding }),
     );
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try std.testing.expect(pool.canClaimTerminalDelivery(first) == false);
@@ -568,10 +487,10 @@ test "custody remains occupied through detachment and rejects late delivery afte
     // after delivery, and delivery state does not restore launch authority.
     try std.testing.expectError(
         error.DispatchPermitConsumed,
-        pool.consumeLaunchAuthority(first, first_binding),
+        pool.consumeLaunchAuthority(first, .{ .model = first_binding }),
     );
     try pool.detach(first);
-    try pool.checkDetached(first);
+    try pool.checkDetached(first, null);
     try std.testing.expectEqual(@as(usize, 1), pool.occupied());
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try pool.cleanupComplete(first);
@@ -585,12 +504,12 @@ test "custody remains occupied through detachment and rejects late delivery afte
         .attempt_ordinal = 1,
     } };
     _ = try pool.attach(second, &second_permit);
-    try pool.checkAttachedModel(second, .{ .turn_id = 2, .operation_id = 2, .attempt_ordinal = 1 });
+    try pool.checkAttached(second, .{ .model = .{ .turn_id = 2, .operation_id = 2, .attempt_ordinal = 1 } });
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try std.testing.expectError(error.StaleCustody, pool.binding(first));
-    try std.testing.expectError(error.StaleCustody, pool.checkAttachedModel(first, first_binding));
-    try std.testing.expectError(error.StaleCustody, pool.checkDetached(first));
-    try std.testing.expectEqual(@as(u64, 2), (try pool.binding(second)).operation_id);
+    try std.testing.expectError(error.StaleCustody, pool.checkAttached(first, .{ .model = first_binding }));
+    try std.testing.expectError(error.StaleCustody, pool.checkDetached(first, null));
+    try std.testing.expectEqual(@as(u64, 2), (try pool.binding(second)).model.operation_id);
     try pool.detach(second);
     try pool.cleanupComplete(second);
 }
@@ -611,7 +530,7 @@ test "custody attach consumes one permit only after validating its reservation" 
         .attempt_ordinal = 1,
     } };
     const attached = try pool.attach(first, &permit);
-    try pool.checkAttachedModel(first, attached);
+    try pool.checkAttached(first, .{ .model = attached });
     try std.testing.expectError(error.DispatchPermitConsumed, pool.attach(second, &permit));
     // Rejected attachment leaves the reservation and its generation intact.
     try pool.checkReserved(second);
@@ -624,7 +543,7 @@ test "custody attach consumes one permit only after validating its reservation" 
     } };
     try std.testing.expectError(error.InvalidCustodyTransition, pool.attach(first, &fresh));
     try std.testing.expect(fresh.available);
-    try pool.checkAttachedModel(first, attached);
+    try pool.checkAttached(first, .{ .model = attached });
     try pool.releaseUnused(second);
     try pool.checkFree(second);
 
@@ -638,7 +557,7 @@ test "custody attach consumes one permit only after validating its reservation" 
     try std.testing.expect(next_permit.available);
     try std.testing.expectError(error.ForeignCustody, pool.checkReserved(foreign));
     try pool.detach(first);
-    try pool.checkDetached(first);
+    try pool.checkDetached(first, null);
     try pool.cleanupComplete(first);
     try pool.checkFree(first);
 
@@ -648,7 +567,7 @@ test "custody attach consumes one permit only after validating its reservation" 
     // Stale attach leaves the new reservation untouched.
     try pool.checkReserved(reused);
     const reused_binding = try pool.attach(reused, &next_permit);
-    try pool.checkAttachedModel(reused, reused_binding);
+    try pool.checkAttached(reused, .{ .model = reused_binding });
     try pool.detach(reused);
     try pool.cleanupComplete(reused);
     try pool.checkFree(reused);
@@ -659,11 +578,11 @@ test "unused reservation returns without an Attempt binding" {
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     try pool.checkReserved(token);
-    try std.testing.expectError(error.InvalidCustodyTransition, pool.checkAttachedModel(token, .{
+    try std.testing.expectError(error.InvalidCustodyTransition, pool.checkAttached(token, .{ .model = .{
         .turn_id = 1,
         .operation_id = 1,
         .attempt_ordinal = 1,
-    }));
+    } }));
     try std.testing.expectError(error.InvalidCustodyTransition, pool.detach(token));
     try std.testing.expectError(error.InvalidCustodyTransition, pool.cleanupComplete(token));
     try pool.releaseUnused(token);
@@ -684,15 +603,15 @@ test "model and Action Attempt bindings cannot cross custody paths" {
         .attempt_ordinal = 3,
     } };
     const model_binding = try pool.attach(model_token, &model_permit);
-    try pool.checkAttachedModel(model_token, model_binding);
-    try std.testing.expectError(error.CustodyDetached, pool.actionBinding(model_token));
+    try pool.checkAttached(model_token, .{ .model = model_binding });
+    try std.testing.expect(try pool.binding(model_token) == .model);
     try std.testing.expectError(
         error.CustodyDetached,
-        pool.checkAttachedAction(model_token, .{
+        pool.checkAttached(model_token, .{ .action = .{
             .turn_id = 1,
             .parent_operation_id = 2,
             .action_id = 4,
-        }),
+        } }),
     );
 
     const action_token = pool.reserve().?;
@@ -701,37 +620,37 @@ test "model and Action Attempt bindings cannot cross custody paths" {
         .parent_operation_id = 2,
         .action_id = 4,
     } };
-    const action_binding = try pool.attachAction(action_token, &action_permit);
-    try pool.checkAttachedAction(action_token, action_binding);
-    try std.testing.expectError(error.CustodyDetached, pool.binding(action_token));
+    const action_binding = try pool.attach(action_token, &action_permit);
+    try pool.checkAttached(action_token, .{ .action = action_binding });
+    try std.testing.expect(try pool.binding(action_token) == .action);
     try std.testing.expectError(
         error.CustodyDetached,
-        pool.checkAttachedModel(action_token, model_binding),
+        pool.checkAttached(action_token, .{ .model = model_binding }),
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeLaunchAuthority(action_token, model_binding),
+        pool.consumeLaunchAuthority(action_token, .{ .model = model_binding }),
     );
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.consumeActionLaunchAuthority(model_token, action_binding),
+        pool.consumeLaunchAuthority(model_token, .{ .action = action_binding }),
     );
     // Valid bindings remain unchanged after cross-path rejection.
-    try pool.checkAttachedModel(model_token, model_binding);
-    try pool.checkAttachedAction(action_token, action_binding);
+    try pool.checkAttached(model_token, .{ .model = model_binding });
+    try pool.checkAttached(action_token, .{ .action = action_binding });
 
     try pool.detach(model_token);
-    try pool.checkDetached(model_token);
-    try pool.checkDetachedModel(model_token, model_binding);
+    try pool.checkDetached(model_token, null);
+    try pool.checkDetached(model_token, .{ .model = model_binding });
     try std.testing.expectError(
         error.CustodyDetached,
-        pool.checkDetachedAction(model_token, action_binding),
+        pool.checkDetached(model_token, .{ .action = action_binding }),
     );
     try pool.cleanupComplete(model_token);
     try pool.checkFree(model_token);
     try pool.detach(action_token);
-    try pool.checkDetached(action_token);
-    try pool.checkDetachedAction(action_token, action_binding);
+    try pool.checkDetached(action_token, null);
+    try pool.checkDetached(action_token, .{ .action = action_binding });
     try pool.cleanupComplete(action_token);
     try pool.checkFree(action_token);
 }
@@ -753,14 +672,14 @@ test "model launch authority requires every identity field" {
         .{ .turn_id = 7, .operation_id = 8, .attempt_ordinal = 90 },
     };
     for (variants) |mismatch| {
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, mismatch));
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttachedModel(token, mismatch));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .model = mismatch }));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttached(token, .{ .model = mismatch }));
     }
     // Each rejection leaves valid authority and the attached binding intact.
-    try pool.checkAttachedModel(token, binding);
-    try pool.consumeLaunchAuthority(token, binding);
-    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, binding));
-    try pool.checkAttachedModel(token, binding);
+    try pool.checkAttached(token, .{ .model = binding });
+    try pool.consumeLaunchAuthority(token, .{ .model = binding });
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));
+    try pool.checkAttached(token, .{ .model = binding });
     try pool.detach(token);
     try pool.cleanupComplete(token);
 }
@@ -774,7 +693,7 @@ test "action launch authority requires every identity field including turn" {
         .parent_operation_id = 8,
         .action_id = 9,
     } };
-    const binding = try pool.attachAction(token, &permit);
+    const binding = try pool.attach(token, &permit);
 
     const variants = [_]attempt.ActionAttemptBinding{
         .{ .turn_id = 70, .parent_operation_id = 8, .action_id = 9 },
@@ -782,29 +701,29 @@ test "action launch authority requires every identity field including turn" {
         .{ .turn_id = 7, .parent_operation_id = 8, .action_id = 90 },
     };
     for (variants) |mismatch| {
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeActionLaunchAuthority(token, mismatch));
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttachedAction(token, mismatch));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(token, .{ .action = mismatch }));
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.checkAttached(token, .{ .action = mismatch }));
     }
-    try pool.checkAttachedAction(token, binding);
-    try pool.consumeActionLaunchAuthority(token, binding);
-    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeActionLaunchAuthority(token, binding));
-    try pool.checkAttachedAction(token, binding);
+    try pool.checkAttached(token, .{ .action = binding });
+    try pool.consumeLaunchAuthority(token, .{ .action = binding });
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .action = binding }));
+    try pool.checkAttached(token, .{ .action = binding });
     try pool.detach(token);
-    try pool.checkDetached(token);
-    try pool.checkDetachedAction(token, binding);
+    try pool.checkDetached(token, null);
+    try pool.checkDetached(token, .{ .action = binding });
     try std.testing.expectError(
         error.ForeignLaunchAuthority,
-        pool.checkDetachedAction(token, .{
+        pool.checkDetached(token, .{ .action = .{
             .turn_id = 7,
             .parent_operation_id = 8,
             .action_id = 90,
-        }),
+        } }),
     );
     try std.testing.expectError(
         error.CustodyDetached,
-        pool.checkDetachedModel(token, .{ .turn_id = 7, .operation_id = 8, .attempt_ordinal = 10 }),
+        pool.checkDetached(token, .{ .model = .{ .turn_id = 7, .operation_id = 8, .attempt_ordinal = 10 } }),
     );
-    try pool.checkDetachedAction(token, binding);
+    try pool.checkDetached(token, .{ .action = binding });
     try pool.cleanupComplete(token);
 }
 
@@ -819,7 +738,7 @@ test "detached custody rejects reuse until cleanup completes" {
     } };
     const binding = try pool.attach(token, &permit);
     try pool.detach(token);
-    try pool.checkDetached(token);
+    try pool.checkDetached(token, null);
     try std.testing.expectEqual(@as(usize, 1), pool.occupied());
     // Detached records cannot be reserved, re-attached, released, or delivered.
     try std.testing.expect(pool.reserve() == null);
@@ -833,8 +752,8 @@ test "detached custody rejects reuse until cleanup completes" {
     try std.testing.expectError(error.InvalidCustodyTransition, pool.releaseUnused(token));
     try std.testing.expect(!pool.claimTerminalDelivery(token));
     try std.testing.expect(!pool.canClaimTerminalDelivery(token));
-    try std.testing.expectError(error.InvalidCustodyTransition, pool.checkAttachedModel(token, binding));
-    try pool.checkDetached(token);
+    try std.testing.expectError(error.InvalidCustodyTransition, pool.checkAttached(token, .{ .model = binding }));
+    try pool.checkDetached(token, null);
     try pool.cleanupComplete(token);
     try pool.checkFree(token);
     try std.testing.expectEqual(@as(usize, 0), pool.occupied());
@@ -849,14 +768,14 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.checkReserved(token);
         var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
         const binding = try pool.attach(token, &permit);
-        try pool.checkAttachedModel(token, binding);
+        try pool.checkAttached(token, .{ .model = binding });
         try std.testing.expect(pool.canClaimTerminalDelivery(token));
-        try pool.consumeLaunchAuthority(token, binding);
-        try pool.checkAttachedModel(token, binding);
+        try pool.consumeLaunchAuthority(token, .{ .model = binding });
+        try pool.checkAttached(token, .{ .model = binding });
         try std.testing.expect(pool.claimTerminalDelivery(token));
         try std.testing.expect(!pool.canClaimTerminalDelivery(token));
         try pool.detach(token);
-        try pool.checkDetached(token);
+        try pool.checkDetached(token, null);
         try std.testing.expectEqual(@as(usize, 1), pool.occupied());
         try pool.cleanupComplete(token);
         try pool.checkFree(token);
@@ -884,9 +803,9 @@ test "bounded custody sequences preserve invariants after every operation" {
         const first = pool.reserve().?;
         var first_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 3, .operation_id = 3, .attempt_ordinal = 3 } };
         const first_binding = try pool.attach(first, &first_permit);
-        try pool.consumeLaunchAuthority(first, first_binding);
-        try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(first, first_binding));
-        try pool.checkAttachedModel(first, first_binding);
+        try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
+        try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
+        try pool.checkAttached(first, .{ .model = first_binding });
         try std.testing.expect(pool.claimTerminalDelivery(first));
         try std.testing.expect(!pool.claimTerminalDelivery(first));
         try pool.detach(first);
@@ -897,7 +816,7 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.checkReserved(second);
         var second_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 4, .operation_id = 4, .attempt_ordinal = 4 } };
         const second_binding = try pool.attach(second, &second_permit);
-        try pool.checkAttachedModel(second, second_binding);
+        try pool.checkAttached(second, .{ .model = second_binding });
         try pool.detach(second);
         try pool.cleanupComplete(second);
     }
@@ -914,15 +833,15 @@ test "bounded custody sequences preserve invariants after every operation" {
         try pool.checkReserved(second);
         var second_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 6, .operation_id = 6, .attempt_ordinal = 6 } };
         const second_binding = try pool.attach(second, &second_permit);
-        try pool.checkAttachedModel(first, first_binding);
-        try pool.checkAttachedModel(second, second_binding);
+        try pool.checkAttached(first, .{ .model = first_binding });
+        try pool.checkAttached(second, .{ .model = second_binding });
         try pool.detach(first);
-        try pool.checkDetached(first);
-        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(first, first_binding));
-        try pool.checkAttachedModel(second, second_binding);
+        try pool.checkDetached(first, null);
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
+        try pool.checkAttached(second, .{ .model = second_binding });
         try pool.cleanupComplete(first);
         try pool.checkFree(first);
-        try pool.checkAttachedModel(second, second_binding);
+        try pool.checkAttached(second, .{ .model = second_binding });
         try pool.detach(second);
         try pool.cleanupComplete(second);
         try std.testing.expectEqual(@as(usize, 0), pool.occupied());
@@ -939,7 +858,7 @@ test "stale tokens after reuse leave the new owner unchanged" {
         .attempt_ordinal = 1,
     } };
     const first_binding = try pool.attach(first, &first_permit);
-    try pool.consumeLaunchAuthority(first, first_binding);
+    try pool.consumeLaunchAuthority(first, .{ .model = first_binding });
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try pool.detach(first);
     try pool.cleanupComplete(first);
@@ -955,14 +874,14 @@ test "stale tokens after reuse leave the new owner unchanged" {
     const second_binding = try pool.attach(second, &second_permit);
 
     // Every old-token operation fails without touching the new owner.
-    try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(first, first_binding));
+    try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(first, .{ .model = first_binding }));
     try std.testing.expectError(error.StaleCustody, pool.binding(first));
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try std.testing.expectError(error.StaleCustody, pool.detach(first));
     try std.testing.expectError(error.StaleCustody, pool.cleanupComplete(first));
     try std.testing.expectError(error.StaleCustody, pool.releaseUnused(first));
-    try std.testing.expectError(error.StaleCustody, pool.checkAttachedModel(first, first_binding));
-    try pool.checkAttachedModel(second, second_binding);
+    try std.testing.expectError(error.StaleCustody, pool.checkAttached(first, .{ .model = first_binding }));
+    try pool.checkAttached(second, .{ .model = second_binding });
     try std.testing.expect(pool.canClaimTerminalDelivery(second));
     try std.testing.expectEqual(@as(usize, 1), pool.occupied());
     try pool.detach(second);
@@ -1009,7 +928,7 @@ test "failed reclamation keeps custody occupied until the same owner succeeds" {
         error.InjectedScratchRemovalFailure,
         owner.reclaim(root),
     );
-    try pool.checkDetached(token);
+    try pool.checkDetached(token, null);
     try std.testing.expectEqual(@as(usize, 1), pool.occupied());
     try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
 
@@ -1077,15 +996,15 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
                 } }));
             }
             // Canonical handoff can reject after local authority is consumed.
-            try pool.consumeLaunchAuthority(token, binding);
+            try pool.consumeLaunchAuthority(token, .{ .model = binding });
             try std.testing.expectEqual(if (failure == .unexpected) ModelDecision.fence else .abandon, modelDecision(.{ .handoff_failed = failure }));
-            try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, binding));
+            try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, .{ .model = binding }));
             try pool.detach(token);
             try std.testing.expect(!pool.claimTerminalDelivery(token));
             try std.testing.expect(pool.reserve() == null);
             try pool.cleanupComplete(token);
             const reused = pool.reserve().?;
-            try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(token, binding));
+            try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(token, .{ .model = binding }));
             try std.testing.expect(!pool.claimTerminalDelivery(token));
             try pool.checkReserved(reused);
             try pool.releaseUnused(reused);
