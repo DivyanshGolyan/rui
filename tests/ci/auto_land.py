@@ -5,7 +5,8 @@ Runs from trusted main code. Main and stable writes share one serialized
 workflow and are non-force. Landing dispatches the existing qualification
 workflows, and promotion the release workflow, explicitly because
 GITHUB_TOKEN pushes do not emit push workflows.
-Missing or failed Mac qualification holds stable, never main.
+Missing or failed Mac qualification holds stable, never main, and so does an
+open stable-red issue.
 """
 import argparse
 import json
@@ -25,6 +26,9 @@ STABLE_BASE = re.compile(r"Stable qualification from base ([0-9a-f]{40})")
 # GITHUB_TOKEN has no `workflows` permission, so GitHub rejects its push of
 # any commit that changes a workflow file.
 WORKFLOW_FILES = ".github/workflows/"
+# report_issue.py files each stable qualification red under this label. Only a
+# fix commit closes the issue, so a later green candidate cannot promote past it.
+STABLE_RED = "stable-red"
 
 
 # Seconds before each repeated dispatch submission; long enough for a run the
@@ -60,6 +64,12 @@ def dispatch(workflow, *args, run_exists):
         time.sleep(delay)
         if run_exists():
             return
+
+
+def open_stable_reds():
+    """Open stable-red issues; a listing failure propagates and holds promotion."""
+    return json.loads(gh("issue", "list", "--repo", os.environ["GITHUB_REPOSITORY"], "--state", "open",
+                         "--label", STABLE_RED, "--limit", "100", "--json", "number,title"))
 
 
 def latest(workflow, sha, branch):
@@ -276,6 +286,10 @@ def promote_stable():
     main_sha, stable_sha = qualify_main()
     if not contains(main_sha, stable_sha):
         print("stable is not on main's history; stable promotion held")
+        return
+    if reds := open_stable_reds():
+        listed = ", ".join(f"#{red['number']} {red['title']}" for red in reds)
+        print(f"Open stable-red issues hold stable at {stable_sha}: {listed}")
         return
     for sha in git("rev-list", "--first-parent", f"{stable_sha}..{main_sha}").splitlines():
         selected = latest("check.yml", sha, "main")

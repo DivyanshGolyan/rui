@@ -386,7 +386,8 @@ jobs:
           fi
   completion:
     # Explicit dispatch is supported for GITHUB_TOKEN; workflow_run is suppressed.
-    needs: [linux, macos, cache_execution]
+    # The wake follows the report, so a red's stable-red issue exists before promotion runs.
+    needs: [linux, macos, cache_execution, report]
     if: ${{ always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
