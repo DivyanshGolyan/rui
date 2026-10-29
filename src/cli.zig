@@ -1078,7 +1078,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
     const reply = blk: {
         defer captured.close(init.io);
         try testGate(init.io, "RUI_TEST_CAPTURE_GATE");
-        break :blk client.sendCaptured(init.io, &captured, null, &reply_buffer) catch |err| {
+        break :blk client.sendCaptured(init.io, &captured, &reply_buffer) catch |err| {
             TerminalText.diagnostic("rui: configuration not confirmed ({s}); use rui request recover {s}. Do not replace uncertain work.\n", .{ @errorName(err), saved.key.slice() });
             return err;
         };
@@ -1315,12 +1315,12 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     input.stage = &stage;
     var sender = requester;
     sender.stage = &stage;
+    sender.drop_reply = parsed.get("test-drop-reply");
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     const human = target == .generated;
-    const drop_reply = parsed.get("test-drop-reply");
     var captured = try client.captureConfigure(io, input, target);
     const saved = captured.identity().*;
     var admitted: ?bool = null;
@@ -1328,7 +1328,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk sender.sendCaptured(&captured, drop_reply, &reply_buffer);
+        break :blk sender.sendCaptured(&captured, &reply_buffer);
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1393,11 +1393,12 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureMessage(io, input, target);
-    if (configuration == null) return sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), &stage);
+    const sender: client.Requests = .{ .io = io, .stage = &stage, .drop_reply = parsed.get("test-drop-reply") };
+    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated);
     defer captured.close(io);
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try (client.Requests{ .io = io, .stage = &stage }).sendCaptured(&captured, parsed.get("test-drop-reply"), &reply_buffer);
+    const reply = try sender.sendCaptured(&captured, &reply_buffer);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -1766,7 +1767,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1778,17 +1779,18 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(io: std.Io, captured: *client.CapturedRecord, generated: bool, drop_reply: ?[]const u8, stage: ?*client.FailureStage) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool) !void {
+    const io = sender.io;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (generated) try announceCapture(io, captured.identity().key.slice());
-        break :blk try (client.Requests{ .io = io, .stage = stage }).sendCaptured(captured, drop_reply, &reply_buffer);
+        break :blk try sender.sendCaptured(captured, &reply_buffer);
     };
     try writeMutationReply(io, reply, .json);
 }
@@ -1807,7 +1809,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2364,7 +2366,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try client.sendCaptured(init.io, &captured, null, &buffer);
+        break :blk try client.sendCaptured(init.io, &captured, &buffer);
     };
     try writeMutationReply(init.io, reply, .json);
 }
