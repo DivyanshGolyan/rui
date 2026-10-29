@@ -119,6 +119,7 @@ def zig_sleep_ordering(path, text):
     it. Production code, including code a test calls, is out of scope.
     """
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
+    declarations = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] in "\"'" else " " * len(match[0]), text)
     blocks, open_blocks, head = [], [], 0
     for index, char in enumerate(code):
         if char == "{":
@@ -132,7 +133,7 @@ def zig_sleep_ordering(path, text):
             head = index + 1
     scopes = []
     for head, start, end in blocks:
-        if test := ZIG_TEST.search(text[head:start]):
+        if test := ZIG_TEST.search(declarations[head:start]):
             scopes.append(Scope(head, start, end, "test", test[1], False))
         elif fn := ZIG_FN.search(code[head:start]):
             scopes.append(Scope(head, start, end, "fn", fn[2], bool(fn[1])))
@@ -374,6 +375,10 @@ test "polls wait on a condition" {
         for (items) |_| try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     production(std.testing.io);
+    // test "commented out" declares nothing
+    while (!done()) {
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
 }
 '''
         self.assertEqual(zig_sleep_ordering("src/a.zig", source), {
