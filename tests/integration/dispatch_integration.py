@@ -1359,7 +1359,7 @@ def main(mode="all", correlation_case="all"):
             assert stop["answer"]["status"] == "accepted", stop
             if order == "denial-first":
                 assert denial["answer"]["status"] == "accepted", denial
-                expected_rows = [(0, 2, "denied"), (1, 0, "cancelled")]
+                expected_rows = [(0, 0, "denied"), (1, 0, "cancelled")]
             else:
                 assert denial["answer"]["status"] == "rejected", denial
                 assert denial["answer"]["code"] == "action_not_pending", denial
@@ -1390,12 +1390,12 @@ def main(mode="all", correlation_case="all"):
         processes.remove(proposal_host)
         with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
             assert database.execute(
-                "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
+                "SELECT authorized,resolution_code FROM action_operation WHERE action_id=?",
                 (int(first_request["action"]),),
-            ).fetchone() == (2, "denied")
+            ).fetchone() == (0, "denied")
             for session, expected_rows in expected_action_rows.items():
                 rows = database.execute(
-                    "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
+                    "SELECT call_ordinal,authorized,resolution_code FROM action_operation "
                     "WHERE session_ref=? ORDER BY call_ordinal",
                     (session,),
                 ).fetchall()

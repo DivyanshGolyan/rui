@@ -1500,7 +1500,7 @@ def main():
         fixture.stop_host(host)
         assert rows(
             store,
-            "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
+            "SELECT authorized,attempt_ordinal FROM action_operation WHERE session_ref=?",
             (session,),
         ) == [(1, 0)]
         before_launch_gate = ReleaseGate(state / "before-launch-gate")
