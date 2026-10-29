@@ -110,7 +110,7 @@ runs:
         esac
         if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
           curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
-            --retry 1 --retry-delay 1 --retry-max-time 95 \
+            --retry 2 --retry-all-errors --retry-max-time 200 \
             "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
           echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/rui-zig"

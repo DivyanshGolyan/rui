@@ -119,7 +119,13 @@ jobs:
           SHA: ${{ needs.plan.outputs.sha }}
         run: |
           set -euo pipefail
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts"
+          for delay in 10 30 ''; do
+            rm -rf "$RUNNER_TEMP/artifacts"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
+            test -n "$delay" || exit 1
+            echo "::warning::Artifact download failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
           mkdir dist
           find "$RUNNER_TEMP/artifacts" -name "rui-$VERSION-*.tar.gz" -exec mv {} dist/ \;
           (cd dist && sha256sum rui-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
