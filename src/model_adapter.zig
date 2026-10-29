@@ -980,6 +980,7 @@ pub const Preparation = struct {
             .work_items = item_allowance - items_left,
             .request_bytes = self.writer.offset,
         };
+        self.view.checkAttempt() catch |err| return .{ .failed = err };
         while (bytes_left != 0 and items_left != 0) {
             if (self.phase == .emitting) {
                 const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };

@@ -633,6 +633,13 @@ pub const HistoricalView = struct {
         };
     }
 
+    /// Each preparation advance checks the Attempt once. Its steps read only
+    /// history below the admission boundary, and the handoff checks again.
+    pub fn checkAttempt(self: *HistoricalView) !void {
+        std.debug.assert(self.active);
+        return self.store.checkAttempt(self.binding);
+    }
+
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
         std.debug.assert(self.active);
         return self.store.readHistoricalSettings(self);
@@ -1391,7 +1398,7 @@ pub const Store = struct {
         const action = error{ActionNotFound};
         const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
         const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
-        const historical_entry = attempt_binding || error{HistoricalPending};
+        const historical_entry = error{HistoricalPending};
         const model_success = attempt_binding || error{InvalidProviderEnvelope};
         const action_attempt = error{StaleActionAttemptBinding};
         const action_dispatch = action_attempt || error{SupersededByControl};
@@ -5328,10 +5335,14 @@ pub const Store = struct {
     }
 
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
+        try self.checkAttempt(binding);
+        return .{ .store = self, .binding = binding };
+    }
+
+    fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
         const access = try self.enter(.none);
         defer access.release();
         try access.finish(Ordinary.attempt_binding, self.validateCurrentAttempt(binding));
-        return .{ .store = self, .binding = binding };
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
@@ -5356,11 +5367,10 @@ pub const Store = struct {
     fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.selectedContextAnchorLocked(binding));
+        return access.finish(Ordinary.none, self.selectedContextAnchorLocked(binding));
     }
 
     fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
-        try self.validateCurrentAttempt(binding);
         const statement = try self.cached("SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
             "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
             "AND " ++ resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<current.admission_position " ++
@@ -5404,11 +5414,10 @@ pub const Store = struct {
     fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.readHistoricalSettingsLocked(view));
+        return access.finish(Ordinary.none, self.readHistoricalSettingsLocked(view));
     }
 
     fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView) !HistoricalSettings {
-        try self.validateCurrentAttempt(view.binding);
         const statement = try self.cached(
             "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
@@ -5469,13 +5478,12 @@ pub const Store = struct {
     fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.validateHistoricalOutputsStepLocked(view));
+        return access.finish(Ordinary.none, self.validateHistoricalOutputsStepLocked(view));
     }
 
     // Select the producing Operation before its items, so even a completely
     // missing output is detected. No statement or lock survives this one step.
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
-        try self.validateCurrentAttempt(view.binding);
         if (view.outputs_validated) return true;
         if (view.output_frontier == null) {
             const boundary = try self.cached("SELECT current.admission_position,coalesce((SELECT base.admission_position " ++
@@ -5540,7 +5548,6 @@ pub const Store = struct {
     }
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
-        try self.validateCurrentAttempt(view.binding);
         std.debug.assert(view.outputs_validated);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
@@ -5817,14 +5824,13 @@ pub const Store = struct {
     ) !?HistoricalToolResult {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.attempt_binding, self.readHistoricalToolResultLocked(view));
+        return access.finish(Ordinary.none, self.readHistoricalToolResultLocked(view));
     }
 
     fn readHistoricalToolResultLocked(
         self: *Store,
         view: *HistoricalView,
     ) !?HistoricalToolResult {
-        try self.validateCurrentAttempt(view.binding);
         const source_operation_id = view.active_tool_group_source_id orelse unreachable;
         const after_call_ordinal = view.active_tool_group_after_ordinal;
         const next_call = "SELECT call.call_ordinal,call.call_id_content_id," ++
