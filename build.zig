@@ -102,8 +102,15 @@ pub fn build(b: *std.Build) void {
         h2_test_step.dependOn(&run_h2_tests.step);
     }
 
+    // Test actors are never shipped and run briefly. On x86_64, Zig's own
+    // backend builds each in about a second, where LLVM pays a ~28 CPU-second
+    // ReleaseSafe floor; safety checks stay on. Its aarch64-macos build of these
+    // actors exhausts memory, so Apple Silicon keeps LLVM. Product binaries and
+    // codegen witnesses such as the signal-stack probe always use LLVM.
+    const test_actor_llvm: ?bool = if (target.result.cpu.arch == .x86_64) false else null;
     const renderer_allocation = b.addExecutable(.{
         .name = "rui-answer-renderer-allocation-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/answer_renderer_allocation.zig"),
             .target = target,
@@ -121,6 +128,7 @@ pub fn build(b: *std.Build) void {
 
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/terminal_notice_test.zig"),
             .target = target,
@@ -195,6 +203,7 @@ pub fn build(b: *std.Build) void {
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/session_list_client.zig"),
             .target = target,
@@ -211,6 +220,7 @@ pub fn build(b: *std.Build) void {
     session_list_client.root_module.addImport("rui_client", read_client);
     const proposal_client = b.addExecutable(.{
         .name = "rui-proposal-client-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/proposal_client.zig"),
             .target = target,
@@ -226,6 +236,7 @@ pub fn build(b: *std.Build) void {
     b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/activity_client.zig"),
             .target = target,
@@ -372,6 +383,7 @@ pub fn build(b: *std.Build) void {
 
     const preference_policy_actor = b.addExecutable(.{
         .name = "rui-preference-policy-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/preference_policy.zig"),
             .target = target,
@@ -421,6 +433,7 @@ pub fn build(b: *std.Build) void {
 
     const host_status_actor = b.addExecutable(.{
         .name = "rui-host-status-test",
+        .use_llvm = test_actor_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/host_status_actor.zig"),
             .target = target,
