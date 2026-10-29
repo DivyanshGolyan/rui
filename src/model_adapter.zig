@@ -3183,14 +3183,17 @@ test "request preparation resumes large private replay validation before emissio
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 100000);
-            const before = if (preparation.emission == .replay) preparation.emission.replay.validation.position else 0;
+            // The Store checks the item before serving it, so no replay
+            // emission starts while its check is pending.
+            const check = &preparation.view.output_check;
+            const before = if (check.reader != null) check.validation.position else 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (preparation.emission == .replay and !preparation.emission.replay.validated) {
+            if (check.reader != null) {
                 validation_turns += 1;
-                try std.testing.expect(preparation.emission.replay.validation.position - before <= 7);
-                try std.testing.expectEqual(@as(u64, 0), preparation.emission.replay.cursor.position);
+                try std.testing.expect(check.validation.position - before <= 7);
+                try std.testing.expect(preparation.emission != .replay);
                 try preparation.checkIntegrity(binding);
             }
             switch (progress) {
