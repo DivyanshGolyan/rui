@@ -3,6 +3,7 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const transport_policy = @import("transport_policy.zig");
 
 pub const ConversationCursor = struct {
     end: u64,
@@ -242,7 +243,7 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Work = struct { status: JsonEnum(protocol.PageWork.Status), turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, work: Work };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -313,7 +314,7 @@ pub const ActivityPage = struct {
             previous = fact.*;
         }
         const work = &page.facts.work;
-        work.status = wire.work.status.value;
+        work.state = wire.work.state.value;
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
@@ -578,9 +579,10 @@ pub const Current = struct {
         }
     };
     pub const Work = struct {
-        status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
-        turn: OmittableJson(Id) = .{},
-        operation: OmittableJson(Id) = .{},
+        state: JsonWorkState,
+        turn: ?Id,
+        operation: ?Id,
+        first_action: ?Id,
         latest_outcome: ?struct { code: JsonString(protocol.max_code_bytes), content: ?Reference },
 
         pub fn jsonStringify(self: Work, jw: anytype) !void {
@@ -786,7 +788,8 @@ pub const Current = struct {
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
-        if ((work.turn.value == null) != (work.operation.value == null) or (work.latest_outcome != null and work.turn.value == null)) return error.InvalidObservation;
+        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null) or
+            (work.first_action != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
             if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
         }
@@ -1419,6 +1422,87 @@ pub const JsonPeer = struct {
     }
 };
 
+/// A Session's work state as every reader writes it (`protocol.WorkStateJson`):
+/// `kind`, `since`, and exactly the facts that kind owns.
+pub const JsonWorkState = struct {
+    value: protocol.WorkState,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Kind = protocol.session_work.Kind;
+        const Wire = struct {
+            kind: JsonEnum(Kind),
+            since: JsonString(20),
+            due_at_ms: OmittableJson(JsonString(20)) = .{},
+            cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
+            attempt: OmittableJson(JsonString(20)) = .{},
+            description: OmittableJson(?JsonString(protocol.max_tool_description_bytes)) = .{},
+            running: OmittableJson(JsonString(20)) = .{},
+            approvals: OmittableJson(JsonString(20)) = .{},
+            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
+            resets_at: OmittableJson(?JsonString(20)) = .{},
+        };
+        const wire = try std.json.innerParse(Wire, allocator, source, options);
+        const kind = wire.kind.value;
+        const present = [_]bool{ wire.due_at_ms.isPresent(), wire.cause.isPresent(), wire.attempt.isPresent(), wire.description.isPresent(), wire.running.isPresent(), wire.approvals.isPresent(), wire.code.isPresent(), wire.resets_at.isPresent() };
+        const owned: [present.len]bool = switch (kind) {
+            .retrying => .{ true, true, true, false, false, false, false, false },
+            .bash => .{ false, false, false, true, true, true, false, false },
+            .failed => .{ false, false, false, false, false, false, true, true },
+            .stopped => .{ false, true, false, false, false, false, false, false },
+            .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
+        };
+        if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
+        const since = number(wire.since, false) catch return error.InvalidCharacter;
+        const value: protocol.WorkState = switch (kind) {
+            .retrying => .{ .retrying = .{
+                .since = since,
+                .due_at_ms = number(wire.due_at_ms.value.?, false) catch return error.InvalidCharacter,
+                .cause = try code(wire.cause.value.?),
+                .attempt = number(wire.attempt.value.?, false) catch return error.InvalidCharacter,
+            } },
+            .bash => .{ .bash = .{
+                .since = since,
+                .description = if (wire.description.value.?) |text| description: {
+                    if (!protocol.ToolPresentation.validDescription(text.slice())) return error.InvalidCharacter;
+                    break :description text.value;
+                } else null,
+                .running = number(wire.running.value.?, false) catch return error.InvalidCharacter,
+                .approvals = number(wire.approvals.value.?, true) catch return error.InvalidCharacter,
+            } },
+            .failed => failed: {
+                const saved = try code(wire.code.value.?);
+                const resets_at = if (wire.resets_at.value.?) |text| number(text, false) catch return error.InvalidCharacter else null;
+                // Only a quota refusal saves a reset time.
+                if (resets_at != null and transport_policy.Quota.ofFailureCode(saved.slice()) == null) return error.InvalidCharacter;
+                break :failed .{ .failed = .{ .since = since, .code = saved, .resets_at = resets_at } };
+            },
+            .stopped => .{ .stopped = .{
+                .since = since,
+                .cause = std.meta.stringToEnum(protocol.session_work.StopCause, wire.cause.value.?.slice()) orelse return error.InvalidCharacter,
+            } },
+            inline .idle, .pending, .working, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
+        };
+        return .{ .value = value };
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginWriteRaw();
+        try (protocol.WorkStateJson{ .state = self.value }).writeJson(jw.writer);
+        jw.endWriteRaw();
+    }
+
+    fn number(text: JsonString(20), zero: bool) !u64 {
+        const value = try mutationId(text, zero);
+        if (value > std.math.maxInt(i64)) return error.InvalidResponse;
+        return value;
+    }
+
+    fn code(text: JsonString(protocol.max_code_bytes)) !protocol.Bounded(protocol.max_code_bytes) {
+        if (text.slice().len == 0) return error.InvalidCharacter;
+        return text.value;
+    }
+};
+
 // The stdlib also accepts numeric enum tags. Host facts require named strings;
 // their closed vocabulary derives the token bound, with JsonString's lifetime.
 pub const JsonToolPresentation = struct {
@@ -1502,7 +1586,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
-    facts.work = .{ .status = .waiting_for_permission, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2, .revision = std.math.maxInt(i64) };
+    facts.work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2, .revision = std.math.maxInt(i64) };
     // An absolute Workspace whose other bytes escape to their widest JSON form.
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
@@ -1517,6 +1601,60 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
+    }
+}
+
+test "a work state reads back exactly the facts its kind owns" {
+    var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try cause.set("provider_temporary_http_429");
+    var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try quota.set("provider_usage_limit_reached");
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Run \u{1}the resize tests");
+    const states = [_]protocol.WorkState{
+        .{ .idle = .{ .since = 1 } },
+        .{ .pending = .{ .since = 2 } },
+        .{ .working = .{ .since = 3 } },
+        .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
+        .{ .bash = .{ .since = 5, .description = description, .running = 1, .approvals = 0 } },
+        .{ .bash = .{ .since = 5, .description = null, .running = 2, .approvals = 3 } },
+        .{ .approval = .{ .since = 6 } },
+        .{ .stopping = .{ .since = 7 } },
+        .{ .finished = .{ .since = 8 } },
+        .{ .failed = .{ .since = 9, .code = quota, .resets_at = 1792940000 } },
+        .{ .failed = .{ .since = 9, .code = cause, .resets_at = null } },
+        .{ .stopped = .{ .since = 10, .cause = .interruption } },
+        .{ .stopped = .{ .since = 10, .cause = .stop } },
+    };
+    for (states) |state| {
+        var buffer: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
+        const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        // The client re-emits the bytes the Host wrote.
+        var again: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+        var again_writer = std.Io.Writer.fixed(&again);
+        try std.json.Stringify.value(parsed.value, .{}, &again_writer);
+        try std.testing.expectEqualStrings(writer.buffered(), again_writer.buffered());
+    }
+    for ([_][]const u8{
+        // A fact the kind does not own, or one it is missing.
+        "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
+        "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
+        // Values outside each fact's grammar.
+        "{\"kind\":\"pending\",\"since\":\"0\"}",
+        "{\"kind\":\"pending\",\"since\":2}",
+        "{\"kind\":\"later\",\"since\":\"2\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":\"\",\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"0\",\"approvals\":\"0\"}",
+        "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"\",\"resets_at\":null}",
+        "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"provider_http_401\",\"resets_at\":\"5\"}",
+        "{\"kind\":\"stopped\",\"since\":\"10\",\"cause\":\"timeout\"}",
+    }) |bytes| {
+        try std.testing.expect(std.meta.isError(std.json.parseFromSlice(JsonWorkState, std.testing.allocator, bytes, .{})));
     }
 }
 
@@ -2428,7 +2566,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
     const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
-    const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"status\":\"idle\",\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
@@ -2503,7 +2641,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -2519,7 +2657,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
-    try std.testing.expectEqual(@as(u64, 91), facts.work.operation.value.?.value);
+    try std.testing.expectEqual(@as(u64, 91), facts.work.operation.?.value);
     try std.testing.expectEqual(@as(usize, 10), facts.recent_count);
     for (facts.recent[0..10], 0..) |row, i| try std.testing.expectEqual(@as(u64, 30 - i), row.turn.value);
     try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "09azvw", .{ .report = .{ .bytes = bytes } }));
@@ -2546,7 +2684,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });

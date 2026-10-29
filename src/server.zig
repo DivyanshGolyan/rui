@@ -2949,7 +2949,26 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.work = .{ .status = Worst.tag(protocol.PageWork.Status), .turn = max, .operation = max, .first_action = max, .revision = max };
+    // The work state's longest kind: every variant written, the longest kept.
+    var longest_state: protocol.WorkState = undefined;
+    var longest_state_bytes: usize = 0;
+    for ([_]protocol.WorkState{
+        .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
+        .{ .bash = .{ .since = max, .description = description, .running = max, .approvals = max } },
+        .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
+        .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
+        .{ .approval = .{ .since = max } },
+    }) |state| {
+        var buffer: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
+        if (writer.end > longest_state_bytes) {
+            longest_state_bytes = writer.end;
+            longest_state = state;
+        }
+    }
+    try std.testing.expectEqual(protocol.WorkStateJson.max_json_bytes, longest_state_bytes);
+    facts.work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max, .revision = max };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;

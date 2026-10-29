@@ -355,10 +355,10 @@ def main(report_source):
         assert len(after - before) == 1, (before, after)
         generated_self_record = pathlib.Path(next(iter(after - before)))
         assert json.loads(generated_self_record.read_text())["sender"] == own_sender
-        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
+        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
-        assert b_held["work"]["status"] != "completed", b_held
+        assert b_held["work"]["state"]["kind"] != "finished", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", session_a, "--profile", "full", home=home)["full"]["actions"][0]
         assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
         assert (workspace / "conflicting-store.out").read_bytes() == b""
@@ -429,7 +429,7 @@ def main(report_source):
         domain = b"rui/content/v1"
         assert reply["input"] == {"type": "text", "bytes": str(len(REPORT.encode())),
                                   "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + REPORT.encode()).hexdigest()}, reply
-        a_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
+        a_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)), "A's reply Turn")
         a_reply_request = [request for request in endpoint.requests if address_of(request) == session_a][-1]
         assert last_user_text(a_reply_request).encode() == REPORT.encode() and a_final
@@ -449,7 +449,7 @@ def main(report_source):
         assert len(a_requests) == 3, a_requests
         # Recovery adds no admission; only the task and two explicit self-sends
         # appear in B. Plain answers are saved results, not implicit Messages.
-        b_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
+        b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn")
         assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
         for record, key in zip((state / "b-self.json", generated_self_record), self_sends):

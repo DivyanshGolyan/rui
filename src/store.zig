@@ -10,6 +10,7 @@ const output_format = @import("output_format.zig");
 const provider_output = @import("provider_output.zig");
 const retry_policy = @import("retry_policy.zig");
 const turn_policy = @import("turn_policy.zig");
+const session_work = @import("session_work.zig");
 
 const c = @import("sqlite");
 
@@ -2681,51 +2682,19 @@ pub const Store = struct {
         };
     }
 
+    /// A pending Message's progress is its Session's work: its own active
+    /// Turn, or the work ahead of it in the queue.
     fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
-        const statement = try self.cached("SELECT t.turn_id,o.resolution_code FROM turn t INDEXED BY turn_one_active_per_session " ++
-            "JOIN model_operation o ON o.operation_id=t.operation_id " ++
-            "WHERE t.session_ref=?1 AND t.outcome_code IS NULL");
-        defer resetCached(statement);
-        try bindText(statement, 1, session_ref);
-        const step = c.sqlite3_step(statement);
-        if (step == c.SQLITE_DONE) {
-            if (state != .queued) return error.CorruptStore;
-            return .{ .status = .runnable };
-        }
-        if (step != c.SQLITE_ROW) return error.TurnReadFailed;
-        const turn_id = c.sqlite3_column_int64(statement, 0);
-        if (turn_id <= 0) return error.CorruptStore;
-        if (state == .processing and state.processing.turn_id != @as(u64, @intCast(turn_id))) return error.CorruptStore;
-        const resolution = if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL) null else blk: {
-            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-            try readText(statement, 1, &code);
-            break :blk code;
+        const session = (try self.readSession(session_ref)) orelse return error.CorruptStore;
+        const work = (try self.readWorkLocked(session_ref, session.created_at, try readUnixMilliseconds(self.io))).work;
+        if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
+        const status: protocol.MessageProgressStatus = switch (work.state.status()) {
+            .runnable => .runnable,
+            .in_flight => .in_flight,
+            .waiting_for_permission => .waiting_for_permission,
+            .idle, .completed, .cancelled, .failed => return error.CorruptStore,
         };
-        return self.activeMessageProgress(session_ref, resolution);
-    }
-
-    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(protocol.max_code_bytes)) !MessageProgress {
-        const statement = try self.cached("SELECT count(*),count(*) FILTER (WHERE action.authorized=0),min(CASE WHEN action.authorized=0 THEN action.action_id END) " ++
-            "FROM turn active INDEXED BY turn_one_active_per_session " ++
-            "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL");
-        defer resetCached(statement);
-        try bindText(statement, 1, session_ref);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
-        const unresolved = c.sqlite3_column_int64(statement, 0);
-        const actionable = c.sqlite3_column_int64(statement, 1);
-        if (unresolved < 0 or actionable < 0 or actionable > unresolved) return error.CorruptStore;
-        const action_id: ?u64 = if (actionable == 0) null else blk: {
-            const id = c.sqlite3_column_int64(statement, 2);
-            if (id <= 0) return error.CorruptStore;
-            break :blk @intCast(id);
-        };
-        const known = if (resolution) |code| turn_policy.Resolution.parse(code.slice()) else null;
-        const status: protocol.MessageProgressStatus = if (known) |current|
-            if (turn_policy.contains(&turn_policy.continues_with_input, current)) .runnable else if (current == .tool_proposals and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (current == .tool_proposals and unresolved == 0) .runnable else .in_flight
-        else
-            .in_flight;
-        return .{ .status = status, .action_id = action_id };
+        return .{ .status = status, .action_id = work.first_action };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -3141,8 +3110,8 @@ pub const Store = struct {
         page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
         // Work as of this same read, so the footer, consent and first Action
         // always describe the page they arrive with.
-        page.work = (try self.readWorkLocked(request.session.slice(), try self.countPendingMessages(request.session.slice()))).page;
-        page.work.revision = session.revision;
+        const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
+        page.work = .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action, .revision = session.revision };
         try page.work.workspace.set(session.workspace.slice());
         return page;
     }
@@ -3671,7 +3640,7 @@ pub const Store = struct {
             try capture.append("null");
         }
         try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
-        try self.appendCurrentWork(session_ref, pending_messages, capture);
+        try self.appendCurrentWork(session_ref, current.created_at, capture);
         try capture.append(",\"selected_message\":");
         try self.appendSelectedMessage(session_ref, capture);
         try capture.append(",\"recent_messages\":[");
@@ -3720,11 +3689,14 @@ pub const Store = struct {
         });
     }
 
-    fn appendCurrentWork(self: *Store, session_ref: []const u8, pending_messages: u64, capture: *SessionReportCapture) !void {
-        const work = try self.readWorkLocked(session_ref, pending_messages);
-        try capture.appendFmt("{{\"status\":\"{s}\"", .{@tagName(work.page.status)});
-        if (work.page.turn) |turn_id| try capture.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\"", .{ turn_id, work.page.operation.? });
-        const outcome = work.outcome orelse return capture.append(",\"latest_outcome\":null}");
+    fn appendCurrentWork(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
+        const read = try self.readWorkLocked(session_ref, created_at, try readUnixMilliseconds(self.io));
+        const work: protocol.SessionWork = .fromCore(read.work);
+        var buffer: [protocol.SessionWork.max_json_bytes]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try protocol.writeShape(&writer, .{"{"} ++ protocol.SessionWork.fields, work.args());
+        try capture.append(writer.buffered());
+        const outcome = read.outcome orelse return capture.append(",\"latest_outcome\":null}");
         try capture.append(",\"latest_outcome\":{\"code\":");
         try capture.appendJsonString(outcome.code.slice());
         try capture.append(",\"content\":");
@@ -3737,49 +3709,164 @@ pub const Store = struct {
         try capture.append("}}");
     }
 
-    /// The Session's latest Turn as work: Current reports it, and each
-    /// activity page carries it from the same read as its items.
-    fn readWorkLocked(self: *Store, session_ref: []const u8, pending_messages: u64) !struct {
-        page: protocol.PageWork,
+    const WorkRead = struct {
+        work: session_work.Work,
+        /// The latest Turn's outcome, once it has one.
         outcome: ?struct { code: protocol.Bounded(protocol.max_code_bytes), content_id: ?i64 } = null,
-    } {
-        const statement = try self.cached(
-            "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.resolution_code " ++
-                "FROM turn t JOIN model_operation o ON o.operation_id=t.operation_id " ++
+    };
+
+    /// The Session's work now: a fixed set of seeks under the caller's lock,
+    /// none of which reads history, then `session_work.derive`. List rows,
+    /// activity pages, Current and Message progress all read work here.
+    fn readWorkLocked(self: *Store, session_ref: []const u8, created_at: u64, now_ms: i64) !WorkRead {
+        var inputs: session_work.Inputs = .{ .now_ms = @intCast(now_ms), .created_at = created_at };
+        var read: WorkRead = .{ .work = undefined };
+        var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
+        var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+        // The quota diagnostic is read only for a failed outcome, and only
+        // while it is small enough to be one.
+        const latest = try self.cached(
+            "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
+                "o.resolution_code,o.retry_due_at_ms,o.last_failure_code,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+                "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=512 AND t.outcome_code NOT IN ('completed','cancelled'))," ++
+                "(SELECT stopped_at FROM session_stop INDEXED BY session_stop_turn WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) " ++
+                "FROM turn t INDEXED BY turn_session_latest JOIN model_operation o ON o.operation_id=t.operation_id " ++
                 "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
         );
-        defer resetCached(statement);
-        try bindText(statement, 1, session_ref);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return .{ .page = .{ .status = if (pending_messages == 0) .idle else .runnable } };
-        if (result != c.SQLITE_ROW) return error.TurnReadFailed;
-        const turn_id = c.sqlite3_column_int64(statement, 0);
-        const operation_id = c.sqlite3_column_int64(statement, 1);
-        if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
-        var page: protocol.PageWork = .{ .turn = @intCast(turn_id), .operation = @intCast(operation_id) };
-        if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
-            const resolution = if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) null else blk: {
-                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-                try readText(statement, 4, &code);
-                break :blk code;
-            };
-            const progress = try self.activeMessageProgress(session_ref, resolution);
-            page.status = switch (progress.status) {
-                inline else => |status| @field(protocol.PageWork.Status, @tagName(status)),
-            };
-            page.first_action = progress.action_id;
-            return .{ .page = page };
+        defer resetCached(latest);
+        try bindText(latest, 1, session_ref);
+        switch (c.sqlite3_step(latest)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => {
+                var turn: session_work.Inputs.Turn = .{
+                    .turn = try readPositive(latest, 0),
+                    .operation = try readPositive(latest, 1),
+                    .input_cutoff = try readPositive(latest, 2),
+                    .stopped_at = try readOptionalPositive(latest, 15),
+                    .op = undefined,
+                };
+                if (c.sqlite3_column_type(latest, 7) != c.SQLITE_NULL) {
+                    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
+                    try readText(latest, 7, &resolution);
+                    turn.op = .{ .resolved = .{ .resolution = turn_policy.Resolution.parse(resolution.slice()), .at = try readPositive(latest, 13) } };
+                } else if (c.sqlite3_column_int64(latest, 8) == 0) {
+                    turn.op = .{ .in_flight = .{ .attempt_at = try readPositive(latest, 11) } };
+                } else {
+                    if (c.sqlite3_column_type(latest, 9) == c.SQLITE_NULL) return error.CorruptStore;
+                    try readText(latest, 9, &cause);
+                    turn.op = .{ .waiting = .{
+                        .scheduled_at = try readPositive(latest, 12),
+                        .due_at_ms = try readPositive(latest, 8),
+                        .cause = cause.slice(),
+                        .attempt = try readPositive(latest, 10),
+                    } };
+                }
+                if (c.sqlite3_column_type(latest, 3) != c.SQLITE_NULL) {
+                    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+                    try readText(latest, 3, &code);
+                    const content_id = try readNullablePositiveI64(latest, 4);
+                    read.outcome = .{ .code = code, .content_id = content_id };
+                    turn.terminal = .{
+                        .outcome = switch (try TurnOutcome.decode(code.slice(), content_id)) {
+                            .completed => .completed,
+                            .cancelled => .cancelled,
+                            .retry_exhausted, .resource_exceeded, .failed => .failed,
+                        },
+                        .code = read.outcome.?.code.slice(),
+                        .at = try readPositive(latest, 5),
+                        .position = try readPositive(latest, 6),
+                        .diagnostic = if (c.sqlite3_column_type(latest, 14) == c.SQLITE_BLOB) columnBytes(latest, 14) else null,
+                    };
+                } else {
+                    turn.actions = try self.readWorkActions(turn.operation, &description);
+                }
+                inputs.latest = turn;
+            },
+            else => return error.TurnReadFailed,
         }
-        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-        try readText(statement, 2, &code);
-        const content_id = try readNullablePositiveI64(statement, 3);
-        const ended: protocol.PageWork.Status = switch (try TurnOutcome.decode(code.slice(), content_id)) {
-            .completed => .completed,
-            .cancelled => .cancelled,
-            .retry_exhausted, .resource_exceeded, .failed => .failed,
+        if (inputs.latest == null or inputs.latest.?.terminal != null) try self.readWorkQueue(session_ref, &inputs);
+        read.work = try session_work.derive(inputs);
+        return read;
+    }
+
+    /// One aggregate over the Operation's Actions, bounded by its calls, and
+    /// the oldest running Action's saved description.
+    fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bounded(protocol.max_tool_description_bytes)) !session_work.Inputs.Actions {
+        const group = try self.cached(
+            "SELECT count(*),count(*) FILTER (WHERE resolution_code IS NULL)," ++
+                "count(*) FILTER (WHERE resolution_code IS NULL AND authorized=0)," ++
+                "min(CASE WHEN resolution_code IS NULL AND authorized=0 THEN action_id END)," ++
+                "count(*) FILTER (WHERE resolution_code IS NULL AND attempt_ordinal=1)," ++
+                "coalesce(max(max(coalesce(decided_at,0),coalesce(resolved_at,0))),0) " ++
+                "FROM action_operation WHERE parent_operation_id=?1",
+        );
+        defer resetCached(group);
+        try bindU64(group, 1, operation_id);
+        if (c.sqlite3_step(group) != c.SQLITE_ROW) return error.ActionReadFailed;
+        var actions: session_work.Inputs.Actions = .{
+            .total = try readCount(group, 0),
+            .unresolved = try readCount(group, 1),
+            .awaiting = try readCount(group, 2),
+            .first_awaiting = try readOptionalPositive(group, 3),
+            .running = try readCount(group, 4),
+            .latest_change_at = try readCount(group, 5),
         };
-        page.status = if (pending_messages != 0) .runnable else ended;
-        return .{ .page = page, .outcome = .{ .code = code, .content_id = content_id } };
+        if (actions.running == 0) return actions;
+        const oldest = try self.cached(
+            "SELECT a.attempt_at,call.description FROM action_operation a " ++
+                "JOIN model_tool_call call ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
+                "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
+        );
+        defer resetCached(oldest);
+        try bindU64(oldest, 1, operation_id);
+        if (c.sqlite3_step(oldest) != c.SQLITE_ROW) return error.CorruptStore;
+        const described = c.sqlite3_column_type(oldest, 1) != c.SQLITE_NULL;
+        if (described) try readText(oldest, 1, description);
+        actions.oldest_running = .{ .at = try readPositive(oldest, 0), .description = if (described) description.slice() else null };
+        return actions;
+    }
+
+    /// Without an active Turn: the oldest eligible queued Message, else the
+    /// newest stop-excluded one and the earliest stop that excluded it.
+    fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.Inputs) !void {
+        const cutoff = try self.latestSessionStopCutoff(session_ref);
+        const queued = try self.cached(
+            "SELECT admitted_at FROM message_admission INDEXED BY message_admission_session_pending " ++
+                "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
+        );
+        defer resetCached(queued);
+        try bindText(queued, 1, session_ref);
+        try bindU64(queued, 2, cutoff);
+        switch (c.sqlite3_step(queued)) {
+            c.SQLITE_ROW => {
+                inputs.oldest_pending_at = try readPositive(queued, 0);
+                return;
+            },
+            c.SQLITE_DONE => {},
+            else => return error.MessageAdmissionReadFailed,
+        }
+        if (cutoff == 0) return;
+        const excluded = try self.cached(
+            "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending " ++
+                "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id<=?2 ORDER BY admission_id DESC LIMIT 1",
+        );
+        defer resetCached(excluded);
+        try bindText(excluded, 1, session_ref);
+        try bindU64(excluded, 2, cutoff);
+        const admission = switch (c.sqlite3_step(excluded)) {
+            c.SQLITE_ROW => try readPositive(excluded, 0),
+            c.SQLITE_DONE => return,
+            else => return error.MessageAdmissionReadFailed,
+        };
+        const stop = try self.cached(
+            "SELECT position,stopped_at FROM session_stop INDEXED BY session_stop_exclusion " ++
+                "WHERE session_ref=?1 AND admission_cutoff>=?2 ORDER BY admission_cutoff,position LIMIT 1",
+        );
+        defer resetCached(stop);
+        try bindText(stop, 1, session_ref);
+        try bindU64(stop, 2, admission);
+        if (c.sqlite3_step(stop) != c.SQLITE_ROW) return error.CorruptStore;
+        inputs.excluded = .{ .admission = admission, .stop_position = try readPositive(stop, 0), .stop_at = try readPositive(stop, 1) };
     }
 
     fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
@@ -8160,6 +8247,33 @@ fn readDigest(statement: *c.sqlite3_stmt, index: c_int) ![32]u8 {
     return bytes[0..32].*;
 }
 
+/// A required positive integer column; anything else is a contradiction.
+fn readPositive(statement: *c.sqlite3_stmt, index: c_int) !u64 {
+    return try readOptionalPositive(statement, index) orelse error.CorruptStore;
+}
+
+fn readOptionalPositive(statement: *c.sqlite3_stmt, index: c_int) !?u64 {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    if (c.sqlite3_column_type(statement, index) != c.SQLITE_INTEGER) return error.CorruptStore;
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value <= 0) return error.CorruptStore;
+    return @intCast(value);
+}
+
+fn readCount(statement: *c.sqlite3_stmt, index: c_int) !u64 {
+    if (c.sqlite3_column_type(statement, index) != c.SQLITE_INTEGER) return error.CorruptStore;
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value < 0) return error.CorruptStore;
+    return @intCast(value);
+}
+
+/// A BLOB column's bytes, borrowed until the statement steps or resets.
+fn columnBytes(statement: *c.sqlite3_stmt, index: c_int) []const u8 {
+    const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
+    const pointer = c.sqlite3_column_blob(statement, index) orelse return "";
+    return @as([*]const u8, @ptrCast(pointer))[0..length];
+}
+
 fn readNullablePositiveI64(statement: *c.sqlite3_stmt, index: c_int) !?i64 {
     if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
     const value = c.sqlite3_column_int64(statement, index);
@@ -9305,7 +9419,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const first_action_id = first: {
         const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(report_bytes);
-        try std.testing.expect(std.mem.indexOf(u8, report_bytes, "\"work\":{\"status\":\"waiting_for_permission\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report_bytes, "\"work\":{\"state\":{\"kind\":\"approval\"") != null);
         const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         try std.testing.expectEqualStrings("2", parsed.value.actions.count);
@@ -9506,7 +9620,7 @@ test "allow once survives mode changes and reopen without granting another Attem
     try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
 }
 
-test "Current reports progress alongside an actionable sibling" {
+test "Current, activity pages and Message progress report one work through an approval" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -9521,23 +9635,41 @@ test "Current reports progress alongside an actionable sibling" {
     defer parsed.deinit();
     const first = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items[0];
     const action_id = try std.fmt.parseInt(u64, first.object.get("action").?.string, 10);
-    try std.testing.expectEqualStrings("waiting_for_permission", parsed.value.object.get("work").?.object.get("status").?.string);
+    try std.testing.expectEqualStrings("approval", parsed.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
     try pageWorkAgrees(&storage, parsed.value, action_id);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.waiting_for_permission, (try storage.observeCommand("mixed-message")).message.?.progress.?.status);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
     try allow.key.set("mixed-allow");
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+
+    // Approved Bash awaiting a slot can progress: the work is pending and
+    // the Message runnable, though a sibling still awaits permission.
     const after = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(after);
     var mixed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{});
     defer mixed.deinit();
-    try std.testing.expectEqualStrings("in_flight", mixed.value.object.get("work").?.object.get("status").?.string);
+    try std.testing.expectEqualStrings("pending", mixed.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
     try std.testing.expectEqual(@as(usize, 1), mixed.value.object.get("actionable_permissions").?.array.items.len);
-    const message = (try storage.observeCommand("mixed-message")).message.?;
+    var message = (try storage.observeCommand("mixed-message")).message.?;
     try std.testing.expectEqualStrings("processing", @tagName(message.queue.?.state));
-    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.progress.?.status);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, message.progress.?.status);
     try std.testing.expectEqual(action_id + 1, message.progress.?.action_id.?);
     try pageWorkAgrees(&storage, mixed.value, action_id + 1);
+
+    // Once it runs, the Session is in Bash with one approval outstanding.
+    _ = (try storage.admitNextActionAttempt(300_000, .{})).?;
+    const running = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(running);
+    var bash = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, running, .{});
+    defer bash.deinit();
+    const state = bash.value.object.get("work").?.object.get("state").?.object;
+    try std.testing.expectEqualStrings("bash", state.get("kind").?.string);
+    try std.testing.expectEqualStrings("1", state.get("running").?.string);
+    try std.testing.expectEqualStrings("1", state.get("approvals").?.string);
+    message = (try storage.observeCommand("mixed-message")).message.?;
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.progress.?.status);
+    try pageWorkAgrees(&storage, bash.value, action_id + 1);
 }
 
 /// The activity page carries the work Current reports and the first
@@ -9547,13 +9679,216 @@ fn pageWorkAgrees(store: *Store, report: std.json.Value, first_action: u64) !voi
     try request.session.set(report.object.get("session").?.object.get("reference").?.string);
     const page = try store.activityPage(request);
     const work = report.object.get("work").?.object;
-    try std.testing.expectEqualStrings(work.get("status").?.string, @tagName(page.work.status));
+    var state: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&state);
+    try std.json.Stringify.value(work.get("state").?, .{}, &writer);
+    var page_state: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+    var page_writer: std.Io.Writer = .fixed(&page_state);
+    try (protocol.WorkStateJson{ .state = page.work.state }).writeJson(&page_writer);
+    try std.testing.expectEqualStrings(writer.buffered(), page_writer.buffered());
     try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("turn").?.string, 10), page.work.turn.?);
     try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("operation").?.string, 10), page.work.operation.?);
     try std.testing.expectEqual(first_action, page.work.first_action.?);
     const session = report.object.get("session").?.object;
     try std.testing.expectEqual(try std.fmt.parseInt(u64, session.get("revision").?.string, 10), page.work.revision);
     try std.testing.expectEqualStrings(session.get("workspace").?.string, page.work.workspace.slice());
+}
+
+/// Current and an activity page report the same work, and its kind is
+/// `kind`. Returns the state's `since`.
+fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, kind: []const u8) !u64 {
+    const bytes = try testingSessionReport(storage, tmp, session, 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const work = report.value.object.get("work").?.object;
+    const state = work.get("state").?.object;
+    try std.testing.expectEqualStrings(kind, state.get("kind").?.string);
+    var current: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+    var current_writer: std.Io.Writer = .fixed(&current);
+    try std.json.Stringify.value(work.get("state").?, .{}, &current_writer);
+
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session);
+    const page = try storage.activityPage(request);
+    var paged: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+    var paged_writer: std.Io.Writer = .fixed(&paged);
+    try (protocol.WorkStateJson{ .state = page.work.state }).writeJson(&paged_writer);
+    try std.testing.expectEqualStrings(current_writer.buffered(), paged_writer.buffered());
+    inline for (.{ "turn", "operation", "first_action" }) |name| {
+        const value = work.get(name).?;
+        const expected: ?u64 = if (value == .null) null else try std.fmt.parseInt(u64, value.string, 10);
+        try std.testing.expectEqual(expected, @field(page.work, name));
+    }
+    return page.work.state.since();
+}
+
+fn expectProgress(storage: *Store, key: []const u8, status: protocol.MessageProgressStatus) !void {
+    const message = (try storage.observeCommand(key)).message.?;
+    try std.testing.expectEqual(status, message.progress.?.status);
+}
+
+test "Current, activity pages and Message progress report one work in each state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    // A configure-only Session is idle since its creation.
+    const session = try configureTestSession(&storage, "one-work-config");
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT created_at FROM session"), try expectOneWork(&storage, &tmp, session.slice(), "idle"));
+
+    // Queued, then admitted.
+    try submitTestMessage(&storage, &tmp, "one-work-file", "one-work-message", session.slice(), "first");
+    _ = try expectOneWork(&storage, &tmp, session.slice(), "pending");
+    try expectProgress(&storage, "one-work-message", .runnable);
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT attempt_at FROM model_operation"), try expectOneWork(&storage, &tmp, session.slice(), "working"));
+    try expectProgress(&storage, "one-work-message", .in_flight);
+
+    // A retry due later is in flight; once due it is runnable, though
+    // nothing committed in between.
+    try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT retry_scheduled_at FROM model_operation"), try expectOneWork(&storage, &tmp, session.slice(), "retrying"));
+    try expectProgress(&storage, "one-work-message", .in_flight);
+    try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL");
+    _ = try expectOneWork(&storage, &tmp, session.slice(), "pending");
+    try expectProgress(&storage, "one-work-message", .runnable);
+
+    // A quota failure carries its saved reset time.
+    const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+    var diagnostic: [512]u8 = undefined;
+    const quota: @import("transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
+    try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{} } }, .ordinary, .{});
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT outcome_at FROM turn"), try expectOneWork(&storage, &tmp, session.slice(), "failed"));
+    {
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const failed = (try storage.activityPage(request)).work.state.failed;
+        try std.testing.expectEqualStrings("provider_usage_limit_reached", failed.code.slice());
+        try std.testing.expectEqual(@as(?u64, 1792940000), failed.resets_at);
+    }
+
+    // A completed Turn is finished.
+    const done = try configureTestSession(&storage, "one-work-done");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, done.slice(), "one-work-answer", &answer);
+    _ = try expectOneWork(&storage, &tmp, done.slice(), "finished");
+
+    // A stop selecting a Turn whose Bash runs is stopping until the Attempt
+    // settles; the Turn then ends stopped by the stop.
+    const bash = try configureTestSessionAsk(&storage, "one-work-bash");
+    try submitTestMessage(&storage, &tmp, "one-work-bash-file", "one-work-bash-message", bash.slice(), "propose");
+    const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, proposing, "one-work-bash-metadata");
+    _ = try expectOneWork(&storage, &tmp, bash.slice(), "approval");
+    try expectProgress(&storage, "one-work-bash-message", .waiting_for_permission);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation"), .decision = .allow_once };
+    try allow.key.set("one-work-allow");
+    try allow.session.set(bash.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try expectOneWork(&storage, &tmp, bash.slice(), "bash");
+    try expectProgress(&storage, "one-work-bash-message", .in_flight);
+    var stop = try completeSessionStop("one-work-stop", bash.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT stopped_at FROM session_stop"), try expectOneWork(&storage, &tmp, bash.slice(), "stopping"));
+    try expectProgress(&storage, "one-work-bash-message", .in_flight);
+    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    _ = try expectOneWork(&storage, &tmp, bash.slice(), "stopped");
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a stop that selected no Turn decides work only through the input it excluded" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "no-turn-stop-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "no-turn-stop-answer", &answer);
+
+    // A stop with nothing to stop leaves the Session finished.
+    var idle_stop = try completeSessionStop("no-turn-stop-idle", session.slice());
+    try std.testing.expect(storage.stopSession(&idle_stop, .{}) == .accepted);
+    _ = try expectOneWork(&storage, &tmp, session.slice(), "finished");
+
+    // A stop that excluded queued input stops the Session from that stop,
+    // and later no-op stops change nothing.
+    try submitTestMessage(&storage, &tmp, "no-turn-stop-file", "no-turn-stop-queued", session.slice(), "queued");
+    var effective = try completeSessionStop("no-turn-stop-effective", session.slice());
+    try std.testing.expect(storage.stopSession(&effective, .{}) == .accepted);
+    const stopped_at = try queryU64(storage.database, "SELECT stopped_at FROM session_stop WHERE command_key='no-turn-stop-effective'");
+    try std.testing.expectEqual(stopped_at, try expectOneWork(&storage, &tmp, session.slice(), "stopped"));
+    var later = try completeSessionStop("no-turn-stop-later", session.slice());
+    try std.testing.expect(storage.stopSession(&later, .{}) == .accepted);
+    try std.testing.expectEqual(stopped_at, try expectOneWork(&storage, &tmp, session.slice(), "stopped"));
+
+    // New input after the stop starts a Turn whose state is the Session's.
+    try submitTestMessage(&storage, &tmp, "no-turn-stop-next-file", "no-turn-stop-next", session.slice(), "next");
+    _ = try expectOneWork(&storage, &tmp, session.slice(), "pending");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    _ = try expectOneWork(&storage, &tmp, session.slice(), "working");
+}
+
+test "a quota reset is read from a saved record and never fences" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    for ([_]struct { code: []const u8, diagnostic: ?[]const u8, resets_at: ?u64 }{
+        .{ .code = "provider_insufficient_quota", .diagnostic = "{\"provider_code\":\"insufficient_quota\",\"resets_at\":null}", .resets_at = null },
+        .{ .code = "provider_usage_not_included", .diagnostic = "{\"provider_code\":\"usage_not_included\",\"resets_at\":42}", .resets_at = 42 },
+        // A missing, corrupt or mismatched record gives no time.
+        .{ .code = "provider_usage_limit_reached", .diagnostic = null, .resets_at = null },
+        .{ .code = "provider_usage_limit_reached", .diagnostic = "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":4x}", .resets_at = null },
+        .{ .code = "provider_usage_limit_reached", .diagnostic = "{\"provider_code\":\"insufficient_quota\",\"resets_at\":42}", .resets_at = null },
+        // Only a quota code reads one.
+        .{ .code = "provider_http_403", .diagnostic = "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":42}", .resets_at = null },
+    }, 0..) |case, index| {
+        var key_buffer: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "quota-{d}", .{index});
+        var message_buffer: [32]u8 = undefined;
+        const message = try std.fmt.bufPrint(&message_buffer, "quota-message-{d}", .{index});
+        const session = try configureTestSession(&storage, key);
+        try submitTestMessage(&storage, &tmp, message, message, session.slice(), "q");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const failure: ModelFailure = if (case.diagnostic) |detail| .{ .rejected = .{ .code = case.code, .diagnostic = detail, .request_id = .{} } } else .{ .uncorrelated = case.code };
+        try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const failed = (try storage.activityPage(request)).work.state.failed;
+        try std.testing.expectEqualStrings(case.code, failed.code.slice());
+        try std.testing.expectEqual(case.resets_at, failed.resets_at);
+    }
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "contradictory work inputs fence the Store" {
+    for ([_][:0]const u8{
+        // A failure code on an active Turn: its settlement closes the Turn.
+        "UPDATE model_operation SET resolution_code='provider_http_500',retry_due_at_ms=NULL,attempt_at=NULL,resolved_at=1",
+        // An Action beside an Operation still in flight.
+        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) " ++
+            "SELECT 999,operation_id,0,session_ref,1,1,0,NULL FROM model_operation",
+        // A waiting retry without the failure that caused it.
+        "UPDATE model_operation SET retry_due_at_ms=9223372036854775807,attempt_at=NULL,retry_scheduled_at=1,last_failure_code=NULL",
+    }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "contradiction-config");
+        try submitTestMessage(&storage, &tmp, "contradiction-file", "contradiction-message", session.slice(), "x");
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try exec(storage.database, fault);
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        try std.testing.expectError(error.CorruptStore, storage.activityPage(request));
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
 test "Action settlement atomically yields to an earlier Session stop" {
@@ -11707,8 +12042,8 @@ test "Full Message projection work does not multiply Messages by stops" {
                 const insert = try std.testing.allocator.printSentinel(
                     "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
                         "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
-                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
-                        "VALUES('stop-{0}','{2s}',NULL,{1},1)",
+                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
+                        "VALUES('stop-{0}','{2s}',NULL,{1},{0},1)",
                     .{ index, message_count, session.slice() },
                     0,
                 );
@@ -11925,7 +12260,8 @@ test "later idle stop does not reclassify a completed Message" {
             "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message')",
     );
     try execSessionSql(storage.database, "UPDATE turn SET outcome_code='completed',outcome_at=1,outcome_content_id=(SELECT content_id FROM message_admission " ++
-        "WHERE command_key='completed-stop-message') WHERE session_ref=?1", session.slice());
+        "WHERE command_key='completed-stop-message'),outcome_position=(SELECT next_position FROM session WHERE session_ref=?1) WHERE session_ref=?1", session.slice());
+    try execSessionSql(storage.database, "UPDATE session SET next_position=next_position+1 WHERE session_ref=?1", session.slice());
     var stop = try completeSessionStop("completed-stop", session.slice());
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);

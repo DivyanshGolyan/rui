@@ -1521,7 +1521,7 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         var buffer: [160]u8 = undefined;
         try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{s} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.slice(), origin }));
     }
-    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.status.value));
+    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.state.value));
     if (work.selected_message) |selected|
         try writeSafeFieldTo(out, "Current message: ", selected.slice());
     if (work.actionable_count != 0) try renderActionable(io, work, file, out);

@@ -619,23 +619,89 @@ pub const CallActivity = struct {
     }
 };
 
+pub const session_work = @import("session_work.zig");
+pub const WorkState = session_work.WorkState;
+
+comptime {
+    std.debug.assert(session_work.max_code_bytes == max_code_bytes);
+    std.debug.assert(session_work.max_description_bytes == max_tool_description_bytes);
+}
+
+/// The wire form of a `WorkState`: `kind` and `since`, then the kind's own
+/// facts. Every reader writes it here, so they cannot drift apart.
+pub const WorkStateJson = struct {
+    state: WorkState,
+
+    /// Holes: kind, since. The kinds that own no other fact.
+    pub const plain_shape = .{ "{\"kind\":\"", Hole{ .tag = session_work.Kind }, "\",\"since\":\"", Hole.decimal, "\"}" };
+    /// Holes: since, then the listed facts.
+    pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
+    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
+    pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
+    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, bash_shape, failed_shape, stopped_shape });
+
+    pub fn writeJson(self: *const WorkStateJson, out: *std.Io.Writer) !void {
+        switch (self.state) {
+            .retrying => |value| try writeShape(out, retrying_shape, .{ value.since, value.due_at_ms, value.cause.slice(), value.attempt }),
+            .bash => |value| try writeShape(out, bash_shape, .{ value.since, if (value.description) |text| text.slice() else null, value.running, value.approvals }),
+            .failed => |value| try writeShape(out, failed_shape, .{ value.since, value.code.slice(), value.resets_at }),
+            .stopped => |value| try writeShape(out, stopped_shape, .{ value.since, value.cause }),
+            inline .idle, .pending, .working, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
+        }
+    }
+};
+
+/// A Session's work, as list rows, activity pages and Current carry it: the
+/// derived state, the latest Turn and Operation, and the earliest Action
+/// awaiting permission.
+pub const SessionWork = struct {
+    state: WorkState = .{ .idle = .{ .since = 0 } },
+    turn: ?u64 = null,
+    operation: ?u64 = null,
+    first_action: ?u64 = null,
+
+    /// Holes: state, turn, operation, first action. Readers that add facts
+    /// beside the work write these inside their own object.
+    pub const fields = .{ "\"state\":", Hole{ .json = WorkStateJson }, ",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id };
+    pub const json_shape = .{"{"} ++ fields ++ .{"}"};
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn fromCore(work: session_work.Work) SessionWork {
+        return .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action };
+    }
+
+    pub fn args(self: *const SessionWork) struct { WorkStateJson, ?u64, ?u64, ?u64 } {
+        return .{ .{ .state = self.state }, self.turn, self.operation, self.first_action };
+    }
+
+    pub fn writeJson(self: *const SessionWork, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, self.args());
+    }
+};
+
 /// The Session's work as of its page's own Store read: what the live footer,
-/// consent and first Action show with that page.
+/// consent and first Action show with that page, beside the revision and
+/// Workspace a permission prompt shows.
 pub const PageWork = struct {
-    pub const Status = enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed };
-    status: Status = .idle,
+    state: WorkState = .{ .idle = .{ .since = 0 } },
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
     revision: u64 = 0,
     workspace: Bounded(max_workspace_bytes) = .{},
 
-    /// Holes follow field order.
-    pub const json_shape = .{ "{\"status\":\"", Hole{ .tag = Status }, "\",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id, ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
+    /// Holes: the work's fields, revision, Workspace.
+    pub const json_shape = .{"{"} ++ SessionWork.fields ++ .{ ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
+    pub fn work(self: *const PageWork) SessionWork {
+        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
+    }
+
     pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.status, self.turn, self.operation, self.first_action, self.revision, self.workspace.slice() });
+        const fields = self.work().args();
+        try writeShape(out, json_shape, .{ fields[0], fields[1], fields[2], fields[3], self.revision, self.workspace.slice() });
     }
 };
 

@@ -765,7 +765,7 @@ def terminal_wait_oracles():
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
-    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass (Bash runs without asking)", "Work: completed", "", "›"]
+    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass (Bash runs without asking)", "Work: finished", "", "›"]
     def frame_after(command, chunks, read):
         reader, peer = socket.socketpair()
         with reader, peer:
@@ -2036,7 +2036,7 @@ def persistent_empty_answer_case():
                 assert result["result"]["status"] == "completed", result
                 assert fixture.read_result(store, key) == expected
                 status = status_frame(master, session)
-                assert "Work: completed" in status, status
+                assert "Work: finished" in status, status
                 return_to_live(master)
                 shown = current_screen(master)
                 assert f"Complete request {index}" in shown and "Work ended" not in shown, shown
@@ -3964,7 +3964,7 @@ def renderer_cases():
                 tty.wait("Session: ")
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", action)
-                tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, after=generation, timeout=20)
+                tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, after=generation, timeout=20)
                 requests = len(endpoint.requests)
                 tty.send("\x07", marker)
                 assert tty.capture.draft("", 2, prompt="> "), tty.capture.completed
@@ -4043,8 +4043,8 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("wait briefly\n", "• Wait briefly")
             shown = tty.send("/status\n", "Session: ")
-            assert "Work: in_flight" in shown or "Work: runnable" in shown, shown
-            shown = tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, timeout=20)
+            assert any(f"Work: {kind}" in shown for kind in ("working", "pending", "bash")), shown
+            shown = tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
             assert "Session: " in shown and "Permission: bypass" in shown, shown
             tty.send("\x07", marker)
             tty.caller.send_signal(signal.SIGINT)
@@ -4120,7 +4120,7 @@ def renderer_cases():
             gates[b"AAA"].set()
             tty.wait(predicate=lambda: holding[b"BBB"].is_set() and "› AAA" in tty.capture.completed)
             gates[b"BBB"].set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both Messages answered", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both Messages answered", timeout=20)
             # BBB may join the first Turn; then its own answer is never asked for.
             unused = [response for response in endpoint.responses if markers[1].encode() in response]
             for response in unused:
@@ -4144,7 +4144,7 @@ def renderer_cases():
                 answer(f"backlog {index}")
                 key = admit(home, "session", "send", "--to", session, input=f"backlog {index}")["request"]
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "backlog answer", timeout=20)
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "backlog settled", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "backlog settled", timeout=20)
             marker = answer("caught up")
             frames = tty.every_frame()
             tty.send("CCC\n", predicate=lambda: "Sent" in tty.capture.completed)
@@ -4240,7 +4240,7 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "call finished", timeout=20)
             frames = tty.every_frame()
             release.set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "queued Message answered", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "queued Message answered", timeout=20)
             # The queued Message may join the call's Turn; then one answer covers both.
             unused = [response for response in endpoint.responses if queued.encode() in response]
             for response in unused:
@@ -4269,7 +4269,7 @@ def renderer_cases():
             tty.send("wait for the capture\n", "• Wait for the capture")
             frames = tty.every_frame()
             holding.set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "turn ended", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "turn ended", timeout=20)
             release.set()
             tty.wait(marker, timeout=20)
             tty.wait(predicate=lambda: "Working…" not in tty.capture.completed, timeout=5)
@@ -4292,12 +4292,12 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("wait to open status\n", "• Wait to open status")
             holding.set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "turn ended", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "turn ended", timeout=20)
             frames = tty.every_frame()
             os.write(tty.master, b"/status\n")
             time.sleep(1)
             release.set()
-            tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, timeout=20)
+            tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
             for frame in frames:
                 assert not ("Session: " in frame and "Working…" in frame), frame
             tty.caller.send_signal(signal.SIGINT)
@@ -4418,7 +4418,7 @@ def renderer_cases():
         with terminal(session) as tty:
             answer("sent late")
             tty.send("DDD\n", predicate=lambda: held.is_set() and "Sending…" in tty.capture.completed)
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "held Message answered", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "held Message answered", timeout=20)
             for index in range(9):
                 answer(f"later {index}")
                 key = admit(home, "session", "send", "--to", session, input=f"later {index}")["request"]
@@ -4580,7 +4580,7 @@ def renderer_cases():
                     holding.set()
                     assert held.wait(5), "no scan reached the held page"
                     first_release.set()
-                    fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "evicted Message answered", timeout=20)
+                    fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "evicted Message answered", timeout=20)
                     release.set()
                 tty.wait("REPLY-04399", timeout=30)
                 tty.send("\x1b[A", "Browsing · Esc returns")
@@ -4771,7 +4771,7 @@ def renderer_cases():
             holding.set()
             assert held.wait(5), "no scan reached the held page"
             first_release.set()
-            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
             release.set()
             tty.wait("SECOND-REPLY-DONE", timeout=30)
@@ -4806,7 +4806,7 @@ def renderer_cases():
             holding.set()
             assert held.wait(5), "no scan reached the held page"
             first_release.set()
-            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
             release.set()
             tty.wait("REPLY-04099", timeout=30)
@@ -4839,7 +4839,7 @@ def renderer_cases():
             holding.set()
             assert held.wait(5), "no scan reached the held page"
             first_release.set()
-            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
             release.set()
             tty.wait("OK-REPLY", timeout=30)
@@ -5461,11 +5461,11 @@ def main(selected="all"):
         session = config["admission"]["answer"]["session"]
         # A one-shot read selects the saved Store; explicit targeting bypasses
         # even corrupt preferences, and an invalid saved destination never falls back.
-        assert json.loads(run(preferences_home, "session", "inspect", "--session", session))["work"]["status"] == "idle"
+        assert json.loads(run(preferences_home, "session", "inspect", "--session", session))["work"]["state"]["kind"] == "idle"
         saved.write_text("version=9\n")
         assert run(preferences_home, "session", "inspect", "--session", session, success=False) == ""
         assert json.loads(run(preferences_home, "session", "inspect", "--store", store,
-            "--session", session))["work"]["status"] == "idle"
+            "--session", session))["work"]["state"]["kind"] == "idle"
         with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", session], env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
@@ -5500,7 +5500,7 @@ def main(selected="all"):
         assert not (state / "missing").exists() and not fallback.exists()
         assert run(preferences_home, "request", "list") == before_missing
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
-        assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["status"] == "idle"
+        assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["state"]["kind"] == "idle"
         before = run(preferences_home, "request", "list")
         invalid_store = subprocess.run([str(fixture.RUI), "session", "send", "--store", "", "--to",
             session], env={**os.environ, "HOME": str(preferences_home)},
@@ -5845,7 +5845,7 @@ def main(selected="all"):
             == "waiting_for_permission" else None), "first request attention")
         action = progress["action"]
         blocked = fixture.command("session", "inspect", "--store", store, "--session", session)
-        assert blocked["selected_message"] == first and blocked["work"]["status"] == "waiting_for_permission", blocked
+        assert blocked["selected_message"] == first and blocked["work"]["state"]["kind"] == "approval", blocked
         assert [entry["action"] for entry in blocked["actionable_permissions"]] == [action], blocked
         queued = admit(home, "session", "send", "--to", session,
             input="queued behind permission")["request"]
@@ -5905,7 +5905,7 @@ def main(selected="all"):
         assert current["selected_message"] is None and [r["message"] for r in current["recent_messages"]] == [queued, first], current
         assert [r["outcome"] for r in current["recent_messages"]] == ["completed", "completed"], current
         settled = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
-        assert settled["work"]["status"] == "completed" and settled["pending_messages"] == "0", settled
+        assert settled["work"]["state"]["kind"] == "finished" and settled["pending_messages"] == "0", settled
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         try:
@@ -6481,7 +6481,7 @@ def main(selected="all"):
             "--record", state / "empty-record.json", "--key", "", input=empty_input.read_text()))
         assert admission["answer"]["status"] == "accepted", admission
         fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store,
-            "--session", empty_session)["work"]["status"] == "in_flight", "empty key active")
+            "--session", empty_session)["work"]["state"]["kind"] == "working", "empty key active")
         current = fixture.command("session", "inspect", "--store", store, "--session", empty_session)
         assert current["selected_message"] == "", current
         try:

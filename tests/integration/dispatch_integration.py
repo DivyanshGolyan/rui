@@ -1281,7 +1281,7 @@ def main(mode="all", correlation_case="all"):
         expected_action_rows = {}
         # Replay preserves canonical work; a live inspection may sample a
         # temporary no-work admission reservation before its owner releases it.
-        assert recovered["work"]["status"] == "waiting_for_permission", recovered
+        assert recovered["work"]["state"]["kind"] == "approval", recovered
         assert len(recovered["full"]["model_operations"]) == 1, recovered
         assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_proposals", recovered
         second = recovered["actions"]["unresolved"][0]

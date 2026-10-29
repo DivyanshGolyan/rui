@@ -656,7 +656,7 @@ fn drawFrame(self: *Self) !void {
             .submitting => "Sending…",
             .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
             .rejected => "Rejected · /discard",
-        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.status),
+        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.state.status()),
     };
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
@@ -758,7 +758,7 @@ test "a paged Action keeps what runs, where and for how long beside the choice" 
     try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
 }
 
-const WorkStatus = protocol.PageWork.Status;
+const WorkStatus = protocol.WorkState.Status;
 
 fn workStatus(status: WorkStatus) []const u8 {
     return switch (status) {

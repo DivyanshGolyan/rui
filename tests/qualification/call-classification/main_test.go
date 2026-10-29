@@ -156,14 +156,14 @@ func TestAcceptedHostFootprintIgnoresSeparateCLIAndRequiresAllScenarios(t *testi
 
 func TestCompletedAndReleasedRequiresOutcomeBeforeEmptyCustody(t *testing.T) {
 	transientlyEmpty := map[string]any{
-		"work":      map[string]any{"status": "runnable", "latest_outcome": nil},
+		"work":      map[string]any{"state": map[string]any{"kind": "pending"}, "latest_outcome": nil},
 		"execution": map[string]any{"custody_occupied": "0", "scratch_used_bytes": "0"},
 	}
 	if ready, err := completedAndReleased(transientlyEmpty); err != nil || ready {
 		t.Fatalf("transient empty custody qualified completion: ready=%v error=%v", ready, err)
 	}
 	completed := map[string]any{
-		"work": map[string]any{"status": "completed", "latest_outcome": map[string]any{"code": "completed"}},
+		"work": map[string]any{"state": map[string]any{"kind": "finished"}, "latest_outcome": map[string]any{"code": "completed"}},
 		"execution": map[string]any{
 			"custody_occupied": "0", "scratch_used_bytes": "0",
 		},
