@@ -981,6 +981,46 @@ const SessionReportCapture = struct {
         try self.append(value);
     }
 
+    /// Writes a protocol shape straight into the capture, so a fact's
+    /// maximum encoding never sits whole on the intake worker's stack.
+    fn appendShape(self: *SessionReportCapture, comptime shape: anytype, args: anytype) AppendError!void {
+        var buffer: [256]u8 = undefined;
+        var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
+        protocol.writeShape(&sink.writer, shape, args) catch return sink.failure.?;
+        sink.writer.flush() catch return sink.failure.?;
+    }
+
+    const AppendError = @typeInfo(@typeInfo(@TypeOf(append)).@"fn".return_type.?).error_union.error_set;
+
+    const ShapeSink = struct {
+        capture: *SessionReportCapture,
+        failure: ?AppendError = null,
+        writer: std.Io.Writer,
+
+        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const sink: *ShapeSink = @alignCast(@fieldParentPtr("writer", writer));
+            try sink.put(writer.buffer[0..writer.end]);
+            writer.end = 0;
+            var written: usize = 0;
+            for (data[0 .. data.len - 1]) |bytes| {
+                try sink.put(bytes);
+                written += bytes.len;
+            }
+            for (0..splat) |_| {
+                try sink.put(data[data.len - 1]);
+                written += data[data.len - 1].len;
+            }
+            return written;
+        }
+
+        fn put(sink: *ShapeSink, bytes: []const u8) std.Io.Writer.Error!void {
+            sink.capture.append(bytes) catch |err| {
+                sink.failure = err;
+                return error.WriteFailed;
+            };
+        }
+    };
+
     fn appendJsonString(self: *SessionReportCapture, value: []const u8) !void {
         try self.append("\"");
         try self.appendJsonStringBytes(value);
@@ -3544,60 +3584,126 @@ pub const Store = struct {
             if (value < 0) return error.CorruptStore;
             ceiling = @intCast(value);
         }
-        const statement = if (request.workspace == null)
-            try self.cached("SELECT rowid,session_ref,workspace,provider,model,tools_mask,permission_mode FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9")
-        else
-            try self.cached("SELECT rowid,session_ref,workspace,provider,model,tools_mask,permission_mode FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
-        defer resetCached(statement);
-        try bindU64(statement, 1, request.after);
-        try bindU64(statement, 2, ceiling);
-        if (request.workspace) |*workspace| try bindText(statement, 3, workspace.slice());
-        try capture.append("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+        // The page's references first, so no list cursor stays open while
+        // each row's own facts are read.
+        var references: [protocol.session_list_page_size]protocol.Bounded(protocol.max_session_bytes) = undefined;
         var count: usize = 0;
         var last: u64 = 0;
         var more = false;
-        while (true) {
-            const step = c.sqlite3_step(statement);
-            if (step == c.SQLITE_DONE) break;
-            if (step != c.SQLITE_ROW) return error.SessionReadFailed;
-            if (count == protocol.session_list_page_size) {
-                more = true;
-                break;
+        {
+            const statement = if (request.workspace == null)
+                try self.cached("SELECT rowid,session_ref FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9")
+            else
+                try self.cached("SELECT rowid,session_ref FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
+            defer resetCached(statement);
+            try bindU64(statement, 1, request.after);
+            try bindU64(statement, 2, ceiling);
+            if (request.workspace) |*workspace| try bindText(statement, 3, workspace.slice());
+            while (true) {
+                const step = c.sqlite3_step(statement);
+                if (step == c.SQLITE_DONE) break;
+                if (step != c.SQLITE_ROW) return error.SessionReadFailed;
+                if (count == protocol.session_list_page_size) {
+                    more = true;
+                    break;
+                }
+                const id = c.sqlite3_column_int64(statement, 0);
+                if (id <= 0) return error.CorruptStore;
+                last = @intCast(id);
+                references[count] = .{};
+                try readText(statement, 1, &references[count]);
+                count += 1;
             }
-            const id = c.sqlite3_column_int64(statement, 0);
-            if (id <= 0) return error.CorruptStore;
-            last = @intCast(id);
-            var reference: protocol.Bounded(protocol.max_session_bytes) = .{};
-            var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-            var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-            try readText(statement, 1, &reference);
-            try readText(statement, 2, &workspace);
-            const provider = try readProvider(statement, 3);
-            try readText(statement, 4, &model);
-            const tools = c.sqlite3_column_int(statement, 5);
-            const permission = c.sqlite3_column_int(statement, 6);
-            if (tools < 0 or tools > tool_catalog.toolBit(.bash) or permission < 0 or permission > 1) return error.CorruptStore;
-            if (count != 0) try capture.append(",");
-            try capture.append("{\"reference\":");
-            try capture.appendJsonString(reference.slice());
-            try capture.append(",\"workspace\":");
-            try capture.appendJsonString(workspace.slice());
-            try capture.append(",\"provider\":");
-            try capture.appendJsonString(@tagName(provider));
-            try capture.append(",\"model\":");
-            try capture.appendJsonString(model.slice());
-            try capture.append(",\"tools\":");
-            try capture.appendTools(@intCast(tools));
-            try capture.append(",\"permission_mode\":");
-            try capture.appendPermissionMode(@intCast(permission));
-            try capture.append("}");
-            count += 1;
         }
-        if (more) {
-            try capture.appendFmt("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ last, ceiling });
-        } else {
-            try capture.append("],\"next\":null}");
+        const now_ms = try readUnixMilliseconds(self.io);
+        try capture.appendShape(protocol.session_list_reply.head, .{});
+        for (references[0..count], 0..) |*reference, index| {
+            if (index != 0) try capture.append(",");
+            const row = try self.readSessionRowLocked(reference.slice(), now_ms);
+            try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow }}, .{&row});
         }
+        if (more)
+            try capture.appendShape(protocol.session_list_reply.next_tail, .{ last, ceiling })
+        else
+            try capture.appendShape(protocol.session_list_reply.last_tail, .{});
+        std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
+    }
+
+    /// One list row: the Session's settings, then a fixed number of seeks
+    /// into its own indexed rows, none of which grows with its history.
+    fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64) !protocol.SessionRow {
+        const current = try self.readSession(session_ref) orelse return error.CorruptStore;
+        var row: protocol.SessionRow = .{
+            .workspace = current.workspace,
+            .provider = current.provider,
+            .model = current.model,
+            .bash = current.tools_mask & tool_catalog.toolBit(.bash) != 0,
+            .permission_mode = switch (current.permission_mode) {
+                0 => .ask,
+                1 => .bypass,
+                else => return error.CorruptStore,
+            },
+            .label = current.label,
+            .created_at = current.created_at,
+            .revision = current.revision,
+            .end = current.next_position - 1,
+            .first_message = try self.readFirstMessageLocked(session_ref),
+            .work = .fromCore((try self.readWorkLocked(session_ref, current.created_at, now_ms)).work),
+            .peers = try self.readPeerFactsLocked(session_ref),
+        };
+        try row.reference.set(session_ref);
+        return row;
+    }
+
+    /// One seek: the latest Message with no Session sender.
+    fn readPeerFactsLocked(self: *Store, session_ref: []const u8) !protocol.PeerFacts {
+        const statement = try self.cached("SELECT admitted_at FROM message_admission INDEXED BY message_admission_person " ++
+            "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_id DESC LIMIT 1");
+        defer resetCached(statement);
+        try bindText(statement, 1, session_ref);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => .{},
+            c.SQLITE_ROW => .{ .from_person_at = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore) },
+            else => error.SessionReadFailed,
+        };
+    }
+
+    /// A Turn binds queued Messages in admission order, so the first Turn's
+    /// first admission precedes every other bound one. The only other
+    /// candidate is the oldest Message never bound: queued, or excluded by a
+    /// stop. Two seeks, then the earlier admission's own row.
+    fn readFirstMessageLocked(self: *Store, session_ref: []const u8) !?protocol.FirstMessage {
+        var first: ?u64 = null;
+        inline for (.{
+            "SELECT first_admission_id FROM turn INDEXED BY turn_session_latest WHERE session_ref=?1 ORDER BY turn_id LIMIT 1",
+            "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending WHERE session_ref=?1 AND turn_id IS NULL ORDER BY admission_id LIMIT 1",
+        }) |sql| {
+            const statement = try self.cached(sql);
+            defer resetCached(statement);
+            try bindText(statement, 1, session_ref);
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => {},
+                c.SQLITE_ROW => {
+                    const admission: u64 = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore);
+                    first = if (first) |earlier| @min(earlier, admission) else admission;
+                },
+                else => return error.SessionReadFailed,
+            }
+        }
+        const admission = first orelse return null;
+        const statement = try self.cached("SELECT admission_position,admitted_at,sender_session_ref,content_id FROM message_admission WHERE admission_id=?1 AND session_ref=?2");
+        defer resetCached(statement);
+        try bindU64(statement, 1, admission);
+        try bindText(statement, 2, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const metadata = try self.readPublicContentMetadata(try readNullablePositiveI64(statement, 3) orelse return error.CorruptStore);
+        return .{
+            .position = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+            .admission = admission,
+            .admitted_at = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore),
+            .sender = try self.readPeer(statement, 2),
+            .content = .{ .length = metadata.length, .digest = metadata.digest },
+        };
     }
 
     fn renderSessionReportLocked(
@@ -3658,8 +3764,10 @@ pub const Store = struct {
         }
         try capture.append(",\"label\":");
         if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
-        try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
+        try capture.appendFmt(",\"created_at\":\"{d}\"}},\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, pending_messages });
         try self.appendCurrentWork(session_ref, current.created_at, capture);
+        try capture.append(",\"peers\":");
+        try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{try self.readPeerFactsLocked(session_ref)});
         try capture.append(",\"selected_message\":");
         try self.appendSelectedMessage(session_ref, capture);
         try capture.append(",\"recent_messages\":[");
@@ -3711,10 +3819,7 @@ pub const Store = struct {
     fn appendCurrentWork(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
         const read = try self.readWorkLocked(session_ref, created_at, try readUnixMilliseconds(self.io));
         const work: protocol.SessionWork = .fromCore(read.work);
-        var buffer: [protocol.SessionWork.max_json_bytes]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buffer);
-        try protocol.writeShape(&writer, .{"{"} ++ protocol.SessionWork.fields, work.args());
-        try capture.append(writer.buffered());
+        try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
         const outcome = read.outcome orelse return capture.append(",\"latest_outcome\":null}");
         try capture.append(",\"latest_outcome\":{\"code\":");
         try capture.appendJsonString(outcome.code.slice());
@@ -9111,6 +9216,104 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
     }
 }
 
+/// One Session's listed row, from one unfiltered page.
+const TestingListRow = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    row: std.json.Value,
+
+    fn deinit(self: *TestingListRow) void {
+        self.parsed.deinit();
+    }
+
+    fn get(self: *const TestingListRow, path: []const []const u8) std.json.Value {
+        var value = self.row;
+        for (path) |name| value = value.object.get(name).?;
+        return value;
+    }
+
+    fn number(self: *const TestingListRow, path: []const []const u8) !u64 {
+        return std.fmt.parseInt(u64, self.get(path).string, 10);
+    }
+};
+
+fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !TestingListRow {
+    var used = std.atomic.Value(u64).init(0);
+    const bytes = try testingSessionList(storage, tmp, .{}, &used, 77);
+    defer std.testing.allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{ .allocate = .alloc_always });
+    errdefer parsed.deinit();
+    for (parsed.value.object.get("sessions").?.array.items) |row| {
+        if (std.mem.eql(u8, row.object.get("reference").?.string, session)) return .{ .parsed = parsed, .row = row };
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "a list row carries its Session's Label, times, first Message, work and peers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("row-create", "", workspace, "model-a");
+    create.configuration.label.state = .value;
+    try create.configuration.label.value.set("Review PR 412");
+    const session = storage.configure(&create, true, .{}).accepted.session;
+    const created_at = try queryU64(storage.database, "SELECT created_at FROM session");
+    {
+        // Configured, never messaged: idle since its creation.
+        var listed = try testingListRow(&storage, &tmp, session.slice());
+        defer listed.deinit();
+        try std.testing.expectEqualStrings("Review PR 412", listed.get(&.{"label"}).string);
+        try std.testing.expectEqual(created_at, try listed.number(&.{"created_at"}));
+        try std.testing.expectEqual(@as(u64, 1), try listed.number(&.{"revision"}));
+        try std.testing.expectEqual(@as(u64, 0), try listed.number(&.{"end"}));
+        try std.testing.expect(listed.get(&.{"first_message"}) == .null);
+        try std.testing.expectEqualStrings("idle", listed.get(&.{ "work", "state", "kind" }).string);
+        try std.testing.expectEqual(created_at, try listed.number(&.{ "work", "state", "since" }));
+        try std.testing.expect(listed.get(&.{ "peers", "from_person_at" }) == .null);
+    }
+    try submitTestMessage(&storage, &tmp, "row-first", "row-first", session.slice(), "hello");
+    // Distinct times show which Message each fact names.
+    try exec(storage.database, "UPDATE message_admission SET admitted_at=1000");
+    {
+        // Queued: the first Message is unbound, and a person sent it.
+        var listed = try testingListRow(&storage, &tmp, session.slice());
+        defer listed.deinit();
+        try std.testing.expectEqual(@as(u64, 1), try listed.number(&.{"end"}));
+        try std.testing.expectEqual(@as(u64, 1), try listed.number(&.{ "first_message", "position" }));
+        try std.testing.expectEqual(@as(u64, 1000), try listed.number(&.{ "first_message", "admitted_at" }));
+        try std.testing.expect(listed.get(&.{ "first_message", "sender" }) == .null);
+        try std.testing.expectEqualStrings("5", listed.get(&.{ "first_message", "content", "bytes" }).string);
+        const digest = std.fmt.bytesToHex(protocol.contentDigest("hello"), .lower);
+        try std.testing.expectEqualStrings(&digest, listed.get(&.{ "first_message", "content", "sha256" }).string);
+        try std.testing.expectEqualStrings("pending", listed.get(&.{ "work", "state", "kind" }).string);
+        try std.testing.expectEqual(@as(u64, 1000), try listed.number(&.{ "peers", "from_person_at" }));
+    }
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    try submitTestMessage(&storage, &tmp, "row-second", "row-second", session.slice(), "and then");
+    try exec(storage.database, "UPDATE message_admission SET admitted_at=2000 WHERE admission_id=(SELECT max(admission_id) FROM message_admission)");
+    {
+        // The first Message is now its Turn's; the latest person's Message is
+        // the queued second one.
+        var listed = try testingListRow(&storage, &tmp, session.slice());
+        defer listed.deinit();
+        try std.testing.expectEqual(@as(u64, 1000), try listed.number(&.{ "first_message", "admitted_at" }));
+        try std.testing.expectEqualStrings("working", listed.get(&.{ "work", "state", "kind" }).string);
+        try std.testing.expect(listed.get(&.{ "work", "turn" }) != .null and listed.get(&.{ "work", "operation" }) != .null);
+        try std.testing.expectEqual(@as(u64, 2000), try listed.number(&.{ "peers", "from_person_at" }));
+        try std.testing.expectEqual(try listed.number(&.{"end"}), try queryU64(storage.database, "SELECT next_position-1 FROM session"));
+    }
+    // Current reports the same creation time and peer fact.
+    const current = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(current);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, current, .{});
+    defer report.deinit();
+    try std.testing.expectEqual(created_at, try std.fmt.parseInt(u64, report.value.object.get("session").?.object.get("created_at").?.string, 10));
+    try std.testing.expectEqualStrings("2000", report.value.object.get("peers").?.object.get("from_person_at").?.string);
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "Current excludes history while Full exposes exact closed Session inventory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -14351,6 +14554,14 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expectEqual(@as(usize, 1), received.count);
     const peer = received.items[0].value.admission.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
+    {
+        // The receiver's row names that peer as its starter; no person has
+        // messaged it.
+        var listed = try testingListRow(&storage, &tmp, allocated_session_1.slice());
+        defer listed.deinit();
+        try std.testing.expectEqualStrings(sender, listed.get(&.{ "first_message", "sender", "session" }).string);
+        try std.testing.expect(listed.get(&.{ "peers", "from_person_at" }) == .null);
+    }
 
     try session.set(sender);
     const own = try storage.activityPage(.{ .session = session, .position = sender_end });

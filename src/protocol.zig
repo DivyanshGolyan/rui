@@ -713,6 +713,99 @@ pub const PageWork = struct {
     }
 };
 
+/// Who reached this Session from outside its peers: when the latest Message
+/// with no Session sender (a person or a script; Rui cannot tell them apart)
+/// was admitted, or null if none was.
+pub const PeerFacts = struct {
+    from_person_at: ?u64 = null,
+
+    pub const json_shape = .{ "{\"from_person_at\":", Hole.optional_id, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const PeerFacts, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{self.from_person_at});
+    }
+};
+
+/// The Session's first admitted Message, whatever happened to it. It never
+/// changes once it exists.
+pub const FirstMessage = struct {
+    position: u64,
+    admission: u64,
+    admitted_at: u64,
+    /// The Session that sent it, or null for a person or a script.
+    sender: ?Peer,
+    content: ActivityItem.Content,
+
+    /// Holes: position, admission, admitted at, sender, content.
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
+    }
+};
+
+pub const PermissionMode = enum { ask, bypass };
+
+/// One `list-sessions` row. Every fact comes from the Store read that
+/// produced its page.
+pub const SessionRow = struct {
+    reference: Bounded(max_session_bytes) = .{},
+    workspace: Bounded(max_workspace_bytes) = .{},
+    provider: Provider = .codex,
+    model: Bounded(max_model_bytes) = .{},
+    bash: bool = false,
+    permission_mode: PermissionMode = .ask,
+    label: ?Bounded(max_label_bytes) = null,
+    created_at: u64 = 0,
+    revision: u64 = 0,
+    /// The last activity position: a forward activity read from an earlier
+    /// `end` shows what changed since.
+    end: u64 = 0,
+    first_message: ?FirstMessage = null,
+    work: SessionWork = .{},
+    peers: PeerFacts = .{},
+
+    pub const json_shape = .{
+        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = "[\"bash\"]".len },           ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
+    };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    /// A row may never exceed this, whatever its fields hold: a new field that
+    /// would grow every page's scratch charge past it fails the build.
+    pub const budget_bytes = 32 * 1024;
+    comptime {
+        std.debug.assert(max_json_bytes <= budget_bytes);
+    }
+
+    pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{
+            self.reference.slice(),                           self.workspace.slice(),
+            self.provider,                                    self.model.slice(),
+            if (self.bash) "[\"bash\"]" else "[]",            self.permission_mode,
+            if (self.label) |*label| label.slice() else null, self.created_at,
+            self.revision,                                    self.end,
+            self.first_message,                               &self.work,
+            &self.peers,
+        });
+    }
+};
+
+/// A `list-sessions` reply: up to eight rows, then the continuation.
+pub const session_list_reply = struct {
+    pub const head = .{"{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":["};
+    /// Holes: after, ceiling.
+    pub const next_tail = .{ "],\"next\":{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
+    pub const last_tail = .{"],\"next\":null}"};
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ next_tail, last_tail });
+};
+
 pub const ActivityFacts = struct {
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,

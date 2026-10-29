@@ -186,9 +186,18 @@ def main():
             assert all(item["workspace"] == str(root) for item in first["sessions"])
             assert first["next"] and int(first["next"]["ceiling"]) == 10
             later = create("created-later", str(root))
-            assert listing(str(root), first["next"]) == (200, {"version": "1", "type": "session_list", "sessions": [
-                {"reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"], "permission_mode": "bypass"}
-            ], "next": None})
+            continued = listing(str(root), first["next"])
+            assert continued[0] == 200 and continued[1]["next"] is None and len(continued[1]["sessions"]) == 1, continued
+            row = continued[1]["sessions"][0]
+            assert {name: row[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
+                "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+                "permission_mode": "bypass"}, row
+            # Configured and never messaged: idle since its creation, with no
+            # Label, first Message or person's Message.
+            assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
+            assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row
+            assert row["work"] == {"state": {"kind": "idle", "since": row["created_at"]}, "turn": None, "operation": None,
+                "first_action": None}, row
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
             assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]

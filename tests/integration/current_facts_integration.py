@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
         original = fixture.command("session", "inspect", "--store", store, "--session", session)
         missing = fixture.command("session", "inspect", "--store", store, "--session", unknown)
         assert missing["session"] is None and missing["execution"]["reason"] == "session_not_found", missing
-        for change in ("extension", "binding", "profile", "missing-selection", "invalid-tail"):
+        for change in ("extension", "binding", "profile", "missing-selection", "missing-peers", "invalid-tail"):
             produced = []
             def rewrite(response):
                 head, body = response.split(b"\r\n\r\n", 1)
@@ -34,6 +34,8 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
                     value["profile"] = "full"
                 elif change == "missing-selection":
                     del value["selected_message"]
+                elif change == "missing-peers":
+                    del value["peers"]
                 body = json.dumps(value, separators=(",", ":")).encode()
                 if change == "invalid-tail":
                     body += b"false"
@@ -53,4 +55,4 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
         assert full["profile"] == "full" and full["full"]["session_revisions"], full
     finally:
         fixture.stop_host(host)
-print("Current producer/consumer: exact metadata, explicit unconfigured, discarded extension, four pre-output refusals; Full unchanged")
+print("Current producer/consumer: exact metadata, explicit unconfigured, discarded extension, five pre-output refusals; Full unchanged")
