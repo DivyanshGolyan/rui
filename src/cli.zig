@@ -1072,7 +1072,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         .model = .{ .present = true, .value = selected.model.slice() },
         .tools = product_defaults.tools,
         .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
-    }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
@@ -1314,29 +1314,29 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) return message(init, parsed, input);
-    var stage: client.FailureStage = .store;
+    var stage: ?client.Step = .store;
     errdefer reportFailureStage(stage);
-    input.stage = &stage;
-    var sender = requester;
-    sender.stage = &stage;
-    sender.drop_reply = parsed.get("test-drop-reply");
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     const human = target == .generated;
-    var captured = try client.captureConfigure(io, input, target);
+    var sender = requester;
+    sender.drop_reply = parsed.get("test-drop-reply");
+    var captured = try takeStep(&stage, client.captureConfigure(io, input, target));
+    stage = .capture;
     const saved = captured.identity().*;
     var admitted: ?bool = null;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk sender.sendCaptured(&captured, &reply_buffer);
+        break :blk takeStep(&stage, sender.sendCaptured(&captured, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
+    stage = presentedStep(reply);
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json) catch |err| {
@@ -1359,14 +1359,14 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
     const io = init.io;
-    var stage: client.FailureStage = .input_parse;
+    var stage: ?client.Step = .input_parse;
     errdefer reportFailureStage(stage);
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
         TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration, .stage = &stage };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
     // Never let incomplete or malformed peer context fall back to HOME or
     // become an anonymous send. The Host still authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
@@ -1396,23 +1396,44 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try client.captureMessage(io, input, target);
-    const sender: client.Requests = .{ .io = io, .stage = &stage, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated);
+    var captured = try takeStep(&stage, client.captureMessage(io, input, target));
+    stage = .capture;
+    const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
+    if (configuration == null) return sendCapturedMutation(sender, &captured, target == .generated, &stage);
     defer captured.close(io);
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try sender.sendCaptured(&captured, &reply_buffer);
+    const reply = try takeStep(&stage, sender.sendCaptured(&captured, &reply_buffer));
+    stage = presentedStep(reply);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
-fn reportFailureStage(stage: client.FailureStage) void {
-    if (stage == .presentation) return;
-    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(stage)});
-    if (stage == .upload or stage == .admission_response)
+/// The value of a capture or send, after recording the step a failure
+/// stopped in for the command's diagnostic.
+fn takeStep(stage: *?client.Step, attempt: anytype) !@FieldType(@TypeOf(attempt), "done") {
+    return switch (attempt) {
+        .done => |value| value,
+        .failed => |failure| {
+            stage.* = failure.step;
+            return failure.err;
+        },
+    };
+}
+
+/// A framed reply leaves nothing to report; an unreadable one leaves
+/// admission unknown.
+fn presentedStep(reply: client.MutationReply) ?client.Step {
+    return if (reply.answer) |_| null else |_| .admission_response;
+}
+
+/// Null once the Host's reply was presented.
+fn reportFailureStage(stage: ?client.Step) void {
+    const step = stage orelse return;
+    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
+    if (step.mayHaveReachedHost())
         TerminalText.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
@@ -1771,7 +1792,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1783,19 +1804,22 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, generated: bool, reported: ?*?client.Step) !void {
     const io = sender.io;
+    var unreported: ?client.Step = null;
+    const stage = reported orelse &unreported;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (generated) try announceCapture(io, captured.identity().key.slice());
-        break :blk try sender.sendCaptured(captured, &reply_buffer);
+        break :blk try takeStep(stage, sender.sendCaptured(captured, &reply_buffer));
     };
+    stage.* = presentedStep(reply);
     try writeMutationReply(io, reply, .json);
 }
 
@@ -1813,7 +1837,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target == .generated, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {

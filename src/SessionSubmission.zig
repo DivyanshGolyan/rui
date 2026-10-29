@@ -330,11 +330,11 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.publication == .not_sent) self.publication = .unknown;
     self.captured = switch (self.intent.?) {
-        .message => |ticket| try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(ticket) }, self.target),
+        .message => |ticket| try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(ticket) }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
-    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer).get();
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -443,7 +443,7 @@ test "submission recovery validates reopened originals and pins the saved reader
                         .content => "modified café!",
                         .length => "short",
                         else => "original café!",
-                    } }, target)
+                    } }, target).get()
                 else
                     try client.capturePermissionDecision(io, .{ .store = store, .session = session, .action_id = if (variant == .action) 20 else 19, .decision = if ((kind == 1) != (variant == .decision)) .allow_once else .deny }, target);
                 record.close(io);
@@ -501,7 +501,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         }
         self.publication = .published;
     }
-    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer).get();
 }
 
 test "submission settles wire Admission only after join and releases only accepted or discarded intent" {
