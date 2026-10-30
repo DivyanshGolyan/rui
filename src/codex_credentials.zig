@@ -26,11 +26,12 @@ pub const Lease = struct {
     lock: std.Io.File,
     record: Record,
 
+    /// Wipes only the secret bytes the lease read: its storage spans about
+    /// 50 KiB, and a whole-record wipe would keep every page of it resident.
     pub fn release(self: *Lease) void {
-        std.crypto.secureZero(u8, std.mem.asBytes(&self.record));
+        self.record.wipe();
         self.lock.close(io);
         self.owner.close();
-        self.* = undefined;
     }
 };
 
@@ -507,6 +508,27 @@ test "unsafe paths and credential aliases fail closed" {
     defer private.close(io);
     try private.symLink(io, "missing", "auth", .{});
     try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
+}
+
+test "releasing a lease wipes its secrets and writes nothing past them" {
+    var scratch: Scratch = undefined;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    var record = try testRecord("acct", 0);
+    try install(path, &record, null, &scratch);
+    var lease: Lease = undefined;
+    try leaseInto(path, &lease, &scratch);
+    const token = &lease.record.refresh_token;
+    const read = token.len;
+    try std.testing.expectEqualStrings("private-refresh", token.slice());
+    // Stands for pages the lease never wrote; releasing must not touch them.
+    @memset(token.bytes[read..], 0x5a);
+    lease.release();
+    try std.testing.expect(std.mem.allEqual(u8, token.bytes[0..read], 0));
+    try std.testing.expect(std.mem.allEqual(u8, token.bytes[read..], 0x5a));
+    try std.testing.expect(std.mem.allEqual(u8, lease.record.access_token.bytes[0.."aaa.bbb.ccc".len], 0));
 }
 
 test "private file, lock, directory, and abandoned temp are validated" {

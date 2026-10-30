@@ -49,6 +49,13 @@ pub fn Bounded(comptime capacity: usize) type {
         pub fn slice(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
         }
+
+        /// Zeroes the bytes `set` wrote and leaves the rest untouched, so
+        /// pages a value never reached stay out of Private_Dirty.
+        pub fn wipe(self: *@This()) void {
+            std.crypto.secureZero(u8, self.bytes[0..self.len]);
+            self.len = 0;
+        }
     };
 }
 
@@ -95,6 +102,14 @@ pub const Record = struct {
     expires_at: i64,
     refreshed_at: i64,
     state: State = .ready,
+
+    /// Zeroes the account and token bytes the record holds.
+    pub fn wipe(self: *Record) void {
+        self.account_id.wipe();
+        self.id_token.wipe();
+        self.access_token.wipe();
+        self.refresh_token.wipe();
+    }
 };
 
 pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
