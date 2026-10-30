@@ -110,8 +110,9 @@ pub const Inputs = struct {
     pub const Excluded = struct { admission: u64, stop_position: u64, stop_at: u64 };
 
     pub const Turn = struct {
-        turn: u64,
-        operation: u64,
+        turn_id: u64,
+        /// The current Operation's ID; `op` is its state.
+        operation_id: u64,
         /// The newest admission this Turn bound as input.
         input_cutoff: u64,
         /// `stopped_at` of the earliest stop that selected this Turn.
@@ -193,7 +194,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     // Only an active Turn's tool proposals own Actions.
     const proposed = latest.op == .resolved and latest.op.resolved.resolution == .tool_proposals;
     if (actions.total != 0 and (latest.terminal != null or !proposed)) return error.CorruptStore;
-    var work: Work = .{ .state = undefined, .turn = latest.turn, .operation = latest.operation, .first_action = actions.first_awaiting };
+    var work: Work = .{ .state = undefined, .turn = latest.turn_id, .operation = latest.operation_id, .first_action = actions.first_awaiting };
     if (latest.terminal) |terminal| {
         if (latest.op != .resolved) return error.CorruptStore;
         work.state = settled(inputs, terminal) orelse switch (terminal.outcome) {
@@ -265,7 +266,7 @@ fn bounded(comptime capacity: usize, text: []const u8) error{CorruptStore}!Bound
 }
 
 fn activeTurn(op: Inputs.Op, actions: Inputs.Actions) Inputs.Turn {
-    return .{ .turn = 7, .operation = 19, .input_cutoff = 5, .op = op, .actions = actions };
+    return .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .op = op, .actions = actions };
 }
 
 fn proposals(at: u64) Inputs.Op {
@@ -274,8 +275,8 @@ fn proposals(at: u64) Inputs.Op {
 
 fn endedTurn(outcome: @FieldType(Inputs.Terminal, "outcome"), code: []const u8) Inputs.Turn {
     return .{
-        .turn = 7,
-        .operation = 19,
+        .turn_id = 7,
+        .operation_id = 19,
         .input_cutoff = 5,
         .terminal = .{ .outcome = outcome, .code = code, .at = 500, .position = 40 },
         .op = .{ .resolved = .{ .resolution = if (outcome == .completed) .answer else null, .at = 499 } },
@@ -482,7 +483,7 @@ test "inputs no writer produces are corrupt" {
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 1, .description = null } }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .running = 1 }),
         // A terminal Turn whose Operation never resolved.
-        .{ .turn = 7, .operation = 19, .input_cutoff = 5, .terminal = .{ .outcome = .completed, .code = "completed", .at = 500, .position = 40 }, .op = unresolved },
+        .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .terminal = .{ .outcome = .completed, .code = "completed", .at = 500, .position = 40 }, .op = unresolved },
         // A saved code beyond its bound.
         activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = &@as([max_code_bytes + 1]u8, @splat('x')), .attempt = 1 } }, .{}),
     }) |turn| {

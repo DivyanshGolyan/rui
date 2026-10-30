@@ -4047,8 +4047,8 @@ pub const Store = struct {
             c.SQLITE_DONE => {},
             c.SQLITE_ROW => {
                 var turn: session_work.Inputs.Turn = .{
-                    .turn = try readPositive(latest, 0),
-                    .operation = try readPositive(latest, 1),
+                    .turn_id = try readPositive(latest, 0),
+                    .operation_id = try readPositive(latest, 1),
                     .input_cutoff = try readPositive(latest, 2),
                     .stopped_at = try readOptionalPositive(latest, 15),
                     .op = undefined,
@@ -4086,7 +4086,7 @@ pub const Store = struct {
                         .diagnostic = if (c.sqlite3_column_type(latest, 14) == c.SQLITE_BLOB) columnBytes(latest, 14) else null,
                     };
                 } else {
-                    turn.actions = try self.readWorkActions(turn.operation, &description);
+                    turn.actions = try self.readWorkActions(turn.operation_id, &description);
                 }
                 inputs.latest = turn;
             },
