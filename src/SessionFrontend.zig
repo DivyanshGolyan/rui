@@ -930,8 +930,7 @@ const ConversationAction = enum {
     expand,
     /// Leaves the conversation; Host work continues.
     detach,
-    /// Retries the uncertain original. Beside an Action it is choice input,
-    /// which decides nothing.
+    /// Retries the uncertain original.
     recover,
 };
 
@@ -955,6 +954,24 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .end = .back,
     .ctrl_end = .latest,
 });
+
+/// What a key does beside an Action's choice.
+const ChoiceAction = union(enum) {
+    conversation: ConversationAction,
+    /// Withholds the choice's line, which then decides nothing at its Enter.
+    refuse,
+};
+
+/// The choice's one key table: the conversation's, except that recovery
+/// refuses the line. The original waits for the Action's decision.
+const choice_keys: keymap.Keymap(ChoiceAction) = blk: {
+    var map: keymap.Keymap(ChoiceAction) = .{ .meanings = .initFill(null) };
+    for (std.enums.values(keymap.Key)) |key| if (conversation_keys.get(key)) |action| map.meanings.set(key, switch (action) {
+        .recover => .refuse,
+        else => .{ .conversation = action },
+    });
+    break :blk map;
+};
 
 fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
@@ -1129,13 +1146,11 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
     const screen = self.terminal.screen;
-    const event = screen.applyChoice(conversation_keys, decoded);
+    const event = screen.applyChoice(choice_keys, decoded);
     const refused = event == .invalid or event == .edit_rejected or event == .unbound or event == .overflow;
     if (event == .action) switch (event.action) {
-        // Beside an Action, Ctrl-R is choice input that is no choice: its
-        // line decides nothing.
-        .recover => screen.refuseChoice(),
-        else => |action| try self.perform(action),
+        .conversation => |action| try self.perform(action),
+        .refuse => screen.refuseChoice(),
     };
     if (!screen.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
