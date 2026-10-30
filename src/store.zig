@@ -5154,13 +5154,14 @@ pub const Store = struct {
         } } };
     }
 
-    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+    /// `out` is valid only when this returns without error.
+    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.action_attempt, self.readBashExecutionInputLocked(binding));
+        return access.finish(Ordinary.action_attempt, self.readBashExecutionInputLocked(binding, out));
     }
 
-    fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+    fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const statement = try self.cached(
             "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
@@ -5176,23 +5177,14 @@ pub const Store = struct {
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try readText(statement, 0, &workspace);
+        try readText(statement, 0, &out.workspace);
         const content_id = c.sqlite3_column_int64(statement, 1);
         const timeout_ms = c.sqlite3_column_int64(statement, 2);
         if (content_id <= 0 or timeout_ms <= 0) return error.CorruptStore;
-        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try readText(statement, 4, &session);
-        var sender_handle: protocol.Bounded(32) = .{};
-        try readText(statement, 5, &sender_handle);
-        const arguments = try self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id");
-        return .{
-            .session = session,
-            .sender_handle = sender_handle,
-            .workspace = workspace,
-            .arguments = arguments,
-            .timeout_ms = @intCast(timeout_ms),
-        };
+        try readText(statement, 4, &out.session);
+        try readText(statement, 5, &out.sender_handle);
+        out.arguments = try self.actionContentLocked(out.session.slice(), binding.action_id, "arguments_content_id");
+        out.timeout_ms = @intCast(timeout_ms);
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
@@ -10986,7 +10978,9 @@ test "Full reports every closed Action resolution without fencing" {
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    try std.testing.expectEqual(@as(u64, 1234), (try storage.readBashExecutionInput(action_binding)).timeout_ms);
+    var input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(action_binding, &input);
+    try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
     try std.testing.expectEqual(
         ActionSettlement.effect,
         try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
@@ -11115,7 +11109,8 @@ test "canonical report and Action read failures fence later commands" {
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try queryU64(storage.database, "SELECT min(action_id) FROM action_operation"))) |_| {} else |err| err,
                 .execution => blk: {
                     const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                    break :blk if (storage.readBashExecutionInput(action.permit.binding)) |_| {} else |err| err;
+                    var input: BashExecutionInput = undefined;
+                    break :blk storage.readBashExecutionInput(action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
@@ -14627,39 +14622,43 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
             .encoded = encoded[1 .. encoded.len - 1],
             .decoded = descriptor,
         }});
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try workspace.set(storage.selector.slice());
+        var input: BashExecutionInput = .{
+            .session = request.session,
+            .sender_handle = .{},
+            .workspace = .{},
+            .arguments = .{ .length = descriptor.len, .digest = undefined },
+            .timeout_ms = 1000,
+        };
+        try input.workspace.set(storage.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
-        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, .{})) {
-            .preparing => |value| value,
-            .failed => |initial| {
-                var failure = initial;
-                try failure.cleanup.cleanup(scratch);
-                return failure.cause;
-            },
-        };
+        var preparation: bash.Preparation = undefined;
+        if (preparation.start(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), &input, storage.selector.slice(), "/bin/bash", 11, .{})) |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup(scratch);
+            return failure.cause;
+        }
         var owned = true;
         defer if (owned) {
             var cleanup = preparation.cancel();
             cleanup.cleanup(scratch) catch unreachable;
         };
-        try std.testing.expect(preparation.advance() == .pending);
+        var prepared: bash.Prepared = undefined;
+        try std.testing.expect(preparation.advance(&prepared) == .pending);
         _ = try configureTestSession(&storage, "bash-checkpoint");
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         while (true) {
-            switch (preparation.advance()) {
+            var progress = preparation.advance(&prepared);
+            switch (progress) {
                 .pending => {},
-                .prepared => |value| {
+                .prepared => {
                     owned = false;
-                    var prepared = value;
                     defer prepared.cleanup() catch unreachable;
                     try std.testing.expectEqualStrings(command, prepared.command.?);
                     break;
                 },
-                .failed => |initial| {
+                .failed => |*failure| {
                     owned = false;
-                    var failure = initial;
                     try failure.cleanup.cleanup(scratch);
                     return failure.cause;
                 },
@@ -15222,7 +15221,9 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    const handle = (try storage.readBashExecutionInput(action)).sender_handle;
+    var input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(action, &input);
+    const handle = input.sender_handle;
     var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
     try own_ref.set(sender);
     const sender_end = (try storage.activityPage(.{ .session = own_ref })).end;
@@ -18985,7 +18986,8 @@ test "tool label observation trusts admission but exact inspection authenticates
             .arguments => if (storage.actionArguments(session.slice(), action)) |_| {} else |err| err,
             .execution => blk: {
                 const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                break :blk if (storage.readBashExecutionInput(admitted.permit.binding)) |_| {} else |err| err;
+                var input: BashExecutionInput = undefined;
+                break :blk storage.readBashExecutionInput(admitted.permit.binding, &input);
             },
             .proposal => blk: {
                 const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
