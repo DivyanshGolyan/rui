@@ -1,8 +1,9 @@
 //! Source check for functional cores: decisions over values.
 //!
 //! A core may name only the `std` members below, and may import only `std`,
-//! `builtin` and other cores. It may not reach C or assembly, alias `std`, or
-//! name a clock method. The check reads tokens to catch accidental effects.
+//! `builtin`, other cores and the value-only Unicode modules below. It may
+//! not reach C or assembly, alias `std`, or name a clock method. The check
+//! reads tokens to catch accidental effects.
 //! Effects reached by reflection (a computed `@field` name) or through an
 //! injected context, such as an `anytype` or a `*std.Io.Writer` that drains to
 //! a file, are left to review.
@@ -25,6 +26,10 @@ const allowed_std = [_][]const u8{
     "std.testing.expectEqual", "std.testing.expectEqualStrings", "std.testing.expectEqualSlices",
     "std.testing.expectError", "std.unicode.utf8ValidateSlice",
 };
+
+/// vaxis's Unicode tables, which `configureTerminalEditor` in build.zig
+/// provides without vaxis's TTY or event loop.
+const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width" };
 
 /// Allowed only inside `test` declarations, for failure diagnostics.
 const test_only_std = [_][]const u8{"std.debug.print"};
@@ -131,7 +136,7 @@ fn scan(source: [:0]const u8, cores: []const []const u8) ?Found {
                     const declared = before[0].tag == .equal and before[1].tag == .identifier and
                         std.mem.eql(u8, source[before[1].loc.start..before[1].loc.end], "std") and before[2].tag == .keyword_const;
                     if (!declared or peek(&tokens).tag != .semicolon) return .{ .offset = at.offset, .text = name };
-                } else if (!std.mem.eql(u8, name, "builtin") and !contains(cores, name)) return .{ .offset = at.offset, .text = name };
+                } else if (!std.mem.eql(u8, name, "builtin") and !contains(cores, name) and !contains(&value_modules, name)) return .{ .offset = at.offset, .text = name };
             } else if (std.mem.eql(u8, text, "@field")) {
                 // `@field(T, "now")` names a clock method or `std` by string;
                 // a name built from literals would hide it.
@@ -253,6 +258,7 @@ test "the boundary check reads names, not comments or strings" {
         \\const builtin = @import("builtin");
         \\const other = @import("other.zig");
         \\const field = @import("other.zig").value;
+        \\const gwidth = @import("terminal_width");
         \\// std.posix.read in a comment
         \\const url = "https://std.fs.example/now()";
         \\const quote = '"';
@@ -320,6 +326,7 @@ test "the boundary check reads names, not comments or strings" {
         .{ "extern fn read() void;", "extern" },
         .{ "export fn f() void {}", "export" },
         .{ "const s = @import(\"store.zig\");", "store.zig" },
+        .{ "const v = @import(\"vaxis\");", "vaxis" },
         .{ "const p = @import(\"std\").posix;", "std" },
     }) |case| {
         const found = check(case[0], &cores) orelse return error.TestExpectedViolation;
