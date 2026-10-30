@@ -16,7 +16,7 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 38;
+pub const schema_version: u32 = 39;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -93,13 +93,16 @@ const runnable_selection_sql =
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
+/// Whether the Turn's `current` Operation lets it continue without input.
+/// `continuation_operation_id` stores this fact so selection can walk an index.
+const continues_without_input_sql =
+    "(" ++ resolutionIn("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
 const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
-    "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-    "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
-    "(" ++ resolutionIn("current.resolution_code", &turn_policy.continues_without_input) ++ " OR " ++ complete_tool_results_sql ++ ") AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
+    "FROM turn active INDEXED BY turn_tool_continuation JOIN session s ON s.session_ref=active.session_ref " ++
+    "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
     "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
-    ") ORDER BY current.operation_id LIMIT 1";
+    ") ORDER BY active.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
 const pending_message_count_sql =
@@ -2712,11 +2715,12 @@ pub const Store = struct {
             .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
         var rejection: ?protocol.PermissionDecisionRejection = null;
+        var turn_id: ?u64 = null;
         if (!protocol.validSessionId(command.session.slice())) rejection = .invalid_session_reference else if (command.action_id == 0 or
             command.action_id > std.math.maxInt(i64)) rejection = .invalid_target else if (try self.readSession(command.session.slice()) == null) rejection = .unknown_session;
         if (rejection == null) {
             const action = try self.cached(
-                "SELECT a.session_ref,a.authorized,a.resolution_code,t.outcome_code FROM action_operation a " ++
+                "SELECT a.session_ref,a.authorized,a.resolution_code,t.outcome_code,t.turn_id FROM action_operation a " ++
                     "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
                     "JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
             );
@@ -2729,6 +2733,7 @@ pub const Store = struct {
                 if (!session.eql(command.session.slice())) rejection = .target_mismatch else if (c.sqlite3_column_int(action, 1) != 0 or
                     c.sqlite3_column_type(action, 2) != c.SQLITE_NULL or
                     c.sqlite3_column_type(action, 3) != c.SQLITE_NULL) rejection = .action_not_pending;
+                turn_id = @intCast(try readNullablePositiveI64(action, 4) orelse return error.CorruptStore);
             }
         }
         var answer = StoredAnswer{ .accepted = rejection == null };
@@ -2765,6 +2770,7 @@ pub const Store = struct {
                     try bindU64(update, 3, position);
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+                    try self.recordContinuation(turn_id.?);
                 },
             }
         }
@@ -5318,6 +5324,7 @@ pub const Store = struct {
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
         try self.completeStoppedTurnIfReady(binding.turn_id);
+        try self.recordContinuation(binding.turn_id);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try self.execute("COMMIT");
         return if (stopped == 1) .session_stop else .effect;
@@ -5387,6 +5394,7 @@ pub const Store = struct {
         const turn_id = c.sqlite3_column_int64(turn_statement, 0);
         if (turn_id <= 0) return error.CorruptStore;
         try self.completeStoppedTurnIfReady(@intCast(turn_id));
+        try self.recordContinuation(@intCast(turn_id));
         try self.execute("COMMIT");
         return true;
     }
@@ -5407,6 +5415,20 @@ pub const Store = struct {
         }
         resetCached(ready);
         if (!try self.closeTurn(turn_id, null, .cancelled)) return error.CorruptStore;
+    }
+
+    /// Every writer that can let an active Turn continue without input calls
+    /// this in its transaction; tool continuation selection reads only the
+    /// stored fact. Admitting the Turn's next Operation retires it.
+    fn recordContinuation(self: *Store, turn_id: u64) !void {
+        const update = try self.cached(
+            "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND outcome_code IS NULL " ++
+                "AND continuation_operation_id IS NOT operation_id AND EXISTS(SELECT 1 FROM model_operation current " ++
+                "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
+        );
+        defer resetCached(update);
+        try bindU64(update, 1, turn_id);
+        try expectDone(update);
     }
 
     fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
@@ -5793,6 +5815,21 @@ pub const Store = struct {
     /// from malformed canonical classification. Only each active Turn's
     /// current Operation can be blocking successor discovery.
     fn validateBlockedToolCalls(self: *Store) !void {
+        {
+            // A Turn whose stored continuation disagrees with its Operation
+            // would never be selected, or would be selected too early.
+            const disagreeing = try self.cached(
+                "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+                    "WHERE active.outcome_code IS NULL AND (active.continuation_operation_id IS active.operation_id)!=" ++
+                    "(CASE WHEN " ++ continues_without_input_sql ++ " THEN 1 ELSE 0 END) LIMIT 1",
+            );
+            defer resetCached(disagreeing);
+            switch (c.sqlite3_step(disagreeing)) {
+                c.SQLITE_DONE => {},
+                c.SQLITE_ROW => return error.CorruptStore,
+                else => return error.CallReadFailed,
+            }
+        }
         const statement = try self.cached(
             "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
                 "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
@@ -6531,6 +6568,7 @@ pub const Store = struct {
                 try expectDone(update);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 if (compact) {
+                    try self.recordContinuation(binding.turn_id);
                     if (faults.before_commit) return error.InjectedCommitFailure;
                     try self.execute("COMMIT");
                     return;
@@ -6940,7 +6978,7 @@ pub const Store = struct {
         }
         if (turn_policy.completesTurn(output_fact, pending)) {
             if (!try self.closeTurn(binding.turn_id, binding.operation_id, .{ .completed = answer_id.? })) return error.StaleAttemptBinding;
-        }
+        } else try self.recordContinuation(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try self.execute("COMMIT");
     }
@@ -8035,9 +8073,11 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ outcome_content_id INTEGER REFERENCES content(content_id),
         \\ outcome_position INTEGER CHECK(outcome_position>0),
         \\ outcome_at INTEGER CHECK(outcome_at IS NULL OR outcome_at>0),
+        \\ continuation_operation_id INTEGER CHECK(continuation_operation_id IS NULL OR continuation_operation_id<=operation_id),
         \\ CHECK((outcome_code IS NULL)=(outcome_at IS NULL))
         \\) STRICT;
         \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
+        \\CREATE INDEX turn_tool_continuation ON turn(operation_id) WHERE outcome_code IS NULL AND continuation_operation_id=operation_id;
         \\CREATE TABLE session_stop(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
@@ -8244,7 +8284,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','message_admission_person','message_admission_unpositioned','session_stop_exclusion','session_stop_unpositioned','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest','turn_unpositioned')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','message_admission_person','message_admission_unpositioned','session_stop_exclusion','session_stop_unpositioned','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','turn_tool_continuation','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest','turn_unpositioned')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -11762,6 +11802,114 @@ test "tool continuation admission runs its selection once" {
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
     try std.testing.expectEqual(runs_before + 1, c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0));
+}
+
+test "each transition that lets a Turn continue without input makes it selectable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Path = enum { rejected, denied, settled, indeterminate, overflow };
+    for (std.enums.values(Path)) |path| {
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "continue-{s}", .{@tagName(path)});
+        var config_buffer: [40]u8 = undefined;
+        const config = try std.fmt.bufPrint(&config_buffer, "{s}-config", .{name});
+        const session = if (path == .overflow) try configureTestSession(&storage, config) else try configureTestSessionAsk(&storage, config);
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "start");
+        const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+        switch (path) {
+            .rejected => {
+                const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+                try settleCallsForTesting(&storage, &tmp, first, config, &calls);
+            },
+            .denied, .settled, .indeterminate => {
+                try settleTwoActionsForTesting(&storage, &tmp, first, config);
+                const last_action = try queryU64(storage.database, "SELECT max(action_id) FROM action_operation");
+                var key_buffer: [48]u8 = undefined;
+                try denyForTesting(&storage, session.slice(), try std.fmt.bufPrint(&key_buffer, "{s}-deny-first", .{name}), last_action - 1);
+                try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+                switch (path) {
+                    .denied => try denyForTesting(&storage, session.slice(), try std.fmt.bufPrint(&key_buffer, "{s}-deny-last", .{name}), last_action),
+                    else => {
+                        var allow: protocol.PermissionDecisionCommand = .{ .action_id = last_action, .decision = .allow_once };
+                        try allow.key.set(try std.fmt.bufPrint(&key_buffer, "{s}-allow", .{name}));
+                        try allow.session.set(session.slice());
+                        try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                        const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                        try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+                        if (path == .settled) {
+                            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+                        } else {
+                            try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+                        }
+                    },
+                }
+            },
+            .overflow => try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "overflow" }, .context_overflow, .{}),
+        }
+        const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+        try std.testing.expectEqual(first.turn_id, continued.turn_id);
+        try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+    }
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a Turn whose continuation was never recorded fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "unrecorded-config");
+    try submitTestMessage(&storage, &tmp, "unrecorded", "unrecorded", session.slice(), "start");
+    const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, first, "unrecorded-metadata", &calls);
+    try exec(storage.database, "UPDATE turn SET continuation_operation_id=NULL");
+    try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
+}
+
+test "a stored continuation never names a later Operation than its Turn's" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "later-config");
+    try submitTestMessage(&storage, &tmp, "later", "later", session.slice(), "start");
+    _ = (try storage.admitModelAttempt(.message, .{})).?;
+    try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, "UPDATE turn SET continuation_operation_id=operation_id"));
+    try std.testing.expectEqual(ConstraintProbe.check_violation, try probeConstraint(storage.database, "UPDATE turn SET continuation_operation_id=operation_id+1"));
+}
+
+test "tool continuation selection never visits a Turn waiting for its tool results" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    // Each round adds a Turn with two Actions waiting for permission.
+    var steps: [2]i32 = undefined;
+    for (&steps, 0..) |*cost, round| {
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "waiting-{d}", .{round});
+        var config_buffer: [40]u8 = undefined;
+        const config = try std.fmt.bufPrint(&config_buffer, "{s}-config", .{name});
+        const session = try configureTestSessionAsk(&storage, config);
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "propose");
+        const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, config);
+
+        const select = try prepare(storage.database, tool_continuation_selection_sql);
+        defer _ = c.sqlite3_finalize(select);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
+        cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM turn WHERE outcome_code IS NULL"));
+    try std.testing.expectEqual(steps[0], steps[1]);
 }
 
 test "production turn preserves skipped continuation preference through actual Store admissions" {
