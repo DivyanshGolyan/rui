@@ -108,6 +108,17 @@ pub const Configuration = struct {
     reasoning_effort: OptionalBounded(16) = .{},
     /// Display text only: never model input, an address or a selector.
     label: OptionalBounded(max_label_bytes) = .{},
+
+    pub fn removeTemporaryContent(self: *Configuration, io: std.Io) !void {
+        var cleanup_error: ?anyerror = null;
+        removeContent(&self.instructions, io) catch |err| {
+            cleanup_error = err;
+        };
+        removeContent(&self.output_schema, io) catch |err| {
+            cleanup_error = err;
+        };
+        if (cleanup_error) |err| return err;
+    }
 };
 
 pub const Kind = enum {
@@ -140,14 +151,7 @@ pub const ConfigureCommand = struct {
     require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
-        var cleanup_error: ?anyerror = null;
-        removeContent(&self.configuration.instructions, io) catch |err| {
-            cleanup_error = err;
-        };
-        removeContent(&self.configuration.output_schema, io) catch |err| {
-            cleanup_error = err;
-        };
-        if (cleanup_error) |err| return err;
+        return self.configuration.removeTemporaryContent(io);
     }
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
@@ -957,7 +961,6 @@ pub const ContentFaults = struct {
 
 pub const ParseOptions = struct {
     io: std.Io,
-    fd: std.posix.fd_t,
     content_length: u64,
     scratch_path: []const u8,
     request_number: u64,
@@ -965,7 +968,6 @@ pub const ParseOptions = struct {
     retained_scratch: *?named_scratch.Owner,
     scratch_budget: ?ScratchBudget = null,
     expected_kind: ?Kind = null,
-    deadline: ?i128 = null,
 };
 
 /// Resumable ingress owns captures until complete framing and validation.
@@ -977,12 +979,18 @@ pub const Ingress = struct {
     metadata: std.ArrayList(u8) = .empty,
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
-    expecting_content: bool = false,
-    capture: ?ContentCapture = null,
+    /// Where the next byte goes: the metadata, the opening quote of a
+    /// content string, or `capture`.
+    content_state: enum { metadata, awaiting_quote, capturing } = .metadata,
+    /// Live while `content_state` is `.capturing`.
+    capture: ContentCapture = undefined,
     decoder: StringDecoder = .{},
     contents: [2]ContentField = .{ .{}, .{} },
     content_count: usize = 0,
     complete: bool = false,
+    /// The one home of the parsed Request: preview and finish parse into it.
+    /// After finish, the Ingress's owner borrows it until it releases the Ingress.
+    request: Request = undefined,
 
     // Initial Message combines configuration scalars and sender identity.
     // Allow worst-case escaping of both and 128 short grammar tokens (keys,
@@ -991,13 +999,14 @@ pub const Ingress = struct {
     const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
         max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 128 * 32) + 128 * 8);
 
-    pub fn init(allocator: std.mem.Allocator, options: ParseOptions) Ingress {
-        return .{ .allocator = allocator, .options = options };
+    /// Builds the Ingress in its home. `request` stays unwritten.
+    pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
+        self.* = .{ .allocator = allocator, .options = options };
     }
 
     pub fn deinit(self: *Ingress) void {
-        if (self.capture) |*capture| capture.deinit();
-        self.capture = null;
+        if (self.content_state == .capturing) self.capture.deinit();
+        self.content_state = .metadata;
         for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
@@ -1008,26 +1017,31 @@ pub const Ingress = struct {
         for (bytes) |byte| {
             if (self.complete) return error.TrailingInput;
             self.received += 1;
-            if (self.expecting_content) {
-                if (self.capture == null) {
+            switch (self.content_state) {
+                .metadata => {},
+                .awaiting_quote => {
                     switch (byte) {
                         ' ', '\t', '\r', '\n' => continue,
                         '"' => {},
                         else => return error.InvalidJsonShape,
                     }
-                    self.capture = try ContentCapture.init(self.options, @intCast(self.content_count + 1));
+                    try self.capture.init(self.options, @intCast(self.content_count + 1));
+                    self.content_state = .capturing;
                     self.decoder = .{};
-                } else if (try self.decoder.feed(byte, &self.capture.?.sink)) {
-                    self.contents[self.content_count] = try self.capture.?.seal();
-                    self.content_count += 1;
-                    self.capture.?.deinit();
-                    self.capture = null;
-                    self.expecting_content = false;
-                    try self.append('"');
-                    try self.append('"');
-                    try self.preview();
-                }
-                continue;
+                    continue;
+                },
+                .capturing => {
+                    if (try self.decoder.feed(byte, &self.capture.sink)) {
+                        self.contents[self.content_count] = try self.capture.seal();
+                        self.content_count += 1;
+                        self.capture.deinit();
+                        self.content_state = .metadata;
+                        try self.append('"');
+                        try self.append('"');
+                        try self.preview();
+                    }
+                    continue;
+                },
             }
             var boundary = false;
             switch (self.lexical) {
@@ -1062,25 +1076,23 @@ pub const Ingress = struct {
         try self.metadata.append(self.allocator, byte);
     }
 
-    fn parse(self: *Ingress) !Request {
-        var source = SocketBody.init(-1, 0);
-        source.input = self.metadata.items;
+    fn parse(self: *Ingress) !void {
+        var source: MetadataSource = .{ .input = self.metadata.items };
         var parser = Parser{
             .source = &source,
             .options = self.options,
             .captured = self.contents[0..self.content_count],
         };
-        const request = try parser.parse();
+        try parser.parse(&self.request);
         std.debug.assert(parser.content_ordinal == self.content_count);
-        return request;
     }
 
     fn preview(self: *Ingress) !void {
-        _ = self.parse() catch |err| switch (err) {
+        self.parse() catch |err| switch (err) {
             error.NeedInput => return,
             error.NeedContent => {
                 std.debug.assert(self.content_count < self.contents.len);
-                self.expecting_content = true;
+                self.content_state = .awaiting_quote;
                 return;
             },
             else => return err,
@@ -1089,15 +1101,18 @@ pub const Ingress = struct {
         if (self.received != self.options.content_length) return error.TrailingInput;
     }
 
-    pub fn finish(self: *Ingress) !Request {
+    /// Parses the complete body into `request`, moves the captured content
+    /// into it, and returns it.
+    pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
-        var request = self.parse() catch |err| switch (err) {
+        self.parse() catch |err| switch (err) {
             error.NeedInput, error.NeedContent => return error.UnexpectedEndOfBody,
             else => return err,
         };
+        const request = &self.request;
         // All fallible validation precedes this non-failing custody transfer.
         var index: usize = 0;
-        switch (request) {
+        switch (request.*) {
             .configure => |*command| {
                 for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
                     if (field.state != .value) continue;
@@ -1119,20 +1134,6 @@ pub const Ingress = struct {
         return request;
     }
 };
-
-pub fn parseRequest(allocator: std.mem.Allocator, options: ParseOptions) !Request {
-    var ingress = Ingress.init(allocator, options);
-    defer ingress.deinit();
-    var buffer: [content_window_bytes]u8 = undefined;
-    while (ingress.received < options.content_length) {
-        try pollExchange(options.io, options.fd, std.posix.POLL.IN, options.deadline);
-        const wanted: usize = @intCast(@min(options.content_length - ingress.received, buffer.len));
-        const count = try std.posix.read(options.fd, buffer[0..wanted]);
-        if (count == 0) return error.UnexpectedEndOfBody;
-        try ingress.feed(buffer[0..count]);
-    }
-    return ingress.finish();
-}
 
 // Discovery uses one absolute budget. Ordinary ingress keeps its existing
 // refill inactivity wait; progress cannot extend an absolute exchange.
@@ -1160,56 +1161,32 @@ pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128
     }
 }
 
-const SocketBody = struct {
-    fd: std.posix.fd_t,
-    remaining: u64,
-    io: std.Io = undefined,
-    deadline: ?i128 = null,
-    buffer: [content_window_bytes]u8 = undefined,
+/// The metadata an Ingress has received so far, the Parser's only input.
+/// Content strings never reach it: the Ingress captures them.
+const MetadataSource = struct {
+    input: []const u8,
     start: usize = 0,
-    end: usize = 0,
-    input: ?[]const u8 = null,
 
-    fn init(fd: std.posix.fd_t, length: u64) SocketBody {
-        return .{ .fd = fd, .remaining = length };
-    }
-
-    fn readByte(self: *SocketBody) !u8 {
-        if (self.input) |input| {
-            if (self.start == input.len) return error.NeedInput;
-            const byte = input[self.start];
-            self.start += 1;
-            return byte;
-        }
-        if (self.start == self.end) try self.refill();
-        const byte = self.buffer[self.start];
+    fn readByte(self: *MetadataSource) !u8 {
+        if (self.start == self.input.len) return error.NeedInput;
+        const byte = self.input[self.start];
         self.start += 1;
         return byte;
     }
 
-    fn atEnd(self: *const SocketBody) bool {
-        return if (self.input) |input| self.start == input.len else self.remaining == 0 and self.start == self.end;
-    }
-
-    fn refill(self: *SocketBody) !void {
-        if (self.remaining == 0) return error.UnexpectedEndOfBody;
-        try pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline);
-        const limit: usize = @intCast(@min(self.remaining, self.buffer.len));
-        const count = try std.posix.read(self.fd, self.buffer[0..limit]);
-        if (count == 0) return error.UnexpectedEndOfBody;
-        self.remaining -= count;
-        self.start = 0;
-        self.end = count;
+    fn atEnd(self: *const MetadataSource) bool {
+        return self.start == self.input.len;
     }
 };
 
 const Parser = struct {
-    source: *SocketBody,
+    source: *MetadataSource,
     options: ParseOptions,
     content_ordinal: u8 = 0,
-    captured: ?[]const ContentField = null,
+    captured: []const ContentField = &.{},
 
-    fn parse(self: *Parser) !Request {
+    /// Sets the command's arm in `out`, then fills that arm in place.
+    fn parse(self: *Parser, out: *Request) !void {
         try self.expectByte('{');
         try self.expectKey("version");
         var version: Bounded(8) = .{};
@@ -1268,78 +1245,129 @@ const Parser = struct {
         var store: Bounded(max_store_bytes) = .{};
         try self.readSmallString(&store);
 
-        var request: Request = switch (kind) {
-            .host_info => .{ .host_info = .{ .store = store } },
-            .host_stop => .{ .host_stop = .{ .store = store } },
-            .configure => .{ .configure = try self.parseConfigure(store) },
-            .message => .{ .message = try self.parseMessage(store) },
-            .session_stop => .{ .session_stop = try self.parseSessionStop(store) },
-            .model_interruption => .{ .model_interruption = try self.parseModelInterruption(store) },
-            .permission_decision => .{ .permission_decision = try self.parsePermissionDecision(store) },
-            .observe_command => .{ .observe_command = try self.parseObserve(store) },
-            .read_result => .{ .read_result = try self.parseReadResult(store) },
-            .read_action_call_id => .{ .read_action_call_id = try self.parseReadActionArguments(store) },
-            .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
-            .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
-            .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
-            .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
-            .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
-            .proposal_page => .{ .proposal_page = try self.parseProposalPage(store) },
-            .proposal_field => .{ .proposal_field = try self.parseProposalField(store) },
-            .activity_page => .{ .activity_page = try self.parseActivityPage(store) },
-            .activity_content => .{ .activity_content = try self.parseActivityContent(store) },
-        };
-        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
+        // Each arm is a literal written straight into `out`, then filled in
+        // place: @unionInit would build a whole Request on the stack first.
+        switch (kind) {
+            .host_info => out.* = .{ .host_info = .{ .store = store } },
+            .host_stop => out.* = .{ .host_stop = .{ .store = store } },
+            .configure => {
+                out.* = .{ .configure = .{ .store = store } };
+                try self.parseConfigure(&out.configure);
+            },
+            .message => {
+                out.* = .{ .message = .{ .store = store } };
+                try self.parseMessage(&out.message);
+            },
+            .session_stop => {
+                out.* = .{ .session_stop = .{ .store = store } };
+                try self.parseSessionStop(&out.session_stop);
+            },
+            .model_interruption => {
+                out.* = .{ .model_interruption = .{ .store = store } };
+                try self.parseModelInterruption(&out.model_interruption);
+            },
+            .permission_decision => {
+                out.* = .{ .permission_decision = .{ .store = store } };
+                try self.parsePermissionDecision(&out.permission_decision);
+            },
+            .observe_command => {
+                out.* = .{ .observe_command = .{ .store = store } };
+                try self.parseObserve(&out.observe_command);
+            },
+            .read_result => {
+                out.* = .{ .read_result = .{ .store = store } };
+                try self.parseReadResult(&out.read_result);
+            },
+            .read_action_call_id => {
+                out.* = .{ .read_action_call_id = .{ .store = store } };
+                try self.parseReadActionArguments(&out.read_action_call_id);
+            },
+            .read_action_arguments => {
+                out.* = .{ .read_action_arguments = .{ .store = store } };
+                try self.parseReadActionArguments(&out.read_action_arguments);
+            },
+            .inspect_session => {
+                out.* = .{ .inspect_session = .{ .store = store } };
+                try self.parseInspect(&out.inspect_session);
+            },
+            .list_sessions => {
+                out.* = .{ .list_sessions = .{ .store = store } };
+                try self.parseListSessions(&out.list_sessions);
+            },
+            .conversation_page => {
+                out.* = .{ .conversation_page = .{ .store = store } };
+                try self.parseConversationPage(&out.conversation_page);
+            },
+            .conversation_content => {
+                out.* = .{ .conversation_content = .{ .store = store } };
+                try self.parseConversationContent(&out.conversation_content);
+            },
+            .proposal_page => {
+                out.* = .{ .proposal_page = .{ .store = store } };
+                try self.parseProposalPage(&out.proposal_page);
+            },
+            .proposal_field => {
+                out.* = .{ .proposal_field = .{ .store = store } };
+                try self.parseProposalField(&out.proposal_field);
+            },
+            .activity_page => {
+                out.* = .{ .activity_page = .{ .store = store } };
+                try self.parseActivityPage(&out.activity_page);
+            },
+            .activity_content => {
+                out.* = .{ .activity_content = .{ .store = store } };
+                try self.parseActivityContent(&out.activity_content);
+            },
+        }
+        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('}');
         if (!self.source.atEnd()) {
             return error.TrailingInput;
         }
-        return request;
     }
 
-    fn parseConfigure(self: *Parser, store: Bounded(max_store_bytes)) !ConfigureCommand {
-        var request = ConfigureCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
+    /// Each parser fills its command `out`, whose Store is already set.
+    fn parseConfigure(self: *Parser, out: *ConfigureCommand) !void {
+        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
+        try self.readSmallString(&out.key);
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("configuration");
-        request.configuration = try self.parseConfiguration(true);
+        try self.parseConfiguration(true, &out.configuration);
         if (try self.consumeIf(',')) {
             try self.expectKey("require_model");
-            request.require_model = try self.readBoolean();
+            out.require_model = try self.readBoolean();
         }
-        return request;
     }
 
-    fn parseConfiguration(self: *Parser, allow_content: bool) !Configuration {
-        var request: ConfigureCommand = .{};
-        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
+    /// Fills `out`, which holds its defaults.
+    fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
+        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('{');
         try self.expectKey("workspace");
-        try self.readOptionalSmall(max_workspace_bytes, &request.configuration.workspace);
+        try self.readOptionalSmall(max_workspace_bytes, &out.workspace);
         try self.expectByte(',');
         try self.expectKey("provider");
-        try self.readOptionalSmall(max_provider_bytes, &request.configuration.provider);
+        try self.readOptionalSmall(max_provider_bytes, &out.provider);
         try self.expectByte(',');
         try self.expectKey("model");
-        try self.readOptionalSmall(max_model_bytes, &request.configuration.model);
+        try self.readOptionalSmall(max_model_bytes, &out.model);
         try self.expectByte(',');
         try self.expectKey("instructions");
-        try self.readContent(&request.configuration.instructions, false, allow_content);
+        try self.readContent(&out.instructions, false, allow_content);
         try self.expectByte(',');
         try self.expectKey("tools");
-        try self.readTools(&request.configuration.tools);
+        try self.readTools(&out.tools);
         try self.expectByte(',');
         try self.expectKey("permission_mode");
-        try self.readOptionalSmall(16, &request.configuration.permission_mode);
+        try self.readOptionalSmall(16, &out.permission_mode);
         try self.expectByte(',');
         try self.expectKey("output_schema");
-        try self.readContent(&request.configuration.output_schema, true, allow_content);
+        try self.readContent(&out.output_schema, true, allow_content);
         var trigger_seen = false;
         var reservation_seen = false;
         var effort_seen = false;
@@ -1350,31 +1378,29 @@ const Parser = struct {
             try self.expectByte(':');
             if (key.eql("compaction_trigger") and !trigger_seen) {
                 trigger_seen = true;
-                try self.readOptionalPolicy(&request.configuration.compaction_trigger);
+                try self.readOptionalPolicy(&out.compaction_trigger);
             } else if (key.eql("output_reservation") and !reservation_seen) {
                 reservation_seen = true;
-                try self.readOptionalPolicy(&request.configuration.output_reservation);
+                try self.readOptionalPolicy(&out.output_reservation);
             } else if (key.eql("reasoning_effort") and !effort_seen) {
                 effort_seen = true;
-                try self.readOptionalSmallNullable(16, &request.configuration.reasoning_effort, true);
+                try self.readOptionalSmallNullable(16, &out.reasoning_effort, true);
             } else if (key.eql("label") and !label_seen) {
                 label_seen = true;
-                try self.readOptionalSmallNullable(max_label_bytes, &request.configuration.label, true);
+                try self.readOptionalSmallNullable(max_label_bytes, &out.label, true);
             } else return error.UnexpectedField;
         }
         try self.expectByte('}');
-        return request.configuration;
     }
 
-    fn parseMessage(self: *Parser, store: Bounded(max_store_bytes)) !MessageCommand {
-        var request = MessageCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
+    fn parseMessage(self: *Parser, out: *MessageCommand) !void {
+        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
+        try self.readSmallString(&out.key);
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("sender");
         try self.skipWhitespace();
@@ -1382,15 +1408,15 @@ const Parser = struct {
             for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
         } else {
             self.source.start -= 1;
-            request.sender = .{};
+            out.sender = .{};
             try self.expectByte('{');
             try self.expectKey("store");
-            try self.readSmallString(&request.sender.?.store);
+            try self.readSmallString(&out.sender.?.store);
             try self.expectByte(',');
             try self.expectKey("session");
-            try self.readSmallString(&request.sender.?.session);
+            try self.readSmallString(&out.sender.?.session);
             try self.expectByte('}');
-            try request.sender.?.validate();
+            try out.sender.?.validate();
         }
         try self.expectByte(',');
         try self.expectKey("sender_handle");
@@ -1399,91 +1425,83 @@ const Parser = struct {
             for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
         } else {
             self.source.start -= 1;
-            request.sender_handle = .{};
-            try self.readSmallString(&request.sender_handle.?);
+            out.sender_handle = .{};
+            try self.readSmallString(&out.sender_handle.?);
         }
         try self.expectByte(',');
-        if (request.session.len == 0) {
+        if (out.session.len == 0) {
             try self.expectKey("configuration");
-            request.configuration = try self.parseConfiguration(false);
+            out.configuration = .{};
+            try self.parseConfiguration(false, &out.configuration.?);
             try self.expectByte(',');
         }
         try self.expectKey("text");
-        try self.readContent(&request.text, false, true);
-        if (request.text.state != .value) return error.InvalidMessage;
+        try self.readContent(&out.text, false, true);
+        if (out.text.state != .value) return error.InvalidMessage;
         if (try self.consumeIf(',')) {
             // Only a creating Message carries a capability condition.
-            if (request.configuration == null) return error.InvalidMessage;
+            if (out.configuration == null) return error.InvalidMessage;
             try self.expectKey("require_model");
-            request.require_model = try self.readBoolean();
+            out.require_model = try self.readBoolean();
         }
-        return request;
     }
 
-    fn parseSessionStop(self: *Parser, store: Bounded(max_store_bytes)) !SessionStopCommand {
-        var request = SessionStopCommand{ .store = store };
+    fn parseSessionStop(self: *Parser, out: *SessionStopCommand) !void {
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
+        try self.readSmallString(&out.key);
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
-        return request;
+        try self.readSmallString(&out.session);
     }
 
-    fn parseModelInterruption(self: *Parser, store: Bounded(max_store_bytes)) !ModelInterruptionCommand {
-        var request = ModelInterruptionCommand{ .store = store };
+    fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand) !void {
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
+        try self.readSmallString(&out.key);
         try self.expectByte(',');
         try self.expectKey("target");
         try self.expectByte('{');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("turn");
-        request.turn_id = try self.readCanonicalU64();
+        out.turn_id = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("operation");
-        request.operation_id = try self.readCanonicalU64();
+        out.operation_id = try self.readCanonicalU64();
         try self.expectByte('}');
-        return request;
     }
 
-    fn parsePermissionDecision(self: *Parser, store: Bounded(max_store_bytes)) !PermissionDecisionCommand {
-        var request = PermissionDecisionCommand{ .store = store };
+    fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand) !void {
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
+        try self.readSmallString(&out.key);
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("action");
-        request.action_id = try self.readCanonicalU64();
+        out.action_id = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("decision");
         var decision: Bounded(16) = .{};
         try self.readSmallString(&decision);
-        request.decision = if (decision.eql("deny"))
+        out.decision = if (decision.eql("deny"))
             .deny
         else if (decision.eql("allow_once"))
             .allow_once
         else
             return error.UnsupportedPermissionDecision;
-        return request;
     }
 
-    fn parseReadActionArguments(self: *Parser, store: Bounded(max_store_bytes)) !ReadActionArguments {
-        var request = ReadActionArguments{ .store = store };
+    fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("action");
-        request.action_id = try self.readCanonicalU64();
-        return request;
+        out.action_id = try self.readCanonicalU64();
     }
 
     fn readCanonicalU64(self: *Parser) !u64 {
@@ -1501,19 +1519,16 @@ const Parser = struct {
         return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
     }
 
-    fn parseObserve(self: *Parser, store: Bounded(max_store_bytes)) !ObserveCommand {
-        var request = ObserveCommand{ .store = store };
+    fn parseObserve(self: *Parser, out: *ObserveCommand) !void {
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
-        return request;
+        try self.readSmallString(&out.key);
     }
 
-    fn parseInspect(self: *Parser, store: Bounded(max_store_bytes)) !InspectSession {
-        var request = InspectSession{ .store = store };
+    fn parseInspect(self: *Parser, out: *InspectSession) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         if (try self.consumeIf(',')) {
             var key: Bounded(32) = .{};
             try self.readSmallString(&key);
@@ -1521,7 +1536,7 @@ const Parser = struct {
             if (key.eql("profile")) {
                 var profile: Bounded(16) = .{};
                 try self.readSmallString(&profile);
-                request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
+                out.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
             } else if (key.eql("failed_response")) {
                 var part: Bounded(16) = .{};
                 try self.readSmallString(&part);
@@ -1533,20 +1548,17 @@ const Parser = struct {
                 try self.expectKey("attempt");
                 const ordinal = try self.readCanonicalU64();
                 if (operation == 0 or operation > std.math.maxInt(i64) or ordinal == 0 or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
-                request.failed_response = .{ .operation = operation, .attempt = ordinal, .part = selected };
+                out.failed_response = .{ .operation = operation, .attempt = ordinal, .part = selected };
             } else return error.UnexpectedKey;
         }
-        return request;
     }
 
-    fn parseListSessions(self: *Parser, store: Bounded(max_store_bytes)) !ListSessions {
-        var request = ListSessions{ .store = store };
+    fn parseListSessions(self: *Parser, out: *ListSessions) !void {
         try self.expectByte(',');
         try self.expectKey("workspace");
         if (!try self.consumeIf('n')) {
-            var workspace: Bounded(max_workspace_bytes) = .{};
-            try self.readSmallString(&workspace);
-            request.workspace = workspace;
+            out.workspace = .{};
+            try self.readSmallString(&out.workspace.?);
         } else {
             try self.expectByte('u');
             try self.expectByte('l');
@@ -1554,15 +1566,15 @@ const Parser = struct {
         }
         try self.expectByte(',');
         try self.expectKey("after");
-        request.after = try self.readCanonicalU64();
+        out.after = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("ceiling");
-        request.ceiling = try self.readCanonicalU64();
+        out.ceiling = try self.readCanonicalU64();
         if (try self.consumeIf(',')) {
             try self.expectKey("since");
             var token: Bounded(SinceToken.max_bytes) = .{};
             try self.readSmallString(&token);
-            request.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
+            out.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
             if (try self.consumeIf(',')) {
                 try self.expectKey("through");
                 const through = try self.readCanonicalU64();
@@ -1571,141 +1583,126 @@ const Parser = struct {
                 var reference: Bounded(session_id_bytes) = .{};
                 try self.readSmallString(&reference);
                 if (reference.len != session_id_bytes) return error.InvalidCursor;
-                request.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
+                out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
             }
         }
-        try request.validate();
-        return request;
+        try out.validate();
     }
 
-    fn parseConversationPage(self: *Parser, store: Bounded(max_store_bytes)) !ConversationPage {
-        var request = ConversationPage{ .store = store };
+    fn parseConversationPage(self: *Parser, out: *ConversationPage) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("end");
-        request.end = try self.readCanonicalU64();
+        out.end = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("before_position");
-        request.before_position = try self.readCanonicalU64();
+        out.before_position = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("before_ordinal");
-        request.before_ordinal = try self.readCanonicalU64();
-        if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
-            request.before_ordinal > std.math.maxInt(i64) or
-            (request.end == 0 and request.before_position != 0) or
-            (request.before_position == 0 and request.before_ordinal != 0) or
-            (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
-        return request;
+        out.before_ordinal = try self.readCanonicalU64();
+        if (out.end > std.math.maxInt(i64) or out.before_position > std.math.maxInt(i64) or
+            out.before_ordinal > std.math.maxInt(i64) or
+            (out.end == 0 and out.before_position != 0) or
+            (out.before_position == 0 and out.before_ordinal != 0) or
+            (out.end != 0 and out.before_position > out.end)) return error.InvalidCursor;
     }
 
-    fn parseConversationContent(self: *Parser, store: Bounded(max_store_bytes)) !ConversationContent {
-        var request = ConversationContent{ .store = store };
+    fn parseConversationContent(self: *Parser, out: *ConversationContent) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("position");
-        request.position = try self.readCanonicalU64();
+        out.position = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("ordinal");
-        request.ordinal = try self.readCanonicalU64();
+        out.ordinal = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("start");
-        request.start = try self.readCanonicalU64();
+        out.start = try self.readCanonicalU64();
         if (try self.consumeIf(',')) {
             try self.expectKey("stream");
             for ("true") |byte| try self.expectByte(byte);
-            request.stream = true;
+            out.stream = true;
         }
-        if (request.position == 0 or request.position > std.math.maxInt(i64) or
-            request.ordinal > std.math.maxInt(i64) or (request.stream and request.start != 0)) return error.InvalidCursor;
-        return request;
+        if (out.position == 0 or out.position > std.math.maxInt(i64) or
+            out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
     }
 
-    fn parseProposalPage(self: *Parser, store: Bounded(max_store_bytes)) !ProposalPage {
-        var request = ProposalPage{ .store = store };
+    fn parseProposalPage(self: *Parser, out: *ProposalPage) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("end");
         if (try self.consumeIf('n')) {
             for ("ull") |byte| try self.expectByte(byte);
-        } else request.end = try self.readCanonicalU64();
+        } else out.end = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("after");
-        request.after = try self.readCanonicalU64();
-        try request.validate();
-        return request;
+        out.after = try self.readCanonicalU64();
+        try out.validate();
     }
 
-    fn parseActivityPage(self: *Parser, store: Bounded(max_store_bytes)) !ActivityPage {
-        var request: ActivityPage = .{ .store = store };
+    fn parseActivityPage(self: *Parser, out: *ActivityPage) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("end");
         if (try self.consumeIf('n')) {
             for ("ull") |byte| try self.expectByte(byte);
-        } else request.end = try self.readCanonicalU64();
+        } else out.end = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("position");
-        request.position = try self.readCanonicalU64();
+        out.position = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("ordinal");
         if (try self.consumeIf('n')) {
             for ("ull") |byte| try self.expectByte(byte);
-        } else request.ordinal = try self.readCanonicalU64();
+        } else out.ordinal = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("direction");
         var direction: Bounded(8) = .{};
         try self.readSmallString(&direction);
-        request.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
-        try request.validate();
-        return request;
+        out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+        try out.validate();
     }
 
-    fn parseActivityContent(self: *Parser, store: Bounded(max_store_bytes)) !ReadActivityContent {
-        var request: ReadActivityContent = .{ .store = store };
+    fn parseActivityContent(self: *Parser, out: *ReadActivityContent) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("position");
-        request.position = try self.readCanonicalU64();
+        out.position = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("ordinal");
-        request.ordinal = try self.readCanonicalU64();
-        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-        return request;
+        out.ordinal = try self.readCanonicalU64();
+        if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
     }
 
-    fn parseProposalField(self: *Parser, store: Bounded(max_store_bytes)) !ReadProposalField {
-        var request = ReadProposalField{ .store = store };
+    fn parseProposalField(self: *Parser, out: *ReadProposalField) !void {
         try self.expectByte(',');
         try self.expectKey("session");
-        try self.readSmallString(&request.session);
+        try self.readSmallString(&out.session);
         try self.expectByte(',');
         try self.expectKey("position");
-        request.position = try self.readCanonicalU64();
-        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.InvalidCursor;
+        out.position = try self.readCanonicalU64();
+        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
         try self.expectByte(',');
         try self.expectKey("field");
         var field: Bounded(16) = .{};
         try self.readSmallString(&field);
-        request.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
-        return request;
+        out.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
     }
 
-    fn parseReadResult(self: *Parser, store: Bounded(max_store_bytes)) !ReadResult {
-        var request = ReadResult{ .store = store };
+    fn parseReadResult(self: *Parser, out: *ReadResult) !void {
         try self.expectByte(',');
         try self.expectKey("key");
-        try self.readSmallString(&request.key);
-        return request;
+        try self.readSmallString(&out.key);
     }
 
     fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
@@ -1783,24 +1780,16 @@ const Parser = struct {
         if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
     }
 
+    /// Reads the empty placeholder the Ingress left for a captured string.
     fn readContentString(self: *Parser, field: *ContentField) !void {
         self.content_ordinal += 1;
-        if (self.captured) |captured| {
-            if (self.content_ordinal > captured.len) return error.NeedContent;
-            try self.expectByte('"');
-            if (try self.source.readByte() != '"') return error.InvalidJsonShape;
-            const original = captured[self.content_ordinal - 1];
-            // Speculative request disposal has no resource authority.
-            field.length = original.length;
-            field.digest = original.digest;
-            return;
-        }
-        var capture = try ContentCapture.init(self.options, self.content_ordinal);
-        defer capture.deinit();
-        try self.readJsonString(&capture.sink);
-        const state = field.state;
-        field.* = try capture.seal();
-        field.state = state;
+        if (self.content_ordinal > self.captured.len) return error.NeedContent;
+        try self.expectByte('"');
+        if (try self.source.readByte() != '"') return error.InvalidJsonShape;
+        const original = self.captured[self.content_ordinal - 1];
+        // Speculative request disposal has no resource authority.
+        field.length = original.length;
+        field.digest = original.digest;
     }
 
     fn readJsonString(self: *Parser, sink: anytype) !void {
@@ -1940,24 +1929,24 @@ const ContentCapture = struct {
     sealed: ?std.Io.File = null,
     transferred: bool = false,
 
-    fn init(options: ParseOptions, ordinal: u8) !ContentCapture {
+    /// Opens the scratch file and builds the capture in place. On error
+    /// nothing is open and the capture is not live.
+    fn init(self: *ContentCapture, options: ParseOptions, ordinal: u8) !void {
         if (options.content_faults.acquire) return error.InjectedContentAcquireFailure;
-        var capture: ContentCapture = undefined;
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.request.format(&name_buffer, options.request_number, ordinal);
-        const path = try std.fmt.bufPrint(&capture.path, "{s}/{s}", .{ options.scratch_path, name });
+        const path = try std.fmt.bufPrint(&self.path, "{s}/{s}", .{ options.scratch_path, name });
         const writer = try std.Io.Dir.createFileAbsolute(options.io, path, .{
             .read = true,
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        capture.options = options;
-        capture.path_len = path.len;
-        capture.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
-        capture.writer_open = true;
-        capture.sealed = null;
-        capture.transferred = false;
-        return capture;
+        self.options = options;
+        self.path_len = path.len;
+        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
+        self.writer_open = true;
+        self.sealed = null;
+        self.transferred = false;
     }
 
     fn seal(self: *ContentCapture) !ContentField {
@@ -2581,6 +2570,28 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
 pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
 
+fn parseForTest(parser: *Parser) !Request {
+    var request: Request = undefined;
+    try parser.parse(&request);
+    return request;
+}
+
+/// Captures one JSON string the way Ingress.feed does, into `field`.
+fn captureForTest(field: *ContentField, options: ParseOptions, ordinal: u8, json: []const u8) !void {
+    std.debug.assert(json[0] == '"');
+    var capture: ContentCapture = undefined;
+    try capture.init(options, ordinal);
+    defer capture.deinit();
+    var decoder: StringDecoder = .{};
+    for (json[1..]) |byte| {
+        if (try decoder.feed(byte, &capture.sink)) {
+            field.* = try capture.seal();
+            return;
+        }
+    }
+    return error.UnexpectedEndOfBody;
+}
+
 test "semantic digest distinguishes omission, null, and value" {
     var omitted = ConfigureCommand{};
     try omitted.session.set("s");
@@ -2696,24 +2707,19 @@ test "configuration content sealing peaks at four descriptors with its socket" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     var retained: ?named_scratch.Owner = null;
-    const json = "\"instructions\"\"schema\"";
-    var source = SocketBody.init(-1, 0);
-    @memcpy(source.buffer[0..json.len], json);
-    source.end = json.len;
-    var parser = Parser{ .source = &source, .options = .{
+    const options: ParseOptions = .{
         .io = io,
-        .fd = -1,
-        .content_length = json.len,
+        .content_length = 22,
         .scratch_path = root[0..root_len],
         .request_number = 1,
         .retained_scratch = &retained,
-    } };
+    };
     var instructions = ContentField{};
     errdefer removeContent(&instructions, io) catch unreachable;
     var output_schema = ContentField{};
     errdefer removeContent(&output_schema, io) catch unreachable;
-    try parser.readContentString(&instructions);
-    try parser.readContentString(&output_schema);
+    try captureForTest(&instructions, options, 1, "\"instructions\"");
+    try captureForTest(&output_schema, options, 2, "\"schema\"");
     try std.testing.expectEqual(@as(usize, 4), 1 + Probe.maximum_live_files);
     try std.testing.expectEqual(@as(usize, 0), Probe.directory_opens);
     try removeContent(&output_schema, io);
@@ -2759,20 +2765,15 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
     for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
-        var parser = Parser{ .source = &source, .options = .{
+        var field = ContentField{};
+        try captureForTest(&field, .{
             .io = io,
-            .fd = -1,
             .content_length = 999999,
             .scratch_path = root[0..n],
             .request_number = ordinal,
             .retained_scratch = &retained,
             .scratch_budget = .{ .used = &used, .limit = 3 },
-        } };
-        var field = ContentField{};
-        try parser.readContentString(&field);
+        }, 1, json);
         try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
         try std.testing.expectEqual(@as(u64, 3), field.length);
         try removeContent(&field, io);
@@ -2804,18 +2805,14 @@ test "failed ingress unlink retains an actionable owner and only the affected ch
     const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var retained: ?named_scratch.Owner = null;
     const json = "\"abc\"";
-    var source = SocketBody.init(-1, 0);
-    @memcpy(source.buffer[0..json.len], json);
-    source.end = json.len;
-    var parser = Parser{ .source = &source, .options = .{
+    const options: ParseOptions = .{
         .io = failing_io,
-        .fd = -1,
         .content_length = json.len,
         .scratch_path = root[0..n],
         .request_number = 1,
         .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 8 },
-    } };
+    };
     const good_file = try tmp.dir.createFile(io, "good", .{});
     try good_file.writeStreamingAll(io, "ok");
     try tmp.dir.deleteFile(io, "good");
@@ -2823,7 +2820,7 @@ test "failed ingress unlink retains an actionable owner and only the affected ch
     try std.testing.expect(budget.charge(2));
     var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
     var field = ContentField{};
-    try std.testing.expectError(error.AccessDenied, parser.readContentString(&field));
+    try std.testing.expectError(error.AccessDenied, captureForTest(&field, options, 1, json));
     try std.testing.expect(!field.hasFile());
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
     try removeContent(&good_field, io);
@@ -2865,21 +2862,18 @@ test "ingress unknown write failure keeps submitted charge until close" {
 
 test "observation needs no scratch at a full budget" {
     const json = "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
-    var source = SocketBody.init(-1, 0);
-    @memcpy(source.buffer[0..json.len], json);
-    source.end = json.len;
+    var source: MetadataSource = .{ .input = json };
     var used = std.atomic.Value(u64).init(3);
     var retained: ?named_scratch.Owner = null;
     var parser = Parser{ .source = &source, .options = .{
         .io = std.testing.io,
-        .fd = -1,
         .content_length = json.len,
         .scratch_path = "unused",
         .request_number = 0,
         .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 3 },
     } };
-    const request = try parser.parse();
+    const request = try parseForTest(&parser);
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
 }
@@ -2896,15 +2890,13 @@ test "Conversation content stream wire requires start zero and literal true" {
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
+        var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
         } else {
-            const request = (try parser.parse()).conversation_content;
+            const request = (try parseForTest(&parser)).conversation_content;
             try std.testing.expectEqual(case.stream, request.stream);
         }
     }
@@ -2926,15 +2918,13 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
+        var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
         } else {
-            const request = try parser.parse();
+            const request = try parseForTest(&parser);
             try std.testing.expect(request == .conversation_page);
         }
     }
@@ -2982,16 +2972,14 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
+        var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
             continue;
         }
-        const command = (try parser.parse()).configure;
+        const command = (try parseForTest(&parser)).configure;
         if (case.trigger) |value| try std.testing.expectEqualStrings(value, command.configuration.compaction_trigger.value.slice());
         if (case.reservation) |value| try std.testing.expectEqualStrings(value, command.configuration.output_reservation.value.slice());
         if (case.label) |value| try std.testing.expectEqualStrings(value, command.configuration.label.value.slice());
@@ -3038,23 +3026,20 @@ test "configuration provider envelope preserves exact spelling and omission" {
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
             .{ case.field, case.suffix },
         );
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
+        var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
-            .fd = -1,
             .content_length = json.len,
             .scratch_path = "unused",
             .request_number = 0,
             .retained_scratch = &retained,
         } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
             continue;
         }
-        const request = try parser.parse();
+        const request = try parseForTest(&parser);
         try std.testing.expectEqual(index == 3, request.configure.require_model);
         const field = request.configure.configuration.provider;
         if (case.expected) |value| {
@@ -3085,22 +3070,19 @@ test "configuration tools accept only an empty catalog or Bash" {
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
             "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..json.len], json);
-        source.end = json.len;
+        var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
-            .fd = -1,
             .content_length = json.len,
             .scratch_path = "unused",
             .request_number = 0,
             .retained_scratch = &retained,
         } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
         } else {
-            const request = try parser.parse();
+            const request = try parseForTest(&parser);
             try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
             if (case.count == 1) try std.testing.expectEqual(.bash, request.configure.configuration.tools.values[0]);
         }
@@ -3133,24 +3115,21 @@ test "Session inspection selects a closed report profile or exact failed respons
         },
     };
     for (cases) |case| {
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..case.json.len], case.json);
-        source.end = case.json.len;
+        var source: MetadataSource = .{ .input = case.json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
-            .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
             .retained_scratch = &retained,
         } };
         if (case.expected) |expected| {
-            const request = try parser.parse();
+            const request = try parseForTest(&parser);
             try std.testing.expectEqual(expected, request.inspect_session.profile);
             try std.testing.expectEqualDeep(case.failed_response, request.inspect_session.failed_response);
         } else {
-            try std.testing.expectError(error.UnknownReportProfile, parser.parse());
+            try std.testing.expectError(error.UnknownReportProfile, parseForTest(&parser));
         }
     }
 }
@@ -3179,23 +3158,20 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         .{ .json = head ++ ",\"since\":\"abababababababababababababababab.042\"}", .failure = error.InvalidCursor },
     };
     for (cases) |case| {
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..case.json.len], case.json);
-        source.end = case.json.len;
+        var source: MetadataSource = .{ .input = case.json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
-            .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
             .retained_scratch = &retained,
         } };
         if (case.failure) |failure| {
-            try std.testing.expectError(failure, parser.parse());
+            try std.testing.expectError(failure, parseForTest(&parser));
             continue;
         }
-        const request = (try parser.parse()).list_sessions;
+        const request = (try parseForTest(&parser)).list_sessions;
         try std.testing.expectEqual(case.after, request.after);
         try std.testing.expectEqual(case.ceiling, request.ceiling);
         if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
@@ -3215,12 +3191,10 @@ test "peer wire rejects old sender strings, malformed addresses and missing hand
         .{ .json = prefix ++ "null,\"text\":{}", .failure = error.UnexpectedField },
     };
     for (cases) |case| {
-        var source = SocketBody.init(-1, 0);
-        @memcpy(source.buffer[0..case.json.len], case.json);
-        source.end = case.json.len;
+        var source: MetadataSource = .{ .input = case.json };
         var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = case.json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
-        try std.testing.expectError(case.failure, parser.parse());
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = case.json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        try std.testing.expectError(case.failure, parseForTest(&parser));
         try std.testing.expect(retained == null);
     }
 }
@@ -3237,9 +3211,9 @@ test "incremental ingress streams fragmented content and transfers charged custo
     const suffix = "\"}}";
     var used = std.atomic.Value(u64).init(0);
     var retained: ?named_scratch.Owner = null;
-    var ingress = Ingress.init(std.testing.allocator, .{
+    var ingress: Ingress = undefined;
+    ingress.init(std.testing.allocator, .{
         .io = io,
-        .fd = -1,
         .content_length = prefix.len + encoded.len + suffix.len,
         .scratch_path = root[0..root_len],
         .request_number = 42,
@@ -3252,7 +3226,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     try std.testing.expectEqual(@as(u64, 8192), used.load(.acquire));
     try std.testing.expectError(error.UnexpectedEndOfBody, ingress.finish());
     for (suffix) |byte| try ingress.feed(&.{byte});
-    var request = try ingress.finish();
+    const request = try ingress.finish();
     defer request.removeTemporaryContent(io) catch unreachable;
     // Disposing the exchange's parser cannot refund or close admitted ingress.
     ingress.deinit();
@@ -3287,7 +3261,6 @@ test "initial Message ingress retains text custody and rejects extra content bef
     var retained: ?named_scratch.Owner = null;
     const options: ParseOptions = .{
         .io = io,
-        .fd = -1,
         .content_length = json.len,
         .scratch_path = root[0..root_len],
         .request_number = 43,
@@ -3295,10 +3268,11 @@ test "initial Message ingress retains text custody and rejects extra content bef
         .scratch_budget = .{ .used = &used, .limit = expected.len },
         .expected_kind = .message,
     };
-    var ingress = Ingress.init(std.testing.allocator, options);
+    var ingress: Ingress = undefined;
+    ingress.init(std.testing.allocator, options);
     defer ingress.deinit();
     for (json) |byte| try ingress.feed(&.{byte});
-    var request = try ingress.finish();
+    const request = try ingress.finish();
     defer request.removeTemporaryContent(io) catch unreachable;
     ingress.deinit();
     try std.testing.expectEqual(.omitted, request.message.configuration.?.instructions.state);
@@ -3316,11 +3290,12 @@ test "initial Message ingress retains text custody and rejects extra content bef
     inline for (.{ prefix ++ value ++ between ++ omitted ++ suffix, prefix ++ omitted ++ between ++ value ++ suffix }) |invalid| {
         var rejection_options = options;
         rejection_options.content_length = invalid.len;
-        var rejected = Ingress.init(std.testing.allocator, rejection_options);
+        var rejected: Ingress = undefined;
+        rejected.init(std.testing.allocator, rejection_options);
         defer rejected.deinit();
         try std.testing.expectError(error.InvalidFieldState, rejected.feed(invalid));
         try std.testing.expectEqual(@as(usize, 0), rejected.content_count);
-        try std.testing.expect(rejected.capture == null);
+        try std.testing.expect(rejected.content_state != .capturing);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
@@ -3349,9 +3324,9 @@ test "only a creating Message carries require_model, and it binds the digest" {
     for (cases, 0..) |case, index| {
         var used = std.atomic.Value(u64).init(0);
         var retained: ?named_scratch.Owner = null;
-        var ingress = Ingress.init(std.testing.allocator, .{
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{
             .io = io,
-            .fd = -1,
             .content_length = case.bytes.len,
             .scratch_path = root[0..root_len],
             .request_number = 44,
@@ -3366,7 +3341,7 @@ test "only a creating Message carries require_model, and it binds the digest" {
             continue;
         }
         try ingress.feed(case.bytes);
-        var request = try ingress.finish();
+        const request = try ingress.finish();
         defer request.removeTemporaryContent(io) catch unreachable;
         try std.testing.expectEqual(case.require_model, request.message.require_model);
         digests[index] = request.message.semanticDigest();
@@ -3402,9 +3377,9 @@ test "incremental ingress preserves grammar and releases both captures after lat
         // Every split of this small command must have the same grammar and
         // capture lifetime, including suspension between surrogate/quote bytes.
         for (0..case.bytes.len + 1) |split| {
-            var ingress = Ingress.init(std.testing.allocator, .{
+            var ingress: Ingress = undefined;
+            ingress.init(std.testing.allocator, .{
                 .io = io,
-                .fd = -1,
                 .content_length = case.bytes.len,
                 .scratch_path = root[0..root_len],
                 .request_number = index,
@@ -3414,7 +3389,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 // A mismatched kind must fail before file acquisition.
                 .content_faults = .{ .acquire = case.kind != .configure },
             });
-            const result: anyerror!Request = blk: {
+            const result: anyerror!*Request = blk: {
                 ingress.feed(case.bytes[0..split]) catch |err| break :blk err;
                 ingress.feed(case.bytes[split..]) catch |err| break :blk err;
                 break :blk ingress.finish();
@@ -3422,7 +3397,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
             if (case.failure) |failure| {
                 try std.testing.expectError(failure, result);
             } else {
-                var request = try result;
+                const request = try result;
                 try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
                 try std.testing.expectEqual(index == 1, request.configure.require_model);
                 const fields = [_]ContentField{ request.configure.configuration.instructions, request.configure.configuration.output_schema };

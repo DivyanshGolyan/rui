@@ -2354,7 +2354,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
 
         fn admit(bytes: []const u8) !void {
             try ingress.feed(bytes);
-            var request = try ingress.finish();
+            const request = try ingress.finish();
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
             const reply = storage.submitMessageWithModel(&request.message, true, .{});
             try std.testing.expect(reply == .accepted);
@@ -2389,9 +2389,9 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     );
     var used: std.atomic.Value(u64) = .init(0);
     var retained_ingress: ?named_scratch.Owner = null;
-    var ingress = protocol.Ingress.init(std.testing.allocator, .{
+    var ingress: protocol.Ingress = undefined;
+    ingress.init(std.testing.allocator, .{
         .io = std.testing.io,
-        .fd = -1,
         .content_length = body.len,
         .scratch_path = setup.root,
         // Match the independent Operation/Attempt counter pair exactly.

@@ -109,6 +109,7 @@ const Intake = struct {
         header: Header = undefined,
         number: ?u64 = null,
         ingress: ?*protocol.Ingress = null,
+        /// The finished Request; it lives in `ingress`.
         request: ?*protocol.Request = null,
         reply: ?*Reply = null,
         retained_scratch: ?named_scratch.Owner = null,
@@ -130,8 +131,16 @@ const Intake = struct {
         fn releaseRequest(self: *Exchange) void {
             if (self.request) |request| {
                 request.removeTemporaryContent(self.host.io) catch unreachable;
-                self.host.allocator.destroy(request);
                 self.request = null;
+                self.releaseIngress();
+            }
+        }
+
+        fn releaseIngress(self: *Exchange) void {
+            if (self.ingress) |ingress| {
+                ingress.deinit();
+                self.host.allocator.destroy(ingress);
+                self.ingress = null;
             }
         }
 
@@ -172,11 +181,7 @@ const Intake = struct {
                 self.reply = null;
             }
             self.releaseRequest();
-            if (self.ingress) |ingress| {
-                ingress.deinit();
-                host.allocator.destroy(ingress);
-                self.ingress = null;
-            }
+            self.releaseIngress();
             self.input.deinit(host.allocator);
             self.input = .empty;
             if (self.retained_scratch) |*retained| {
@@ -318,9 +323,8 @@ const Intake = struct {
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
                     const ingress = try self.host.allocator.create(protocol.Ingress);
-                    ingress.* = protocol.Ingress.init(self.host.allocator, .{
+                    ingress.init(self.host.allocator, .{
                         .io = self.host.io,
-                        .fd = self.fd,
                         .content_length = self.header.content_length,
                         .scratch_path = self.host.lease.paths.scratch.slice(),
                         .request_number = self.number.?,
@@ -352,13 +356,7 @@ const Intake = struct {
             const ingress = self.ingress.?;
             try ingress.feed(bytes);
             if (ingress.received == ingress.options.content_length) {
-                const request = try self.host.allocator.create(protocol.Request);
-                errdefer self.host.allocator.destroy(request);
-                request.* = try ingress.finish();
-                self.request = request;
-                ingress.deinit();
-                self.host.allocator.destroy(ingress);
-                self.ingress = null;
+                self.request = try ingress.finish();
                 self.input.deinit(self.host.allocator);
                 self.input = .empty;
                 return .ready;
@@ -2140,6 +2138,21 @@ fn httpReason(status: u16) []const u8 {
     };
 }
 
+/// A finished Request in its Ingress, as `receive` leaves it.
+fn adoptRequestForTest(exchange: *Intake.Exchange, request: protocol.Request) !void {
+    const ingress = try exchange.host.allocator.create(protocol.Ingress);
+    ingress.init(exchange.host.allocator, .{
+        .io = exchange.host.io,
+        .content_length = 0,
+        .scratch_path = "",
+        .request_number = 0,
+        .retained_scratch = &exchange.retained_scratch,
+    });
+    ingress.request = request;
+    exchange.ingress = ingress;
+    exchange.request = &ingress.request;
+}
+
 fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
     var reply = Reply{ .io = io, .allocator = std.testing.allocator, .absolute_deadline = deadline };
     defer reply.deinit();
@@ -3215,9 +3228,8 @@ test "retired ordinary capture still consumes its intake classification and reso
         switch (custody) {
             .ingress => {
                 const ingress = try host.allocator.create(protocol.Ingress);
-                ingress.* = protocol.Ingress.init(host.allocator, .{
+                ingress.init(host.allocator, .{
                     .io = host.io,
-                    .fd = retained.fd,
                     .content_length = 4096,
                     .scratch_path = root,
                     .request_number = 7,
@@ -3298,8 +3310,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     try intake.exchanges.append(std.testing.allocator, &exchange);
     exchange.route = .configure;
     exchange.state = .ready;
-    exchange.request = try std.testing.allocator.create(protocol.Request);
-    exchange.request.?.* = .{ .configure = .{} };
+    try adoptRequestForTest(&exchange, .{ .configure = .{} });
     defer exchange.releaseRequest();
     _ = host.advance(.stopping);
     intake.serviceWorkers();
@@ -3356,8 +3367,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
             .header = .{ .route = .host_stop, .content_length = 0, .instance = instance_id },
         };
         defer std.debug.assert(retry.cleanup());
-        retry.request = try std.testing.allocator.create(protocol.Request);
-        retry.request.?.* = .{ .host_stop = .{ .store = lease.paths.store } };
+        try adoptRequestForTest(&retry, .{ .host_stop = .{ .store = lease.paths.store } });
         retry.retireUnhanded();
         try std.testing.expectEqual(.ready, retry.state);
         try retry.prepare();
@@ -3770,9 +3780,8 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         const exchange = try std.testing.allocator.create(Intake.Exchange);
         exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
         const ingress = try std.testing.allocator.create(protocol.Ingress);
-        ingress.* = protocol.Ingress.init(std.testing.allocator, .{
+        ingress.init(std.testing.allocator, .{
             .io = io,
-            .fd = sockets[0],
             .content_length = prefix.len + payload.len + suffix.len,
             .scratch_path = root,
             .request_number = 7,
