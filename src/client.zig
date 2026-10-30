@@ -177,7 +177,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.list_sessions_request, .{ paths.store.slice(), workspace, cursor.after, cursor.ceiling });
+        try appendListSessions(&body, paths.store.slice(), workspace, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -372,6 +372,8 @@ pub const ConfigureInput = struct {
     compaction_trigger: OptionalPolicy = .{},
     output_reservation: OptionalPolicy = .{},
     reasoning_effort: OptionalPolicy = .{},
+    /// A null value clears the Label.
+    label: OptionalPolicy = .{},
 };
 
 pub const MessageInput = struct {
@@ -609,6 +611,18 @@ pub fn listSessions(
     reply_buffer: *ReplyBuffer,
 ) !protocol_reply.ReportReply {
     return (Requests{ .io = io }).listSessions(store_path, workspace, cursor, destination, reply_buffer);
+}
+
+/// The request a list cursor names: a full traversal's keyset, a token's
+/// first page, or a changed continuation.
+fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor) !void {
+    const head = .{ store, workspace, cursor.after, cursor.ceiling };
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    const since = cursor.since orelse return body.appendShape(protocol.list_sessions_request, head);
+    if (cursor.changed) |*changed|
+        try body.appendShape(protocol.list_sessions_changed_request, head ++ .{ since.format(&token), changed.through, @as([]const u8, &changed.after_reference) })
+    else
+        try body.appendShape(protocol.list_sessions_since_request, head ++ .{since.format(&token)});
 }
 
 pub fn readActionArguments(
@@ -877,7 +891,10 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
-    if ((kind != .configure and (kind != .message and fields.configuration != null or fields.require_model != null)) or
+    // Configuration, and its capability condition, belong to a configure or
+    // a creating Message.
+    if ((kind != .configure and kind != .message and fields.configuration != null) or
+        (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
@@ -1007,7 +1024,10 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
-    try capture.writeRequest(protocol.message_request.tail, .{});
+    if (input.configuration != null and input.configuration.?.require_model)
+        try capture.writeRequest(protocol.message_request.require_model_tail, .{})
+    else
+        try capture.writeRequest(protocol.message_request.tail, .{});
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
@@ -1243,6 +1263,8 @@ const Capture = struct {
         try self.writeOptionalPolicy(input.output_reservation);
         try self.write(",\"reasoning_effort\":");
         try self.writeOptionalPolicy(input.reasoning_effort);
+        try self.write(",\"label\":");
+        try self.writeOptionalPolicy(input.label);
         try self.write("}");
     }
 
@@ -1934,9 +1956,9 @@ test "response framing rejects ambiguous or malformed fields before interpreting
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.append("{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"work\":{\"status\":\"idle\",\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -2787,6 +2809,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const key = @as([protocol.max_key_bytes]u8, @splat(1));
     const session = @as([protocol.max_session_bytes]u8, @splat(1));
     const workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
+    const token = @as([protocol.SinceToken.max_bytes]u8, @splat('9'));
+    const reference = @as([protocol.session_id_bytes]u8, @splat(1));
     const id: u64 = std.math.maxInt(u64);
     const optional_id: ?u64 = std.math.maxInt(u64);
     const Direction = @FieldType(protocol.ActivityPage, "direction");
@@ -2799,7 +2823,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
         .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, protocol.max_inspect_session_request_bytes },
-        .{ protocol.list_sessions_request, .{ &store, @as(?[]const u8, &workspace), id, id }, protocol.max_list_sessions_request_bytes },
+        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
@@ -2822,19 +2846,26 @@ test "every request renders its exact worst-case bound from the shape it writes"
     try std.testing.expectEqual(protocol.max_control_request_bytes, protocol.max_model_interruption_request_bytes);
 }
 
-test "Session list client renders exact cursor and maximum escaped workspace without truncation" {
-    var empty: protocol.RequestBuffer = .{};
-    try empty.appendShape(protocol.list_sessions_request, .{ "/store", @as(?[]const u8, null), 0, 0 });
-    try std.testing.expectEqualStrings(
-        "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}",
-        empty.slice(),
-    );
+test "Session list client renders each cursor's request exactly, within the bound" {
+    const token: protocol.SinceToken = .{ .instance = @splat(0xab), .generation = 42 };
+    const cases = .{
+        .{ protocol_reply.SessionListCursor{}, "" },
+        .{ protocol_reply.SessionListCursor{ .after = 8, .ceiling = 23 }, "" },
+        .{ protocol_reply.SessionListCursor{ .since = token }, ",\"since\":\"abababababababababababababababab.42\"" },
+        .{ protocol_reply.SessionListCursor{ .since = token, .changed = .{ .through = 48, .after_reference = "k7m2qx".* } }, ",\"since\":\"abababababababababababababababab.42\",\"through\":\"48\",\"after_reference\":\"k7m2qx\"" },
+    };
+    inline for (cases) |case| {
+        var body: protocol.RequestBuffer = .{};
+        try appendListSessions(&body, "/store", null, case[0]);
+        var expected: [512]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
+    }
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     var maximum: protocol.RequestBuffer = .{};
-    try maximum.appendShape(protocol.list_sessions_request, .{ &escaped_store, @as(?[]const u8, &escaped_workspace), std.math.maxInt(u64), std.math.maxInt(u64) });
-    try std.testing.expectEqual(protocol.max_list_sessions_request_bytes, maximum.len);
-    try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"after\":\"18446744073709551615\",\"ceiling\":\"18446744073709551615\"}"));
+    try appendListSessions(&maximum, &escaped_store, &escaped_workspace, .{ .since = .{ .instance = @splat(0xff), .generation = std.math.maxInt(u64) }, .changed = .{ .through = std.math.maxInt(u64), .after_reference = "zzzzzz".* } });
+    try std.testing.expect(maximum.len <= protocol.max_list_sessions_request_bytes);
+    try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"since\":\"ffffffffffffffffffffffffffffffff.18446744073709551615\",\"through\":\"18446744073709551615\",\"after_reference\":\"zzzzzz\"}"));
 }
 
 test "control captures attain escaped key and canonical Session request bounds" {

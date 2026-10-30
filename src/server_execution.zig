@@ -2808,7 +2808,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3028,7 +3028,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 

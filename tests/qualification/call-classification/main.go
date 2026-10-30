@@ -453,7 +453,8 @@ func completedAndReleased(inspection map[string]any) (bool, error) {
 		return false, errors.New("inspection omitted work")
 	}
 	latest, _ := work["latest_outcome"].(map[string]any)
-	if work["status"] != "completed" || latest["code"] != "completed" {
+	state, _ := work["state"].(map[string]any)
+	if state["kind"] != "finished" || latest["code"] != "completed" {
 		return false, nil
 	}
 	execution, ok := inspection["execution"].(map[string]any)

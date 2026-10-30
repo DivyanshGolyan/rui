@@ -16,6 +16,15 @@ pub const max_model_bytes = model_capability.max_model_bytes;
 // Resolution, rejection and failure codes.
 pub const max_code_bytes = 96;
 pub const max_tool_description_bytes = 100;
+/// A Session Label obeys the saved Bash description rule.
+pub const max_label_bytes = max_tool_description_bytes;
+
+/// Whether `bytes` is a Session Label: one non-blank line of UTF-8 within
+/// `max_label_bytes`.
+pub fn validLabel(bytes: []const u8) bool {
+    comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
+    return ToolPresentation.validDescription(bytes);
+}
 pub const Provider = enum { codex };
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
@@ -97,6 +106,8 @@ pub const Configuration = struct {
     compaction_trigger: OptionalBounded(20) = .{},
     output_reservation: OptionalBounded(20) = .{},
     reasoning_effort: OptionalBounded(16) = .{},
+    /// Display text only: never model input, an address or a selector.
+    label: OptionalBounded(max_label_bytes) = .{},
 };
 
 pub const Kind = enum {
@@ -159,6 +170,7 @@ pub const ConfigureCommand = struct {
         hashOptional(&hash, &self.configuration.compaction_trigger);
         hashOptional(&hash, &self.configuration.output_reservation);
         hashOptional(&hash, &self.configuration.reasoning_effort);
+        hashOptional(&hash, &self.configuration.label);
         hash.update(&.{@intFromBool(self.require_model)});
         return hash.finalResult();
     }
@@ -176,6 +188,8 @@ pub const MessageCommand = struct {
     // one transaction. The requested Session must then be empty. Initial
     // configuration cannot supply instruction or schema content values.
     configuration: ?Configuration = null,
+    // A creating Message only: create nothing unless the Host has a model.
+    require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
         try removeContent(&self.text, io);
@@ -183,7 +197,7 @@ pub const MessageCommand = struct {
 
     pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/message/v3");
+        hashField(&hash, "rui/core/message/v4");
         hashField(&hash, self.session.slice());
         hash.update(&.{@intFromBool(self.sender != null)});
         if (self.sender) |sender| {
@@ -194,7 +208,8 @@ pub const MessageCommand = struct {
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
         hashContent(&hash, &self.text);
         if (self.configuration) |configuration| {
-            const creation = ConfigureCommand{ .configuration = configuration };
+            // The creation's own digest covers its capability condition.
+            const creation = ConfigureCommand{ .configuration = configuration, .require_model = self.require_model };
             hashField(&hash, "initial-configuration");
             hash.update(&creation.semanticDigest());
         }
@@ -250,6 +265,7 @@ pub const ConfigurationRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -269,6 +285,7 @@ pub const MessageRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -313,7 +330,7 @@ pub const PermissionDecisionRejection = enum {
     target_mismatch,
     action_not_pending,
 };
-pub const MessageProgressStatus = enum { runnable, in_flight, waiting_for_permission };
+pub const MessageProgressStatus = WorkState.Progress;
 pub const ConversationItemKind = enum { user, assistant, tool_result };
 
 pub const PermissionDecisionCommand = struct {
@@ -388,6 +405,11 @@ pub const HostInfo = struct {
     active_capacity: []const u8,
     intake_capacity: []const u8 = "100",
     descriptor_limit: []const u8 = "unlimited",
+    /// Host Unix seconds, fixed before the execution thread starts.
+    started_at: []const u8,
+    /// Slots in use: held custody records, including detached cleanup. The
+    /// value Current reports as `execution.custody_occupied`.
+    custody_occupied: []const u8,
     capabilities: struct {
         bash: bool,
         model: bool,
@@ -401,7 +423,29 @@ pub const ListSessions = struct {
     // Zero/zero begins a traversal. A continuation carries both values.
     after: u64 = 0,
     ceiling: u64 = 0,
+    /// A token from an earlier reply: answer only what changed since it.
+    since: ?SinceToken = null,
+    /// A changed continuation: the first page's generation, and the last
+    /// Session the previous page gave.
+    changed: ?ChangedCursor = null,
+
+    pub const ChangedCursor = struct { through: u64, after_reference: change_ring.Id };
+
+    pub fn validate(self: *const ListSessions) error{InvalidCursor}!void {
+        if (self.after > std.math.maxInt(i64) or self.ceiling > std.math.maxInt(i64) or
+            (self.after == 0 and self.ceiling != 0) or
+            (self.after != 0 and self.after > self.ceiling)) return error.InvalidCursor;
+        // A full continuation needs no token; a changed one needs its own.
+        if (self.since != null and self.after != 0) return error.InvalidCursor;
+        if (self.changed) |changed| {
+            const since = self.since orelse return error.InvalidCursor;
+            if (changed.through < since.generation or !validSessionId(&changed.after_reference)) return error.InvalidCursor;
+        }
+    }
 };
+
+/// What a list reply answers relative to its request's `since`.
+pub const ListDelta = enum { not_modified, changed, full };
 
 // Positions are immutable within a Session. The zero end/cursor requests the
 // first (newest) page; subsequent requests carry the returned fixed end.
@@ -514,6 +558,8 @@ pub const Peer = struct {
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
+    /// The Host Unix second the row's owning fact committed.
+    at: u64,
     value: Value,
     pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
     pub const Content = struct {
@@ -535,9 +581,9 @@ pub const ActivityItem = struct {
     pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
     pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(max_code_bytes) };
 
-    /// Holes: position, ordinal; then the value's shape, then `tail`.
-    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
+    /// Holes: position, ordinal, at; then the value's shape, then `tail`.
+    pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"at\":\"", .decimal, "\",\"value\":{\"" ++ @tagName(kind) ++ "\":" };
     }
     pub const tail = .{"}}"};
     /// Each value kind's JSON, named by its tag.
@@ -562,6 +608,7 @@ pub const ActivityItem = struct {
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = Peer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     };
     pub const max_json_bytes = blk: {
+        @setEvalBranchQuota(10_000);
         var bytes = 0;
         for (std.meta.tags(std.meta.Tag(Value))) |kind| bytes = @max(bytes, shapeBytes(head(kind)) + shapeBytes(@field(value_shapes, @tagName(kind))));
         break :blk bytes + shapeBytes(tail);
@@ -569,7 +616,7 @@ pub const ActivityItem = struct {
 
     pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
         switch (self.value) {
-            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal }),
+            inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
             inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
@@ -617,24 +664,184 @@ pub const CallActivity = struct {
     }
 };
 
-/// The Session's work as of its page's own Store read: what the live footer,
-/// consent and first Action show with that page.
-pub const PageWork = struct {
-    pub const Status = enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed };
-    status: Status = .idle,
+pub const session_work = @import("session_work.zig");
+pub const WorkState = session_work.WorkState;
+pub const change_ring = @import("change_ring.zig");
+/// A list reply's opaque change token.
+pub const SinceToken = change_ring.Token;
+
+comptime {
+    std.debug.assert(session_work.max_code_bytes == max_code_bytes);
+    std.debug.assert(session_work.max_description_bytes == max_tool_description_bytes);
+}
+
+/// The wire form of a `WorkState`: `kind` and `since`, then the kind's own
+/// facts. Every reader writes it here, so they cannot drift apart.
+pub const WorkStateJson = struct {
+    state: WorkState,
+
+    /// Holes: kind, since. The kinds that own no other fact.
+    pub const plain_shape = .{ "{\"kind\":\"", Hole{ .tag = session_work.Kind }, "\",\"since\":\"", Hole.decimal, "\"}" };
+    /// Holes: since, then the listed facts.
+    pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
+    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
+    pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
+    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, bash_shape, failed_shape, stopped_shape });
+
+    pub fn writeJson(self: *const WorkStateJson, out: *std.Io.Writer) !void {
+        switch (self.state) {
+            .retrying => |value| try writeShape(out, retrying_shape, .{ value.since, value.due_at_ms, value.cause.slice(), value.attempt }),
+            .bash => |value| try writeShape(out, bash_shape, .{ value.since, if (value.description) |text| text.slice() else null, value.running, value.approvals }),
+            .failed => |value| try writeShape(out, failed_shape, .{ value.since, value.code.slice(), value.resets_at }),
+            .stopped => |value| try writeShape(out, stopped_shape, .{ value.since, value.cause }),
+            inline .idle, .pending, .working, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
+        }
+    }
+};
+
+/// A Session's work, as list rows, activity pages and Current carry it: the
+/// derived state, the latest Turn and Operation, and the earliest Action
+/// awaiting permission.
+pub const SessionWork = struct {
+    state: WorkState = .{ .idle = .{ .since = 0 } },
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
+
+    /// Holes: state, turn, operation, first action. Readers that add facts
+    /// beside the work write these inside their own object.
+    pub const fields = .{ "\"state\":", Hole{ .json = WorkStateJson }, ",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id };
+    pub const json_shape = .{"{"} ++ fields ++ .{"}"};
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn fromCore(work: session_work.Work) SessionWork {
+        return .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action };
+    }
+
+    pub fn args(self: *const SessionWork) struct { WorkStateJson, ?u64, ?u64, ?u64 } {
+        return .{ .{ .state = self.state }, self.turn, self.operation, self.first_action };
+    }
+
+    pub fn writeJson(self: *const SessionWork, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, self.args());
+    }
+};
+
+/// The Session's work as of its page's own Store read: what the live footer,
+/// consent and first Action show with that page, beside the revision and
+/// Workspace a permission prompt shows.
+pub const PageWork = struct {
+    work: SessionWork = .{},
     revision: u64 = 0,
     workspace: Bounded(max_workspace_bytes) = .{},
 
-    /// Holes follow field order.
-    pub const json_shape = .{ "{\"status\":\"", Hole{ .tag = Status }, "\",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id, ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
+    /// Holes: the work's fields, revision, Workspace.
+    pub const json_shape = .{"{"} ++ SessionWork.fields ++ .{ ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.status, self.turn, self.operation, self.first_action, self.revision, self.workspace.slice() });
+        try writeShape(out, json_shape, self.work.args() ++ .{ self.revision, self.workspace.slice() });
     }
+};
+
+/// Who reached this Session from outside its peers: when the latest Message
+/// with no Session sender (a person or a script; Rui cannot tell them apart)
+/// was admitted, or null if none was.
+pub const PeerFacts = struct {
+    from_person_at: ?u64 = null,
+
+    pub const json_shape = .{ "{\"from_person_at\":", Hole.optional_id, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const PeerFacts, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{self.from_person_at});
+    }
+};
+
+/// The Session's first admitted Message, whatever happened to it. It never
+/// changes once it exists.
+pub const FirstMessage = struct {
+    position: u64,
+    admission: u64,
+    admitted_at: u64,
+    /// The Session that sent it, or null for a person or a script.
+    sender: ?Peer,
+    content: ActivityItem.Content,
+
+    /// Holes: position, admission, admitted at, sender, content.
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, self.content });
+    }
+};
+
+pub const PermissionMode = enum { ask, bypass };
+
+/// One `list-sessions` row. Every fact comes from the Store read that
+/// produced its page.
+pub const SessionRow = struct {
+    reference: Bounded(max_session_bytes) = .{},
+    workspace: Bounded(max_workspace_bytes) = .{},
+    provider: Provider = .codex,
+    model: Bounded(max_model_bytes) = .{},
+    bash: bool = false,
+    permission_mode: PermissionMode = .ask,
+    label: ?Bounded(max_label_bytes) = null,
+    created_at: u64 = 0,
+    revision: u64 = 0,
+    /// The last activity position: a forward activity read from an earlier
+    /// `end` shows what changed since.
+    end: u64 = 0,
+    first_message: ?FirstMessage = null,
+    work: SessionWork = .{},
+    peers: PeerFacts = .{},
+
+    pub const json_shape = .{
+        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = "[\"bash\"]".len },           ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
+    };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    /// A row may never exceed this, whatever its fields hold: a new field that
+    /// would grow every page's scratch charge past it fails the build.
+    pub const budget_bytes = 32 * 1024;
+    comptime {
+        std.debug.assert(max_json_bytes <= budget_bytes);
+    }
+
+    pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{
+            self.reference.slice(),                           self.workspace.slice(),
+            self.provider,                                    self.model.slice(),
+            if (self.bash) "[\"bash\"]" else "[]",            self.permission_mode,
+            if (self.label) |*label| label.slice() else null, self.created_at,
+            self.revision,                                    self.end,
+            self.first_message,                               &self.work,
+            &self.peers,
+        });
+    }
+};
+
+/// A `list-sessions` reply: up to eight rows, what they answer relative to
+/// the request's `since`, the next token, then the continuation.
+pub const session_list_reply = struct {
+    pub const head = .{"{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":["};
+    /// Holes: delta, token.
+    const facts = .{ "],\"delta\":\"", Hole{ .tag = ListDelta }, "\",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"next\":" };
+    /// Holes: delta, token, after, ceiling.
+    pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
+    /// Holes: delta, token, through, after reference.
+    pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
+    /// Holes: delta, token.
+    pub const last_tail = facts ++ .{"null}"};
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
 };
 
 pub const ActivityFacts = struct {
@@ -1104,15 +1311,7 @@ const Parser = struct {
         request.configuration = try self.parseConfiguration(true);
         if (try self.consumeIf(',')) {
             try self.expectKey("require_model");
-            try self.skipWhitespace();
-            const first = try self.source.readByte();
-            const rest: []const u8 = switch (first) {
-                't' => "rue",
-                'f' => "alse",
-                else => return error.InvalidJsonShape,
-            };
-            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-            request.require_model = first == 't';
+            request.require_model = try self.readBoolean();
         }
         return request;
     }
@@ -1144,6 +1343,7 @@ const Parser = struct {
         var trigger_seen = false;
         var reservation_seen = false;
         var effort_seen = false;
+        var label_seen = false;
         while (try self.consumeIf(',')) {
             var key: Bounded(32) = .{};
             try self.readSmallString(&key);
@@ -1157,6 +1357,9 @@ const Parser = struct {
             } else if (key.eql("reasoning_effort") and !effort_seen) {
                 effort_seen = true;
                 try self.readOptionalSmallNullable(16, &request.configuration.reasoning_effort, true);
+            } else if (key.eql("label") and !label_seen) {
+                label_seen = true;
+                try self.readOptionalSmallNullable(max_label_bytes, &request.configuration.label, true);
             } else return error.UnexpectedField;
         }
         try self.expectByte('}');
@@ -1208,6 +1411,12 @@ const Parser = struct {
         try self.expectKey("text");
         try self.readContent(&request.text, false, true);
         if (request.text.state != .value) return error.InvalidMessage;
+        if (try self.consumeIf(',')) {
+            // Only a creating Message carries a capability condition.
+            if (request.configuration == null) return error.InvalidMessage;
+            try self.expectKey("require_model");
+            request.require_model = try self.readBoolean();
+        }
         return request;
     }
 
@@ -1349,9 +1558,23 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("ceiling");
         request.ceiling = try self.readCanonicalU64();
-        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
-            (request.after == 0 and request.ceiling != 0) or
-            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        if (try self.consumeIf(',')) {
+            try self.expectKey("since");
+            var token: Bounded(SinceToken.max_bytes) = .{};
+            try self.readSmallString(&token);
+            request.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
+            if (try self.consumeIf(',')) {
+                try self.expectKey("through");
+                const through = try self.readCanonicalU64();
+                try self.expectByte(',');
+                try self.expectKey("after_reference");
+                var reference: Bounded(session_id_bytes) = .{};
+                try self.readSmallString(&reference);
+                if (reference.len != session_id_bytes) return error.InvalidCursor;
+                request.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
+            }
+        }
+        try request.validate();
         return request;
     }
 
@@ -1597,6 +1820,18 @@ const Parser = struct {
     fn expectByte(self: *Parser, expected: u8) !void {
         try self.skipWhitespace();
         if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+    }
+
+    fn readBoolean(self: *Parser) !bool {
+        try self.skipWhitespace();
+        const first = try self.source.readByte();
+        const rest: []const u8 = switch (first) {
+            't' => "rue",
+            'f' => "alse",
+            else => return error.InvalidJsonShape,
+        };
+        for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        return first == 't';
     }
 
     fn consumeIf(self: *Parser, expected: u8) !bool {
@@ -2005,8 +2240,13 @@ pub const inspect_session_request = struct {
     pub const failed_response = .{ "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
     pub const max_bytes = maxShapeBytes(.{ current, full, failed_response });
 };
-/// Holes: Store, workspace, after, ceiling.
-pub const list_sessions_request = .{ "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Workspace, after, ceiling.
+const list_sessions_head = .{ "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
+pub const list_sessions_request = list_sessions_head ++ .{"}"};
+/// Hole: the token, after the head's.
+pub const list_sessions_since_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"}" };
+/// Holes: the token, through, after reference, after the head's.
+pub const list_sessions_changed_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}" };
 /// Holes: Store, Session, Action.
 pub const read_action_arguments_request = .{ "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, Action.
@@ -2042,6 +2282,8 @@ pub const message_request = struct {
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const tail = .{"}}"};
+    /// A creating Message's capability condition follows its text.
+    pub const require_model_tail = .{"},\"require_model\":true}"};
 };
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
@@ -2053,7 +2295,7 @@ pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
-pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request);
+pub const max_list_sessions_request_bytes = maxShapeBytes(.{ list_sessions_request, list_sessions_since_request, list_sessions_changed_request });
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
@@ -2065,10 +2307,10 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,     host_info_request,            host_stop_request,
-    read_result_request,         list_sessions_request,        read_action_arguments_request,
-    read_action_call_id_request, conversation_content_request, conversation_page_request,
-    proposal_page_request,       proposal_field_request,       activity_page_request,
+    observe_command_request,     host_info_request,             host_stop_request,
+    read_result_request,         list_sessions_changed_request, read_action_arguments_request,
+    read_action_call_id_request, conversation_content_request,  conversation_page_request,
+    proposal_page_request,       proposal_field_request,        activity_page_request,
     activity_content_request,
 }));
 
@@ -2236,8 +2478,9 @@ pub const max_control_response_bytes = @max(
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), model and managed authentication capabilities.
-pub const host_info_reply = .{ "{\"version\":\"1\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
+/// (decimal or `unlimited`), start time, slots in use, model and managed
+/// authentication capabilities.
+pub const host_info_reply = .{ "{\"version\":\"1\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
@@ -2675,8 +2918,18 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     }
 }
 
+test "a Label is one non-blank line of at most 100 bytes" {
+    const longest: [max_label_bytes]u8 = @splat('x');
+    const overlong: [max_label_bytes + 1]u8 = @splat('x');
+    try std.testing.expect(validLabel("Review PR 412") and validLabel(&longest) and validLabel("Café"));
+    for ([_][]const u8{ "", " \t", "one\ntwo", "one\u{2028}two", "\xff", &overlong }) |invalid|
+        try std.testing.expect(!validLabel(invalid));
+}
+
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {
-    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, failure: ?anyerror = null }{
+    const longest_label: [max_label_bytes]u8 = @splat('x');
+    const overlong_label: [max_label_bytes + 1]u8 = @splat('x');
+    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, label: ?[]const u8 = null, failure: ?anyerror = null }{
         .{ .suffix = "" },
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}" },
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"100000\"}", .trigger = "100000" },
@@ -2695,6 +2948,11 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"}" },
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"ultra\"}" },
         .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"},\"reasoning_effort\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"Review PR 412\"}", .label = "Review PR 412" },
+        .{ .suffix = ",\"label\":{\"state\":\"null\"}" },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ longest_label ++ "\"}", .label = &longest_label },
+        .{ .suffix = ",\"label\":{\"state\":\"value\",\"value\":\"" ++ overlong_label ++ "\"}", .failure = error.ValueTooLong },
+        .{ .suffix = ",\"label\":{\"state\":\"null\"},\"label\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
     };
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
@@ -2714,11 +2972,14 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
         const command = (try parser.parse()).configure;
         if (case.trigger) |value| try std.testing.expectEqualStrings(value, command.configuration.compaction_trigger.value.slice());
         if (case.reservation) |value| try std.testing.expectEqualStrings(value, command.configuration.output_reservation.value.slice());
+        if (case.label) |value| try std.testing.expectEqualStrings(value, command.configuration.label.value.slice());
         if (std.mem.indexOf(u8, case.suffix, "\"state\":\"null\"") != null) {
             const state = if (std.mem.indexOf(u8, case.suffix, "compaction_trigger") != null)
                 command.configuration.compaction_trigger.state
             else if (std.mem.indexOf(u8, case.suffix, "reasoning_effort") != null)
                 command.configuration.reasoning_effort.state
+            else if (std.mem.indexOf(u8, case.suffix, "label") != null)
+                command.configuration.label.state
             else
                 command.configuration.output_reservation.state;
             try std.testing.expectEqual(FieldState.explicit_null, state);
@@ -2872,12 +3133,28 @@ test "Session inspection selects a closed report profile or exact failed respons
     }
 }
 
-test "Session listing wire distinguishes all, exact workspace, continuation and invalid cursor" {
-    const cases = [_]struct { json: []const u8, workspace: ?[]const u8, after: u64, ceiling: u64, valid: bool }{
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}", .workspace = null, .after = 0, .ceiling = 0, .valid = true },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12, .valid = true },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .workspace = null, .after = 0, .ceiling = 12, .valid = false },
-        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .workspace = null, .after = 13, .ceiling = 12, .valid = false },
+test "Session listing wire distinguishes all, exact workspace, continuation, since and invalid cursor" {
+    const head = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
+    const since = ",\"since\":\"abababababababababababababababab.42\"";
+    const Case = struct { json: []const u8, workspace: ?[]const u8 = null, after: u64 = 0, ceiling: u64 = 0, since: ?u64 = null, through: ?u64 = null, failure: ?anyerror = null };
+    const cases = [_]Case{
+        .{ .json = head ++ "}" },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        // A token's first page, and a changed continuation through the
+        // first page's generation after the last reference it gave.
+        .{ .json = head ++ since ++ "}", .since = 42 },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 48 },
+        .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
+        // A full continuation carries no token; a changed one never ends
+        // before its token, and names a Session.
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2q\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"ABABABABABABABABABABABABABABABAB.42\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"abababababababababababababababab.042\"}", .failure = error.InvalidCursor },
     };
     for (cases) |case| {
         var source = SocketBody.init(-1, 0);
@@ -2892,12 +3169,18 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
             .request_number = 0,
             .retained_scratch = &retained,
         } };
-        if (case.valid) {
-            const request = (try parser.parse()).list_sessions;
-            try std.testing.expectEqual(case.after, request.after);
-            try std.testing.expectEqual(case.ceiling, request.ceiling);
-            if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
-        } else try std.testing.expectError(error.InvalidCursor, parser.parse());
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+            continue;
+        }
+        const request = (try parser.parse()).list_sessions;
+        try std.testing.expectEqual(case.after, request.after);
+        try std.testing.expectEqual(case.ceiling, request.ceiling);
+        if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
+        try std.testing.expectEqual(case.since, if (request.since) |token| token.generation else null);
+        if (request.since) |token| try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0xab)), &token.instance);
+        try std.testing.expectEqual(case.through, if (request.changed) |changed| changed.through else null);
+        if (request.changed) |changed| try std.testing.expectEqualStrings("k7m2qx", &changed.after_reference);
     }
 }
 
@@ -3018,6 +3301,58 @@ test "initial Message ingress retains text custody and rejects extra content bef
         try std.testing.expect(rejected.capture == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
+}
+
+test "only a creating Message carries require_model, and it binds the digest" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const creating = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
+        "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
+        .{ .bytes = creating ++ "}" },
+        .{ .bytes = creating ++ ",\"require_model\":false}" },
+        .{ .bytes = creating ++ ",\"require_model\":true}", .require_model = true },
+        .{ .bytes = creating ++ ",\"require_model\":1}", .failure = error.InvalidJsonShape },
+        .{ .bytes = creating ++ ",\"required_model\":true}", .failure = error.UnexpectedField },
+        .{ .bytes = addressed ++ "}" },
+        .{ .bytes = addressed ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
+        .{ .bytes = addressed ++ ",\"require_model\":false}", .failure = error.InvalidMessage },
+    };
+    var digests: [cases.len][32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var used = std.atomic.Value(u64).init(0);
+        var retained: ?named_scratch.Owner = null;
+        var ingress = Ingress.init(std.testing.allocator, .{
+            .io = io,
+            .fd = -1,
+            .content_length = case.bytes.len,
+            .scratch_path = root[0..root_len],
+            .request_number = 44,
+            .retained_scratch = &retained,
+            .scratch_budget = .{ .used = &used, .limit = 16 },
+            .expected_kind = .message,
+        });
+        defer ingress.deinit();
+        if (case.failure) |failure| {
+            const result = if (ingress.feed(case.bytes)) |_| ingress.finish() else |err| err;
+            try std.testing.expectError(failure, result);
+            continue;
+        }
+        try ingress.feed(case.bytes);
+        var request = try ingress.finish();
+        defer request.removeTemporaryContent(io) catch unreachable;
+        try std.testing.expectEqual(case.require_model, request.message.require_model);
+        digests[index] = request.message.semanticDigest();
+    }
+    // An explicit false is the omitted condition; true is a different intent.
+    try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
+    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[2]));
+    try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[5]));
 }
 
 test "incremental ingress preserves grammar and releases both captures after late failure" {

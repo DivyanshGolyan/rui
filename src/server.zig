@@ -931,6 +931,9 @@ pub fn serve(
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
+    const started_at = std.Io.Clock.real.now(io).toSeconds();
+    if (started_at <= 0) return error.ClockReadFailed;
+    host.started_at = @intCast(started_at);
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
@@ -1151,7 +1154,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, .host_unavailable, "dispatch_fenced");
             var response: protocol.ResponseBuffer = .{};
-            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
+            // Atomics and fixed values only: this reply never touches SQLite.
+            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
             try fd.setJson(200, response.slice());
         },
         .host_stop => {
@@ -1174,7 +1178,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             deliverResponse(host.io, fd, status, response.slice());
         },
         .message => |*command| {
-            const result = host.store.submitMessage(command, host.hooks.storeFaults(.command));
+            const result = host.store.submitMessageWithModel(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1322,6 +1326,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
         },
         .list_sessions => |request_value| {
+            // Nothing changed since the token: answered from atomics, with no
+            // Store lock, scratch or SQLite.
+            if (request_value.since) |since| {
+                if (request_value.changed == null and host.store.notModified(since)) {
+                    var response: protocol.ResponseBuffer = .{};
+                    try renderSessionsNotModified(&response, since);
+                    return deliverResponse(host.io, fd, 200, response.slice());
+                }
+            }
             const page = host.store.captureSessionList(request_value, .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
@@ -1894,13 +1907,21 @@ fn renderHostInfo(
     active_capacity: u64,
     intake_capacity: u64,
     descriptor_soft_limit: ?u64,
+    started_at: u64,
+    custody_occupied: u64,
     model: bool,
     managed_authentication: bool,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, model, managed_authentication });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, model, managed_authentication });
     std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+}
+
+/// Nothing changed since the token: it comes back, with no rows.
+fn renderSessionsNotModified(response: *protocol.ResponseBuffer, since: protocol.SinceToken) !void {
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
 }
 
 fn renderStatic(response: *protocol.ResponseBuffer, kind: protocol.ErrorType, code: []const u8) !void {
@@ -2745,6 +2766,23 @@ test "control response variants fit exact worst-case JSON bounds" {
     );
 }
 
+test "an unchanged listing echoes its token with no rows, as a client reads it" {
+    const protocol_reply = @import("protocol_reply.zig");
+    const io = std.testing.io;
+    const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
+    var response: protocol.ResponseBuffer = .{};
+    try renderSessionsNotModified(&response, since);
+    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, response.slice(), 0);
+    const page = try protocol_reply.SessionListPage.read(io, file, response.len, null, .{ .since = since });
+    try std.testing.expectEqual(protocol.ListDelta.not_modified, page.delta);
+    try std.testing.expectEqual(@as(usize, 0), page.count);
+}
+
 test "every reply renders its exact worst-case bound from the shape it writes" {
     // Each bound comes from the shape its renderer writes, so the longest
     // value of every variant must reach it exactly. Text a renderer wrote
@@ -2832,7 +2870,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, false, false);
+    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, max, max, false, false);
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -2935,7 +2973,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_item: protocol.ActivityItem = undefined;
     var longest_item_bytes: usize = 0;
     for (values) |value| {
-        const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .value = value };
+        const item: protocol.ActivityItem = .{ .position = max, .ordinal = max, .at = max, .value = value };
         var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         try item.writeJson(&writer);
@@ -2949,7 +2987,26 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.work = .{ .status = Worst.tag(protocol.PageWork.Status), .turn = max, .operation = max, .first_action = max, .revision = max };
+    // The work state's longest kind: every variant written, the longest kept.
+    var longest_state: protocol.WorkState = undefined;
+    var longest_state_bytes: usize = 0;
+    for ([_]protocol.WorkState{
+        .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
+        .{ .bash = .{ .since = max, .description = description, .running = max, .approvals = max } },
+        .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
+        .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
+        .{ .approval = .{ .since = max } },
+    }) |state| {
+        var buffer: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
+        if (writer.end > longest_state_bytes) {
+            longest_state_bytes = writer.end;
+            longest_state = state;
+        }
+    }
+    try std.testing.expectEqual(protocol.WorkStateJson.max_json_bytes, longest_state_bytes);
+    facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;

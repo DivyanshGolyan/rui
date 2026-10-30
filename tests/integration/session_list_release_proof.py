@@ -105,7 +105,7 @@ def listing(client, store):
     result = subprocess.run([client, store, "-", "0", "0"], capture_output=True, timeout=10)
     invocation = (began_ns, time.monotonic_ns(), deadline)
     assert result.returncode == 0, (result.returncode, result.stderr)
-    assert json.loads(result.stdout) == {"version": "1", "type": "session_list", "sessions": [], "next": None}
+    fixture.assert_empty_full(json.loads(result.stdout))
     return invocation
 
 

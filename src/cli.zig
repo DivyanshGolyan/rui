@@ -425,6 +425,7 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
             const instance = std.fmt.bytesToHex(ready.instance, .lower);
             try writer.print(",\"instance\":\"{s}\",\"active_capacity\":\"{d}\",\"intake_capacity\":\"{d}\",\"descriptor_limit\":", .{ &instance, ready.active_capacity, ready.intake_capacity });
             if (ready.descriptor_limit) |limit| try writer.print("\"{d}\"", .{limit}) else try writer.writeAll("null");
+            try writer.print(",\"started_at\":\"{d}\",\"custody_occupied\":\"{d}\"", .{ ready.started_at, ready.custody_occupied });
             try writer.writeAll(",\"capabilities\":");
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
@@ -1268,6 +1269,24 @@ test "policy arguments reset and preserve spelling" {
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
+/// "" is the one spelling that clears a Label and can never be one.
+fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
+    if (text.len == 0) return .{ .present = true, .value = null };
+    if (protocol.validLabel(text)) return .{ .present = true, .value = text };
+    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed.\n" ++ cli_args.label_help);
+    return error.InvalidLabel;
+}
+
+test "a Label argument sets, clears or refuses before capture" {
+    try std.testing.expectEqualStrings("Review PR 412", (try labelArgument("Review PR 412")).value.?);
+    const cleared = try labelArgument("");
+    try std.testing.expect(cleared.present and cleared.value == null);
+    const longest: [100]u8 = @splat('x');
+    const too_long: [101]u8 = @splat('x');
+    for ([_][]const u8{ "two\nlines", " ", &too_long }) |text| try std.testing.expectError(error.InvalidLabel, labelArgument(text));
+    try std.testing.expectEqual(@as(usize, 100), (try labelArgument(&longest)).value.?.len);
+}
+
 fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
     if (model_capability.supportsModel(model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
@@ -1310,6 +1329,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
     if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
     if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
+    if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
@@ -1521,7 +1541,7 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         var buffer: [160]u8 = undefined;
         try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{s} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.slice(), origin }));
     }
-    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.status.value));
+    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.state.value));
     if (work.selected_message) |selected|
         try writeSafeFieldTo(out, "Current message: ", selected.slice());
     if (work.actionable_count != 0) try renderActionable(io, work, file, out);
@@ -1607,44 +1627,15 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
 }
 
 fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
-    // The grammar admits exactly one of REF, --session and --last.
-    const reference = parsed.positional orelse parsed.get("session");
+    // The grammar admits exactly one of ID and --session, and dispatch has
+    // checked it is a Session ID.
+    const reference = parsed.positional orelse parsed.get("session").?;
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
     try startHost(init, destination, true, null);
-    var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
-    if (reference) |value| {
-        try selected.set(value);
-    } else {
-        var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
-        defer directory.close(init.io);
-        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-        const workspace_length = try directory.realPath(init.io, &workspace_buffer);
-        const workspace = workspace_buffer[0..workspace_length];
-        const file = try renderScratch(init);
-        defer file.close(init.io);
-        var cursor: protocol_reply.SessionListCursor = .{};
-        while (true) {
-            try file.setLength(init.io, 0);
-            try init.io.vtable.fileSeekTo(init.io.userdata, file, 0);
-            var buffer: client.ReplyBuffer = .{};
-            const reply = try client.listSessions(init.io, destination, workspace, cursor, file, &buffer);
-            const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
-            const page = switch (decoded) {
-                .page => |*value| value,
-                .failure => |failure| return failure.err(),
-            };
-            if (page.count != 0) selected = page.rows[page.count - 1].reference;
-            cursor = page.next orelse break;
-        }
-        if (selected.len == 0) {
-            TerminalText.diagnostic("rui: no Session in this Workspace. Run `rui` to start one, or `rui session list --all` to inspect other Workspaces.\n", .{});
-            return error.SessionNotFound;
-        }
-    }
-    return runSession(init, destination, selected.slice(), null);
+    return runSession(init, destination, reference, null);
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
@@ -1706,7 +1697,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
             return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
-            if (err == error.UnsupportedModel) return; // The pre-capture diagnostic already gives the repair.
+            if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
             TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
             if (err == error.CanonicalStoreFailure) return err;
         };
@@ -2404,12 +2395,15 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Requ
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?protocol_reply.SessionListCursor } {
+/// Reads the traversal's next page and appends its rows to `rows`; a page
+/// that restarts the traversal replaces the rows there. Returns whether
+/// another page follows.
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, rows: *std.Io.File.Writer) !bool {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const reply = try client.listSessions(init.io, store, workspace, traversal.cursor, file, &buffer);
+    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, traversal.cursor, reply);
     const page = switch (decoded) {
         .page => |*page| page,
         .failure => |failure| {
@@ -2421,12 +2415,25 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
             return failure.err();
         },
     };
-    if (!first and page.count != 0) try writer.writeByte(',');
-    try page.writeRowsJson(writer);
-    return .{ .count = page.count, .next = page.next };
+    if (traversal.restarts(page)) {
+        try rows.seekTo(0);
+        try rows.end();
+    }
+    if (page.count != 0 and rows.logicalPos() != 0) rows.interface.writeByte(',') catch return rows.err.?;
+    page.writeRowsJson(&rows.interface) catch return rows.err.?;
+    return traversal.advance(page);
+}
+
+/// A token from an earlier listing's `since`.
+fn sinceArgument(text: []const u8) error{InvalidSince}!protocol.SinceToken {
+    return protocol.SinceToken.parse(text) catch {
+        _ = @import("stderr.zig").write("rui: --since takes the since value of an earlier rui session list, unchanged.\n");
+        return error.InvalidSince;
+    };
 }
 
 fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const since = if (parsed.get("since")) |text| try sinceArgument(text) else null;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -2436,19 +2443,30 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const length = try directory.realPath(init.io, &workspace_buffer);
         break :blk workspace_buffer[0..length];
     };
-    // Bounded pages stream into one final JSON value; no page population is
-    // retained. A failed later page leaves incomplete output and exits nonzero.
-    var cursor: protocol_reply.SessionListCursor = .{};
+    // Bounded pages collect their rows in unlinked scratch, not memory, and
+    // print as one JSON value once the last page is read: a failed page
+    // prints nothing, and a changed listing that turns full drops the rows
+    // it gave before, so each Session appears once.
+    var traversal = protocol_reply.SessionTraversal.init(since);
+    const scratch = try renderScratch(init);
+    defer scratch.close(init.io);
+    var rows_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var rows = scratch.writer(init.io, &rows_buffer);
+    while (try sessionPage(init, store, workspace, &traversal, &rows)) {}
+    try rows.end();
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
-    var first = true;
-    while (true) {
-        const page = try sessionPage(init, store, workspace, cursor, first, writer);
-        if (page.count != 0) first = false;
-        cursor = page.next orelse break;
+    writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[") catch |err| return output.failure(err);
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < rows.pos) {
+        const count = try scratch.readPositionalAll(init.io, window[0..@intCast(@min(rows.pos - offset, window.len))], offset);
+        if (count == 0) return error.TruncatedResult;
+        writer.writeAll(window[0..count]) catch |err| return output.failure(err);
+        offset += count;
     }
-    try writer.writeAll("],\"next\":null}\n");
+    var token: [protocol.SinceToken.max_bytes]u8 = undefined;
+    writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":null}}\n", .{ traversal.delta, traversal.since.?.format(&token) }) catch |err| return output.failure(err);
     try output.finish();
 }
 
@@ -2705,7 +2723,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:

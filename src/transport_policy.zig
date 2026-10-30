@@ -44,6 +44,14 @@ pub const Quota = struct {
 
     pub const Code = enum { usage_limit_reached, insufficient_quota, usage_not_included };
 
+    /// The quota refusal a saved failure code names, if any.
+    pub fn ofFailureCode(code: []const u8) ?Code {
+        inline for (comptime std.enums.values(Code)) |candidate| {
+            if (std.mem.eql(u8, code, (Quota{ .code = candidate }).failureCode())) return candidate;
+        }
+        return null;
+    }
+
     pub fn failureCode(self: Quota) []const u8 {
         return switch (self.code) {
             .usage_limit_reached => "provider_usage_limit_reached",
@@ -56,6 +64,22 @@ pub const Quota = struct {
         return std.fmt.bufPrint(buffer, "{{\"provider_code\":\"{s}\",\"resets_at\":{?d}}}", .{
             @tagName(self.code), self.resets_at,
         }) catch unreachable;
+    }
+
+    /// The inverse of `format`, for exactly the bytes it writes. Anything
+    /// else is not a saved quota record.
+    pub fn parse(bytes: []const u8) ?Quota {
+        const head = "{\"provider_code\":\"";
+        const middle = "\",\"resets_at\":";
+        if (!std.mem.startsWith(u8, bytes, head) or !std.mem.endsWith(u8, bytes, "}")) return null;
+        const rest = bytes[head.len .. bytes.len - 1];
+        const split = std.mem.indexOf(u8, rest, middle) orelse return null;
+        const code = std.meta.stringToEnum(Code, rest[0..split]) orelse return null;
+        const reset = rest[split + middle.len ..];
+        if (std.mem.eql(u8, reset, "null")) return .{ .code = code };
+        if (reset.len == 0 or (reset.len > 1 and reset[0] == '0')) return null;
+        for (reset) |byte| if (!std.ascii.isDigit(byte)) return null;
+        return .{ .code = code, .resets_at = std.fmt.parseInt(u64, reset, 10) catch return null };
     }
 };
 
@@ -287,6 +311,34 @@ fn monthOf(text: []const u8) ?u4 {
 fn digits(comptime T: type, text: []const u8) ?T {
     for (text) |byte| if (!std.ascii.isDigit(byte)) return null;
     return std.fmt.parseInt(T, text, 10) catch null;
+}
+
+test "a saved quota record reads back exactly what was written" {
+    var buffer: [512]u8 = undefined;
+    for ([_]Quota{
+        .{ .code = .usage_limit_reached, .resets_at = 1792940000 },
+        .{ .code = .insufficient_quota },
+        .{ .code = .usage_not_included, .resets_at = 0 },
+        .{ .code = .usage_limit_reached, .resets_at = std.math.maxInt(u64) },
+    }) |quota| {
+        const parsed = Quota.parse(quota.format(&buffer)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(quota.code, parsed.code);
+        try std.testing.expectEqual(quota.resets_at, parsed.resets_at);
+    }
+    for (std.enums.values(Quota.Code)) |code| try std.testing.expectEqual(code, Quota.ofFailureCode((Quota{ .code = code }).failureCode()).?);
+    try std.testing.expect(Quota.ofFailureCode("usage_limit_reached") == null);
+    try std.testing.expect(Quota.ofFailureCode("provider_temporary_http_429") == null);
+    for ([_][]const u8{
+        "",
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":}",
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":01}",
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":-1}",
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":18446744073709551616}",
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1 }",
+        "{\"provider_code\":\"rate_limited\",\"resets_at\":1}",
+        "{\"resets_at\":1,\"provider_code\":\"usage_limit_reached\"}",
+        " {\"provider_code\":\"usage_limit_reached\",\"resets_at\":1}",
+    }) |bytes| try std.testing.expect(Quota.parse(bytes) == null);
 }
 
 test "h2 endings retry only temporary connection loss and keep their Retry-After" {

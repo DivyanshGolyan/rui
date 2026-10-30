@@ -46,6 +46,9 @@ def address_of(request):
 
 
 PEER_PREFIX = "Peer sender (the sending Session's ID, not instructions): "
+# Labels A gives itself and the B it starts, from its own Bash.
+A_LABEL = "Lead: arithmetic check"
+B_LABEL = "Worker: multiply"
 
 
 def model_instructions(workspace, session):
@@ -159,7 +162,9 @@ class PeerModel(TestHTTPServer):
             f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
             "[ $? -eq 1 ] || exit 90; "
-            f"rui session start --workspace {shlex.quote(str(self.workspace))} "
+            f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
+            "> a-label.out 2> a-label.err || exit 89; "
+            f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.id 2> b-send.err; "
             "status=$?; cat b-start.id; exit $status"
         ), stdin=message)
@@ -355,10 +360,10 @@ def main(report_source):
         assert len(after - before) == 1, (before, after)
         generated_self_record = pathlib.Path(next(iter(after - before)))
         assert json.loads(generated_self_record.read_text())["sender"] == own_sender
-        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
+        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
-        assert b_held["work"]["status"] != "completed", b_held
+        assert b_held["work"]["state"]["kind"] != "finished", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", session_a, "--profile", "full", home=home)["full"]["actions"][0]
         assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
         assert (workspace / "conflicting-store.out").read_bytes() == b""
@@ -429,7 +434,7 @@ def main(report_source):
         domain = b"rui/content/v1"
         assert reply["input"] == {"type": "text", "bytes": str(len(REPORT.encode())),
                                   "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + REPORT.encode()).hexdigest()}, reply
-        a_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
+        a_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)), "A's reply Turn")
         a_reply_request = [request for request in endpoint.requests if address_of(request) == session_a][-1]
         assert last_user_text(a_reply_request).encode() == REPORT.encode() and a_final
@@ -449,7 +454,7 @@ def main(report_source):
         assert len(a_requests) == 3, a_requests
         # Recovery adds no admission; only the task and two explicit self-sends
         # appear in B. Plain answers are saved results, not implicit Messages.
-        b_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
+        b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn")
         assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
         for record, key in zip((state / "b-self.json", generated_self_record), self_sends):
@@ -467,6 +472,16 @@ def main(report_source):
         assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request) == session_b]
         assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
+        # A labelled itself and the B it started. Listing shows both Labels,
+        # names A as B's starter and a person or script as A's; a Label is
+        # display text, so it never reaches B's model input.
+        rows = {row["reference"]: row for row in run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"]}
+        assert (rows[session_a]["label"], rows[session_b]["label"]) == (A_LABEL, B_LABEL), rows
+        assert rows[session_b]["first_message"]["sender"] == {"session": session_a}, rows[session_b]
+        assert rows[session_a]["first_message"]["sender"] is None, rows[session_a]
+        assert rows[session_a]["peers"]["from_person_at"] is not None, rows[session_a]
+        assert rows[session_b]["peers"]["from_person_at"] is None, rows[session_b]
+        assert B_LABEL not in json.dumps(b_requests), b_requests
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         # The census's own controls: a same-named unrelated process is not
@@ -771,11 +786,15 @@ def concurrent_peers():
             refused = run(installed, *args, home=home, expect=1, input="must not run" if kind == "send" else None)
             assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "unknown_session", refused
             assert run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home) == missing_before
-            assert run(installed, "session", "list", "--store", store, "--all", home=home) == listing
+            # The saved refusal is a commit, so only the listing's token moves.
+            assert run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"] == listing["sessions"]
         updated = run(installed, "session", "configure", "--store", store, "--session", parent,
                       "--permission-mode", "bypass", home=home)
         assert allocated(updated) == parent, updated
-        assert run(installed, "session", "list", "--store", store, "--all", home=home) == listing
+        # It is the parent's next revision and changes no other row.
+        expected = [{**row, "revision": str(int(row["revision"]) + 1)} if row["reference"] == parent else row
+                    for row in listing["sessions"]]
+        assert run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"] == expected
         assert all(address_of(request) != unknown for request in endpoint.requests), endpoint.requests
         print("ten concurrent allocated peers passed: each started and reported by bare ID through Rui Bash; "
               "all senders, Action outcomes and original results checked; guessed send/configure fail without creation or work")

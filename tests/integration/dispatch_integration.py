@@ -1281,7 +1281,7 @@ def main(mode="all", correlation_case="all"):
         expected_action_rows = {}
         # Replay preserves canonical work; a live inspection may sample a
         # temporary no-work admission reservation before its owner releases it.
-        assert recovered["work"]["status"] == "waiting_for_permission", recovered
+        assert recovered["work"]["state"]["kind"] == "approval", recovered
         assert len(recovered["full"]["model_operations"]) == 1, recovered
         assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_proposals", recovered
         second = recovered["actions"]["unresolved"][0]
@@ -4092,8 +4092,8 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,0)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
+                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
                 [(index, index, session) for index, session in enumerate(backlog_history, 1)],
             )
             database.commit()
@@ -4181,8 +4181,8 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,0)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation) "
+                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0)",
                 [(index, index, session) for index, session in enumerate(recovery_history, 1)],
             )
             database.commit()
@@ -4257,7 +4257,7 @@ def main(mode="all", correlation_case="all"):
                 "SELECT operation_id FROM model_operation WHERE session_ref=?", (recovery_sessions["sentinel"],)
             ).fetchone()[0]
             database.execute(
-                "UPDATE model_operation SET attempt_ordinal=4,retry_due_at_ms=0 "
+                "UPDATE model_operation SET attempt_ordinal=4,retry_due_at_ms=0,attempt_at=1,retry_scheduled_at=NULL "
                 "WHERE operation_id<=100 OR operation_id=?",
                 (sentinel_operation,),
             )

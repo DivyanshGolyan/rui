@@ -699,6 +699,7 @@ def check_schema(database_path):
             "selected_turn_id",
             "position",
             "admission_cutoff",
+            "stopped_at",
         ]
         assert interruption_columns == [
             "command_key",
@@ -941,6 +942,9 @@ def prove_sealed_interruption_and_cleanup(state):
         milestones.claim_inspection()
         execution = inspect_execution(store, session)
         assert execution["custody_occupied"] == "1", execution
+        # Host information counts the same held record, read from memory.
+        host = command("host", "status", "--store", store)
+        assert host["status"] == "ready" and host["custody_occupied"] == "1", host
 
         replayed = retry(state, store, "sealed-interrupt", "model-interruption")
         assert replayed["answer"]["status"] == "accepted", replayed

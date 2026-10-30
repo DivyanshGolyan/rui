@@ -1735,7 +1735,7 @@ test "real preparation consumes the configured allowance across multiple advance
         .digest = protocol.contentDigest(text),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -1885,7 +1885,7 @@ const PreparationTestSetup = struct {
             .digest = protocol.contentDigest(text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(self.storage.submitMessage(&command, .{}) == .accepted);
+        try std.testing.expect(self.storage.submitMessageWithModel(&command, true, .{}) == .accepted);
     }
 };
 
@@ -2325,7 +2325,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
             try ingress.feed(bytes);
             var request = try ingress.finish();
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-            const reply = storage.submitMessage(&request.message, .{});
+            const reply = storage.submitMessageWithModel(&request.message, true, .{});
             try std.testing.expect(reply == .accepted);
             try std.testing.expect(!reply.accepted.replayed);
             admitted = true;

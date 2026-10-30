@@ -171,7 +171,7 @@ def main():
             assert all(issued not in json.dumps(request) for issued in handles for request in endpoint.requests), "model context exposed sender authority"
             if ending == "exit":
                 (workspace / f"{session}.release").touch()
-                wait_for(lambda: inspect(session)["work"]["status"] == "completed", "normal Action exit")
+                wait_for(lambda: inspect(session)["work"]["state"]["kind"] == "finished", "normal Action exit")
             elif ending == "stop":
                 run("session", "stop", "--store", store, "--session", session)
             else:

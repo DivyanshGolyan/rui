@@ -169,7 +169,7 @@ def execute(command, overlay, log, retention, cache):
                 assert time.monotonic() < deadline, "TD1 first-scan handshake deadline"
             assert os.read(ready, 1) == b"x"
             release.set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed" and len(endpoint.requests) == 2,
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished" and len(endpoint.requests) == 2,
                              "queued Message canonical completion", timeout=30)
             os.write(done, b"x")
             outcome["exit"] = process.wait(timeout=60)

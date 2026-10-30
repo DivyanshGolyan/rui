@@ -6,7 +6,7 @@ import pathlib
 import subprocess
 import tempfile
 
-from canonical_failure_integration import ReplyProxy
+from canonical_failure_integration import ERROR_BYTES, ReplyProxy
 import model_fixture as fixture
 
 
@@ -39,6 +39,10 @@ def main():
                     page["version"] = "2"
                 elif mode == "cursor":
                     page["next"]["after"] = "0" + page["next"]["after"]
+                elif mode == "delta":
+                    # Changed rows answer a token; this listing sent none.
+                    assert page["delta"] == "full", page
+                    page["delta"] = "changed"
                 elif mode == "exhausted" and page["next"] is not None:
                     assert len(page["sessions"]) == 8 and int(page["next"]["after"]) < int(page["next"]["ceiling"]), page
                     page["next"]["after"] = page["next"]["ceiling"]
@@ -53,7 +57,7 @@ def main():
                 return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
                     b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                     + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
-            for mode in ("exhausted", "unknown", "scope", "version", "cursor", "duplicate", "failure"):
+            for mode in ("exhausted", "unknown", "scope", "version", "cursor", "delta", "duplicate", "failure"):
                 proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
                 try:
                     result = invoke("session", "list", "--store", store)
@@ -74,7 +78,48 @@ def main():
                 else:
                     assert result.returncode != 0 and "InvalidSessionPage" in result.stderr, (mode, result)
                     assert result.stdout == "", ("invalid first page reached output", mode, result)
-            print("Session-list facts: actual producer, all pages, one JSON value, discarded extensions, exact scope/version/canonical cursor/duplicate rejection; synthetic busy diagnostics")
+            failure = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
+                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
+            def paged(*args, replies=()):
+                """Lists through the real producer, answering page N with replies[N] when given."""
+                def replace(response):
+                    index = len(proxy.exchanges) - 1
+                    return replies[index] if index < len(replies) and replies[index] is not None else response
+                proxy = ReplyProxy(host, "/v1/list-sessions", replace)
+                try:
+                    result = invoke("session", "list", "--store", store, *args)
+                finally:
+                    proxy.close()
+                return result, [json.loads(response.split(b"\r\n\r\n", 1)[1]) for _, response in proxy.exchanges], \
+                    [response for _, response in proxy.exchanges]
+            # Rows print only once the last page is read: a later page that
+            # fails prints nothing.
+            result, pages, _ = paged(replies=(None, failure))
+            assert len(pages) == 2 and pages[0]["next"] is not None, pages
+            assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr and result.stdout == "", result
+            token = json.loads(paged()[0].stdout)["since"]
+            for index, reference in enumerate(allocated):
+                relabelled = invoke("session", "configure", "--store", store, "--session", reference, "--label", f"Watched {index}")
+                assert relabelled.returncode == 0, relabelled
+            _, full_pages, full_replies = paged()
+            full_first = full_pages[0]
+            # A changed listing whose continuation restarts as full prints
+            # the full listing alone, so each Session appears once.
+            for replies in ((None, full_replies[0]), (None, full_replies[0], failure), (None, failure)):
+                result, pages, _ = paged("--since", token, replies=replies)
+                assert len(pages) == len(replies) + (replies[-1] is not failure), (replies, pages)
+                assert pages[0]["delta"] == "changed" and len(pages[0]["sessions"]) == 8 and "through" in pages[0]["next"], pages
+                if replies[-1] is failure:
+                    assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr and result.stdout == "", result
+                    continue
+                assert result.returncode == 0, result
+                listed = json.loads(result.stdout)
+                assert listed["delta"] == "full" and listed["since"] == full_first["since"], listed
+                assert [row["reference"] for row in listed["sessions"]] == allocated, listed
+                assert [row["label"] for row in listed["sessions"]] == [f"Watched {index}" for index in range(len(allocated))], listed
+            print("Session-list facts: actual producer, all pages, one JSON value, discarded extensions, exact scope/version/canonical cursor/duplicate rejection; synthetic busy diagnostics; "
+                "a failed later page prints nothing; a changed listing restarted as full prints each Session once")
         finally:
             fixture.stop_host(host)
 

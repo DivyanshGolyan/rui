@@ -80,3 +80,16 @@ If a command loses its reply or exits nonzero, Rui may still have accepted the w
 Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host. It gets the Host's `HOME` but none of the Host's other environment, such as credentials.
 
 Each model request tells the agent its own bare ID. Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority. To get an answer from another Session, an agent puts its own ID in the Message. The other Session replies with an ordinary `session send --to ID`.
+
+An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`. `--label ""` clears it. A Label is display text: it never addresses a Session or reaches the model.
+
+## Watch Sessions
+
+`rui session list` reports each Session's Label, its work state and when that began, who sent its first Message, and when a person or script last wrote to it.
+
+To watch many Sessions:
+
+1. List once and keep the reply's `since`.
+2. List again with `--since` that value. `delta` says `not_modified` (keep your rows), `changed` (replace only the rows returned) or `full` (a complete listing). Every reply carries the next `since`.
+
+The token is opaque and does not survive a Host restart. A retry falling due changes no row, so compare `due_at_ms` with the clock yourself. To watch one Session, use `rui session inspect --session ID` rather than a listing.

@@ -459,7 +459,7 @@ def main():
                 stale.unlink()
             noncanonical = json.dumps({
                 "version": "1", "type": "host_info", "store": str(store.resolve()),
-                "instance": "0" * 32, "active_capacity": "01",
+                "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
                 "capabilities": {"bash": True, "model": False, "managed_authentication": False},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
@@ -468,6 +468,13 @@ def main():
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
                 *(valid_body.replace(b'"capabilities":', f'"{field}": "{value}", "capabilities":'.encode())
                   for field in ("intake_capacity", "descriptor_limit") for value in ("010", "+10", "1_0")),
+                # The start time is a positive canonical second; slots in use
+                # never exceed Active Capacity; both are required.
+                *(valid_body.replace(b'"started_at": "1792918800"', f'"started_at": "{value}"'.encode())
+                  for value in ("0", "01792918800", "+1792918800")),
+                valid_body.replace(b'"custody_occupied": "1"', b'"custody_occupied": "2"'),
+                valid_body.replace(b'"started_at": "1792918800", ', b''),
+                valid_body.replace(b'"custody_occupied": "1", ', b''),
             )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
@@ -574,8 +581,11 @@ def main():
                 before = wait_for_descriptors(first.pid)
                 before_fd = len(before)
             first_status = exchange("host_info", lambda: status(store))
-            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true", first_status)
+            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true ([1-9][0-9]*) 0", first_status)
             assert match, first_status
+            # The Host's start, not the call's: fixed for this Host's life.
+            started_at = match.group(2)
+            assert int(started_at) <= time.time(), first_status
             alias = store.parent / "alias"
             alias.symlink_to(store, target_is_directory=True)
             assert exchange("host_info", lambda: status(alias)) == first_status
@@ -586,7 +596,7 @@ def main():
             assert selected == {
                 "version": "1", "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
-                "descriptor_limit": fields["descriptor_limit"],
+                "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
@@ -605,6 +615,7 @@ def main():
                 "version": "1", "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
+                "started_at": started_at, "custody_occupied": "0",
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
@@ -638,8 +649,10 @@ def main():
         completed = False
         try:
             second_status = exchange("host_info", lambda: status(store))
-            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false", second_status)
+            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false ([1-9][0-9]*) 0", second_status)
             assert match_second, second_status
+            # A replacement Host starts no earlier than the one it replaced.
+            assert int(match_second.group(2)) >= int(started_at), (first_status, second_status)
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
             assert selected["active_capacity"] == "7", selected
