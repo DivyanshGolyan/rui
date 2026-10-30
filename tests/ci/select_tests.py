@@ -168,6 +168,10 @@ RULES = (
      ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
 )
 
+# Inputs to the Host's ReleaseSafe frames or to their gate. Frontend owners are
+# client-only. check runs stack-frames; check-full does not.
+STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
+
 CHECK_COVERS = {
     "test", "test-h2", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
@@ -222,6 +226,10 @@ def select(paths, phase, available):
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             continue
+        if (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
+                and not any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)):
+            targets.add("stack-frames")
+            reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
                 or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
@@ -271,6 +279,8 @@ def select(paths, phase, available):
             checks.discard("check")
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS
+        if "check" in checks:
+            checks.discard("stack-frames")
     # Linux predicts Mac except where code may differ by platform.
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:

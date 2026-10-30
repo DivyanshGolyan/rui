@@ -1,0 +1,187 @@
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from stack_frames import PAGE, POLICY, allowance_growth, check, parse
+
+
+# objdump -d --no-show-raw-insn -C of a Host whose main thread spawns one worker.
+DISASSEMBLY = """
+Disassembly of section .text:
+
+0000000000001000 <server.serve>:
+    1000:\tpush   %rbp
+    1004:\tmov    $0x3000,%eax
+    1009:\tcall   2000 <__zig_probe_stack>
+    100e:\tsub    %rax,%rsp
+    1011:\tcall   1100 <server.Intake.run__func_12>
+    1016:\tlea    0x1e4(%rip),%rdx        # 1200 <Thread.PosixThreadImpl.spawn__func_7.Instance.entryFn>
+    101d:\tcall   1300 <debug.panic__func_3>
+
+0000000000001100 <server.Intake.run__func_12>:
+    1100:\tsub    $0x2800,%rsp
+    1107:\tjmp    1400 <store.Store.capture>
+
+0000000000001200 <Thread.PosixThreadImpl.spawn__func_7.Instance.entryFn>:
+    1200:\tsub    $0x48,%rsp
+    1204:\tcall   1500 <worker.receive>
+
+0000000000001300 <debug.panic__func_3>:
+    1300:\tsub    $0x10000,%rsp
+
+0000000000001400 <store.Store.capture>:
+    1400:\tsub    $0x100,%rsp
+    1407:\tcall   1400 <store.Store.capture>
+
+0000000000001500 <worker.receive>:
+    1500:\tmov    $0x5000,%eax
+    1505:\tcall   2000 <__zig_probe_stack>
+    150a:\tsub    %rax,%rsp
+    150d:\tcall   1100 <server.Intake.run__func_12>
+
+0000000000001600 <client.only>:
+    1600:\tsub    $0x40000,%rsp
+
+0000000000002000 <__zig_probe_stack>:
+    2000:\tsub    $0x1000,%rsp
+"""
+
+WORKER_ENTRY = "Thread.PosixThreadImpl.spawn.Instance.entryFn (worker)"
+
+
+# Each over-budget frame's page ceiling; server.Intake.run measures 0x2800.
+SEEDED = {"server.serve": 0x3000, "server.Intake.run": 0x3000, "worker.receive": 0x5000}
+
+
+def policy(exceptions, threads=None):
+    return {"budget_bytes": 8192, "threads": threads or {"worker": "worker.receive"},
+            "exceptions": [{"function": name, "frame_bytes": size, "cause": "fixture"}
+                           for name, size in exceptions.items()]}
+
+
+def gate(exceptions, disassembly=DISASSEMBLY, threads=None):
+    return check(parse(disassembly), policy(exceptions, threads))
+
+
+class StackFramesTest(unittest.TestCase):
+    def test_every_reachable_frame_over_budget_fails_without_an_exception(self):
+        report, failures = gate({})
+        self.assertEqual(sorted(failure.split(":")[0] for failure in failures), sorted(SEEDED))
+        self.assertIn("worker.receive: frame 20480 bytes exceeds the 8192-byte budget "
+                      f"(via {WORKER_ENTRY} > worker.receive)", "\n".join(failures))
+        # Panic paths, the probe helper and code no Host stack calls are not Host frames.
+        self.assertNotIn("debug.panic", "\n".join(failures))
+        self.assertNotIn("client.only", "\n".join(failures))
+
+    def test_exceptions_at_the_measured_frame_pass_and_report_each_deepest_chain(self):
+        report, failures = gate(SEEDED)
+        self.assertEqual(failures, [])
+        self.assertIn("main thread (server.serve): deepest chain 22784 bytes (22 KiB)", report)
+        self.assertIn("worker (Thread.PosixThreadImpl.spawn__func_7.Instance.entryFn): "
+                      "deepest chain 31048 bytes (30 KiB)", report)
+        self.assertIn(f"        72 {WORKER_ENTRY}", report)
+
+    def test_generated_suffixes_are_normalized(self):
+        _, failures = gate(SEEDED, DISASSEMBLY.replace("__func_12", "__func_99").replace("__func_7", "__struct_8"))
+        self.assertEqual(failures, [])
+
+    def test_stale_exception_must_be_deleted(self):
+        _, failures = gate({**SEEDED, "store.Store.capture": 0x2000, "gone.function": 0x4000})
+        self.assertEqual(failures, [
+            "store.Store.capture: now fits (256 bytes); delete this exception from stack_frames.json",
+            "gone.function: is no longer reachable; delete this exception from stack_frames.json",
+        ])
+
+    def test_grown_frame_fails(self):
+        _, failures = gate({**SEEDED, "worker.receive": 0x4fff})
+        self.assertEqual(failures, [f"worker.receive: frame grew to 20480 bytes, past its 20479-byte exception "
+                                    f"(via {WORKER_ENTRY} > worker.receive)"])
+
+    def test_a_whole_page_of_shrinkage_must_lower_the_exception_to_its_page_ceiling(self):
+        _, failures = gate({**SEEDED, "worker.receive": 0x6000, "server.Intake.run": 0x4000})
+        self.assertEqual(failures, [
+            "worker.receive: frame shrank to 20480 bytes; lower its frame_bytes from 24576 to 20480 in stack_frames.json",
+            "server.Intake.run: frame shrank to 10240 bytes; lower its frame_bytes from 16384 to 12288 in stack_frames.json",
+        ])
+        # Less than a page is CPU-model noise, not a page the thread gave back.
+        _, failures = gate({**SEEDED, "worker.receive": 0x5fff})
+        self.assertEqual(failures, [])
+
+    def test_the_largest_instance_of_a_generic_function_is_its_frame(self):
+        larger = DISASSEMBLY.replace("150d:\tcall   1100 <server.Intake.run__func_12>",
+                                     "150d:\tcall   1700 <server.Intake.run__func_13>") + """
+0000000000001700 <server.Intake.run__func_13>:
+    1700:\tsub    $0x3800,%rsp
+"""
+        _, failures = gate(SEEDED, larger)
+        self.assertEqual([failure.split(":")[0] for failure in failures], ["server.Intake.run"])
+        self.assertIn("grew to 14336 bytes", failures[0])
+
+    def test_thread_entries_are_told_apart_by_their_anchor(self):
+        spawned = DISASSEMBLY.replace("0x48,%rsp", "0x4000,%rsp")
+        _, failures = gate({**SEEDED, WORKER_ENTRY: 0x4000}, spawned)
+        self.assertEqual(failures, [])
+        _, failures = gate(SEEDED, spawned)
+        self.assertEqual([failure.split(":")[0] for failure in failures], [WORKER_ENTRY])
+
+    def test_every_spawned_thread_is_named_by_exactly_one_anchor(self):
+        with self.assertRaisesRegex(ValueError, "reaches anchors \\[\\]"):
+            gate(SEEDED, threads={"worker": "client.only"})
+        with self.assertRaisesRegex(ValueError, "reaches anchors \\['worker', 'other'\\]"):
+            gate(SEEDED, threads={"worker": "worker.receive", "other": "store.Store.capture"})
+        with self.assertRaisesRegex(ValueError, "no Host thread reaches the anchor of \\['engine'\\]"):
+            gate(SEEDED, DISASSEMBLY.replace("# 1200 <", "# 1200 <spawn.removed>"),
+                 threads={"engine": "worker.receive"})
+        with self.assertRaisesRegex(ValueError, "server.serve is not in the binary"):
+            gate(SEEDED, DISASSEMBLY.replace("<server.serve>:", "<cli.main>:"))
+
+    def test_repository_policy_is_a_seeded_ratchet(self):
+        rules = json.loads(POLICY.read_text())
+        self.assertEqual(rules["budget_bytes"], 8192)
+        names = [entry["function"] for entry in rules["exceptions"]]
+        self.assertEqual(len(names), len(set(names)))
+        for entry in rules["exceptions"]:
+            self.assertGreater(entry["frame_bytes"], rules["budget_bytes"], entry["function"])
+            self.assertEqual(entry["frame_bytes"] % PAGE, 0, entry["function"])
+            self.assertTrue(entry["cause"].strip(), entry["function"])
+
+    def test_repository_allowance_does_not_grow_from_trusted_base(self):
+        self.assertEqual(allowance_growth(), [])
+
+    def test_candidate_cannot_enlarge_allowance_from_trusted_git_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "stack_frames.json"
+            git = ["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid"]
+
+            def commit(message):
+                subprocess.run(git + ["add", "."], check=True)
+                subprocess.run(git + ["commit", "-qm", message], check=True)
+
+            subprocess.run(git + ["init", "-q"], check=True)
+            (root / "README").write_text("trusted\n")
+            commit("before the gate")
+            subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            path.write_text(json.dumps(policy({"a.big": 0x4000})))
+            # First introduction: the reviewed seed is the allowance.
+            self.assertEqual(allowance_growth(root, path), [])
+            commit("seed")
+            subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            path.write_text(json.dumps(policy({"a.big": 0x3000})))
+            self.assertEqual(allowance_growth(root, path), [])
+            path.write_text(json.dumps(policy({"a.big": 0x5000, "b.new": 0x3000})))
+            commit("candidate grows allowance")
+            self.assertEqual(allowance_growth(root, path), [
+                "a.big: frame_bytes 20480 exceeds the trusted 16384",
+                "b.new: frame_bytes 12288 exceeds the trusted absence",
+            ])
+            rules = policy({"a.big": 0x4000})
+            rules["budget_bytes"] = 16384
+            path.write_text(json.dumps(rules))
+            self.assertEqual(allowance_growth(root, path), ["budget_bytes 16384 exceeds the trusted 8192"])
+
+
+if __name__ == "__main__":
+    unittest.main()
