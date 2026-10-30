@@ -1024,6 +1024,10 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_DEFAULT_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_MAX_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_TEMP_STORE", "1");
+    // Every page cache, each ephemeral table's (IN lists, RETURNING) included,
+    // otherwise bulk-allocates 20 pages on first fetch: they fault in, then
+    // free returns them to the kernel. Per-page allocation skips that churn.
+    module.addCMacro("SQLITE_DEFAULT_PCACHE_INITSZ", "0");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
 }
