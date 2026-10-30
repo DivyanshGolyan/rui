@@ -9644,6 +9644,55 @@ fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8
     return error.TestUnexpectedResult;
 }
 
+test "a list row reads the same steps however long its Session's history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    // One Session, measured at two lengths of the same shape: answered
+    // Turns, each followed by a queued Message a stop excluded, then a last
+    // answered Turn. Alone in the Store, its index probes have the same
+    // neighbours both times.
+    const Round = struct {
+        const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+
+        fn run(store: *Store, dir: *std.testing.TmpDir, session: []const u8, comptime name: []const u8) !void {
+            try answerTestTurn(store, dir, session, name ++ "-answer", &answer);
+            try submitTestMessage(store, dir, name ++ "-queued-file", name ++ "-queued", session, "excluded");
+            var stop = try completeSessionStop(name ++ "-stop", session);
+            try std.testing.expect(store.stopSession(&stop, .{}) == .accepted);
+        }
+    };
+    const Counter = struct {
+        steps: u64 = 0,
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context.?));
+            counter.steps += 1;
+            return 0;
+        }
+
+        /// VM steps for one row read. Preparing also runs the handler, so
+        /// the statements are prepared by an unmeasured read first.
+        fn rowSteps(store: *Store, session: []const u8) !u64 {
+            _ = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
+            var counter: @This() = .{};
+            c.sqlite3_progress_handler(store.database, 1, progress, &counter);
+            defer c.sqlite3_progress_handler(store.database, 0, null, null);
+            const row = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
+            try std.testing.expect(row.work.state == .finished and row.first_message != null);
+            return counter.steps;
+        }
+    };
+    const session = try configureTestSession(&storage, "row-steps");
+    try Round.run(&storage, &tmp, session.slice(), "row-steps-0");
+    try answerTestTurn(&storage, &tmp, session.slice(), "row-steps-short", &Round.answer);
+    const short = try Counter.rowSteps(&storage, session.slice());
+    inline for (1..33) |round| try Round.run(&storage, &tmp, session.slice(), std.fmt.comptimePrint("row-steps-{d}", .{round}));
+    try answerTestTurn(&storage, &tmp, session.slice(), "row-steps-long", &Round.answer);
+    try std.testing.expect(short > 0);
+    try std.testing.expectEqual(short, try Counter.rowSteps(&storage, session.slice()));
+}
+
 test "a list row carries its Session's Label, times, first Message, work and peers" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
