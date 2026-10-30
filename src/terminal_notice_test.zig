@@ -3,6 +3,7 @@ const std = @import("std");
 const Terminal = @import("SessionTerminal.zig");
 const Input = @import("TerminalInput.zig");
 const Editor = @import("TerminalEditor.zig");
+const keymap = @import("keymap.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -37,14 +38,15 @@ fn replay(io: std.Io, terminal: *Terminal) !void {
     while (true) {
         const read = terminal.next(io, &input, 10) catch |err| switch (err) {
             error.InputDeadline => {
-                if (try input.expire()) std.debug.print("expired escape\n", .{});
+                if (try input.expire() != .none) std.debug.print("expired escape\n", .{});
                 continue;
             },
             else => return err,
         } orelse continue;
         var decoded = input.feed(read.byte, read.at);
         while (decoded != .none) : (decoded = input.next()) {
-            const event = editor.apply(decoded);
+            // Each key the editor has no use for is named as itself.
+            const outcome = editor.apply(keymap.every, decoded);
             // This bounded private transcript exposes decoded events as well
             // as editor outcomes. Expectations live in Python, not this actor.
             const kind: []const u8, const point: u21, const mods: u8, const pasted: bool = switch (decoded) {
@@ -55,10 +57,15 @@ fn replay(io: std.Io, terminal: *Terminal) !void {
                 },
                 else => .{ @tagName(decoded), 0, 0, input.paste },
             };
+            const name = switch (outcome) {
+                .action => |key| @tagName(key),
+                else => @tagName(outcome),
+            };
             std.debug.print("event {s} {d} {d} {} {s} {x} {d}\n", .{
-                kind, point, mods, pasted, @tagName(event), storage[0..editor.length], editor.cursor,
+                kind, point, mods, pasted, name, storage[0..editor.length], editor.cursor,
             });
-            if (Editor.endsLine(event)) return;
+            // Enter ends the line; Ctrl-C ends the replay, as it ends a prompt.
+            if (outcome.endsLine() or (outcome == .action and outcome.action == .ctrl_c)) return;
         }
     }
 }

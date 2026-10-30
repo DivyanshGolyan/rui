@@ -18,6 +18,7 @@ const cores = .{
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
+    .{ "keymap.zig", @import("keymap.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
@@ -264,7 +265,7 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
 
         counting.count = 0;
         const render_start = nanosecondsNow();
-        var screen = try overview_view.render(counting.allocator(), &state, 200, 60, .{}, 0);
+        var screen = try overview_view.render(counting.allocator(), &state, .{}, 200, 60, .{}, 0);
         render_ns[run] = nanosecondsNow() - render_start;
         render_allocations = @max(render_allocations, counting.count);
         screen.deinit();

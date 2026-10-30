@@ -10,6 +10,7 @@ const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const ChoiceLine = @import("ChoiceLine.zig");
 const Editor = @import("TerminalEditor.zig");
+const keymap = @import("keymap.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const Self = @This();
 
@@ -173,12 +174,19 @@ pub fn stale(self: *const Self) bool {
 }
 
 /// Applies one decoded event to the choice and to the line typed there.
-pub fn applyChoice(self: *Self, decoded: TerminalInput.Decoded) Editor.Event {
-    const event = self.choice.apply(decoded);
+pub fn applyChoice(self: *Self, comptime keys: anytype, decoded: TerminalInput.Decoded) keymap.Outcome(@TypeOf(keys).Action) {
+    const outcome = self.choice.apply(keys, decoded);
     // Typed, rejected or dropped input begins a line.
-    const began = self.choice.length != 0 or self.choice.rejected != null or event == .unbound or event == .edit_rejected;
-    self.choice_line.apply(began, Editor.endsLine(event));
-    return event;
+    const began = self.choice.length != 0 or self.choice.rejected != null or outcome == .unbound or outcome == .edit_rejected;
+    self.choice_line.apply(began, outcome.endsLine());
+    return outcome;
+}
+
+/// Withholds the choice's line until its Enter, which then reports it
+/// invalid, as for input that is not text. The line has begun.
+pub fn refuseChoice(self: *Self) void {
+    self.choice.refuse();
+    self.choice_line.apply(true, false);
 }
 
 pub fn choiceText(self: *const Self) []const u8 {

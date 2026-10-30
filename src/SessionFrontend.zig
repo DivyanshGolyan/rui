@@ -13,6 +13,7 @@ const Terminal = @import("SessionTerminal.zig");
 const Screen = @import("SessionScreen.zig");
 const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
+const keymap = @import("keymap.zig");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -908,22 +909,68 @@ fn decisionShown(self: *const Self) bool {
     return approval == .draining or approval == .ready;
 }
 
-fn navigation(self: *Self, event: Editor.Event) !void {
+/// What a key does in a conversation, beside the draft or an Action's choice.
+const ConversationAction = enum {
+    page_up,
+    page_down,
+    /// Shift-Up, and Up past the draft's first line; terminals in the
+    /// alternate screen also send wheel scrolling as these arrows.
+    scroll_up,
+    scroll_down,
+    /// The latest view, which is the pending Action if there is one.
+    latest,
+    /// Out of a Message page, else to the latest view. It never leaves the
+    /// conversation.
+    back,
+    /// As `back`, and from the settled latest view, once nothing would be
+    /// lost, to the overview.
+    close,
+    /// Opens the lowest collapsed Message, or leaves a Message page.
+    expand,
+    /// Leaves the conversation; Host work continues.
+    detach,
+    /// Retries the uncertain original. Beside an Action it is choice input,
+    /// which decides nothing.
+    recover,
+};
+
+/// The conversation's one key table.
+const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
+    .escape = .close,
+    // The Esc that needs no ESC expiry.
+    .ctrl_g = .close,
+    .ctrl_c = .detach,
+    .ctrl_d = .detach,
+    .ctrl_o = .expand,
+    .ctrl_r = .recover,
+    .ctrl_x = null,
+    .up = .scroll_up,
+    .down = .scroll_down,
+    .shift_up = .scroll_up,
+    .shift_down = .scroll_down,
+    .page_up = .page_up,
+    .page_down = .page_down,
+    .home = null,
+    .end = .back,
+    .ctrl_end = .latest,
+});
+
+fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
-    switch (event) {
+    switch (action) {
         .page_up, .page_down, .scroll_up, .scroll_down => {
-            const down = event == .page_down or event == .scroll_down;
+            const down = action == .page_down or action == .scroll_down;
             if (screen.view == .live) {
                 if (down) return; // Live output already shows the latest rows.
                 try self.beginTranscript();
             }
             self.transcript.older_failed = false; // A new scroll may retry a failed load.
-            if (screen.browse(down, event == .page_up or event == .page_down)) try screen.latest();
+            if (screen.browse(down, action == .page_up or action == .page_down)) try screen.latest();
         },
-        .latest, .close_view => {
+        .latest, .back, .close => {
             // Leaving also abandons a Message page not yet shown.
             self.dropMessageRequest();
-            if (event == .close_view and self.settledView()) {
+            if (action == .close and self.settledView()) {
                 if (self.submission.view()) |submission| {
                     self.notice = switch (submission.state) {
                         .rejected => "Esc returns to the overview once /discard clears the rejected original.",
@@ -938,7 +985,7 @@ fn navigation(self: *Self, event: Editor.Event) !void {
                     self.notice = "Esc returns to the overview once the draft is empty.";
                 }
             }
-            if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
+            if (action != .latest and screen.view == .message) try screen.leaveMessage() else try screen.latest();
         },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
             // A newer Ctrl-O replaces any page asked for before it, even
@@ -946,8 +993,13 @@ fn navigation(self: *Self, event: Editor.Event) !void {
             self.dropMessageRequest();
             self.expansion.pending = true;
         },
-        // Every other event reaches here unhandled, and must not redraw.
-        else => return,
+        .detach => self.leaving = .detached,
+        // While approval is paused, recovery waits for the Action and the
+        // paused draft stays as it is.
+        .recover => if (screen.consent.active()) {
+            screen.invalidateChoice();
+            self.notice = self.decisionNotice();
+        } else try self.submission.requestRecovery(null),
     }
     self.dirty = true;
 }
@@ -1033,7 +1085,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const pending = stream.pending();
     const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            if (try stream.expire()) try self.navigation(.close_view);
+            const expired = try stream.expire();
+            if (expired != .none) try self.inputEvent(expired);
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -1051,61 +1104,41 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
         },
-        // Ctrl-R recovers in every encoding the terminal may send it, raw,
-        // Kitty or modifyOtherKeys, but never from pasted text. Beside its
-        // Action it is choice input; while approval is paused, recovery
-        // waits for the Action and the paused draft stays as it is.
-        .event => |value| if (!value.pasted and isRecovery(value.event) and self.terminal.screen.selected.editor != .choice) {
-            if (self.terminal.screen.consent.active()) {
-                self.terminal.screen.invalidateChoice();
-                self.notice = self.decisionNotice();
-            } else try self.submission.requestRecovery(null);
-        } else try self.inputEvent(decoded),
         else => try self.inputEvent(decoded),
     };
     return .byte;
 }
 
-fn isRecovery(event: vaxis.Event) bool {
-    return switch (event) {
-        .key_press => |key| key.matchExact('r', .{ .ctrl = true }),
-        else => false,
-    };
-}
-
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    switch (decoded) {
-        // The editor the latest frame encodes takes the input; a transition
-        // changes it only at the next frame. While approval is paused, typing
-        // goes to the draft shown in the composer; it never decides, and
-        // returning to the Action needs a fresh choice.
-        else => if (self.terminal.screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
-            const screen = self.terminal.screen;
-            if (screen.consent.active()) {
-                screen.invalidateChoice();
-                screen.restartChoice();
-            }
-            try self.draftEvent(decoded);
-            if (self.leaving != null) screen.interruptConsent();
-        },
+    // The editor the latest frame encodes takes the input; a transition
+    // changes it only at the next frame. While approval is paused, typing
+    // goes to the draft shown in the composer; it never decides, and
+    // returning to the Action needs a fresh choice.
+    const screen = self.terminal.screen;
+    if (screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
+        if (screen.consent.active()) {
+            screen.invalidateChoice();
+            screen.restartChoice();
+        }
+        try self.draftEvent(decoded);
     }
+    if (self.leaving != null) screen.interruptConsent();
 }
 
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
     const screen = self.terminal.screen;
-    const event = screen.applyChoice(decoded);
+    const event = screen.applyChoice(conversation_keys, decoded);
+    const refused = event == .invalid or event == .edit_rejected or event == .unbound or event == .overflow;
+    if (event == .action) switch (event.action) {
+        // Beside an Action, Ctrl-R is choice input that is no choice: its
+        // line decides nothing.
+        .recover => screen.refuseChoice(),
+        else => |action| try self.perform(action),
+    };
     if (!screen.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
-        if (event == .interrupt or event == .eof) {
-            screen.interruptConsent();
-            self.leaving = .detached;
-        }
-        try self.navigation(event);
-        switch (event) {
-            .invalid, .edit_rejected, .unbound, .overflow => self.notice = choiceRejection(event, false),
-            else => {},
-        }
+        if (refused) self.notice = choiceRejection(event == .unbound, false);
         // Only a slash command survives, or any text while the Action is
         // unread: reading its last row clears it, so neither can decide.
         const text = screen.choiceText();
@@ -1114,10 +1147,15 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         if (event == .submit and command) self.choiceCommand(text);
         // Enter on an unread Action says why nothing was decided.
         if (event == .submit and !command and reading) self.notice = "! Read the whole Action first; nothing authorized.";
-        if (ChoiceLine.end(Editor.endsLine(event), text, reading, stream.pending() != .none)) screen.restartChoice();
+        if (ChoiceLine.end(event.endsLine(), text, reading, stream.pending() != .none)) screen.restartChoice();
         return;
     }
-    try self.navigation(event);
+    if (refused) {
+        screen.restartChoice();
+        screen.invalidateChoice();
+        self.notice = choiceRejection(event == .unbound, self.decisionShown() and !self.commandActive());
+        return;
+    }
     switch (event) {
         .submit => {
             const text = screen.choiceText();
@@ -1139,15 +1177,6 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             screen.invalidateChoice();
             screen.restartChoice();
         },
-        .invalid, .edit_rejected, .unbound, .overflow => {
-            screen.restartChoice();
-            screen.invalidateChoice();
-            self.notice = choiceRejection(event, self.decisionShown() and !self.commandActive());
-        },
-        .interrupt, .eof => {
-            screen.interruptConsent();
-            self.leaving = .detached;
-        },
         else => {},
     }
 }
@@ -1159,9 +1188,9 @@ fn decisionNotice(self: *const Self) []const u8 {
 
 /// Only a choice ready to decide can ask for a or d; until then the
 /// status line names what the Action needs first, such as reading it.
-fn choiceRejection(event: Editor.Event, ready: bool) []const u8 {
-    if (!ready) return if (event == .unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
-    return if (event == .unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
+fn choiceRejection(unbound: bool, ready: bool) []const u8 {
+    if (!ready) return if (unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
+    return if (unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
 }
 
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
@@ -1174,7 +1203,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .command = self.commandActive(),
         .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
     });
-    switch (self.input.applySelected(decoded, allowed)) {
+    switch (self.input.applySelected(conversation_keys, decoded, allowed)) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -1183,13 +1212,12 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             self.input.clear();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
-        .editor => |event| switch (event) {
-            .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => try self.navigation(event),
-            .interrupt, .eof => self.leaving = .detached,
+        .editor => |outcome| switch (outcome) {
+            .action => |action| try self.perform(action),
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .unbound => self.notice = "! Key combination not recognized; ignored. Draft unchanged.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
-            else => {},
+            .none, .append, .redraw, .submit => {},
         },
     }
 }
@@ -1898,8 +1926,29 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expect(self.leaving == null);
     held.screen.withdrawAction();
     self.live.work.first_action = null;
-    // Ctrl-G stands for Esc and Alt-Esc, which close_view joins.
+    // Ctrl-G stands for Esc and Alt-Esc.
     try Keys.send(self, "\x07");
+    try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
+}
+
+test "End on an empty draft goes to the latest view and never leaves the conversation" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Keys = struct {
+        fn send(frontend: *Self, bytes: []const u8) !void {
+            for (bytes) |byte| {
+                var decoded = frontend.input.stream.feed(byte, 0);
+                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
+            }
+        }
+    };
+    for ([_][]const u8{ "\x1b[F", "\x1bOF" }) |end| {
+        try Keys.send(self, end);
+        try std.testing.expect(self.leaving == null);
+    }
+    // A rejected draft changes no key's meaning: Esc still returns.
+    try Keys.send(self, "\x00\x1b[27u");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
@@ -1999,12 +2048,17 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
         .{ .bytes = "\x1b[114;6;114u", .recovery = false },
         .{ .bytes = "\x1b[114:114;6u", .recovery = false },
     }) |case| {
+        var storage: [8]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
         var stream: TerminalInput = .{};
-        var found: ?bool = null;
-        for (case.bytes) |byte| switch (stream.feed(byte, 0)) {
-            .event => |decoded| found = isRecovery(decoded.event),
-            else => {},
-        };
-        try std.testing.expectEqual(@as(?bool, case.recovery), found);
+        var recovers = false;
+        for (case.bytes) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) {
+                const outcome = editor.apply(conversation_keys, decoded);
+                recovers = recovers or (outcome == .action and outcome.action == .recover);
+            }
+        }
+        try std.testing.expectEqual(case.recovery, recovers);
     }
 }

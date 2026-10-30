@@ -7,7 +7,10 @@
 const std = @import("std");
 const Input = @import("TerminalInput.zig");
 const Editor = @import("TerminalEditor.zig");
+const keymap = @import("keymap.zig");
 const vaxis = @import("vaxis");
+/// Each key the editor has no use for comes back as itself.
+const Fed = keymap.Outcome(keymap.Key);
 
 const Unavailable = enum {
     // Prefixing an unmodified/Ctrl key with ESC changes it to an Alt chord.
@@ -30,7 +33,7 @@ const Case = struct {
     caret: usize = 5,
     after: []const u8 = "one two!",
     cursor: usize = 5,
-    event: Editor.Event,
+    event: Fed,
     wires: [4]Wire,
 };
 
@@ -44,35 +47,38 @@ const no_case27: Wire = .{ .unavailable = .functional_key };
 // Legacy means ESC-prefix Alt OR standard CSI/SS3 functional keys. Plain
 // controls are in raw, never mislabelled as ESC-prefix equivalents.
 const cases = [_]Case{
-    .{ .name = "Ctrl-C", .event = .interrupt, .wires = .{ no_alt, bytes("\x1b[99;5u"), bytes("\x1b[27;5;99~"), bytes("\x03") } },
+    .{ .name = "Ctrl-C", .event = .{ .action = .ctrl_c }, .wires = .{ no_alt, bytes("\x1b[99;5u"), bytes("\x1b[27;5;99~"), bytes("\x03") } },
     .{ .name = "Ctrl-D deletes forward", .event = .redraw, .after = "one to!", .wires = .{ no_alt, bytes("\x1b[100;5u"), bytes("\x1b[27;5;100~"), bytes("\x04") } },
-    .{ .name = "Ctrl-D empty EOF", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .eof, .wires = .{ no_alt, bytes("\x1b[100;5u"), bytes("\x1b[27;5;100~"), bytes("\x04") } },
+    .{ .name = "Ctrl-D on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .ctrl_d }, .wires = .{ no_alt, bytes("\x1b[100;5u"), bytes("\x1b[27;5;100~"), bytes("\x04") } },
     .{ .name = "Enter", .event = .submit, .wires = .{ no_alt, bytes("\x1b[13u"), bytes("\x1b[27;1;13~"), bytes("\r") } },
     .{ .name = "Ctrl-J", .event = .submit, .wires = .{ no_alt, bytes("\x1b[106;5u"), bytes("\x1b[27;5;106~"), bytes("\n") } },
-    .{ .name = "Escape", .event = .close_view, .wires = .{ no_alt, bytes("\x1b[27u"), bytes("\x1b[27;1;27~"), bytes("\x1b") } },
-    .{ .name = "Alt-Escape", .event = .close_view, .wires = .{ bytes("\x1b\x1b"), bytes("\x1b[27;3u"), bytes("\x1b[27;3;27~"), no_raw } },
+    .{ .name = "Escape", .event = .{ .action = .escape }, .wires = .{ no_alt, bytes("\x1b[27u"), bytes("\x1b[27;1;27~"), bytes("\x1b") } },
+    .{ .name = "Alt-Escape", .event = .{ .action = .escape }, .wires = .{ bytes("\x1b\x1b"), bytes("\x1b[27;3u"), bytes("\x1b[27;3;27~"), no_raw } },
     .{ .name = "Tab", .event = .redraw, .after = "one t\two!", .cursor = 6, .wires = .{ no_alt, bytes("\x1b[9u"), bytes("\x1b[27;1;9~"), bytes("\t") } },
     .{ .name = "Shift-Enter", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ .{ .unavailable = .collapses_to_enter }, bytes("\x1b[13;2u"), bytes("\x1b[27;2;13~"), no_raw } },
     .{ .name = "Alt-J", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ bytes("\x1bj"), bytes("\x1b[106;3u"), bytes("\x1b[27;3;106~"), no_raw } },
-    .{ .name = "PgUp", .event = .page_up, .wires = .{ bytes("\x1b[5~"), bytes("\x1b[5;1~"), no_case27, no_raw } },
-    .{ .name = "Shift-PgUp", .event = .page_up, .wires = .{ bytes("\x1b[5;2~"), bytes("\x1b[5;2~"), no_case27, no_raw } },
-    .{ .name = "PgDn", .event = .page_down, .wires = .{ bytes("\x1b[6~"), bytes("\x1b[6;1~"), no_case27, no_raw } },
-    .{ .name = "Shift-PgDn", .event = .page_down, .wires = .{ bytes("\x1b[6;2~"), bytes("\x1b[6;2~"), no_case27, no_raw } },
-    .{ .name = "Shift-Up", .event = .scroll_up, .wires = .{ bytes("\x1b[1;2A"), bytes("\x1b[1;2A"), no_case27, no_raw } },
-    .{ .name = "Shift-Down", .event = .scroll_down, .wires = .{ bytes("\x1b[1;2B"), bytes("\x1b[1;2B"), no_case27, no_raw } },
-    .{ .name = "Ctrl-End", .event = .latest, .wires = .{ bytes("\x1b[1;5F"), bytes("\x1b[8;5~"), no_case27, no_raw } },
-    .{ .name = "Ctrl-G", .event = .close_view, .wires = .{ no_alt, bytes("\x1b[103;5u"), bytes("\x1b[27;5;103~"), bytes("\x07") } },
-    .{ .name = "Ctrl-O", .event = .expand, .wires = .{ no_alt, bytes("\x1b[111;5u"), bytes("\x1b[27;5;111~"), bytes("\x0f") } },
+    .{ .name = "PgUp", .event = .{ .action = .page_up }, .wires = .{ bytes("\x1b[5~"), bytes("\x1b[5;1~"), no_case27, no_raw } },
+    .{ .name = "Shift-PgUp", .event = .{ .action = .page_up }, .wires = .{ bytes("\x1b[5;2~"), bytes("\x1b[5;2~"), no_case27, no_raw } },
+    .{ .name = "PgDn", .event = .{ .action = .page_down }, .wires = .{ bytes("\x1b[6~"), bytes("\x1b[6;1~"), no_case27, no_raw } },
+    .{ .name = "Shift-PgDn", .event = .{ .action = .page_down }, .wires = .{ bytes("\x1b[6;2~"), bytes("\x1b[6;2~"), no_case27, no_raw } },
+    .{ .name = "Shift-Up", .event = .{ .action = .shift_up }, .wires = .{ bytes("\x1b[1;2A"), bytes("\x1b[1;2A"), no_case27, no_raw } },
+    .{ .name = "Shift-Down", .event = .{ .action = .shift_down }, .wires = .{ bytes("\x1b[1;2B"), bytes("\x1b[1;2B"), no_case27, no_raw } },
+    .{ .name = "Ctrl-End", .event = .{ .action = .ctrl_end }, .wires = .{ bytes("\x1b[1;5F"), bytes("\x1b[8;5~"), no_case27, no_raw } },
+    .{ .name = "Ctrl-G", .event = .{ .action = .ctrl_g }, .wires = .{ no_alt, bytes("\x1b[103;5u"), bytes("\x1b[27;5;103~"), bytes("\x07") } },
+    .{ .name = "Ctrl-O", .event = .{ .action = .ctrl_o }, .wires = .{ no_alt, bytes("\x1b[111;5u"), bytes("\x1b[27;5;111~"), bytes("\x0f") } },
     .{ .name = "Left", .event = .redraw, .cursor = 4, .wires = .{ bytes("\x1bOD"), bytes("\x1b[D"), no_case27, no_raw } },
     .{ .name = "Right", .event = .redraw, .cursor = 6, .wires = .{ bytes("\x1bOC"), bytes("\x1b[C"), no_case27, no_raw } },
-    .{ .name = "Up scrolls at first line", .event = .scroll_up, .wires = .{ bytes("\x1bOA"), bytes("\x1b[A"), no_case27, no_raw } },
-    .{ .name = "Down scrolls at last line", .event = .scroll_down, .wires = .{ bytes("\x1bOB"), bytes("\x1b[B"), no_case27, no_raw } },
+    .{ .name = "Up at the first line", .event = .{ .action = .up }, .wires = .{ bytes("\x1bOA"), bytes("\x1b[A"), no_case27, no_raw } },
+    .{ .name = "Down at the last line", .event = .{ .action = .down }, .wires = .{ bytes("\x1bOB"), bytes("\x1b[B"), no_case27, no_raw } },
     .{ .name = "Up moves within draft", .before = "abcde\nxy!", .caret = 8, .after = "abcde\nxy!", .cursor = 2, .event = .redraw, .wires = .{ bytes("\x1bOA"), bytes("\x1b[A"), no_case27, no_raw } },
     .{ .name = "Down clamps to shorter line", .before = "abcde\nxy!", .caret = 4, .after = "abcde\nxy!", .cursor = 9, .event = .redraw, .wires = .{ bytes("\x1bOB"), bytes("\x1b[B"), no_case27, no_raw } },
     .{ .name = "Home", .event = .redraw, .cursor = 0, .wires = .{ bytes("\x1bOH"), bytes("\x1b[H"), no_case27, no_raw } },
+    .{ .name = "Home on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .home }, .wires = .{ bytes("\x1bOH"), bytes("\x1b[H"), no_case27, no_raw } },
+    .{ .name = "Ctrl-R", .event = .{ .action = .ctrl_r }, .wires = .{ no_alt, bytes("\x1b[114;5u"), bytes("\x1b[27;5;114~"), bytes("\x12") } },
+    .{ .name = "Ctrl-X", .event = .{ .action = .ctrl_x }, .wires = .{ no_alt, bytes("\x1b[120;5u"), bytes("\x1b[27;5;120~"), bytes("\x18") } },
     .{ .name = "Ctrl-A", .event = .redraw, .cursor = 0, .wires = .{ no_alt, bytes("\x1b[97;5u"), bytes("\x1b[27;5;97~"), bytes("\x01") } },
     .{ .name = "End", .event = .redraw, .cursor = 8, .wires = .{ bytes("\x1bOF"), bytes("\x1b[F"), no_case27, no_raw } },
-    .{ .name = "End empty closes view", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .close_view, .wires = .{ bytes("\x1bOF"), bytes("\x1b[F"), no_case27, no_raw } },
+    .{ .name = "End on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .end }, .wires = .{ bytes("\x1bOF"), bytes("\x1b[F"), no_case27, no_raw } },
     .{ .name = "Ctrl-E", .event = .redraw, .cursor = 8, .wires = .{ no_alt, bytes("\x1b[101;5u"), bytes("\x1b[27;5;101~"), bytes("\x05") } },
     .{ .name = "Delete", .event = .redraw, .after = "one to!", .wires = .{ bytes("\x1b[3~"), bytes("\x1b[3;1~"), no_case27, no_raw } },
     .{ .name = "Backspace DEL", .event = .redraw, .after = "one wo!", .cursor = 4, .wires = .{ no_alt, bytes("\x1b[127u"), bytes("\x1b[27;1;127~"), bytes("\x7f") } },
@@ -101,9 +107,9 @@ const Outcome = struct {
     text: [128]u8 = undefined,
     length: usize,
     cursor: usize,
-    event: Editor.Event,
+    event: Fed,
     submits: usize,
-    rejected: ?Editor.Event,
+    rejected: bool,
     closes: usize = 0,
 };
 
@@ -111,10 +117,10 @@ fn feed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcome) voi
     for (data) |byte| {
         var decoded = input.feed(byte, 0);
         while (decoded != .none) : (decoded = input.next()) {
-            const event = editor.apply(decoded);
+            const event = editor.apply(keymap.every, decoded);
             if (event != .none) outcome.event = event;
             if (event == .submit) outcome.submits += 1;
-            if (event == .close_view) outcome.closes += 1;
+            if (std.meta.eql(event, Fed{ .action = .escape })) outcome.closes += 1;
         }
     }
 }
@@ -124,7 +130,7 @@ fn inlineFeed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcom
         const event = editor.feed(input, byte);
         if (event != .none) outcome.event = event;
         if (event == .submit) outcome.submits += 1;
-        if (event == .close_view) outcome.closes += 1;
+        if (std.meta.eql(event, Fed{ .action = .escape })) outcome.closes += 1;
     }
 }
 
@@ -134,12 +140,12 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
     @memcpy(storage[0..case.before.len], case.before);
     var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice };
     var input: Input = .{};
-    var result: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+    var result: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
     deliver(&editor, &input, wire[0..split], &result);
     // A read ending at any byte boundary must not commit an incomplete chord.
     // Clock expiry itself is tested separately at the owning deadline seam.
     if (split != 0 and split < wire.len) {
-        try std.testing.expectEqual(Editor.Event.none, result.event);
+        try std.testing.expectEqual(Fed.none, result.event);
         try std.testing.expectEqualStrings(case.before, storage[0..editor.length]);
         try std.testing.expectEqual(case.caret, editor.cursor);
     }
@@ -147,25 +153,24 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
     const bare_escape = std.mem.eql(u8, wire, "\x1b") or std.mem.eql(u8, wire, "\x1b\x1b");
     try std.testing.expectEqual(if (bare_escape) Input.Pending.escape else Input.Pending.none, input.pending());
     if (bare_escape) {
-        try std.testing.expect(try input.expire());
-        // SessionFrontend translates a successful bare-ESC expiry to close_view.
-        result.event = .close_view;
+        // Every reader routes the expired Esc through the editor as a key.
+        result.event = editor.apply(keymap.every, try input.expire());
     }
     try std.testing.expectEqual(Input.Pending.none, input.pending());
     result.length = editor.length;
     result.cursor = editor.cursor;
-    result.rejected = editor.rejected;
+    result.rejected = editor.rejected != null;
     @memcpy(result.text[0..result.length], storage[0..editor.length]);
-    if (case.event != .submit and case.event != .interrupt and case.event != .eof) {
+    if (case.event != .submit and !std.meta.eql(case.event, Fed{ .action = .ctrl_c }) and !std.meta.eql(case.event, Fed{ .action = .ctrl_d })) {
         // Observable caret/retained-suffix oracle: a later typed edit and Enter
         // must submit the exact independently specified draft, once.
         var expected: [128]u8 = undefined;
         @memcpy(expected[0..case.cursor], case.after[0..case.cursor]);
         expected[case.cursor] = 'Z';
         @memcpy(expected[case.cursor + 1 ..][0 .. case.after.len - case.cursor], case.after[case.cursor..]);
-        var suffix: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+        var suffix: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         deliver(&editor, &input, "Z\r", &suffix);
-        try std.testing.expectEqual(Editor.Event.submit, suffix.event);
+        try std.testing.expectEqual(Fed.submit, suffix.event);
         try std.testing.expectEqual(@as(usize, 1), suffix.submits);
         try std.testing.expectEqualStrings(expected[0 .. case.after.len + 1], storage[0..editor.length]);
     }
@@ -179,7 +184,7 @@ fn check(comptime route: Route, case: Case, lane: Lane, wire: []const u8, split:
     try std.testing.expectEqual(case.cursor, actual.cursor);
     try std.testing.expectEqual(case.event, actual.event);
     try std.testing.expectEqual(@as(usize, if (case.event == .submit) 1 else 0), actual.submits);
-    try std.testing.expectEqual(@as(?Editor.Event, null), actual.rejected);
+    try std.testing.expect(!actual.rejected);
 }
 
 fn matrix(case27: bool) !void {
@@ -235,7 +240,7 @@ test "TD2 incomplete prefixes expire fatally without modifying or submitting dra
             @memcpy(storage[0..case.before.len], case.before);
             var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret };
             var input: Input = .{};
-            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
             const prefix = data[0..split];
             // The fixture, never pending()/expire(), supplies the expectation.
             // A recognized CSI/SS3/kitty/case27 prefix is not a bare Esc key.
@@ -243,7 +248,7 @@ test "TD2 incomplete prefixes expire fatally without modifying or submitting dra
             feed(&editor, &input, prefix, &outcome);
             try std.testing.expectEqual(if (bare_escape) Input.Pending.escape else Input.Pending.incomplete, input.pending());
             if (bare_escape) {
-                try std.testing.expect(try input.expire());
+                try std.testing.expect(try input.expire() != .none);
                 try std.testing.expectEqual(Input.Pending.none, input.pending());
             } else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
             try std.testing.expectEqualStrings(case.before, storage[0..editor.length]);
@@ -260,7 +265,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         @memcpy(storage[0..8], "headTAIL");
         var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
         var input: Input = .{};
-        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         feed(&editor, &input, data[0..split], &outcome);
         feed(&editor, &input, data[split..], &outcome);
         try std.testing.expectEqualStrings("headé\nZqTAIL", storage[0..editor.length]);
@@ -270,7 +275,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         try std.testing.expectEqual(Input.Pending.none, input.pending());
         try std.testing.expect(!input.paste);
         feed(&editor, &input, "\r", &outcome);
-        try std.testing.expectEqual(Editor.Event.submit, outcome.event);
+        try std.testing.expectEqual(Fed.submit, outcome.event);
         try std.testing.expectEqual(@as(usize, 1), outcome.submits);
     }
     // Encoded Enter/Ctrl-R are never keyboard gestures inside marked paste.
@@ -279,13 +284,13 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         var storage: [128]u8 = undefined;
         var editor: Editor = .{ .buffer = &storage };
         var input: Input = .{};
-        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         feed(&editor, &input, "\x1b[200~kept", &outcome);
         feed(&editor, &input, encoded, &outcome);
         try std.testing.expectEqual(Input.Pending.incomplete, input.pending());
         try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
         feed(&editor, &input, "\x1b[201~\r", &outcome);
-        try std.testing.expectEqual(Editor.Event.invalid, outcome.event);
+        try std.testing.expectEqual(Fed.invalid, outcome.event);
         try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
     }
@@ -300,14 +305,14 @@ test "TD2 Ghostty modified control chords cannot turn retained choice text into 
             var storage: [128]u8 = undefined;
             var editor: Editor = .{ .buffer = &storage, .allow_paste = !choice };
             var input: Input = .{};
-            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
             feed(&editor, &input, "a", &outcome);
             feed(&editor, &input, encoded[0..split], &outcome);
             feed(&editor, &input, encoded[split..], &outcome);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
             feed(&editor, &input, "\r", &outcome);
-            try std.testing.expectEqual(Editor.Event.invalid, outcome.event);
+            try std.testing.expectEqual(Fed.invalid, outcome.event);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
         };
@@ -399,7 +404,7 @@ test "TD2 kitty release is not a binding and repeat produces one submission" {
 test "TD2 explicit Kitty Ctrl press then release acts once through both editor entry points" {
     for (controls[0..3]) |control| {
         const case: Case = switch (control.point) {
-            'c' => .{ .name = "Ctrl-C press", .event = .interrupt, .wires = undefined },
+            'c' => .{ .name = "Ctrl-C press", .event = .{ .action = .ctrl_c }, .wires = undefined },
             'd' => .{ .name = "Ctrl-D press", .event = .redraw, .after = "one to!", .wires = undefined },
             'j' => .{ .name = "Ctrl-J press", .event = .submit, .wires = undefined },
             else => unreachable,
@@ -412,18 +417,18 @@ test "TD2 explicit Kitty Ctrl press then release acts once through both editor e
                 @memcpy(storage[0..case.before.len], case.before);
                 var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice };
                 var input: Input = .{};
-                var pressed: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+                var pressed: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
                 deliver(&editor, &input, control.wires[3], &pressed);
                 try std.testing.expectEqual(case.event, pressed.event);
                 try std.testing.expectEqual(@as(usize, if (case.event == .submit) 1 else 0), pressed.submits);
-                var released: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+                var released: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
                 deliver(&editor, &input, release[0..split], &released);
                 deliver(&editor, &input, release[split..], &released);
-                try std.testing.expectEqual(Editor.Event.none, released.event);
+                try std.testing.expectEqual(Fed.none, released.event);
                 try std.testing.expectEqual(@as(usize, 0), released.submits);
                 try std.testing.expectEqualStrings(case.after, storage[0..editor.length]);
                 try std.testing.expectEqual(case.cursor, editor.cursor);
-                try std.testing.expectEqual(@as(?Editor.Event, null), editor.rejected);
+                try std.testing.expect(editor.rejected == null);
                 try std.testing.expectEqual(Input.Pending.none, input.pending());
             }
         };
@@ -479,7 +484,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
                 try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
             } else {
                 try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
-                if (pending == .escape) try std.testing.expect(try input.expire()) else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
+                if (pending == .escape) try std.testing.expect(try input.expire() != .none) else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
                 // Expiry did not consume ready input. It remains for the next
                 // read, not swallowed as part of an expired prefix. (Incomplete
                 // expiry ends the caller; read as its successor would.)
@@ -502,7 +507,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         @memcpy(storage[0..8], "headTAIL");
         var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
         var input: Input = .{};
-        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "\x1b", 1));
         const escape = (try terminal.next(io, &input, 0)).?;
         feedAt(&editor, &input, escape, &outcome);
@@ -511,7 +516,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         clock.at += 80_000_000 + offset;
         if (offset >= 0) {
             try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
-            try std.testing.expect(try input.expire());
+            try std.testing.expect(try input.expire() != .none);
             try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
             try std.testing.expectEqual(@as(usize, 4), editor.cursor);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
@@ -522,7 +527,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
-        try std.testing.expectEqual(if (offset < 0) Editor.Event.redraw else Editor.Event.submit, outcome.event);
+        try std.testing.expectEqual(@as(Fed, if (offset < 0) .redraw else .submit), outcome.event);
         try std.testing.expectEqual(Input.Pending.none, input.pending());
     };
 }
@@ -530,7 +535,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
 fn feedAt(editor: *Editor, input: *Input, read: @import("SessionTerminal.zig").Read, outcome: *Outcome) void {
     var decoded = input.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = input.next()) {
-        const event = editor.apply(decoded);
+        const event = editor.apply(keymap.every, decoded);
         if (event != .none) outcome.event = event;
         if (event == .submit) outcome.submits += 1;
     }
