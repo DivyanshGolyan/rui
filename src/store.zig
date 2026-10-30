@@ -12880,7 +12880,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         var preparation: @import("model_adapter.zig").Preparation = undefined;
         try storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
-        defer if (preparation.active) preparation.cancel();
+        defer if (preparation.state.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(7, 2);
             switch (progress) {
@@ -12939,7 +12939,7 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         var preparation: @import("model_adapter.zig").Preparation = undefined;
         try storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
-        defer if (preparation.active) preparation.cancel();
+        defer if (preparation.state.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(1, 1);
             switch (progress) {

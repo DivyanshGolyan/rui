@@ -3316,7 +3316,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             host.limits.request_preparation_byte_allowance,
             host.limits.request_preparation_item_allowance,
         ));
-        try std.testing.expect(!preparation.active and !preparation.view.active);
+        try std.testing.expect(!preparation.state.active and !preparation.view.active);
         try std.testing.expect(slots[0] == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
