@@ -221,7 +221,7 @@ pub const BashParser = struct {
                                 self.phase = .after_value;
                             },
                             .description => {
-                                if (!validDescription(self.result.description.slice())) return .invalid;
+                                if (!protocol.ToolPresentation.validDescription(self.result.description.slice())) return .invalid;
                                 self.has_description = true;
                                 self.phase = .after_value;
                             },
@@ -395,20 +395,6 @@ pub const BashParser = struct {
         return true;
     }
 };
-
-pub fn validDescription(bytes: []const u8) bool {
-    if (bytes.len == 0 or bytes.len > protocol.max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
-    var scalars = std.unicode.Utf8View.initUnchecked(bytes).iterator();
-    var nonblank = false;
-    while (scalars.nextCodepoint()) |scalar| {
-        switch (scalar) {
-            '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
-            ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
-            else => nonblank = true,
-        }
-    }
-    return nonblank;
-}
 
 fn isSpace(byte: u8) bool {
     return switch (byte) {

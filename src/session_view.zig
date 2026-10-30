@@ -2,6 +2,7 @@
 //! A failed stream may leave a visible prefix; the terminal owner must not retry it.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
@@ -784,7 +785,7 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     const result = try requests.readActionArguments(store, session, action, scratch, &reply);
     if (result == .command) {
         const failure = requests.captureReadFailure(result.command) catch {
-            try client.checkCanonicalFailure(result.command);
+            try protocol_reply.checkCanonicalFailure(result.command);
             return error.ActionReadFailed;
         };
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
@@ -848,7 +849,7 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     return summary;
 }
 
-pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !client.Current {
+pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !protocol_reply.Current {
     try scratch.setLength(requests.io, 0);
     const Capture = struct {
         io: std.Io,
@@ -862,7 +863,7 @@ pub fn current(requests: client.Requests, store: []const u8, session: []const u8
     var capture: Capture = .{ .io = requests.io, .file = scratch };
     var reply: client.ReplyBuffer = .{};
     const report = try requests.inspectSession(store, session, .current, &capture, &reply);
-    return switch (try client.CurrentReply.decode(requests.io, scratch, session, report)) {
+    return switch (try protocol_reply.CurrentReply.decode(requests.io, scratch, session, report)) {
         .current => |value| value,
         .unconfigured => error.SessionNotConfigured,
         .failure => |failure| requests.failRead(failure),
@@ -976,7 +977,7 @@ pub const Pending = struct {
 
 pub fn pending(requests: client.Requests, store: []const u8, session: []const u8, end: u64) !Pending {
     var summary: Pending = .{};
-    var cursor: client.ActivityCursor = .{ .end = end };
+    var cursor: protocol_reply.ActivityCursor = .{ .end = end };
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
             .page => |page| page,
@@ -1281,7 +1282,7 @@ test "an ended Turn says what happened and what to do next where it ended" {
     try std.testing.expectEqualStrings("\n! Work ended: retry_exhausted. Send a message to continue.\n", out.buffered());
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];

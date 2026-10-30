@@ -10,6 +10,7 @@ test {
     _ = @import("os/socket.zig");
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
+    _ = @import("protocol_reply.zig");
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");

@@ -1,6 +1,7 @@
 //! Atomic bounded Conversation preparation, distinct from one-pass opening.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const View = @import("session_view.zig");
 
@@ -10,7 +11,7 @@ pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_ite
 /// Owns metadata; borrows unchanged scratch from successful prepare to render.
 /// Preparation exposes no output or cursor; the caller commits after rendering.
 pub const Prepared = struct {
-    page: client.ConversationPage,
+    page: protocol_reply.ConversationPage,
     offsets: [protocol.public_conversation_page_items]u64 = undefined,
 
     /// The transcript matches live presentation; details keep exact tool output.
@@ -107,7 +108,7 @@ pub const Prepared = struct {
     }
 };
 
-fn collapsed(item: client.ConversationPage.Item) View.Collapsed {
+fn collapsed(item: protocol_reply.ConversationPage.Item) View.Collapsed {
     return .{ .source = .conversation, .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest }, .row = true };
 }
 
@@ -121,7 +122,7 @@ pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, positi
     try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ position, ordinal }));
 }
 
-pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
+pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor, scratch: std.Io.File) !Prepared {
     const page = switch (try requests.conversationPage(store, session, cursor)) {
         .page => |value| value,
         .failure => |failure| return requests.failRead(failure),
@@ -130,7 +131,7 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         requests: client.Requests,
         store: []const u8,
         session: []const u8,
-        fn read(self: @This(), item: client.ConversationPage.Item, _: usize, sink: anytype) !void {
+        fn read(self: @This(), item: protocol_reply.ConversationPage.Item, _: usize, sink: anytype) !void {
             if (try self.requests.readConversationContent(self.store, self.session, item.position, item.ordinal, item.content, sink)) |failure| return self.requests.failRead(failure);
         }
     };
@@ -139,7 +140,7 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
 
 // The source owns received-byte validation; this owner independently verifies
 // the actual scratch bytes before returning any presentation authority.
-fn stagePage(io: std.Io, page: client.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
+fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
     var prepared: Prepared = .{ .page = page };
     try scratch.setLength(io, 0);
     const Staging = struct {
@@ -420,7 +421,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         const peer = if (supplied) null else try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
         const Bytes = struct {
             bodies: [2][]const u8,
-            fn read(self: @This(), _: client.ConversationPage.Item, index: usize, sink: anytype) !void {
+            fn read(self: @This(), _: protocol_reply.ConversationPage.Item, index: usize, sink: anytype) !void {
                 const body = self.bodies[index];
                 var offset: usize = 0;
                 while (offset < body.len) {
@@ -431,7 +432,7 @@ test "history preparation binds wire and staged bytes before exposure" {
             }
         };
         const bytes: Bytes = .{ .bodies = .{ if (case.large) Peer.large_body else "first", if (case.empty_second) "" else "end" } };
-        var page: client.ConversationPage = .{ .end = 2, .count = if (case.large) 2 else 1, .more = false };
+        var page: protocol_reply.ConversationPage = .{ .end = 2, .count = if (case.large) 2 else 1, .more = false };
         for (page.items[0..page.count], 0..) |*item, index| {
             item.* = .{ .position = 2 - index, .ordinal = 0, .kind = if (index == 0) .user else .assistant, .content = .{ .bytes = bytes.bodies[index].len, .digest = undefined } };
             // Independent hashlib oracles, not the staging implementation.

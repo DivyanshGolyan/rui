@@ -6,7 +6,7 @@ pub fn main(init: std.process.Init) !void {
     defer std.heap.c_allocator.free(args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "layout")) {
         var buffer: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "activity page={d} cursor={d} bytes (fixed owned values)\n", .{ @sizeOf(client.ActivityPage), @sizeOf(client.ActivityCursor) }));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "activity page={d} cursor={d} bytes (fixed owned values)\n", .{ @sizeOf(client.protocol_reply.ActivityPage), @sizeOf(client.protocol_reply.ActivityCursor) }));
         return;
     }
     const requests: client.Requests = .{ .io = init.io };
@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
             .end = if (std.mem.eql(u8, args[4], "null")) null else try std.fmt.parseInt(u64, args[4], 10),
             .position = try std.fmt.parseInt(u64, args[5], 10),
             .ordinal = if (std.mem.eql(u8, args[6], "null")) null else try std.fmt.parseInt(u64, args[6], 10),
-            .direction = std.meta.stringToEnum(@FieldType(client.ActivityCursor, "direction"), args[7]) orelse return error.InvalidArguments,
+            .direction = std.meta.stringToEnum(@FieldType(client.protocol_reply.ActivityCursor, "direction"), args[7]) orelse return error.InvalidArguments,
         });
         const page = switch (reply) {
             .page => |page| page,

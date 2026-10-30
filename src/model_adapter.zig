@@ -3,10 +3,12 @@ const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
+const history_memo = @import("history_memo.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const h2 = @import("h2");
+const model_capability = @import("model_capability.zig");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -15,6 +17,11 @@ const tools = @import("tools.zig");
 
 const ScratchBudget = provider.ScratchBudget;
 const PreparedRequest = provider.PreparedRequest;
+pub const HistoryMemos = history_memo.Table;
+
+test {
+    _ = history_memo;
+}
 
 // The sole V1 model adapter owns Codex wire grammar, output interpretation,
 // and managed-route authentication. The Host owns only effect scheduling and
@@ -74,10 +81,11 @@ pub fn interpretOutput(
     event_data: *Output.EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
+    item_check: *Output.OutputItemCheck,
     faults: Output.Faults,
 ) OutputInterpretation {
     var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, faults) catch |err| return .{ .rejected = .{
+    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, item_check, faults) catch |err| return .{ .rejected = .{
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
@@ -210,7 +218,7 @@ test "provider interpretation preserves independently reported model evidence" {
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, .{});
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -274,7 +282,7 @@ test "provider interpretation closes failure variants without granting settlemen
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, .{ .metadata = case.fault });
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -295,7 +303,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, .{});
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{});
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -724,8 +732,11 @@ test "Codex headers carry turn state only when the Turn has one" {
     }
 }
 
+/// Where a prepared request is sent. The managed Codex route accepts no
+/// structured output, so preparing a Session with an output schema for it fails.
+pub const Route = enum { endpoint, managed };
+
 pub const PreparationFaults = struct {
-    managed_route: bool = false,
     first_step: bool = false,
     write: bool = false,
     seal: bool = false,
@@ -734,6 +745,10 @@ pub const PreparationFaults = struct {
     // set alongside unlink, the retained owner uses this gate so the test
     // can complete reclamation through the production path.
     unlink_removal: ?*const std.atomic.Value(bool) = null,
+    /// Fail the history memo read that would carry the copy past this many
+    /// span bytes, in place of that read. Earlier chunks already reached the
+    /// request, so the rewind must remove a partial span.
+    memo_read_failure_after: ?u64 = null,
 };
 
 const RequestWriter = struct {
@@ -745,8 +760,11 @@ const RequestWriter = struct {
     fail_write: bool,
     /// Accepted bytes not yet in the file. Every preparation advance flushes
     /// before it yields or seals, so between advances the file holds `offset`.
+    /// Writes are positional, so the file position never matters.
     pending: [preparation_byte_allowance]u8 = undefined,
     pending_length: usize = 0,
+    /// The file closed at seal; the charge stays until `deinit`.
+    closed: bool = false,
 
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
         const next_offset = std.math.add(u64, self.offset, bytes.len) catch
@@ -760,7 +778,7 @@ const RequestWriter = struct {
         if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
         if (bytes.len > self.pending.len - self.pending_length) try self.flush();
         if (bytes.len > self.pending.len) {
-            try self.file.writeStreamingAll(self.io, bytes);
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
         } else {
             @memcpy(self.pending[self.pending_length..][0..bytes.len], bytes);
             self.pending_length += bytes.len;
@@ -768,14 +786,59 @@ const RequestWriter = struct {
         self.offset = next_offset;
     }
 
+    /// Room for up to `length` bytes after the pending bytes, flushing them
+    /// first when fewer remain. The caller fills a prefix of it and appends
+    /// that prefix with `commit`, before any other write.
+    fn reserve(self: *RequestWriter, length: usize) ![]u8 {
+        const wanted = @min(length, self.pending.len);
+        if (wanted > self.pending.len - self.pending_length) try self.flush();
+        return self.pending[self.pending_length..][0..wanted];
+    }
+
+    /// Append `count` bytes that the caller placed at the start of the slice
+    /// `reserve` returned, charged like written bytes.
+    fn commit(self: *RequestWriter, count: usize) !void {
+        std.debug.assert(count <= self.pending.len - self.pending_length);
+        const next_offset = std.math.add(u64, self.offset, count) catch
+            return error.RequestLengthOverflow;
+        const next_charged = std.math.add(u64, self.charged, count) catch
+            return error.RequestLengthOverflow;
+        if (!self.budget.allocate(count)) return error.RequestScratchExhausted;
+        self.charged = next_charged;
+        if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
+        self.pending_length += count;
+        self.offset = next_offset;
+    }
+
     fn flush(self: *RequestWriter) !void {
         if (self.pending_length == 0) return;
-        try self.file.writeStreamingAll(self.io, self.pending[0..self.pending_length]);
+        try self.file.writePositionalAll(self.io, self.pending[0..self.pending_length], self.offset - self.pending_length);
         self.pending_length = 0;
     }
 
-    fn deinit(self: *RequestWriter) void {
+    /// Continue writing at `offset`, which was flushed, discarding what
+    /// follows. Truncation proves those bytes gone and returns their charge
+    /// above `charged`. Without it they stay charged until both aliases
+    /// close; positional writes overwrite them, and sealing still requires
+    /// the file length to equal the request length.
+    fn rewind(self: *RequestWriter, offset: u64, charged: u64) void {
+        std.debug.assert(offset <= self.offset and charged <= self.charged);
+        self.pending_length = 0;
+        self.offset = offset;
+        self.file.setLength(self.io, offset) catch return;
+        self.budget.release(self.charged - charged);
+        self.charged = charged;
+    }
+
+    /// Close the sealed file, whose bytes the read-only alias keeps.
+    fn close(self: *RequestWriter) void {
+        std.debug.assert(self.pending_length == 0);
         self.file.close(self.io);
+        self.closed = true;
+    }
+
+    fn deinit(self: *RequestWriter) void {
+        if (!self.closed) self.file.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -835,73 +898,230 @@ const peer_parts = blk: {
     break :blk result;
 };
 
-/// A peer Message's leading input part. The Host recorded its sender; the
-/// adapter renders that saved fact, never text a peer wrote.
-const PeerPart = union(enum) { text: []const u8, sender };
-const peer_rule = [_]PeerPart{
-    .{ .text = peer_parts[0] },
-    .sender,
-    .{ .text = peer_parts[1] },
+/// One element of a model request, read from the Operation's historical
+/// view in request order. Each item is a value; the provider's writer alone
+/// turns it into wire bytes.
+const RequestItem = union(enum) {
+    /// Model, tool-call policy and reasoning effort.
+    settings,
+    /// Rui's runtime context, the Workspace, the Session's own address and
+    /// the saved baseline instructions.
+    instructions,
+    /// The history span an earlier request of this Session encoded.
+    history_memo,
+    /// A User Message or an instruction update.
+    message: store.HistoricalEntry,
+    /// One accepted output item, judged compatible and replayed.
+    replayed_output: Replayed,
+    tool_result: store.HistoricalToolResult,
+    compaction_trigger,
+    tools,
+    /// Verbosity and the optional output schema.
+    text_format,
 };
+
+/// A stretch of wire bytes, named by how its source reaches the request.
+const Piece = union(enum) {
+    /// Literal JSON syntax, copied.
+    syntax: []const u8,
+    /// Bytes escaped into the enclosing JSON string.
+    escaped: []const u8,
+    /// A JSON string literal inside the enclosing string, escaped twice.
+    /// Its enclosing quotes belong to the caller.
+    nested: []const u8,
+    /// Canonical text escaped into the enclosing JSON string.
+    escaped_content: store.HistoricalContent,
+    /// Canonical JSON, copied.
+    verbatim_content: store.HistoricalContent,
+    /// Accepted output the grammar judged compatible, replayed.
+    replay: Replayed,
+    history_memo,
+};
+
+/// A replayed output item. Private reasoning text is never replay input.
+const Replayed = struct { content: store.HistoricalContent, omit_reasoning_text: bool };
+
+/// One item's pieces, written in order.
+const Pieces = struct {
+    list: [8]Piece = undefined,
+    length: u8 = 0,
+    next_index: u8 = 0,
+
+    fn add(self: *Pieces, piece: Piece) void {
+        std.debug.assert(self.length < self.list.len);
+        self.list[self.length] = piece;
+        self.length += 1;
+    }
+
+    fn next(self: *Pieces) ?Piece {
+        if (self.done()) return null;
+        defer self.next_index += 1;
+        return self.list[self.next_index];
+    }
+
+    fn done(self: *const Pieces) bool {
+        return self.next_index == self.length;
+    }
+};
+
+fn codexEnvelope(comptime parallel_tool_calls: bool) []const u8 {
+    return "\",\"parallel_tool_calls\":" ++ (if (parallel_tool_calls) "true" else "false") ++
+        ",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+}
+
+/// An input item after another takes a comma.
+fn separateInput(pieces: *Pieces, input_comma: *bool) void {
+    if (input_comma.*) pieces.add(.{ .syntax = "," });
+    input_comma.* = true;
+}
+
+/// The Codex Responses encoding of one item. Its pieces borrow from `item`
+/// and `settings`. `input_comma` is the only syntax state carried between
+/// items.
+fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool) Pieces {
+    var pieces: Pieces = .{};
+    switch (item.*) {
+        .settings => {
+            pieces.add(.{ .syntax = "{\"model\":\"" });
+            pieces.add(.{ .escaped = settings.model.slice() });
+            pieces.add(.{ .syntax = if (model_capability.parallelToolCalls(settings.model.slice())) codexEnvelope(true) else codexEnvelope(false) });
+            if (settings.reasoning_effort) |effort| pieces.add(.{ .syntax = switch (effort) {
+                inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
+            } });
+        },
+        .instructions => {
+            pieces.add(.{ .syntax = ",\"instructions\":\"" });
+            pieces.add(.{ .escaped = context_parts[0] });
+            pieces.add(.{ .nested = settings.workspace.slice() });
+            // The originating Operation's ID, rebuilt on every Attempt.
+            pieces.add(.{ .escaped = context_parts[1] });
+            pieces.add(.{ .nested = settings.session.slice() });
+            pieces.add(.{ .escaped = context_parts[2] });
+            pieces.add(.{ .escaped_content = settings.baseline_instructions });
+            pieces.add(.{ .syntax = "\",\"input\":[" });
+        },
+        // A memo is the span's first bytes and records its own comma state.
+        .history_memo => pieces.add(.history_memo),
+        .message => |*entry| {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = if (entry.kind == .user)
+                "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
+            else
+                "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"" });
+            // A peer Message's sender is its own leading part, separate from
+            // the text the peer wrote. The Host recorded that sender; the
+            // adapter renders the saved fact, never text a peer wrote.
+            if (entry.sender) |*sender| {
+                pieces.add(.{ .escaped = peer_parts[0] });
+                pieces.add(.{ .nested = sender.slice() });
+                pieces.add(.{ .escaped = peer_parts[1] });
+                pieces.add(.{ .syntax = "\"},{\"type\":\"input_text\",\"text\":\"" });
+            }
+            pieces.add(.{ .escaped_content = entry.content.? });
+            pieces.add(.{ .syntax = "\"}]}" });
+        },
+        .replayed_output => |replayed| {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .replay = replayed });
+        },
+        .tool_result => |result| {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = "{\"type\":\"function_call_output\",\"call_id\":\"" });
+            pieces.add(.{ .escaped_content = result.call_id });
+            pieces.add(.{ .syntax = "\",\"output\":\"" });
+            pieces.add(.{ .escaped_content = result.output });
+            pieces.add(.{ .syntax = "\"}" });
+        },
+        .compaction_trigger => {
+            separateInput(&pieces, input_comma);
+            pieces.add(.{ .syntax = "{\"type\":\"compaction_trigger\"}" });
+        },
+        .tools => {
+            pieces.add(.{ .syntax = "],\"tools\":[" });
+            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .syntax = tools.bash_definition_json });
+            pieces.add(.{ .syntax = "]" });
+        },
+        .text_format => if (settings.output_schema) |schema| {
+            pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":" });
+            pieces.add(.{ .verbatim_content = schema });
+            pieces.add(.{ .syntax = "}}}" });
+        } else pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\"}}" }),
+    }
+    return pieces;
+}
 
 pub const Preparation = struct {
     view: store.HistoricalView,
+    route: Route,
     settings: ?store.HistoricalSettings = null,
     writer: RequestWriter,
     readonly: std.Io.File,
     faults: PreparationFaults,
-    phase: Phase = .settings,
-    next_phase: Phase = .settings,
+    /// Where the next item comes from.
+    stage: Stage = .settings,
+    /// The item being written; its pieces borrow from it.
+    item: RequestItem = .settings,
+    pieces: Pieces = .{},
     emission: Emission = .none,
     input_comma: bool = false,
     continuation_unavailable: bool = false,
     history_position: u64 = 0,
-    selected_anchor: ?u64 = null,
-    current_entry: ?store.HistoricalEntry = null,
-    current_tool_result: ?store.HistoricalToolResult = null,
-    peer_part: usize = 0,
+    /// The served output entry the replay_verdict stage judges.
+    replay_entry: store.HistoricalEntry = undefined,
     active: bool = true,
     last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
+    /// The Host's history memos, borrowed for the preparation's life. Null
+    /// rebuilds every request in full and keeps nothing.
+    memos: ?*history_memo.Table,
+    /// This request's history span, from its start while memos are kept.
+    span: ?MemoSpan = null,
+    /// The sealed span being kept as the Session's memo.
+    memo_write: ?history_memo.Write = null,
 
-    const Phase = enum {
+    const MemoSpan = struct {
+        /// Request offset of the span's first byte, flushed before a copy.
+        start: u64,
+        /// The Session's memo copied as the span's prefix, once its copy
+        /// begins; dropped with a failed copy.
+        copy: ?MemoCopy = null,
+        /// The finished span, kept as the Session's memo once the request
+        /// seals.
+        next: ?history_memo.Memo = null,
+    };
+
+    const MemoCopy = struct {
+        memo: history_memo.Memo,
+        /// Open only while copying.
+        file: ?std.Io.File,
+        copied: u64 = 0,
+        /// The writer's charge before the copy, restored by a rewind.
+        charged: u64,
+        /// Digest state of the bytes copied so far.
+        hasher: history_memo.Hasher = history_memo.newHasher(),
+    };
+
+    const Stage = enum {
         settings,
         history_validation,
-        model_prefix,
-        model,
-        envelope,
-        reasoning,
-        instructions_prefix,
-        runtime_instructions,
-        workspace,
-        address_prefix,
-        address_session,
-        instructions_separator,
-        instructions_content,
-        input_prefix,
-        history_next,
-        covered_tool_result_next,
+        instructions,
+        history_start,
+        history,
+        replay_verdict,
+        tool_results,
+        covered_tool_results,
         compaction_trigger,
-        entry_comma,
-        entry_prefix,
-        peer_part,
-        entry_content,
-        entry_suffix,
-        tool_result_next,
-        tool_result_prefix,
-        tool_call_id,
-        tool_result_middle,
-        tool_output,
-        tool_result_suffix,
-        tools_prefix,
-        bash_tool,
-        tools_suffix,
-        schema_prefix,
-        schema,
-        schema_suffix,
-        request_suffix,
-        seal,
-        emitting,
+        tools,
+        text_format,
+        end,
+        history_store,
         complete,
+    };
+
+    const Next = union(enum) {
+        /// No item yet: the stage moved on or waits for allowance.
+        pending,
+        item: RequestItem,
+        end,
     };
 
     const JsonEmission = struct {
@@ -922,8 +1142,6 @@ pub const Preparation = struct {
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
-        validation: Output.ReplayValidationCursor = .{},
-        validated: bool = false,
         cursor: request_encoding.ReplayCursor = .{},
     };
 
@@ -933,6 +1151,17 @@ pub const Preparation = struct {
         json: JsonEmission,
         raw: RawEmission,
         replay: ReplayEmission,
+        history_memo,
+
+        /// The content reader the emission holds open, if any.
+        fn reader(self: *Emission) ?*store.HistoricalReader {
+            return switch (self.*) {
+                .none, .fixed, .history_memo => null,
+                .json => |*json| if (json.reader) |*value| value else null,
+                .raw => |*raw| &raw.reader,
+                .replay => |*replay| &replay.reader,
+            };
+        }
     };
 
     pub fn init(
@@ -941,20 +1170,35 @@ pub const Preparation = struct {
         view: store.HistoricalView,
         scratch_path: []const u8,
         budget: ScratchBudget,
+        route: Route,
+        memos: ?*history_memo.Table,
         faults: PreparationFaults,
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        var owned_view = view;
-        errdefer owned_view.close();
+        // The view moves straight into place: a local copy would add the
+        // whole view to the caller's frame, all of it resident once probed.
+        // It moves only while no item is being read, since the grammar
+        // borrows its own nesting buffer.
+        std.debug.assert(view.itemCheckIdle());
+        self.* = .{
+            .view = view,
+            .route = route,
+            .writer = undefined,
+            .readonly = undefined,
+            .faults = faults,
+            .memos = memos,
+            .active = false,
+        };
+        errdefer self.view.close();
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.@"provider-request".format(
             &name_buffer,
-            view.binding.operation_id,
-            view.binding.attempt_ordinal,
+            self.view.binding.operation_id,
+            self.view.binding.attempt_ordinal,
         );
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
@@ -970,19 +1214,19 @@ pub const Preparation = struct {
             retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
-        self.* = .{
-            .view = owned_view,
-            .writer = .{
-                .io = io,
-                .file = file,
-                .budget = budget,
-                .fail_write = faults.write,
-            },
-            .readonly = readonly,
-            .faults = faults,
+        self.writer = .{
+            .io = io,
+            .file = file,
+            .budget = budget,
+            .fail_write = faults.write,
         };
+        self.readonly = readonly;
+        self.active = true;
     }
 
+    /// Write the request one item at a time: take the next item from the
+    /// view, turn it into pieces with the provider's writer, and stream each
+    /// piece under the allowance.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.active and byte_allowance != 0 and item_allowance != 0);
         var bytes_left = byte_allowance;
@@ -994,191 +1238,243 @@ pub const Preparation = struct {
         };
         self.view.checkAttempt() catch |err| return .{ .failed = err };
         while (bytes_left != 0 and items_left != 0) {
-            if (self.phase == .emitting) {
+            if (self.emission != .none) {
                 const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };
                 if (!finished) return self.flushAndYield();
-                self.phase = self.next_phase;
                 continue;
             }
             items_left -= 1;
-            switch (self.phase) {
-                .settings => {
-                    self.settings = self.view.settings() catch |err| return .{ .failed = err };
-                    if (self.faults.managed_route and self.settings.?.output_schema != null)
-                        return .{ .failed = error.UnsupportedCodexConfiguration };
-                    self.phase = .history_validation;
-                },
-                .history_validation => {
-                    if (!(self.view.validateOutputsStep() catch |err| return .{ .failed = err })) continue;
-                    self.selected_anchor = self.view.contextAnchor() catch |err| return .{ .failed = err };
-                    self.phase = switch (self.settings.?.provider) {
-                        .codex => .model_prefix,
+            if (self.pieces.next()) |piece| {
+                self.startPiece(piece) catch |err| return .{ .failed = err };
+                continue;
+            }
+            // The sealed request is the memo's source, copied under the
+            // allowance; a failure loses only the memo.
+            if (self.stage == .history_store) {
+                const write = &(self.memo_write orelse return self.finish());
+                const memos = self.memos.?;
+                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left) catch {
+                    self.abandonMemoWrite();
+                    return self.finish();
+                };
+                if (!write.done()) continue;
+                memos.commit(self.writer.io, write);
+                self.memo_write = null;
+                return self.finish();
+            }
+            switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
+                .pending => {},
+                .item => |item| {
+                    self.item = item;
+                    self.pieces = switch (self.settings.?.provider) {
+                        .codex => codexPieces(&self.item, &self.settings.?, &self.input_comma),
                     };
                 },
-                .model_prefix => self.emitFixed("{\"model\":\"", .model),
-                .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
-                .envelope => self.emitFixed(if (@import("model_capability.zig").parallelToolCalls(self.settings.?.model.slice()))
-                    "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]"
-                else
-                    "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]", .reasoning),
-                .reasoning => {
-                    if (self.settings.?.reasoning_effort) |effort| switch (effort) {
-                        inline else => |value| self.emitFixed(",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}", .instructions_prefix),
-                    } else self.phase = .instructions_prefix;
-                },
-                .instructions_prefix => self.emitFixed(",\"instructions\":\"", .runtime_instructions),
-                .runtime_instructions => self.emitJsonBytes(context_parts[0], .workspace),
-                .workspace => {
-                    self.emitJsonBytes(self.settings.?.workspace.slice(), .address_prefix);
-                    self.emission.json.cursor.nested_string = true;
-                },
-                // The originating Operation's ID, rebuilt on every Attempt.
-                .address_prefix => self.emitJsonBytes(context_parts[1], .address_session),
-                .address_session => {
-                    self.emitJsonBytes(self.settings.?.session.slice(), .instructions_separator);
-                    self.emission.json.cursor.nested_string = true;
-                },
-                .instructions_separator => self.emitJsonBytes(context_parts[2], .instructions_content),
-                .instructions_content => {
-                    const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .input_prefix);
-                },
-                .input_prefix => self.emitFixed("\",\"input\":[", .history_next),
-                .history_next => {
-                    items_left += 1; // The semantic cursor charges discovery or parser work.
-                    const progress = self.view.nextEntryStep(self.history_position, &bytes_left, &items_left) catch |err| return .{ .failed = err };
-                    const entry = switch (progress) {
-                        .pending => continue,
-                        .ready => |entry| entry,
-                    };
-                    if (entry) |item| {
-                        self.history_position = item.position;
-                        if (self.selected_anchor) |anchor| {
-                            if (item.position < anchor and (item.kind == .provider_output or item.kind == .tool_results)) {
-                                if (item.kind == .tool_results) self.phase = .covered_tool_result_next;
-                                continue;
-                            }
-                        }
-                        if (item.requested_model) |model| {
-                            validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch {
-                                self.continuation_unavailable = true;
-                            };
-                        }
-                    }
-                    self.current_entry = entry;
-                    if (entry == null) {
-                        self.phase = .compaction_trigger;
-                    } else if (entry.?.kind == .tool_results) {
-                        self.phase = .tool_result_next;
-                    } else self.phase = .entry_comma;
-                },
-                .covered_tool_result_next => {
-                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
-                    if (result == null) self.phase = .history_next;
-                },
-                .compaction_trigger => {
-                    if (self.settings.?.operation == .compaction) {
-                        self.emitFixed(if (self.input_comma)
-                            ",{\"type\":\"compaction_trigger\"}"
-                        else
-                            "{\"type\":\"compaction_trigger\"}", .tools_prefix);
-                    } else self.phase = .tools_prefix;
-                },
-                .entry_comma => {
-                    if (self.input_comma) self.emitFixed(",", .entry_prefix) else self.phase = .entry_prefix;
-                },
-                .entry_prefix => {
-                    const entry = self.current_entry.?;
-                    if (entry.kind == .provider_output) {
-                        const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
-                        self.emitReplay(reader, .entry_suffix);
-                    } else {
-                        const prefix = if (entry.kind == .user)
-                            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
-                        else
-                            "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
-                        self.peer_part = 0;
-                        self.emitFixed(prefix, if (entry.sender != null) .peer_part else .entry_content);
-                    }
-                },
-                // A peer Message's sender is its own leading part, separate
-                // from the text the peer wrote.
-                .peer_part => {
-                    if (self.peer_part == peer_rule.len) {
-                        self.emitFixed("\"},{\"type\":\"input_text\",\"text\":\"", .entry_content);
-                        continue;
-                    }
-                    const part = peer_rule[self.peer_part];
-                    self.peer_part += 1;
-                    switch (part) {
-                        .text => |text| self.emitJsonBytes(text, .peer_part),
-                        .sender => {
-                            self.emitJsonBytes(self.current_entry.?.sender.?.slice(), .peer_part);
-                            self.emission.json.cursor.nested_string = true;
-                        },
-                    }
-                },
-                .entry_content => {
-                    const reader = self.view.openContent(self.current_entry.?.content.?) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .entry_suffix);
-                },
-                .entry_suffix => {
-                    const entry = self.current_entry.?;
-                    self.input_comma = true;
-                    self.current_entry = null;
-                    if (entry.kind == .provider_output) self.phase = .history_next else self.emitFixed("\"}]}", .history_next);
-                },
-                .tool_result_next => {
-                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
-                    self.current_tool_result = result;
-                    if (result == null) {
-                        self.current_entry = null;
-                        self.phase = .history_next;
-                    } else self.phase = .tool_result_prefix;
-                },
-                .tool_result_prefix => {
-                    const prefix = if (self.input_comma)
-                        ",{\"type\":\"function_call_output\",\"call_id\":\""
-                    else
-                        "{\"type\":\"function_call_output\",\"call_id\":\"";
-                    self.emitFixed(prefix, .tool_call_id);
-                },
-                .tool_call_id => {
-                    const reader = self.view.openContent(self.current_tool_result.?.call_id) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .tool_result_middle);
-                },
-                .tool_result_middle => self.emitFixed("\",\"output\":\"", .tool_output),
-                .tool_output => {
-                    const reader = self.view.openContent(self.current_tool_result.?.output) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .tool_result_suffix);
-                },
-                .tool_result_suffix => {
-                    self.input_comma = true;
-                    self.current_tool_result = null;
-                    self.emitFixed("\"}", .tool_result_next);
-                },
-                .tools_prefix => self.emitFixed("],\"tools\":[", .bash_tool),
-                .bash_tool => {
-                    if (self.settings.?.tools_mask & tools.toolBit(.bash) != 0) {
-                        self.emitFixed(tools.bash_definition_json, .tools_suffix);
-                    } else self.phase = .tools_suffix;
-                },
-                .tools_suffix => {
-                    if (self.settings.?.output_schema != null) self.emitFixed("]", .schema_prefix) else self.emitFixed("],\"text\":{\"verbosity\":\"low\"}", .request_suffix);
-                },
-                .schema_prefix => self.emitFixed(",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":", .schema),
-                .schema => {
-                    const reader = self.view.openContent(self.settings.?.output_schema.?) catch |err| return .{ .failed = err };
-                    self.emitRawReader(reader, .schema_suffix);
-                },
-                .schema_suffix => self.emitFixed("}}", .request_suffix),
-                .request_suffix => self.emitFixed("}", .seal),
-                .seal => return self.seal() catch |err| .{ .failed = err },
-                .complete => unreachable,
-                .emitting => unreachable,
+                .end => self.seal() catch |err| return .{ .failed = err },
             }
         }
         return self.flushAndYield();
+    }
+
+    /// The request's next item, read from the view. History decisions live
+    /// here: which output a compaction base covers, where the history memo
+    /// resumes, and whether a compaction trigger ends the input.
+    fn nextItem(self: *Preparation, bytes_left: *usize, items_left: *usize) !Next {
+        switch (self.stage) {
+            .settings => {
+                self.settings = try self.view.settings();
+                if (self.route == .managed and self.settings.?.output_schema != null)
+                    return error.UnsupportedCodexConfiguration;
+                self.stage = .history_validation;
+            },
+            .history_validation => {
+                if (!try self.view.validateOutputsStep()) return .pending;
+                // The selected base must be readable before any request byte.
+                _ = try self.view.coverage();
+                self.stage = .instructions;
+                return .{ .item = .settings };
+            },
+            .instructions => {
+                self.stage = .history_start;
+                return .{ .item = .instructions };
+            },
+            // The history span starts here. A memo of this Session's
+            // previous span that this view contains replaces encoding that
+            // prefix; anything else rebuilds it from the Store.
+            .history_start => {
+                self.stage = .history;
+                const memos = self.memos orelse return .pending;
+                self.span = .{ .start = self.writer.offset };
+                const memo = memos.held(self.settings.?.session.slice()) orelse return .pending;
+                const key = try self.memoKey();
+                if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
+                try self.writer.flush();
+                const file = memos.open(self.writer.io, &memo) orelse return .pending;
+                self.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
+                return .{ .item = .history_memo };
+            },
+            .history => {
+                items_left.* += 1; // The semantic cursor charges discovery or parser work.
+                const entry = switch (try self.view.nextEntryStep(self.history_position, bytes_left, items_left)) {
+                    .pending => return .pending,
+                    .ready => |entry| entry orelse {
+                        try self.endSpan();
+                        self.stage = .compaction_trigger;
+                        return .pending;
+                    },
+                };
+                self.history_position = entry.position;
+                // The selected base replaces the output before its anchor;
+                // Codex keeps every host input it covers.
+                const anchor = (try self.view.coverage()).anchor;
+                const covered = if (anchor) |position| entry.position < position else false;
+                switch (entry.kind) {
+                    .user, .instruction => return .{ .item = .{ .message = entry } },
+                    .tool_results => self.stage = if (covered) .covered_tool_results else .tool_results,
+                    .provider_output => {
+                        if (covered) return .pending;
+                        validateRequestedBinding(entry.requested_model.?.slice(), self.settings.?.model.slice()) catch {
+                            self.continuation_unavailable = true;
+                        };
+                        self.replay_entry = entry;
+                        self.stage = .replay_verdict;
+                    },
+                }
+            },
+            // Every replayed item is judged, even once continuation is
+            // unavailable: compatibility never excuses unauthenticated later
+            // items. The Store already judged a call before serving it, so
+            // each item gets one grammar pass. Unusable output stays private;
+            // no partial request can seal.
+            .replay_verdict => {
+                items_left.* += 1; // The Store charges its own reading work.
+                const verdict = try self.view.replayVerdictStep(&self.replay_entry, bytes_left, items_left) orelse return .pending;
+                self.stage = .history;
+                switch (verdict) {
+                    .incompatible => self.continuation_unavailable = true,
+                    .compatible => |compatible| if (!self.continuation_unavailable) return .{ .item = .{ .replayed_output = .{
+                        .content = self.replay_entry.content.?,
+                        .omit_reasoning_text = compatible.omit_reasoning_text,
+                    } } },
+                }
+            },
+            .tool_results => {
+                const result = try self.view.nextToolResult() orelse {
+                    self.stage = .history;
+                    return .pending;
+                };
+                return .{ .item = .{ .tool_result = result } };
+            },
+            .covered_tool_results => {
+                if (try self.view.nextToolResult() == null) self.stage = .history;
+            },
+            .compaction_trigger => {
+                self.stage = .tools;
+                if (self.settings.?.operation == .compaction) return .{ .item = .compaction_trigger };
+            },
+            .tools => {
+                self.stage = .text_format;
+                return .{ .item = .tools };
+            },
+            .text_format => {
+                self.stage = .end;
+                return .{ .item = .text_format };
+            },
+            .end => return .end,
+            .history_store, .complete => unreachable,
+        }
+        return .pending;
+    }
+
+    fn memoKey(self: *Preparation) !history_memo.Key {
+        return .{
+            .session = self.settings.?.session,
+            .model = self.settings.?.model,
+            .anchor = (try self.view.coverage()).anchor,
+        };
+    }
+
+    /// Read the memo's next bytes into `destination`. A short file or a
+    /// read failure loses the memo.
+    fn readMemo(self: *Preparation, copy: *const MemoCopy, destination: []u8) !usize {
+        if (self.faults.memo_read_failure_after) |after| {
+            if (copy.copied + destination.len > after) return error.InjectedMemoReadFailure;
+        }
+        const count = try copy.file.?.readPositionalAll(self.writer.io, destination, copy.copied);
+        if (count == 0) return error.EndOfStream;
+        return count;
+    }
+
+    /// Copy the memo's bytes into the request, hashing as they go, one
+    /// item per chunk. Returns true once the copy ends, matched or lost.
+    fn advanceMemoCopy(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
+        const copy = &self.span.?.copy.?;
+        while (copy.copied != copy.memo.length) {
+            if (bytes_left.* == 0 or items_left.* == 0) return false;
+            items_left.* -= 1;
+            const destination = try self.writer.reserve(@intCast(@min(bytes_left.*, copy.memo.length - copy.copied)));
+            const count = self.readMemo(copy, destination) catch {
+                self.abandonMemoCopy();
+                return true;
+            };
+            copy.hasher.update(destination[0..count]);
+            try self.writer.commit(count);
+            copy.copied += count;
+            bytes_left.* -= count;
+        }
+        if (copy.hasher.final() == copy.memo.digest) self.finishMemoCopy() else self.abandonMemoCopy();
+        return true;
+    }
+
+    /// The copied bytes match the memo's digest: resume encoding exactly as
+    /// the producing request's encoder stood after its last entry.
+    fn finishMemoCopy(self: *Preparation) void {
+        self.closeMemoFile();
+        const memo = &self.span.?.copy.?.memo;
+        self.history_position = memo.history_position;
+        self.input_comma = memo.input_comma;
+        self.view.resumeToolGroups(memo.tool_group_cursor);
+    }
+
+    /// A failed read or a digest mismatch loses only the memo that was
+    /// copied: discard the partial span and its charge, drop that memo and
+    /// rebuild the history from the Store.
+    fn abandonMemoCopy(self: *Preparation) void {
+        self.closeMemoFile();
+        const span = &self.span.?;
+        const copy = span.copy.?;
+        span.copy = null;
+        self.writer.rewind(span.start, copy.charged);
+        self.memos.?.forget(self.writer.io, &copy.memo);
+    }
+
+    fn closeMemoFile(self: *Preparation) void {
+        const span = &(self.span orelse return);
+        const copy = &(span.copy orelse return);
+        if (copy.file) |file| file.close(self.writer.io);
+        copy.file = null;
+    }
+
+    /// The span ends after the last entry; keep it as this Session's next
+    /// memo once the request seals.
+    fn endSpan(self: *Preparation) !void {
+        const span = &(self.span orelse return);
+        span.next = .{
+            .key = try self.memoKey(),
+            .admission_position = self.view.admissionPosition(),
+            .history_position = self.history_position,
+            .tool_group_cursor = self.view.toolGroupCursor(),
+            .input_comma = self.input_comma,
+            .length = self.writer.offset - span.start,
+            .digest = undefined,
+        };
+    }
+
+    /// Bytes of this request's span that a memo supplied.
+    fn memoCopied(self: *const Preparation) u64 {
+        const span = self.span orelse return 0;
+        const copy = span.copy orelse return 0;
+        return copy.copied;
     }
 
     fn flushAndYield(self: *Preparation) PreparationProgress {
@@ -1190,34 +1486,19 @@ pub const Preparation = struct {
         return self.last_advance;
     }
 
-    fn emitFixed(self: *Preparation, bytes: []const u8, next: Phase) void {
-        self.emission = .{ .fixed = .{ .bytes = bytes } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitJsonBytes(self: *Preparation, bytes: []const u8, next: Phase) void {
-        self.emission = .{ .json = .{ .bytes = bytes } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitJsonReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .json = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitRawReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .raw = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
-    }
-
-    fn emitReplay(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
-        self.emission = .{ .replay = .{ .reader = reader } };
-        self.next_phase = next;
-        self.phase = .emitting;
+    fn startPiece(self: *Preparation, piece: Piece) !void {
+        switch (piece) {
+            .syntax => |bytes| self.emission = .{ .fixed = .{ .bytes = bytes } },
+            .escaped => |bytes| self.emission = .{ .json = .{ .bytes = bytes } },
+            .nested => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
+            .escaped_content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
+            .verbatim_content => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
+            .replay => |replayed| self.emission = .{ .replay = .{
+                .reader = try self.view.openContent(replayed.content),
+                .cursor = .{ .omit_content = replayed.omit_reasoning_text },
+            } },
+            .history_memo => self.emission = .{ .history_memo = {} },
+        }
     }
 
     fn advanceEmission(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
@@ -1236,38 +1517,11 @@ pub const Preparation = struct {
                 raw.reader.close();
             },
             .replay => |*replay| {
-                if (!replay.validated) {
-                    const sequential = HistoricalSource{ .reader = &replay.reader };
-                    var incompatible = false;
-                    const complete = replay.validation.advance(sequential, bytes_left, items_left) catch |err| switch (err) {
-                        error.ContinuationUnavailable => done: {
-                            incompatible = true;
-                            break :done true;
-                        },
-                        error.SyntaxError,
-                        error.UnexpectedEndOfInput,
-                        error.UnexpectedJsonDelimiter,
-                        error.InvalidJsonUtf8,
-                        error.JsonTooDeep,
-                        error.DuplicateJsonField,
-                        => return replay.reader.malformed(),
-                        else => return err,
-                    };
-                    if (!complete) return false;
-                    const identity = replay.reader.itemIdentity();
-                    replay.validation.authenticateIdentity(identity.kind, identity.id_digest) catch return replay.reader.malformed();
-                    if (incompatible) self.continuation_unavailable = true;
-                    if (!self.continuation_unavailable) replay.cursor.omit_content = replay.validation.replaysReasoningText();
-                    replay.validated = true;
-                }
-                // Compatibility never excuses unauthenticated later items.
-                // Unusable output stays private; no partial request can seal.
-                if (!self.continuation_unavailable) {
-                    const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
-                    if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
-                }
+                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
+                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
+            .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
         }
         // Naming the void field stores only the tag; `.none` lowers to a
         // memset of the whole union, replay validation window included.
@@ -1284,15 +1538,30 @@ pub const Preparation = struct {
         return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
-    fn seal(self: *Preparation) !PreparationProgress {
+    fn seal(self: *Preparation) !void {
         if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.flush();
         try self.writer.file.sync(self.writer.io);
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
         self.closeEmission();
+        // The writer closes before a memo file opens.
+        self.writer.close();
+        self.stage = .history_store;
+        const span = &(self.span orelse return);
+        const next = span.next orelse return;
+        const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
+        self.memo_write = self.memos.?.begin(self.writer.io, next, span.start, if (prefix) |*value| value else null);
+    }
+
+    fn abandonMemoWrite(self: *Preparation) void {
+        const write = &(self.memo_write orelse return);
+        self.memos.?.abandon(self.writer.io, write);
+        self.memo_write = null;
+    }
+
+    fn finish(self: *Preparation) PreparationProgress {
         self.view.close();
-        self.writer.file.close(self.writer.io);
         const request = PreparedRequest{
             .file = self.readonly,
             .length = self.writer.offset,
@@ -1301,12 +1570,14 @@ pub const Preparation = struct {
             .session_affinity = self.settings.?.session_affinity,
         };
         self.active = false;
-        self.phase = .complete;
+        self.stage = .complete;
         return .{ .prepared = request };
     }
 
     pub fn cancel(self: *Preparation) void {
         std.debug.assert(self.active);
+        self.closeMemoFile();
+        self.abandonMemoWrite();
         self.closeEmission();
         self.view.close();
         self.readonly.close(self.writer.io);
@@ -1318,8 +1589,9 @@ pub const Preparation = struct {
     /// preparation without mutating it. The legal checkpoint is a stable
     /// point between synchronous advances, while the preparation remains
     /// in its final storage under the existing single-owner discipline.
-    /// Must not be called after cancellation or sealing: the writer is
-    /// consumed and an inactive preparation owns no request resources.
+    /// Must not be called after cancellation or completion: an inactive
+    /// preparation owns no request resources. While a sealed request's span
+    /// is kept as a memo the writer is closed and the view still open.
     /// Reuses the view's reader count, borrowed-reference ownership, and
     /// reader-active facts; no outstanding-reader registry is added.
     pub fn checkIntegrity(self: *Preparation, expected: store.AttemptBinding) !void {
@@ -1330,33 +1602,15 @@ pub const Preparation = struct {
             if (!self.view.ownsSettings(frozen)) return error.PreparationForeignContent;
         }
         var expected_readers: usize = 0;
-        switch (self.emission) {
-            .none, .fixed => {},
-            .json => |*json| {
-                if (json.reader) |*reader| {
-                    expected_readers = 1;
-                    if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-                }
-            },
-            .raw => |*raw| {
-                expected_readers = 1;
-                if (!raw.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-            },
-            .replay => |*replay| {
-                expected_readers = 1;
-                if (!replay.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
-            },
+        if (self.emission.reader()) |reader| {
+            expected_readers = 1;
+            if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
         }
         if (self.view.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
     }
 
     fn closeEmission(self: *Preparation) void {
-        switch (self.emission) {
-            .json => |*json| json.close(),
-            .raw => |*raw| raw.reader.close(),
-            .replay => |*replay| replay.reader.close(),
-            .none, .fixed => {},
-        }
+        if (self.emission.reader()) |reader| reader.close();
         self.emission = .{ .none = {} };
     }
 };
@@ -1494,6 +1748,8 @@ test "real preparation consumes the configured allowance across multiple advance
         view,
         root,
         .{ .used = &used, .limit = 4096 },
+        .endpoint,
+        null,
         .{},
         &retained,
     );
@@ -1657,7 +1913,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const result = try drainPreparation(&preparation, 7, 3, 1 << 16);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
@@ -2126,7 +2382,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var retained_provider: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained_provider);
+    try preparation.init(io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained_provider);
     defer preparation.cancel();
     if (Overlap.failure) |err| return err;
     if (!provider_first) try Overlap.admit(body[split..]);
@@ -2187,7 +2443,7 @@ test "request preparation minimal golden is exact across schedules" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         try std.testing.expect(retained == null);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
         defer std.testing.allocator.free(result.bytes);
@@ -2247,7 +2503,7 @@ test "request preparation retains the allocated ID across reopen and replacement
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         const result = try drainPreparation(&preparation, 7, 3, 16384);
         defer std.testing.allocator.free(result.bytes);
@@ -2308,7 +2564,7 @@ test "request preparation escapes instructions and user content" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const first = try drainPreparation(&preparation, 2, 2, 4096);
     defer std.testing.allocator.free(first.bytes);
     try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
@@ -2363,7 +2619,7 @@ test "request preparation escapes instructions and user content" {
     var used_two: std.atomic.Value(u64) = .init(0);
     var retained_two: ?named_scratch.Owner = null;
     var preparation_two: Preparation = undefined;
-    try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .{}, &retained_two);
+    try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained_two);
     const second = try drainPreparation(&preparation_two, 1, 1, 8192);
     defer std.testing.allocator.free(second.bytes);
     // Only each Operation's own address differs between the two Stores.
@@ -2384,7 +2640,7 @@ test "request preparation frozen selection excludes later messages" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Advance partially, then submit a later message while the admitted
     // historical view stays frozen.
     var partial: usize = 0;
@@ -2446,7 +2702,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
             var preparation: Preparation = undefined;
-            try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+            try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (preparation.active) preparation.cancel();
             var sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
@@ -2513,7 +2769,7 @@ test "request preparation freezes settings at admission" {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
@@ -2540,7 +2796,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Guard the active preparation separately from any sealed request: a
     // sealed preparation is inactive, so this guard never cancels a
     // transferred owner.
@@ -2557,7 +2813,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
         const probe_view = try setup.storage.openHistoricalView(binding);
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
-        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
         defer if (probe.active) probe.cancel();
         const probe_result = try drainPreparation(&probe, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
@@ -2617,14 +2873,14 @@ test "request preparation cancellation and failure release ownership" {
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
             const probe_view = try setup.storage.openHistoricalView(binding);
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
-            try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+            try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
             defer if (probe.active) probe.cancel();
             const probe_result = try drainPreparation(&probe, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
@@ -2648,7 +2904,7 @@ test "request preparation cancellation and failure release ownership" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .first_step = true }, &retained));
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .first_step = true }, &retained));
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
@@ -2659,7 +2915,7 @@ test "request preparation cancellation and failure release ownership" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, faults, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, faults, &retained);
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
@@ -2692,7 +2948,7 @@ test "request preparation cancellation and failure release ownership" {
         var gate: std.atomic.Value(bool) = .init(true);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .unlink = true, .unlink_removal = &gate }, &retained));
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var reclaimed = false;
@@ -2732,7 +2988,7 @@ test "request preparation completed request is fenced by later stop before hando
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Guard the active preparation before any fallible observation: an
     // error before the request reaches the caller must still cancel it.
     // After sealing the preparation is inactive and this guard is inert.
@@ -2796,7 +3052,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         var probe: Preparation = undefined;
-        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
         defer if (probe.active) probe.cancel();
         var count: usize = 0;
         while (count < 4096) {
@@ -2829,7 +3085,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         // Validation may precede output; establish the charged checkpoint
         // independently of the first advance's incidental phase count.
@@ -2853,7 +3109,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], seal_steps - 1));
         try std.testing.expect(!preparation.active);
@@ -2911,7 +3167,7 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             var unexpected = request;
@@ -2962,21 +3218,27 @@ test "request preparation resumes large private replay validation before emissio
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         var validation_turns: usize = 0;
         var turns: usize = 0;
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 100000);
-            const before = if (preparation.emission == .replay) preparation.emission.replay.validation.position else 0;
+            // While the item is judged, nothing of it is emitted, and the
+            // grammar reads no more than the advance charges.
+            const judging = preparation.stage == .replay_verdict;
+            const written = preparation.writer.offset;
+            const read_before = preparation.view.itemCheckBytes() orelse 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (preparation.emission == .replay and !preparation.emission.replay.validated) {
+            if (judging and preparation.stage == .replay_verdict) {
                 validation_turns += 1;
-                try std.testing.expect(preparation.emission.replay.validation.position - before <= 7);
-                try std.testing.expectEqual(@as(u64, 0), preparation.emission.replay.cursor.position);
+                const read_after = preparation.view.itemCheckBytes().?;
+                try std.testing.expect(read_after >= read_before and read_after - read_before <= 7);
+                try std.testing.expectEqual(written, preparation.writer.offset);
+                try std.testing.expect(preparation.emission == .none);
                 try preparation.checkIntegrity(binding);
             }
             switch (progress) {
@@ -3014,7 +3276,7 @@ test "request preparation composes replay tool results and schema" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
         const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
@@ -3044,14 +3306,14 @@ test "request preparation authenticates the historical requested model binding" 
     var retained: ?named_scratch.Owner = null;
     {
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.active) prep.cancel();
         var request = try drainLivePreparation(&prep, 1, 1, 32768);
         defer request.deinit(std.testing.io, prep.writer.budget);
     }
     try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
     var prep: Preparation = undefined;
-    try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (prep.active) prep.cancel();
     if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
         var unexpected = prepared;
@@ -3099,7 +3361,7 @@ test "request preparation replays reasoning continuation without its private rea
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
@@ -3127,7 +3389,7 @@ test "request preparation cancellation yields inside canonical proposal authenti
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (preparation.active) preparation.cancel();
     var pending_turns: usize = 0;
     for (0..4096) |_| {
@@ -3137,7 +3399,7 @@ test "request preparation cancellation yields inside canonical proposal authenti
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.phase == .history_next and preparation.writer.offset == before) {
+        if (preparation.stage == .history and preparation.pieces.done() and preparation.writer.offset == before) {
             pending_turns += 1;
             if (pending_turns == 12) break;
         }
@@ -3160,11 +3422,14 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try compact.permit.consume();
+    var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
     {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
         defer if (prep.active) prep.cancel();
         const request = try drainPreparation(&prep, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
@@ -3191,7 +3456,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, .{})) {
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{})) {
         .accepted => |value| value,
         .rejected => return error.UnexpectedOutputRejection,
     };
@@ -3215,10 +3480,16 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
-    try prep.init(std.testing.io, try setup.storage.openHistoricalView(next_binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    try prep.init(std.testing.io, try setup.storage.openHistoricalView(next_binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
     defer if (prep.active) prep.cancel();
     const request = try drainPreparation(&prep, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
+    // The compaction's own memo has no anchor; the successor selects one,
+    // so it rebuilds, and its replacement Attempt copies the new span.
+    try std.testing.expectEqual(@as(u64, 0), prep.memoCopied());
+    try std.testing.expect(memo_entries[0].memo.?.key.anchor != null);
+    const after_anchor: usize = @intCast(memo_entries[0].memo.?.length);
+    try std.testing.expectEqual(after_anchor, try expectMemoRebuildEqual(&setup, next_binding, &memos, .{}));
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
@@ -3263,14 +3534,14 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var retained: ?named_scratch.Owner = null;
         {
             var prep: Preparation = undefined;
-            try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+            try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (prep.active) prep.cancel();
             var request = try drainLivePreparation(&prep, 1, 1, 32768);
             defer request.deinit(std.testing.io, prep.writer.budget);
         }
         try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.active) prep.cancel();
         if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
             var unexpected = prepared;
@@ -3307,7 +3578,7 @@ test "request preparation cancels inside schema and replay emissions" {
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, target, 16384);
         // Direct owner prerequisite for each emission family: the intended
@@ -3320,4 +3591,387 @@ test "request preparation cancels inside schema and replay emissions" {
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
     }
+}
+
+const MemoPrepared = struct { bytes: []u8, copied: usize };
+
+/// Prepare one Attempt, optionally through the memo table, with small
+/// allowances so a memo copy spans many chunks.
+fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: ?*history_memo.Table, faults: PreparationFaults) !MemoPrepared {
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, faults, &retained);
+    defer if (preparation.active) preparation.cancel();
+    // A rewound copy shrinks the request, so this drain does not require
+    // monotonic growth as drainPreparation does.
+    var steps: usize = 0;
+    var request = while (true) : (steps += 1) {
+        try std.testing.expect(steps < 1 << 16);
+        switch (preparation.advance(7, 3)) {
+            .pending => {},
+            .prepared => |value| break value,
+            .failed => |err| return err,
+        }
+    };
+    const bytes = bytes: {
+        defer request.deinit(std.testing.io, preparation.writer.budget);
+        const bytes = try std.testing.allocator.alloc(u8, @intCast(request.length));
+        errdefer std.testing.allocator.free(bytes);
+        try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes, 0));
+        try std.testing.expectEqual(request.length, try request.file.length(std.testing.io));
+        break :bytes bytes;
+    };
+    errdefer std.testing.allocator.free(bytes);
+    // Every charge, including a rewound partial copy, is released.
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    return .{ .bytes = bytes, .copied = @intCast(preparation.memoCopied()) };
+}
+
+/// Prepare through `memos` and again with a full rebuild, and require the
+/// same bytes. Returns how many span bytes the memo supplied.
+fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: *history_memo.Table, faults: PreparationFaults) !usize {
+    const memo = try prepareMemoForTesting(setup, binding, memos, faults);
+    defer std.testing.allocator.free(memo.bytes);
+    const full = try prepareMemoForTesting(setup, binding, null, .{});
+    defer std.testing.allocator.free(full.bytes);
+    try std.testing.expectEqual(@as(usize, 0), full.copied);
+    try std.testing.expectEqualStrings(full.bytes, memo.bytes);
+    return memo.copied;
+}
+
+/// Settle `binding` with a reasoning item and one Bash call, deny that call
+/// and admit the successor.
+fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
+    var names: [4][32]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
+    const reasoning_id = try std.fmt.bufPrint(&names[1], "memo-r{d}", .{round});
+    const item_id = try std.fmt.bufPrint(&names[2], "memo-item-{d}", .{round});
+    const call_id = try std.fmt.bufPrint(&names[3], "memo-call-{d}", .{round});
+    var json_buffer: [128]u8 = undefined;
+    const reasoning = try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round });
+    try settleComposedForTesting(setup, binding, prefix, .reasoning, reasoning, reasoning_id, &.{.{ .item_id = item_id, .call_id = call_id }});
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = round };
+    var key_buffer: [32]u8 = undefined;
+    try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));
+    deny.session = session;
+    try std.testing.expect(setup.storage.decidePermission(&deny, .{}) == .accepted);
+    var successor = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedSuccessorAdmission;
+    return successor.permit.consume();
+}
+
+fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounded(protocol.max_session_bytes) {
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("memo-config");
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(setup.workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 1;
+    command.configuration.tools.values[0] = .bash;
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const reply = setup.storage.configure(&command, true, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+fn heldMemoLength(memos: *history_memo.Table, session: []const u8) usize {
+    const memo = memos.held(session) orelse return 0;
+    return @intCast(memo.length);
+}
+
+const MemoFileDamage = enum { poisoned, flipped, deleted, truncated, extended, directory };
+
+/// Change the Session's memo file behind the table's back.
+fn damageMemoFileForTesting(setup: *PreparationTestSetup, memos: *history_memo.Table, session: []const u8, damage: MemoFileDamage) !void {
+    const memo = memos.held(session).?;
+    var name_buffer: [64]u8 = undefined;
+    const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, history_memo.sessionSlot(memos.entries, session).? + 1, 1);
+    const io = std.testing.io;
+    switch (damage) {
+        .poisoned => {
+            const file = try setup.tmp.dir.openFile(io, name, .{ .mode = .read_write });
+            defer file.close(io);
+            const poison = try std.testing.allocator.alloc(u8, @intCast(memo.length));
+            defer std.testing.allocator.free(poison);
+            @memset(poison, 'X');
+            try file.writePositionalAll(io, poison, 0);
+        },
+        .flipped => {
+            const file = try setup.tmp.dir.openFile(io, name, .{ .mode = .read_write });
+            defer file.close(io);
+            var byte: [1]u8 = undefined;
+            const offset = memo.length / 2;
+            try std.testing.expectEqual(@as(usize, 1), try file.readPositionalAll(io, &byte, offset));
+            byte[0] ^= 1;
+            try file.writePositionalAll(io, &byte, offset);
+        },
+        .deleted => try setup.tmp.dir.deleteFile(io, name),
+        .truncated, .extended => {
+            const file = try setup.tmp.dir.openFile(io, name, .{ .mode = .read_write });
+            defer file.close(io);
+            try file.setLength(io, if (damage == .truncated) memo.length / 2 else memo.length + 1);
+        },
+        .directory => {
+            try setup.tmp.dir.deleteFile(io, name);
+            try setup.tmp.dir.createDir(io, name, .fromMode(0o700));
+        },
+    }
+}
+
+test "a history memo hit writes exactly the bytes of a full rebuild" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // A fresh Host has no memo: the first request is a full rebuild.
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    // A replacement Attempt with the same view copies the whole span.
+    const whole = heldMemoLength(&memos, session.slice());
+    try std.testing.expect(whole != 0);
+    try std.testing.expectEqual(whole, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    var round: u64 = 1;
+    while (round <= 3) : (round += 1) {
+        const covered = heldMemoLength(&memos, session.slice());
+        binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
+        // Later Operations copy the previous span and encode only the
+        // reasoning, call and Tool Result that follow it.
+        try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        try std.testing.expect(heldMemoLength(&memos, session.slice()) > covered);
+    }
+}
+
+test "a history memo that does not match the frozen request is rebuilt in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    // Each mismatch carries poisoned bytes, so using it would change the
+    // request; equality with the full rebuild proves it was not used.
+    const Mismatch = enum { anchor, model, older_view, session };
+    for (std.enums.values(Mismatch)) |mismatch| {
+        try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
+        const memo = &memo_entries[history_memo.sessionSlot(&memo_entries, session.slice()).?].memo.?;
+        switch (mismatch) {
+            .anchor => memo.key.anchor = 1,
+            .model => try memo.key.model.set("model-b"),
+            // A retry of an earlier Operation has an older frozen view.
+            .older_view => memo.admission_position = std.math.maxInt(u64),
+            .session => try memo.key.session.set("zzzzzz"),
+        }
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        if (mismatch == .session) memos.forget(std.testing.io, &memos.held("zzzzzz").?);
+    }
+    // After a Host restart the table starts empty, whatever files remain.
+    var restarted_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var restarted: history_memo.Table = .{ .entries = &restarted_entries, .scratch_path = setup.root };
+    defer restarted.deinit(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &restarted, .{}));
+    try std.testing.expect(heldMemoLength(&restarted, session.slice()) != 0);
+}
+
+test "a failed history memo copy rewinds its partial span and rebuilds in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    // A memo read fails on the first chunk, and part-way after several
+    // chunks reached the request. Either way the request is the full
+    // rebuild's, and that rebuild leaves a memo the next request uses.
+    for ([_]u64{ 0, 20 }) |after| {
+        const held = heldMemoLength(&memos, session.slice());
+        try std.testing.expect(held > after + 7);
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{ .memo_read_failure_after = after }));
+        try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    }
+}
+
+test "a history memo file that changed on disk is dropped and rebuilt in full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    // One changed byte fails the digest after the whole span was copied, so
+    // the copy is rewound. Missing, short, long, or not a file: the length
+    // check refuses it before any byte is copied. Each rebuild stores a
+    // fresh memo.
+    for ([_]MemoFileDamage{ .flipped, .deleted, .truncated, .extended, .directory }) |damage| {
+        const held = heldMemoLength(&memos, session.slice());
+        try std.testing.expect(held != 0);
+        try damageMemoFileForTesting(&setup, &memos, session.slice(), damage);
+        try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+        if (damage == .directory) {
+            // The directory's removal is unconfirmed, so its slot stays
+            // counted; the rebuilt memo takes the other slot.
+            try std.testing.expectEqual(held, heldMemoLength(&memos, session.slice()));
+            try std.testing.expectEqual(@as(u64, 2 * held), memos.bytes);
+            var name_buffer: [64]u8 = undefined;
+            for (0..2) |slot| {
+                const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+                setup.tmp.dir.deleteDir(std.testing.io, name) catch {};
+            }
+        }
+        try std.testing.expectEqual(held, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    }
+    // The table's bytes are the files' bytes, and stopping removes them.
+    try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), memos.bytes);
+    memos.deinit(std.testing.io);
+    var name_buffer: [64]u8 = undefined;
+    for (0..2) |slot| {
+        const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+        try std.testing.expectError(error.FileNotFound, setup.tmp.dir.access(std.testing.io, name, .{}));
+    }
+}
+
+test "a cold history memo build yields under the preparation allowance" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    const text = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    try setup.submit("memo-large", "memo-large", session.slice(), text);
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var requests: [2][]u8 = undefined;
+    var copied: [2]u64 = undefined;
+    for (&requests, &copied, 0..) |*bytes, *count, attempt| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        // Advances after the request reached its final length copy the
+        // span into the memo file, each within the byte allowance.
+        var final_advances: usize = 0;
+        var final_work: usize = 0;
+        var last_request: u64 = 0;
+        var steps: usize = 0;
+        var request = while (true) : (steps += 1) {
+            try std.testing.expect(steps < 1 << 12);
+            const progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
+            const stats = preparation.advanceStats();
+            try std.testing.expect(stats.work_bytes <= preparation_byte_allowance);
+            if (stats.request_bytes != last_request) {
+                final_advances = 0;
+                final_work = 0;
+                last_request = stats.request_bytes;
+            }
+            final_advances += 1;
+            final_work += stats.work_bytes;
+            switch (progress) {
+                .pending => {},
+                .prepared => |value| break value,
+                .failed => |err| return err,
+            }
+        };
+        defer request.deinit(std.testing.io, preparation.writer.budget);
+        bytes.* = try std.testing.allocator.alloc(u8, @intCast(request.length));
+        try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes.*, 0));
+        count.* = preparation.memoCopied();
+        if (attempt == 0) {
+            const held = heldMemoLength(&memos, session.slice());
+            try std.testing.expect(held > text.len);
+            try std.testing.expect(final_work >= held);
+            try std.testing.expect(final_advances >= held / preparation_byte_allowance);
+        }
+    }
+    defer for (requests) |bytes| std.testing.allocator.free(bytes);
+    // A replacement Attempt copies the whole kept span and writes the same
+    // request.
+    try std.testing.expectEqual(@as(u64, 0), copied[0]);
+    try std.testing.expectEqual(@as(u64, heldMemoLength(&memos, session.slice())), copied[1]);
+    try std.testing.expectEqualStrings(requests[0], requests[1]);
+}
+
+/// Cancel a preparation through `memos` while it is keeping its span, then
+/// require that the table kept nothing of it and the next request rebuilds
+/// in full and keeps its memo.
+fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []const u8, binding: store.AttemptBinding, memos: *history_memo.Table) !void {
+    const full = try prepareMemoForTesting(setup, binding, null, .{});
+    defer std.testing.allocator.free(full.bytes);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, .{}, &retained);
+    defer if (preparation.active) preparation.cancel();
+    var final_advances: usize = 0;
+    var steps: usize = 0;
+    while (final_advances < 3) : (steps += 1) {
+        try std.testing.expect(steps < 1 << 16);
+        try std.testing.expect(preparation.advance(7, 3) == .pending);
+        if (preparation.advanceStats().request_bytes == full.bytes.len) final_advances += 1;
+    }
+    // Mid-store: the table counts the span's file bytes but holds no memo.
+    try std.testing.expect(memos.held(session) == null);
+    try std.testing.expect(memos.bytes != 0);
+    preparation.cancel();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(memos.held(session) == null);
+    try std.testing.expectEqual(@as(u64, 0), memos.bytes);
+    var name_buffer: [64]u8 = undefined;
+    for (0..memos.entries.len) |slot| {
+        const name = try named_scratch.NumericName.@"history-memo".format(&name_buffer, slot + 1, 1);
+        try std.testing.expectError(error.FileNotFound, setup.tmp.dir.access(std.testing.io, name, .{}));
+    }
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(setup, binding, memos, .{}));
+    try std.testing.expect(heldMemoLength(memos, session) != 0);
+}
+
+test "a preparation cancelled while keeping its memo keeps nothing of it" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // A cold build, then an append after a copied prefix, which rewrites the
+    // held memo's file.
+    try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
+    binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
+    try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
 }

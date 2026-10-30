@@ -2,6 +2,7 @@
 //! storage; neither this owner nor its input may move until the borrower joins.
 const std = @import("std");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
@@ -48,7 +49,7 @@ path: [std.Io.Dir.max_path_bytes]u8 = undefined,
 target: client.CaptureTarget = undefined,
 captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
-reply: ?client.MutationReply = null,
+reply: ?protocol_reply.MutationReply = null,
 // These capture facts are worker-owned until join, independent of Admission.
 publication: Publication = .not_sent,
 last_error: ?anyerror = null,
@@ -184,7 +185,7 @@ test "submission bounded joined outcomes precede retry and retire original autho
                 input.init();
                 var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
-                self.reply = .{ .status = 200, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
+                self.reply = .{ .status = 200, .context = .{ .kind = if (kind == 0) .message else .permission_decision }, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
                     .accepted => .{ .accepted = if (kind == 0) .{ .message = .{ .admission = 37 } } else .permission_decision },
                     .rejected => .{ .rejected = .{} },
                     else => .conflict,
@@ -330,11 +331,11 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.publication == .not_sent) self.publication = .unknown;
     self.captured = switch (self.intent.?) {
-        .message => |ticket| try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(ticket) }, self.target),
+        .message => |ticket| try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(ticket) }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer).get();
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -443,7 +444,7 @@ test "submission recovery validates reopened originals and pins the saved reader
                         .content => "modified café!",
                         .length => "short",
                         else => "original café!",
-                    } }, target)
+                    } }, target).get()
                 else
                     try client.capturePermissionDecision(io, .{ .store = store, .session = session, .action_id = if (variant == .action) 20 else 19, .decision = if ((kind == 1) != (variant == .decision)) .allow_once else .deny }, target);
                 record.close(io);
@@ -482,7 +483,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.captured == null) {
         // Only absent publication permits capture of the SAME reserved intent.
-        self.captured = client.openCaptured(task.io, self.directory, &self.key) catch |err| switch (err) {
+        self.captured = client.openCaptured(task.io, .{ .generated = .{ .directory = self.directory, .handle = &self.key } }) catch |err| switch (err) {
             error.FileNotFound => return submit(raw, task),
             else => return err,
         };
@@ -490,18 +491,18 @@ fn resend(raw: *anyopaque, task: *Task) !void {
             self.captured.?.close(task.io);
             self.captured = null;
         }
-        const capture = &self.captured.?;
-        if (!capture.saved.store.eql(self.store) or !capture.saved.session.eql(self.session) or !capture.saved.key.eql(&self.key)) return error.OriginalBindingMismatch;
-        switch (self.intent.?) {
-            .message => |ticket| {
+        const original: protocol_reply.MutationTarget = switch (self.intent.?) {
+            .message => |ticket| blk: {
                 const bytes = try self.input.message(ticket);
-                if (!capture.saved.isKind(.message) or capture.target != .message or capture.target.message.bytes != bytes.len or !std.mem.eql(u8, &capture.target.message.digest, &protocol.contentDigest(bytes))) return error.OriginalBindingMismatch;
+                break :blk .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
             },
-            .decision => |decision| if (!capture.saved.isKind(.permission_decision) or capture.target != .permission_decision or capture.target.permission_decision.action != decision.action or capture.target.permission_decision.decision != decision.decision) return error.OriginalBindingMismatch,
-        }
+            .decision => |decision| .{ .permission_decision = .{ .action = decision.action, .decision = decision.decision } },
+        };
+        const expected: client.Binding = .{ .store = self.store, .session = self.session, .key = &self.key, .target = original };
+        if (!expected.matches(&self.captured.?.saved, self.captured.?.target)) return error.OriginalBindingMismatch;
         self.publication = .published;
     }
-    self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
+    self.reply = try task.requests().sendCaptured(&self.captured.?, &self.reply_buffer).get();
 }
 
 test "submission settles wire Admission only after join and releases only accepted or discarded intent" {

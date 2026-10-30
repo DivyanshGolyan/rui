@@ -446,8 +446,7 @@ def main():
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
-            if os_semantics.SOCKET_MODE_ENFORCED and os.geteuid() != 0:
-                # Root may bypass this denial with CAP_DAC_OVERRIDE.
+            if os_semantics.SOCKET_MODE_ENFORCED:
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)

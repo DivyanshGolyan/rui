@@ -652,7 +652,7 @@ type auditedCall struct {
 	ItemOrdinal   int     `json:"item_ordinal"`
 	Rejection     *string `json:"rejection"`
 	ActionID      *int    `json:"action_id"`
-	Permission    *int    `json:"permission"`
+	Authorized    *int    `json:"authorized"`
 	ActionOutcome *string `json:"action_outcome"`
 }
 
@@ -691,7 +691,7 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 		return map[string]any{"counts": counts}, fmt.Errorf("audit mismatch for %+v: %v", expected, counts)
 	}
 	rowsQuery := `SELECT call.call_ordinal,call.item_ordinal,` +
-		`call.rejection_code AS rejection,action.action_id AS action_id,action.permission_state AS permission,` +
+		`call.rejection_code AS rejection,action.action_id AS action_id,action.authorized AS authorized,` +
 		`action.resolution_code AS action_outcome FROM model_tool_call call ` +
 		`LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal ` +
 		`ORDER BY call.call_ordinal;`
@@ -711,7 +711,7 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 			return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("call %d relational order mismatch: %+v", index, row)
 		}
 		if index < expected.Valid {
-			if row.Rejection != nil || row.ActionID == nil || row.Permission == nil || *row.Permission != 2 || row.ActionOutcome == nil || *row.ActionOutcome != "denied" {
+			if row.Rejection != nil || row.ActionID == nil || row.Authorized == nil || *row.Authorized != 0 || row.ActionOutcome == nil || *row.ActionOutcome != "denied" {
 				return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("valid call %d authority mismatch: %+v", index, row)
 			}
 		} else {
@@ -719,7 +719,7 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 			if (index-expected.Valid)%2 == 1 {
 				expectedRejection = "invalid_arguments"
 			}
-			if row.Rejection == nil || *row.Rejection != expectedRejection || row.ActionID != nil || row.Permission != nil || row.ActionOutcome != nil {
+			if row.Rejection == nil || *row.Rejection != expectedRejection || row.ActionID != nil || row.Authorized != nil || row.ActionOutcome != nil {
 				return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("rejected call %d acquired authority or wrong result: %+v", index, row)
 			}
 		}

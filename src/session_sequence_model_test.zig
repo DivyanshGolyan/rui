@@ -5,6 +5,7 @@ const std = @import("std");
 const Screen = @import("SessionScreen.zig");
 const Task = @import("ClientTask.zig");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
 
@@ -79,13 +80,10 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .store = "td1-no-host",
                 .session = "k7m2qx",
                 .directory = path,
-                .scratch = self.page,
-                .inspection_file = self.page,
-                .status_file = self.page,
-                .action_file = self.action,
+                .files = .{ .scratch = self.page, .inspection = self.page, .status = self.page, .action = self.action },
                 .command = undefined,
                 .colour = false,
-                .opening = false,
+                .reading = .{ .opening = false },
                 .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = self.screen, .output = self.output.handle, .active = false },
             };
             self.front.init.io = std.testing.io;
@@ -308,7 +306,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 fresh = false;
                 choice = .{};
             }
-            try std.testing.expectEqual(submitted, front.sent);
+            try std.testing.expectEqual(submitted, front.admission.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
             try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
@@ -320,8 +318,8 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
 fn pages(comptime Frontend: type, comptime ops: anytype) !void {
     const Event = enum { details, history, status, complete, send, latest, transcript, edit };
     const events = std.enums.values(Event);
-    const first_cursor: client.ConversationCursor = .{ .end = 99, .before_position = 79, .before_ordinal = 3 };
-    const next_cursor: client.ConversationCursor = .{ .end = 99, .before_position = 23, .before_ordinal = 1 };
+    const first_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 79, .before_ordinal = 3 };
+    const next_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 23, .before_ordinal = 1 };
     for (0..4) |seed| for (0..512) |sequence| {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
@@ -334,7 +332,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         var request_generation: u64 = 0;
         var request: ?enum { details, history, status } = null;
         var draft: Text = .{};
-        var older: ?client.ConversationCursor = null;
+        var older: ?protocol_reply.ConversationCursor = null;
         // Seed a real retained boundary. History is launched only from the
         // transcript, including A -> launch -> new B -> delayed completion.
         front.job.result.boundaries.add(.{ .output = 0, .cursor = first_cursor, .admitted = first_cursor.before_position });
@@ -365,16 +363,16 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                     };
                     requested_at = sent;
                     request_generation = generation;
-                    front.read_phase = switch (event) {
+                    front.reading.phase = switch (event) {
                         .details => .details,
                         .history => .history,
                         else => .activity,
                     };
-                    front.details_sent = front.sent;
-                    front.job = ops.freeze(front, front.read_phase);
+                    front.admission.details_sent = front.admission.sent;
+                    front.job = ops.freeze(front, front.reading.phase);
                     front.job.result.history_cursor = next_cursor;
                     if (event == .status) {
-                        front.status_requested = true;
+                        front.inspection.status_requested = true;
                         front.job.open_status = true;
                         front.job.result = .{ .status = true };
                     }
@@ -407,12 +405,12 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         }
                         // Also keep the queued, not-yet-launched request in
                         // scope: send must retire both kinds of old read work.
-                        front.history_requested = .older;
+                        front.transcript.history_requested = .older;
                         try fixture.bytes("message\r");
                         sent = 1;
                         selected = .live;
                         draft = .{};
-                        try std.testing.expect(front.history_requested == null);
+                        try std.testing.expect(front.transcript.history_requested == null);
                     }
                 },
                 .latest => {
@@ -433,8 +431,8 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                 },
             }
             try std.testing.expectEqual(selected, fixture.screen.view);
-            try std.testing.expectEqual(sent, front.sent);
-            try std.testing.expectEqual(older, front.transcript_older);
+            try std.testing.expectEqual(sent, front.admission.sent);
+            try std.testing.expectEqual(older, front.transcript.older);
             try fixture.checkText(&draft, &.{}, false);
         }
     };
@@ -466,7 +464,7 @@ fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
                 },
                 .deliver_old, .deliver_new, .silent => {
                     const admission: u64 = if (event == .deliver_old) 7 else if (event == .deliver_new) 913 else 0;
-                    front.read_phase = .activity;
+                    front.reading.phase = .activity;
                     front.job.result = .{ .delivered = admission };
                     try ops.applyReader(front, .complete);
                     delivered = @max(delivered, admission);
@@ -484,8 +482,8 @@ fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
                 },
                 .redraw => try ops.draw(front),
             }
-            try std.testing.expectEqual(delivered, front.delivered);
-            try std.testing.expectEqual(echo, front.echo);
+            try std.testing.expectEqual(delivered, front.admission.delivered);
+            try std.testing.expectEqual(echo, front.admission.echo);
             try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
         }
     }
@@ -515,7 +513,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     front.session = session;
     front.submission.store = store;
     front.submission.session = session;
-    front.read_phase = .activity;
+    front.reading.phase = .activity;
     front.job = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
     try ops.scan(&front.job, &task);
@@ -533,7 +531,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
         try ops.applyReader(front, .complete);
         try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
         try historyReachability(front, ops, prefix + 1);
-        if (front.cursor.end == null) break;
+        if (front.live.cursor.end == null) break;
     } else return error.ActivityDidNotDrain;
     try std.testing.expect(fixture.screen.live.origin > 0);
 }
@@ -562,12 +560,12 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     // that identity, so the block reaches it.
     const screen = front.terminal.screen;
     for (0..screen.transcriptCollapsed()) |block| {
-        const shown = front.transcript_blocks.fromEnd(block) orelse continue;
+        const shown = front.transcript.blocks.fromEnd(block) orelse continue;
         for (messages, 0..) |text, index| {
             if (shown.content.length == text.len and std.mem.eql(u8, &shown.content.digest, &digests[index])) reachable[index] = true;
         }
     }
-    var cursor = front.transcript_older;
+    var cursor = front.transcript.older;
     const requests: client.Requests = .{ .io = std.testing.io };
     for (0..16) |_| {
         const next = cursor orelse break;
@@ -584,7 +582,7 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     } else return error.HistoryDidNotDrain;
     var all_reachable = true;
     for (reachable, 0..) |found, index| {
-        if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript_older });
+        if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript.older });
         all_reachable = all_reachable and found;
     }
     try std.testing.expect(all_reachable);

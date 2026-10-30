@@ -7,6 +7,7 @@ const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -112,13 +113,10 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return err;
         }
-        if (err == error.MutationNotAccepted) {
-            TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
-            return err;
-        }
         // Model rejection already names the ID, supported IDs and repair;
         // Pre-admission refusals have one diagnostic, with no recovery handle.
-        if (err == error.UnsupportedModel or err == error.EmptyMessageInput) return err;
+        // A saved rejection or conflict already named its replay.
+        if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
@@ -248,6 +246,15 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    // Preferences live in HOME, so a saved Store redirects every Workspace.
+    if (!interactive and edit.store != .keep) notice: {
+        var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.writeAll("rui: saved ") catch break :notice;
+        TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
+        notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    }
     if (!interactive) return writeDefaultsJson(init.io, .{
         .changed = changed,
         .store = prospective_store,
@@ -396,7 +403,7 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
-    if (command == .host_start) return startHost(init, selected, false);
+    if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"));
     if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
@@ -407,7 +414,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     }
 }
 
-fn writeHostStatus(io: std.Io, status: client.HostStatus) !void {
+fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
@@ -473,13 +480,11 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     }
 }
 
-fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
+/// Null capacity leaves a new Host on product_defaults.active_capacity.
+fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize) !void {
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
-        .ready => |ready| {
-            if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-            return;
-        },
+        .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
         .unavailable, .owned_unavailable => {},
@@ -497,13 +502,21 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     const store_z = try std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0);
     // Application policy lives here. The synchronous native launcher borrows
     // these terminated strings and pointer framing through exec/error handoff;
-    // all storage is prepared before any detach fork. Omitting
-    // --active-capacity keeps product_defaults.active_capacity the only default.
-    const argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex",
+    // all storage is prepared before any detach fork. Without a requested
+    // capacity the flag is omitted, so product_defaults.active_capacity stays
+    // the only default.
+    var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
+    var argv = [_:null]?[*:0]const u8{
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex", null, null,
     };
+    var argc: usize = argv.len - 2;
+    if (capacity) |value| {
+        argv[argc] = "--active-capacity";
+        argv[argc + 1] = (try std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0)).ptr;
+        argc += 2;
+    }
     var startup_read: c_int = -1;
-    const launched = rui_launch_detached_observed(argv[0].?, &argv, argv.len, &startup_read);
+    const launched = rui_launch_detached_observed(argv[0].?, &argv, argc, &startup_read);
     defer if (startup_read >= 0) {
         _ = std.c.close(startup_read);
     };
@@ -559,8 +572,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
                     _ = @import("stderr.zig").write(notices);
-                if (!quiet) try writeHostStatus(io, .{ .ready = ready });
-                return;
+                return reportStartedHost(io, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -572,6 +584,20 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
     TerminalText.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
+}
+
+/// A ready Host keeps the capacity it started with, so a different request
+/// is reported rather than dropped; a competing launcher may have won.
+fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+    if (capacity) |requested| if (requested != ready.active_capacity) notice: {
+        var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
+        notice.writeByte('\n') catch break :notice;
+        TerminalText.diagnostic("{s}", .{notice.buffered()});
+    };
+    if (!quiet) try writeHostStatus(io, .{ .ready = ready });
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
@@ -992,7 +1018,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     };
 }
 
-fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.CapturedIdentity {
+fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_reply.MutationIdentity {
     if (options.model) |model| try requireSupportedModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -1051,7 +1077,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         try guideProviderLogin(init);
         after_choice = true;
     };
-    try startHost(init, selected_store, true);
+    try startHost(init, selected_store, true, null);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
     const ready = switch (client.hostStatus(init.io, destination)) {
@@ -1072,13 +1098,13 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         .model = .{ .present = true, .value = selected.model.slice() },
         .tools = product_defaults.tools,
         .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
-    }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
         try testGate(init.io, "RUI_TEST_CAPTURE_GATE");
-        break :blk client.sendCaptured(init.io, &captured, null, &reply_buffer) catch |err| {
+        break :blk (client.Requests{ .io = init.io }).sendCaptured(&captured, &reply_buffer).get() catch |err| {
             TerminalText.diagnostic("rui: configuration not confirmed ({s}); use rui request recover {s}. Do not replace uncertain work.\n", .{ @errorName(err), saved.key.slice() });
             return err;
         };
@@ -1118,16 +1144,14 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
     const active_capacity = try parsed.number(usize, "active-capacity") orelse product_defaults.active_capacity;
     var limits: server.Limits = .{};
-    var faults: server.Faults = .{};
+    var hooks: server.Hooks = .{};
     if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
     if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
         if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
         limits.retention_entry_capacity = capacity;
     }
-    if (parsed.has("test-retention-removal-failure")) faults.retention_removal = true;
-    for (parsed.all("fault")) |fault| {
-        if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-once")) faults.response_write_once = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-captures")) faults.bash_preparation_after_captures = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
-    }
+    if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
+    for (parsed.all("fault")) |fault| try hooks.inject(fault);
     if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
         if (seconds < 1) return error.InvalidProviderInactivity;
         _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
@@ -1136,41 +1160,45 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
     if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
         if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
-        faults.before_launch_delay_ms = delay;
+        hooks.pauses.getPtr(.action_launch).delay_ms = delay;
+        hooks.pauses.getPtr(.model_launch).delay_ms = delay;
     }
     if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
         if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
-        faults.before_result_delay_ms = delay;
+        hooks.pauses.getPtr(.action_result).delay_ms = delay;
+        hooks.pauses.getPtr(.model_result).delay_ms = delay;
     }
-    faults.model_result_gate_path = parsed.get("test-model-result-gate-path");
-    faults.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
-    faults.inspection_reply_gate_path = parsed.get("test-inspection-reply-gate-path");
+    hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
+    hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
+    hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
     if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
         if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
-        faults.inspection_reply_delay_ms = delay;
+        hooks.inspection_reply.delay_ms = delay;
     }
     if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
         if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         limits.client_send_buffer_bytes = bytes;
     }
-    if (parsed.has("test-phase-trace")) faults.test_phase_trace = true;
+    if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
     if (try parsed.number(c_int, "test-observation-fd")) |fd| {
-        faults.test_observation_fd = fd;
-        faults.test_phase_trace = true;
+        hooks.observation_fd = fd;
+        hooks.phase_trace = true;
     }
-    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| faults.test_observation_state_fd = fd;
-    if (parsed.get("test-observation-plan")) |plan| faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
+    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
+    if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
         return error.InvalidTestObservationPlan;
-    if (parsed.get("test-transition")) |transition| {
-        if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
-    }
-    faults.test_transition_gate_path = parsed.get("test-transition-gate-path");
-    faults.bash_observed_exit_gate_path = parsed.get("test-bash-observed-exit-gate-path");
-    faults.bash_cleanup_gate_path = parsed.get("test-bash-cleanup-gate-path");
-    faults.control_gate_keys = parsed.get("test-control-gate-keys");
-    faults.control_gate_path = parsed.get("test-control-gate-path");
-    if (parsed.has("test-suppress-first-control-hint")) faults.suppress_first_control_hint = true;
-    if (parsed.has("test-sqlite-diagnostics")) faults.sqlite_diagnostics = true;
+    const transition: ?server.Hooks.Transition = if (parsed.get("test-transition")) |name|
+        server.Hooks.fromOptionName(server.Hooks.Transition, name) orelse return error.UnknownTestTransition
+    else
+        null;
+    const transition_gate_path = parsed.get("test-transition-gate-path");
+    hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
+    hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
+    hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
+    const control_gate_keys = parsed.get("test-control-gate-keys");
+    const control_gate_path = parsed.get("test-control-gate-path");
+    if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
+    if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
     if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
     if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
         if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
@@ -1187,10 +1215,12 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
         if (delay < 0) return error.InvalidRequestPreparationDelay;
-        faults.request_preparation_advance_delay_ms = delay;
+        hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
     }
-    if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
-    if ((faults.test_transition == null) != (faults.test_transition_gate_path == null)) return error.IncompleteTestTransitionGate;
+    if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
+    if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
+    if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
+    if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1202,7 +1232,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
         limits,
-        faults,
+        hooks,
         if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
         if (credential_path) |path| model_adapter.Authentication{ .path = path, .fixture = fixture_endpoint != null } else null,
@@ -1310,32 +1340,30 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) return message(init, parsed, input);
-    var stage: client.FailureStage = .store;
-    errdefer reportFailureStage(stage);
-    input.stage = &stage;
-    var sender = requester;
-    sender.stage = &stage;
+    var step: ?client.Step = .store;
+    errdefer reportFailureStep(step);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     const human = target == .generated;
-    const drop_reply = parsed.get("test-drop-reply");
-    var captured = try client.captureConfigure(io, input, target);
+    var sender = requester;
+    sender.drop_reply = parsed.get("test-drop-reply");
+    var captured = try takeCapture(&step, client.captureConfigure(io, input, target));
     const saved = captured.identity().*;
     var admitted: ?bool = null;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk sender.sendCaptured(&captured, drop_reply, &reply_buffer);
+        break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json) catch |err| {
+    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .{ .json = .of(target) }) catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
@@ -1355,14 +1383,14 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
     const io = init.io;
-    var stage: client.FailureStage = .input_parse;
-    errdefer reportFailureStage(stage);
+    var step: ?client.Step = .input_parse;
+    errdefer reportFailureStep(step);
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
         TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration, .stage = &stage };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
     // Never let incomplete or malformed peer context fall back to HOME or
     // become an anonymous send. The Host still authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
@@ -1377,7 +1405,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
     }
-    stage = .store;
+    step = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (sender_store) |trusted| {
         const sender_paths = try platform.resolveClientPaths(io, trusted);
@@ -1392,22 +1420,49 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try client.captureMessage(io, input, target);
-    if (configuration == null) return sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), &stage);
+    var captured = try takeCapture(&step, client.captureMessage(io, input, target));
+    const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
+    if (configuration == null) return sendCapturedMutation(sender, &captured, target, &step);
     defer captured.close(io);
     if (target == .generated) try announceCapture(io, captured.identity().key.slice());
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try (client.Requests{ .io = io, .stage = &stage }).sendCaptured(&captured, parsed.get("test-drop-reply"), &reply_buffer);
-    if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
+    const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+    if (!reply.isAccepted()) return writeMutationReply(io, reply, .{ .json = .of(target) });
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
-fn reportFailureStage(stage: client.FailureStage) void {
-    if (stage == .presentation) return;
-    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(stage)});
-    if (stage == .upload or stage == .admission_response)
+/// The value of a capture or send, after recording the step a failure
+/// stopped in for the command's diagnostic. A failure before any step keeps
+/// the step the command already holds.
+fn takeStep(step: *?client.Step, stepped: anytype) !@FieldType(@TypeOf(stepped), "done") {
+    if (stepped == .failed) if (stepped.failed.step) |failed| {
+        step.* = failed;
+    };
+    return stepped.get();
+}
+
+/// A captured record; until a send begins, a later failure is the capture's.
+fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
+    const captured = try takeStep(step, stepped);
+    step.* = .capture;
+    return captured;
+}
+
+/// A send's reply. A framed reply leaves nothing to report; an unreadable
+/// one leaves admission unknown.
+fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationReply {
+    const reply = try takeStep(step, stepped);
+    step.* = if (reply.answer) |_| null else |_| .admission_response;
+    return reply;
+}
+
+/// Null once the Host's reply was presented.
+fn reportFailureStep(held: ?client.Step) void {
+    const step = held orelse return;
+    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
+    if (step.mayHaveReachedHost())
         TerminalText.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
@@ -1431,7 +1486,7 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
 
 /// Everything /status reports, from one Current capture; `file` holds the
 /// capture's attention rows.
-pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const client.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
+pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
@@ -1558,7 +1613,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
-    try startHost(init, destination, true);
+    try startHost(init, destination, true, null);
     var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
     if (reference) |value| {
         try selected.set(value);
@@ -1570,13 +1625,13 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const workspace = workspace_buffer[0..workspace_length];
         const file = try renderScratch(init);
         defer file.close(init.io);
-        var cursor: client.SessionListCursor = .{};
+        var cursor: protocol_reply.SessionListCursor = .{};
         while (true) {
             try file.setLength(init.io, 0);
             try init.io.vtable.fileSeekTo(init.io.userdata, file, 0);
             var buffer: client.ReplyBuffer = .{};
             const reply = try client.listSessions(init.io, destination, workspace, cursor, file, &buffer);
-            const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+            const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
             const page = switch (decoded) {
                 .page => |*value| value,
                 .failure => |failure| return failure.err(),
@@ -1632,7 +1687,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             if (err != error.UnsupportedModel) TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
         };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
-        const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+        const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
             return;
         };
@@ -1714,15 +1769,15 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
             else => continue,
         };
         if (!saved.store.eql(canonical.store.slice())) continue;
-        if ((saved.isKind(.configure) or saved.isKind(.message)) and saved.session.len == 0) {
+        if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ReplyBuffer = .{};
             const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
-            if (observed.status != .accepted or !saved.kind.eql(@tagName(observed.kind.?)) or !observed.target.?.eql(session_ref)) continue;
+            if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
         try writeSafeTextTo(out, handle);
         try out.writeAll(" (");
-        try writeSafeTextTo(out, saved.kind.slice());
+        try writeSafeTextTo(out, @tagName(saved.kind));
         try out.writeAll(")\n");
     }
 }
@@ -1766,7 +1821,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1778,19 +1833,22 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(io: std.Io, captured: *client.CapturedRecord, generated: bool, drop_reply: ?[]const u8, stage: ?*client.FailureStage) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, target: client.CaptureTarget, reported: ?*?client.Step) !void {
+    const io = sender.io;
+    var unreported: ?client.Step = null;
+    const step = reported orelse &unreported;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
-        if (generated) try announceCapture(io, captured.identity().key.slice());
-        break :blk try (client.Requests{ .io = io, .stage = stage }).sendCaptured(captured, drop_reply, &reply_buffer);
+        if (target == .generated) try announceCapture(io, captured.identity().key.slice());
+        break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
     };
-    try writeMutationReply(io, reply, .json);
+    try writeMutationReply(io, reply, .{ .json = .of(target) });
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -1807,7 +1865,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1857,7 +1915,7 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         defer file.close(io);
         var response: client.ReplyBuffer = .{};
         const wire_reply = try client.inspectSession(io, selected_store, reference, .current, file, &response);
-        const reply = try client.CurrentReply.decode(io, file, reference, wire_reply);
+        const reply = try protocol_reply.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
             try writeCommandReply(io, wire_reply.command, .stdout);
             return reply.failure.err();
@@ -1980,16 +2038,16 @@ const JsonOutput = struct {
     }
 };
 
-fn writeCommandReply(io: std.Io, reply: client.CommandReply, stream: JsonOutput.Stream) !void {
+fn writeCommandReply(io: std.Io, reply: protocol_reply.CommandReply, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     writer.writeAll(reply.body) catch |err| return output.failure(err);
     writer.writeAll("\n") catch |err| return output.failure(err);
     try output.finish();
-    try client.checkCanonicalFailure(reply);
+    try protocol_reply.checkCanonicalFailure(reply);
 }
 
-fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
+fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, stream);
     std.json.Stringify.value(.{ .key = key, .@"error" = .{
@@ -2001,7 +2059,7 @@ fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, st
     try output.finish();
 }
 
-fn checkedObservation(io: std.Io, reply: client.ObservationReply, key: []const u8) !client.CommandObservation {
+fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: []const u8) !protocol_reply.CommandObservation {
     return switch (reply) {
         .observation => |observation| observation,
         .failure => |failure| {
@@ -2044,25 +2102,70 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-const MutationPresentation = enum {
-    json,
+/// How a caller replays a saved answer: by its generated handle, or by the
+/// explicit record it captured to.
+const Replay = union(enum) {
+    generated,
+    explicit: []const u8,
+
+    fn of(target: client.CaptureTarget) Replay {
+        return switch (target) {
+            .generated => .generated,
+            .explicit => |explicit| .{ .explicit = explicit.record },
+        };
+    }
+};
+
+const MutationPresentation = union(enum) {
+    json: Replay,
     human,
     interactive_configuration,
 };
 
-fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (reply.answer) |answer| {
         if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
             TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
     } else |_| {}
     if (presentation == .json) {
         var output: JsonOutput = undefined;
-        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
+        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| {
+            const cause = output.failure(err);
+            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, presentation.json);
+            return cause;
+        };
         return output.finish();
     }
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(io, &buffer);
     presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
+}
+
+/// Names the replay the caller actually holds: a generated handle, or the
+/// explicit record, since repeating its capture refuses the existing --record.
+fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: Replay) void {
+    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&bytes);
+    writeNotAccepted(&notice, context, replay) catch return;
+    TerminalText.diagnostic("{s}", .{notice.buffered()});
+}
+
+fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: Replay) !void {
+    try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
+    switch (replay) {
+        // validRequestHandle admits only shell-inert handle bytes.
+        .generated => try notice.writeAll(context.key.slice()),
+        .explicit => |record| {
+            try notice.writeAll("--store ");
+            try TerminalText.writeShellWord(notice, context.store.slice());
+            try notice.writeAll(" --record ");
+            try TerminalText.writeShellWord(notice, record);
+            switch (context.kind) {
+                inline else => |kind| try notice.print(" --kind {s}", .{comptime retryName(kind)}),
+            }
+        },
+    }
+    try notice.writeByte('\n');
 }
 
 fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -2073,7 +2176,7 @@ fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const 
     try writer.writeByte('\n');
 }
 
-fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, presentation: MutationPresentation) !void {
+fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .interactive_configuration and reply.isAccepted()) {
         try writer.writeAll("Rui: Configured.\n");
         return writer.flush();
@@ -2126,13 +2229,13 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
 }
 
 // Presentation of owned facts only: no wire representation or second parser.
-fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void {
+fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
     try writer.writeAll("{\"context\":");
     try std.json.Stringify.value(.{
         .store = reply.context.store.slice(),
         .session = reply.context.session.slice(),
         .key = reply.context.key.slice(),
-        .kind = reply.context.kind.slice(),
+        .kind = @tagName(reply.context.kind),
     }, .{}, writer);
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -2187,10 +2290,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
-    var reply = client.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
     try reply.context.key.set("original\"key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     @memset(&bytes, 'x');
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2209,7 +2312,7 @@ test "mutation presentation complete modes preserve escaped original context" {
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
-    const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
+    const modes = [_]MutationPresentation{ .{ .json = .generated }, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
         human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
@@ -2221,10 +2324,10 @@ test "mutation presentation complete modes preserve escaped original context" {
         failed_human,
     };
     for ([_]bool{ false, true }) |failed| {
-        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
+        var reply = protocol_reply.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
         try reply.context.store.set("/store");
         try reply.context.key.set("key/µ\"\n\x1b");
-        try reply.context.kind.set("configure");
+        reply.context.kind = .configure;
         for (modes, 0..) |mode, index| {
             var buffer: [2048]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
@@ -2247,10 +2350,10 @@ test "mutation presentation complete modes preserve escaped original context" {
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
     const wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
-    var reply = client.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
-    try reply.context.kind.set("configure");
+    reply.context.kind = .configure;
     var buffer: [1024]u8 = undefined;
     for ([_]MutationPresentation{ .human, .interactive_configuration }) |mode| {
         var writer = std.Io.Writer.fixed(&buffer);
@@ -2258,32 +2361,55 @@ test "mutation presentation wrong binding keeps caller context even interactivel
         try std.testing.expectEqualStrings("Store: /original-store\nSession: original\nkey: original-key\ninvocation: RequestBindingMismatch (HTTP 200); outcome unconfirmed\n", writer.buffered());
     }
     var writer = std.Io.Writer.fixed(&buffer);
-    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .json));
+    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .{ .json = .generated }));
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-const SavedRequest = client.CapturedIdentity;
+test "not-accepted guidance names the generated handle or the quoted explicit recover form" {
+    var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
+    try context.store.set("/it's \\store");
+    try context.key.set("0f8fad5b-d9cb-469f-a165-70867728950e");
+    var buffer: [512]u8 = undefined;
+    const prefix = "rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ";
+    var generated = std.Io.Writer.fixed(&buffer);
+    try writeNotAccepted(&generated, context, .generated);
+    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e\n", generated.buffered());
+    var explicit = std.Io.Writer.fixed(&buffer);
+    try writeNotAccepted(&explicit, context, .{ .explicit = "stop\x1b.json" });
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop\n", explicit.buffered());
+}
+
+const SavedRequest = protocol_reply.MutationIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
-fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !SavedRequest {
-    if (parsed.positional) |handle| return savedRequest(init, handle);
-    var identity: SavedRequest = .{};
+/// The Store and key a request command names, from a saved handle or flags.
+const RequestIdentity = struct {
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+};
+
+fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !RequestIdentity {
+    if (parsed.positional) |handle| {
+        const saved = try savedRequest(init, handle);
+        return .{ .store = saved.store, .key = saved.key };
+    }
+    var identity: RequestIdentity = .{};
     try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?client.SessionListCursor } {
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, first: bool, writer: *std.Io.Writer) !struct { count: usize, next: ?protocol_reply.SessionListCursor } {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
     const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply);
     const page = switch (decoded) {
         .page => |*page| page,
         .failure => |failure| {
@@ -2312,7 +2438,7 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     };
     // Bounded pages stream into one final JSON value; no page population is
     // retained. A failed later page leaves incomplete output and exits nonzero.
-    var cursor: client.SessionListCursor = .{};
+    var cursor: protocol_reply.SessionListCursor = .{};
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
@@ -2353,23 +2479,56 @@ fn requests(init: std.process.Init) !void {
 }
 
 fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
-    const handle = parsed.positional orelse {
-        // The grammar requires --store, --record and --kind together.
-        var reply_buffer: client.ReplyBuffer = .{};
-        const reply = try client.retry(init.io, parsed.get("store").?, parsed.get("record").?, parsed.get("kind").?, &reply_buffer);
-        return writeMutationReply(init.io, reply, .json);
-    };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
+    // The grammar requires --store, --record and --kind together.
+    const saved: client.SavedRecord = if (parsed.positional) |handle|
+        .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
+    else blk: {
+        const store = parsed.get("store").?;
+        const kind = parseRetryName(parsed.get("kind").?) orelse {
+            // The Store is resolved before the kind is read, so its failure stays first.
+            _ = try platform.resolveClientPaths(init.io, store);
+            return error.InvalidRetryKind;
+        };
+        break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
+    };
+    var captured = try client.openCaptured(init.io, saved);
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try client.sendCaptured(init.io, &captured, null, &buffer);
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
-    try writeMutationReply(init.io, reply, .json);
+    try writeMutationReply(init.io, reply, .{ .json = switch (saved) {
+        .generated => .generated,
+        .explicit => |explicit| .{ .explicit = explicit.record },
+    } });
 }
 
-fn showResult(init: std.process.Init, requester: client.Requests, saved: *const client.MessageAddress) !void {
+/// A command kind in its `rui request recover --kind` spelling.
+fn parseRetryName(name: []const u8) ?protocol.CommandKind {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
+        if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
+    }
+    return null;
+}
+
+fn retryName(comptime kind: protocol.CommandKind) []const u8 {
+    comptime {
+        var name = @tagName(kind)[0..@tagName(kind).len].*;
+        std.mem.replaceScalar(u8, &name, '_', '-');
+        const final = name;
+        return &final;
+    }
+}
+
+test "recover accepts only the hyphenated spelling of each command kind" {
+    inline for (comptime std.enums.values(protocol.CommandKind)) |kind|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, kind), parseRetryName(comptime retryName(kind)));
+    inline for (.{ "session_stop", "model_interruption", "permission_decision", "Message", "", "configure-" }) |name|
+        try std.testing.expectEqual(@as(?protocol.CommandKind, null), parseRetryName(name));
+}
+
+fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
     const observed = try checkedObservation(init.io, try requester.observeMessage(saved), saved.key.slice());
     const state = observed.state();
     var line: [256]u8 = undefined;
@@ -2421,7 +2580,7 @@ fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.F
 }
 
 const SessionObservation = struct {
-    current: client.Current,
+    current: protocol_reply.Current,
     // The complete Current capture remains owned until all its permissions
     // have been displayed; no per-Action resident list is needed.
     file: std.Io.File,
@@ -2443,23 +2602,23 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try requester.inspectSession(store, session_ref, .current, file, &response);
-    switch (try client.CurrentReply.decode(init.io, file, session_ref, reply)) {
+    switch (try protocol_reply.CurrentReply.decode(init.io, file, session_ref, reply)) {
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
         .failure => |failure| {
             if (requester.read_failure != null) return requester.failRead(failure);
             try out.writeAll(reply.command.body);
             try out.writeByte('\n');
-            try client.checkCanonicalFailure(reply.command);
+            try protocol_reply.checkCanonicalFailure(reply.command);
             return failure.err();
         },
     }
 }
 
-fn renderActionable(io: std.Io, current: *const client.Current, file: std.Io.File, out: *std.Io.Writer) !void {
+fn renderActionable(io: std.Io, current: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) !void {
     const Sink = struct {
         out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: client.Current.Attention) !void {
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
             if (row == .actionable) {
                 var buffer: [20]u8 = undefined;
                 try writeSafeFieldTo(self.out, "Action requiring attention: ", try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value}));

@@ -1040,6 +1040,7 @@ def main():
         )
     )
     exited_child_pid = state / "exited-child-pid"
+    exited_pipes_leader_release = state / "exited-pipes-leader-release"
     responses.append(
         fixture.sse_tool_calls(
             "exited-pipes-calls",
@@ -1048,7 +1049,11 @@ def main():
                 "exited-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & {publish_pid(exited_child_pid, '$!')}",
+                        "cmd": (
+                            f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
+                            f"{publish_pid(exited_child_pid, '$!')}; "
+                            f"while [ ! -e {exited_pipes_leader_release} ]; do sleep 0.01; done"
+                        ),
                         "timeout_ms": None,
                         "description": "Start detached pipe-free child",
                     },
@@ -1500,7 +1505,7 @@ def main():
         fixture.stop_host(host)
         assert rows(
             store,
-            "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
+            "SELECT authorized,attempt_ordinal FROM action_operation WHERE session_ref=?",
             (session,),
         ) == [(1, 0)]
         before_launch_gate = ReleaseGate(state / "before-launch-gate")
@@ -1702,6 +1707,7 @@ def main():
         )
         child_pid = int(exited_child_pid.read_text())
         assert process_exists(child_pid)
+        exited_pipes_leader_release.touch()
         fixture.wait_for(
             lambda: resolution(store, session) == "succeeded",
             "natural Bash result after descendant cleanup",
