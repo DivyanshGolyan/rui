@@ -15,6 +15,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
+const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
@@ -35,6 +36,9 @@ pub const max_page_rows = 8;
 pub const max_first_line_reads = 8;
 /// Bytes of a first line kept for its title; a longer line ends in an ellipsis.
 pub const max_line_bytes = 256;
+/// The shell reads this much of a first line: one byte more than a row keeps,
+/// so a longer line shows that it was cut.
+pub const max_line_read_bytes = max_line_bytes + 1;
 /// The composer's text, which becomes a new Session's first Message.
 pub const max_draft_bytes = 64 * 1024;
 /// Rows a folded group shows before its "more" line.
@@ -43,6 +47,8 @@ pub const fold_rows = 5;
 pub const max_stops = 8;
 /// The least time between two list requests.
 pub const list_interval_ms = 1000;
+/// A generated request handle, as `rui request recover` takes it.
+pub const max_handle_bytes = 36;
 
 pub const Group = enum { yours, working, idle, finished, ended };
 pub const Mark = enum { active, waiting, finished, failed, stopped };
@@ -71,15 +77,18 @@ pub const Rule = struct {
     detail: Detail = .none,
     /// Ctrl-X may stop a Session in this state.
     stoppable: bool,
+    /// The state holds an Attempt in Host custody, which is process-local:
+    /// entered before this Host started, it is being recovered.
+    held: bool = false,
 };
 
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .group = .idle, .mark = .waiting, .colour = .quiet, .word = "idle", .said_by_group = true, .stoppable = false },
     .pending = .{ .group = .working, .mark = .waiting, .colour = .quiet, .word = "pending", .stoppable = true },
-    .working = .{ .group = .working, .mark = .active, .colour = .normal, .word = "working", .said_by_group = true, .stoppable = true },
+    .working = .{ .group = .working, .mark = .active, .colour = .normal, .word = "working", .said_by_group = true, .stoppable = true, .held = true },
     .retrying = .{ .group = .working, .mark = .active, .colour = .attention, .word = "retrying", .detail = .due, .stoppable = true },
-    .bash = .{ .group = .working, .mark = .active, .colour = .normal, .word = "Bash", .detail = .description, .stoppable = true },
+    .bash = .{ .group = .working, .mark = .active, .colour = .normal, .word = "Bash", .detail = .description, .stoppable = true, .held = true },
     .approval = .{ .group = .working, .mark = .waiting, .colour = .attention, .word = "needs approval", .stoppable = true },
     .stopping = .{ .group = .working, .mark = .active, .colour = .quiet, .word = "stopping", .stoppable = false },
     .finished = .{ .group = .finished, .mark = .finished, .colour = .quiet, .word = "finished", .said_by_group = true, .stoppable = false },
@@ -212,8 +221,18 @@ pub const ListReply = union(enum) { page: Page, failed };
 pub const FirstLine = struct {
     reference: Reference,
     admission: u64,
-    /// The unverified first line, or null when the read failed.
+    /// The unverified first line, or null when the Host refused it.
     line: ?[]const u8,
+    /// No answer came, as when the Host is down: the next listing asks again.
+    unanswered: bool = false,
+};
+
+/// What host-info says of the serving Host.
+pub const Host = struct {
+    /// Unix seconds.
+    started_at: u64,
+    slots: u64,
+    slots_in_use: u64,
 };
 
 pub const StopResult = struct {
@@ -222,7 +241,14 @@ pub const StopResult = struct {
     failure: ?[]const u8,
 };
 
-pub const StartResult = union(enum) { started: Reference, failed: []const u8 };
+pub const StartResult = union(enum) {
+    started: Reference,
+    /// The Host refused it, or it never left: the text can be sent again.
+    failed: []const u8,
+    /// It may have reached the Host. Its saved request handle recovers it;
+    /// another Enter would start a second Session.
+    unconfirmed: []const u8,
+};
 
 pub const Event = union(enum) {
     key: Key,
@@ -232,6 +258,10 @@ pub const Event = union(enum) {
     first_line: FirstLine,
     stop: StopResult,
     start: StartResult,
+    /// Opens a Session named outside the overview, as `session resume` does.
+    open: Reference,
+    /// The Host's facts, read as a listing starts; null when it gave none.
+    host: ?Host,
 };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
@@ -396,6 +426,10 @@ pub const State = struct {
     settings: StartSettings = .{},
     /// A start is in flight; the composer is locked until its result.
     starting: bool = false,
+    /// The handle of the last start whose admission is unknown.
+    unconfirmed: ?Bounded(max_handle_bytes) = null,
+    /// The serving Host's facts, from the latest host-info read.
+    host: ?Host = null,
     stops: [max_stops]Reference = undefined,
     stop_count: usize = 0,
 
@@ -418,12 +452,12 @@ pub const State = struct {
         login_at: ?u64 = null,
     };
 
-    /// The caller owns `home` for the state's lifetime.
-    pub fn init(gpa: Allocator, options: Options) error{OutOfMemory}!State {
-        var state: State = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at };
-        errdefer state.deinit();
-        state.cwd = try state.intern(options.cwd);
-        return state;
+    /// Initializes in place, since the state holds the whole draft. The
+    /// caller owns `home` for the state's lifetime.
+    pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
+        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at };
+        errdefer self.deinit();
+        self.cwd = try self.intern(options.cwd);
     }
 
     pub fn deinit(self: *State) void {
@@ -460,6 +494,12 @@ pub const State = struct {
             at = @min(at orelse resets *| 1000, resets *| 1000);
         };
         return at;
+    }
+
+    fn pendingCount(self: *const State) usize {
+        var count: usize = 0;
+        for (self.rows.items) |*row| count += @intFromBool(row.state == .pending);
+        return count;
     }
 
     fn selectedRow(self: *const State) ?*const Row {
@@ -604,10 +644,33 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     effects.add(.{ .open = ref });
                 },
                 .failed => |code| state.say(.attention, "! Could not start a Session: {s}", .{code}),
+                .unconfirmed => |handle| {
+                    // The saved request holds the text; recovery, not a
+                    // second Enter, finds out whether it started.
+                    state.draft_len = 0;
+                    state.settings = .{};
+                    state.next_list_ms = 0;
+                    var held: Bounded(max_handle_bytes) = .{};
+                    held.set(handle) catch unreachable;
+                    state.unconfirmed = held;
+                    state.say(.attention, "! Unconfirmed: rui request recover {s}", .{held.slice()});
+                },
             }
         },
+        .open => |ref| {
+            state.selected = ref;
+            effects.add(.{ .open = ref });
+        },
+        .host => |facts| state.host = facts,
     }
     return effects;
+}
+
+/// What the shell prints once the terminal is restored: how to recover a
+/// start the overview could not confirm.
+pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    const handle = state.unconfirmed orelse return;
+    try writer.print("rui: A new Session's start was not confirmed; use rui request recover {s}. Do not start it again.\n", .{handle.slice()});
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
@@ -793,6 +856,10 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     if (row.line != .requested) return;
     const first = row.first orelse return;
     if (first.admission != result.admission) return;
+    if (result.unanswered) {
+        row.line = .unread;
+        return;
+    }
     const bytes = result.line orelse {
         row.line = .unavailable;
         return;
@@ -929,6 +996,12 @@ fn configure(state: *State, arguments: []const u8) bool {
             return false;
         }
     }
+    // The Host admits any model name, so the client checks release support,
+    // as `session start` does.
+    if (parsed.get("model")) |model| if (!model_capability.supportsModel(model)) {
+        state.say(.attention, "! Unsupported model {s}; rui session configure --help lists them.", .{model});
+        return false;
+    };
     var next: StartSettings = .{};
     inline for (start_options, 0..) |name, option| {
         if (parsed.get(name) orelse state.settings.get(option)) |value| next.put(option, value) catch {
@@ -1099,7 +1172,31 @@ pub const Caps = struct {
     width: gwidth.Method = .wcwidth,
     /// False under NO_COLOR: no colour, only bold and reverse.
     colour: bool = true,
+
+    pub const Environment = struct {
+        lc_all: ?[]const u8 = null,
+        lc_ctype: ?[]const u8 = null,
+        lang: ?[]const u8 = null,
+        no_color: ?[]const u8 = null,
+    };
+
+    /// The locale that sets the character set is the first of LC_ALL,
+    /// LC_CTYPE and LANG that is set; one that does not name UTF-8 draws
+    /// ASCII. With none set, Unicode. A non-empty NO_COLOR turns colour off.
+    pub fn of(environment: Environment) Caps {
+        const locale = for ([_]?[]const u8{ environment.lc_all, environment.lc_ctype, environment.lang }) |value| {
+            if (value) |text| if (text.len != 0) break text;
+        } else null;
+        const utf8 = if (locale) |text| for (0..text.len) |at| {
+            if (std.ascii.startsWithIgnoreCase(text[at..], "utf-8") or std.ascii.startsWithIgnoreCase(text[at..], "utf8")) break true;
+        } else false else true;
+        return .{ .unicode = utf8, .colour = if (environment.no_color) |text| text.len == 0 else true };
+    }
 };
+
+/// SGR parameters per colour, the conversation's palette. The band is dark
+/// text on yellow.
+const sgr = std.enums.EnumArray(Colour, []const u8).init(.{ .normal = "", .quiet = "90", .attention = "33", .failure = "91", .band = "30;43" });
 
 pub const Style = struct {
     colour: Colour = .normal,
@@ -1120,6 +1217,11 @@ pub const Span = struct {
 pub const Screen = struct {
     arena: std.heap.ArenaAllocator,
     lines: []const []const Span,
+    /// Where the terminal's cursor shows: the composer's caret, unless the
+    /// composer is locked.
+    cursor: ?Cursor = null,
+
+    pub const Cursor = struct { row: u16, column: u16 };
 
     pub fn deinit(self: *Screen) void {
         self.arena.deinit();
@@ -1138,6 +1240,25 @@ pub const Screen = struct {
             }
             try writer.writeByte('\n');
         }
+    }
+
+    /// The screen as terminal bytes: one synchronized update that clears and
+    /// draws every line, then shows the cursor at the caret or hides it.
+    pub fn writeFrame(self: *const Screen, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeAll("\x1b[?2026h\x1b[?25l");
+        for (self.lines, 1..) |spans, row| {
+            try writer.print("\x1b[{d};1H\x1b[2K", .{row});
+            for (spans) |span| {
+                try writer.print("\x1b[{d};{d}H\x1b[0", .{ row, span.column + 1 });
+                if (span.style.bold) try writer.writeAll(";1");
+                if (span.style.reverse) try writer.writeAll(";7");
+                const parameters = sgr.get(span.style.colour);
+                if (parameters.len != 0) try writer.print(";{s}", .{parameters});
+                try writer.print("m{s}\x1b[0m", .{span.text});
+            }
+        }
+        if (self.cursor) |at| try writer.print("\x1b[{d};{d}H\x1b[?25h", .{ at.row + 1, at.column + 1 });
+        try writer.writeAll("\x1b[?2026l");
     }
 
     /// The style at `column` of line `row`, if a span covers it.
@@ -1180,6 +1301,10 @@ pub fn render(gpa: Allocator, state: *const State, width: u16, height: u16, caps
         lines[height - 3] = try ruleLine(&painter);
         lines[height - 2] = try composer(&painter, state);
         lines[height - 1] = try hints(&painter, state);
+        // The caret ends the draft, the composer's last span.
+        const spans = lines[height - 2];
+        const column = if (state.draft_len == 0 or spans.len == 0) 3 else spans[spans.len - 1].column + spans[spans.len - 1].cells;
+        if (!state.starting) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
     }
     return screen;
 }
@@ -1418,6 +1543,12 @@ fn headline(painter: *Painter, state: *const State) error{OutOfMemory}![]const S
         column += try painter.put(column, text, cells, .{});
         first = false;
     }
+    // Pending Sessions wait for a slot when every slot is held.
+    if (state.host) |host| if (host.slots_in_use >= host.slots and state.pendingCount() != 0) {
+        const text = try std.fmt.allocPrint(painter.arena, " {s} all {d} slots in use", .{ painter.glyphs.dot, host.slots });
+        const cells = painter.measure(text);
+        if (column + cells <= painter.width -| 1) _ = try painter.put(column, text, cells, .{ .colour = .quiet });
+    };
     return painter.finish();
 }
 
@@ -1655,6 +1786,7 @@ fn title(state: *const State, row: *const Row) struct { text: []const u8, hint: 
 
 /// What the row says beside its title, unless its group heading says it.
 fn word(arena: Allocator, state: *const State, row: *const Row, rule: Rule, glyphs: Glyphs) error{OutOfMemory}![]const u8 {
+    if (rule.held) if (state.host) |host| if (row.state.since() < host.started_at) return "recovering";
     const own = rule.said_by_group and row.group() == rule.group;
     return switch (rule.detail) {
         .none => if (own) "" else rule.word,
@@ -1679,7 +1811,9 @@ fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
 const test_now_s = 1_792_937_000;
 
 fn testState() error{OutOfMemory}!State {
-    return State.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
+    return state;
 }
 
 fn testToken(generation: u64) Token {
@@ -2026,16 +2160,16 @@ test "/configure holds start settings for the Session the next Enter starts" {
     try expectNotice(&state, null);
     try expectScreenLine(&state, 23, " start settings: --permission-mode ask --label \"lane four\" · esc clears");
     // A later value replaces an earlier one; the rest stay.
-    try typeText(&state, "/configure --label \"lane \\\"five\\\"\" --model gpt-5");
+    try typeText(&state, "/configure --label \"lane \\\"five\\\"\" --model gpt-5.5");
     try expectEffects(&.{}, try press(&state, .enter));
     var buffer: [2 * start_options.len][]const u8 = undefined;
     const args = state.settings.args(&buffer);
     try std.testing.expectEqual(@as(usize, 6), args.len);
-    for ([_][]const u8{ "--model", "gpt-5", "--permission-mode", "ask", "--label", "lane \"five\"" }, args) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
-    try expectScreenLine(&state, 23, " start settings: --model gpt-5 --permission-mode ask --label \"lan… · esc clears");
+    for ([_][]const u8{ "--model", "gpt-5.5", "--permission-mode", "ask", "--label", "lane \"five\"" }, args) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    try expectScreenLine(&state, 23, " start settings: --model gpt-5.5 --permission-mode ask --label \"l… · esc clears");
 
     var held: StartSettings = .{};
-    try held.put(1, "gpt-5");
+    try held.put(1, "gpt-5.5");
     try held.put(4, "ask");
     try held.put(8, "lane \"five\"");
     try typeText(&state, "Run the tests");
@@ -2051,6 +2185,8 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/configure --help", configure_usage },
         .{ "/configure --bogus 1", configure_usage },
         .{ "/configure --label \"open", configure_usage },
+        // The Host would admit it; its Turns would fail at the provider.
+        .{ "/configure --model gpt-5", "! Unsupported model gpt-5; rui session configure --help lists them." },
         .{ "/status", "! Unknown command · /configure sets the next Session's settings, /exit leaves" },
     }) |case| {
         try typeText(&state, case[0]);
@@ -2086,6 +2222,84 @@ test "ctrl-d leaves from an empty composer; ctrl-c and /exit always leave" {
     _ = try press(&state, .escape);
     try typeText(&state, "/exit");
     try expectEffects(&.{.exit}, try press(&state, .enter));
+}
+
+test "session resume opens its Session through the overview, which then keeps it selected" {
+    var state = try testState();
+    defer state.deinit();
+    try expectEffects(&.{.{ .open = "c3d4e5".* }}, try step(&state, .{ .open = "c3d4e5".* }));
+    // The first listing finds the row; the selection waited for it.
+    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = test_now_s * 1000 }));
+    _ = try respond(&state, .full, testToken(1), &mixed);
+    try expectSelected(&state, "c3d4e5");
+}
+
+test "an unconfirmed start clears the composer and names the request that recovers it" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try writeDeparture(&state, &departure.writer);
+    try std.testing.expectEqualStrings("", departure.written());
+
+    try typeText(&state, "/configure --permission-mode ask");
+    _ = try press(&state, .enter);
+    try typeText(&state, "Fix the flaky resize test");
+    _ = try press(&state, .enter);
+    const handle = "0f8e2c1a-7b3d-4e5f-9a6b-1c2d3e4f5a6b";
+    try expectEffects(&.{}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
+    try std.testing.expect(!state.starting);
+    // Another Enter would be a second Session, so the text is not kept.
+    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
+    try std.testing.expect(state.settings.empty());
+    try expectNotice(&state, "! Unconfirmed: rui request recover " ++ handle);
+    try expectScreenLine(&state, 23, " ! Unconfirmed: rui request recover " ++ handle);
+    // The next tick lists at once, so a start that did land shows.
+    try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
+    try writeDeparture(&state, &departure.writer);
+    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n", departure.written());
+}
+
+test "the cursor sits at the composer's caret and hides while a start is locked" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const expectCursor = struct {
+        fn at(from: *const State, width: u16, expected: ?Screen.Cursor) !void {
+            var screen = try render(std.testing.allocator, from, width, 24, .{}, 0);
+            defer screen.deinit();
+            try std.testing.expectEqual(expected, screen.cursor);
+        }
+    }.at;
+    try expectCursor(&state, 80, .{ .row = 22, .column = 3 });
+    try typeText(&state, "Fix 中");
+    try expectCursor(&state, 80, .{ .row = 22, .column = 9 });
+    // A draft wider than the composer keeps its end, and the caret, in view.
+    const long: [100]u8 = @splat('x');
+    try typeText(&state, &long);
+    try expectCursor(&state, 80, .{ .row = 22, .column = 79 });
+    try expectCursor(&state, 6, .{ .row = 22, .column = 5 });
+    _ = try press(&state, .enter);
+    try expectCursor(&state, 80, null);
+}
+
+test "caps follow the locale that sets the character set, and NO_COLOR" {
+    for ([_]struct { Caps.Environment, Caps }{
+        .{ .{}, .{} },
+        .{ .{ .lang = "en_US.UTF-8" }, .{} },
+        .{ .{ .lang = "C" }, .{ .unicode = false } },
+        .{ .{ .lang = "C.utf8" }, .{} },
+        .{ .{ .lc_all = "C", .lang = "en_US.UTF-8" }, .{ .unicode = false } },
+        .{ .{ .lc_all = "", .lc_ctype = "POSIX", .lang = "en_US.UTF-8" }, .{ .unicode = false } },
+        .{ .{ .lc_ctype = "en_GB.utf-8", .lang = "C" }, .{} },
+        .{ .{ .lang = "C", .no_color = "1" }, .{ .unicode = false, .colour = false } },
+        .{ .{ .no_color = "" }, .{} },
+    }) |case| try std.testing.expectEqual(case[1], Caps.of(case[0]));
+}
+
+test "a first line read one byte past the kept bound shows it was cut" {
+    var line: [max_line_read_bytes]u8 = @splat('a');
+    try std.testing.expect(std.mem.endsWith(u8, firstLineText(&line).slice(), "…"));
+    try std.testing.expect(!std.mem.endsWith(u8, firstLineText(line[0..max_line_bytes]).slice(), "…"));
 }
 
 test "a first line arriving titles its unlabelled row" {
@@ -2130,6 +2344,50 @@ test "a first line arriving titles its unlabelled row" {
     again.items[0] = .{ .reference = "f6g7h8".*, .position = 2, .admission = 12 };
     again.len = 1;
     try expectEffects(&.{.{ .read_first_lines = again }}, try refresh(&state, .changed, testToken(5), &.{session("f6g7h8", .{ .idle = ago(0) }, .{ .first = .{ .position = 2, .admission = 12, .sender = null } })}));
+}
+
+test "a first line with no answer is asked for again by the next listing" {
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const rows = [_]Listed{session("h8q2mz", .{ .finished = ago(60) }, .{})};
+    var reads: Reads = .{};
+    reads.items[0] = .{ .reference = "h8q2mz".*, .position = 1, .admission = 4 };
+    reads.len = 1;
+    try expectEffects(&.{.{ .read_first_lines = reads }}, try respond(&state, .full, testToken(1), &rows));
+    try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = null, .unanswered = true } }));
+    try std.testing.expectEqual(Line.unread, state.find("h8q2mz".*).?.line);
+    try expectEffects(&.{.{ .read_first_lines = reads }}, try refresh(&state, .not_modified, testToken(1), &.{}));
+}
+
+test "Host facts word a held row recovering and say when pending Sessions wait for a slot" {
+    var state = try opened(&.{
+        session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Admitted before the restart" }),
+        session("h8q2mz", .{ .working = ago(5) }, .{ .label = "Admitted after it" }),
+        session("d4e5f6", .{ .pending = ago(5) }, .{ .label = "Waiting for a slot" }),
+    });
+    defer state.deinit();
+    const before = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "recovering") == null);
+    try expectScreenLine(&state, 1, " 2 active · 1 waiting");
+    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
+    try expectScreenLine(&state, 1, " 2 active · 1 waiting · all 2 slots in use");
+    const after = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(after);
+    var lines = std.mem.splitScalar(u8, after, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "before the restart") != null) try std.testing.expect(std.mem.indexOf(u8, line, "recovering") != null);
+        if (std.mem.indexOf(u8, line, "after it") != null) try std.testing.expect(std.mem.indexOf(u8, line, "recovering") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "recovering"));
+    // A free slot leaves nothing to say; no facts leave nothing to word.
+    _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 1 } });
+    try expectScreenLine(&state, 1, " 2 active · 1 waiting");
+    _ = try step(&state, .{ .host = null });
+    const unknown = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(unknown);
+    try std.testing.expect(std.mem.indexOf(u8, unknown, "recovering") == null);
 }
 
 test "a long first line keeps whole code points and ends in an ellipsis" {

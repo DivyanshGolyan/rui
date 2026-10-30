@@ -827,8 +827,8 @@ def main():
             disconnected.stderr.close()
             forced_crash_cleanup(disconnected_store)
 
-        # Bare terminal entry starts the same managed Host and configures one
-        # recoverable Session without any separate serve terminal.
+        # Bare terminal entry starts the same managed Host and opens the
+        # overview without any separate serve terminal. It creates nothing.
         bare_home = root / "bare-home"
         bare_home.mkdir(mode=0o700)
         # macOS's temporary root may have symlink ancestors. Supply canonical
@@ -849,10 +849,10 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS)
             until = time.monotonic() + COMMAND_TIMEOUT
-            # The committed screen, not a byte match, establishes the prompt:
-            # the opening frame has drawn and the cursor sits at the composer.
-            while not (screen.completed and "Opening…" not in screen.completed
-                    and screen.screen.display[screen.screen.cursor.y].startswith("›")):
+            # The committed screen, not a byte match, establishes the overview:
+            # the empty Store's hint has drawn and the cursor sits at the composer.
+            while not (screen.completed and "No Sessions yet" in screen.completed
+                    and screen.screen.display[screen.screen.cursor.y].startswith(" ›")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
@@ -865,29 +865,7 @@ def main():
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
-            captures = list((bare_home / ".config/rui/requests").glob("*.json"))
-            assert len(captures) == 1, captures
-            captured = json.loads(captures[0].read_text())
-            key = captures[0].stem
-            assert captured["key"] == key and captured["kind"] == "configure", captured
-            assert captured["session"] == "" and captured["store"] == str(bare_store.resolve()), captured
-            observation = subprocess.run([RUI, "request", "inspect", key],
-                env=bare_env, capture_output=True, text=True, timeout=5)
-            assert observation.returncode == 0, observation.stderr
-            observed = json.loads(observation.stdout)
-            assert observed["type"] == "command_observation" and observed["key"] == key, observed
-            accepted = observed["observation"]
-            assert accepted["status"] == "accepted" and accepted["kind"] == "configure" and accepted["created"] is True, observed
-            reference = accepted["target"]
-            assert re.fullmatch(r"[0-9a-hjkmnp-tv-z]{6}", reference), reference
-            configuration = captured["configuration"]
-            assert configuration["workspace"] == {"state": "value", "value": str(root.resolve())}, captured
-            assert configuration["provider"] == {"state": "value", "value": "codex"}, captured
-            assert configuration["model"] == {"state": "value", "value": DEFAULTS.recommended_model}, captured
-            assert configuration["tools"] == {"state": "value", "value": DEFAULTS.tools.split(",")}, captured
-            assert configuration["permission_mode"] == {"state": "value", "value": DEFAULTS.permission_mode}, captured
-            assert captured["require_model"] is True, captured
-            assert key.encode() not in output and reference.encode() not in output, output
+            assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"
             assert len(wait_for_processes(bare_store, 1)) == 1
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.
@@ -899,22 +877,10 @@ def main():
             assert os_semantics.user_termios(actual_terminal) == os_semantics.user_termios(original_terminal), (actual_terminal, original_terminal, output)
             assert b"host_status" not in output and b'"diagnostics"' not in output, output
             assert instance(status(bare_store, bare_env), DEFAULT_ACTIVE_CAPACITY)
-            inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],
+            listed = subprocess.run([RUI, "session", "list", "--store", bare_store, "--all"],
                 env=bare_env, capture_output=True, text=True, timeout=5)
-            assert inspected.returncode == 0, inspected.stderr
-            current = json.loads(inspected.stdout)["session"]
-            assert {name: current[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
-                "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
-                "model": DEFAULTS.recommended_model, "tools": DEFAULTS.tools.split(","),
-                "permission_mode": DEFAULTS.permission_mode,
-            }, current
+            assert listed.returncode == 0 and json.loads(listed.stdout)["sessions"] == [], listed
             assert_configure_defaults(root, bare_store, bare_env)
-            recovered = subprocess.run([RUI, "request", "recover", key],
-                env=bare_env, capture_output=True, text=True, timeout=5)
-            assert recovered.returncode == 0, recovered.stderr
-            answer = json.loads(recovered.stdout)["answer"]
-            assert answer["status"] == "accepted" and answer["replayed"] is True, answer
-            assert answer["session"] == reference and answer["created"] is True, answer
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped

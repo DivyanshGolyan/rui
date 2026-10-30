@@ -16,7 +16,8 @@ from strict_paths import strict
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
-            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig")
+            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
+            "src/Overview.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -43,7 +44,7 @@ RULES = (
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
-      "src/session_reads.zig", "src/ClientTask.zig"),
+      "src/session_reads.zig", "src/ClientTask.zig", "src/Overview.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      "Frontend value decisions and native terminal/borrower handoffs"),

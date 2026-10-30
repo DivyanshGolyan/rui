@@ -404,6 +404,7 @@ def interactive_cases(state, binding=False, null_code=False):
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
         '{"cmd":"true","timeout_ms":null,"description":"Check successful shell exit"}')]),
         fixture.sse_answer("canonical-answer", "canonical-reason", "canonical-message", "denied tool saved")[0],
+        fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "overview start answered")[0],
         fixture.sse_answer("confirmed-answer", "confirmed-reason", "confirmed-message", "accepted work remains accepted")[0]])
     endpoint_thread = threading.Thread(target=endpoint.serve_forever)
     endpoint_thread.start()
@@ -416,7 +417,7 @@ def interactive_cases(state, binding=False, null_code=False):
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "d"),
-                ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
+                ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
             master, slave = open_pty()
@@ -437,7 +438,17 @@ def interactive_cases(state, binding=False, null_code=False):
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                if line is not None:
+                if line is None:
+                    # Bare rui opens the overview; its composer starts the Session.
+                    requested = len(endpoint.requests)
+                    human.overview_frame(master, lambda screen: screen.startswith(" rui "))
+                    os.write(master, b"fresh overview bytes\n")
+                    if binding:
+                        # An unconfirmed start stays recoverable: the overview
+                        # names it and Ctrl-D still leaves.
+                        human.read_terminal(master, "! Unconfirmed: rui request recover ")
+                        os.write(master, b"\x04")
+                else:
                     if route == "/v1/control/permission-decision":
                         proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
                         assert "\n? Run Bash · " in proposal and "\n  $ true\n" in proposal, proposal
@@ -538,13 +549,17 @@ def interactive_cases(state, binding=False, null_code=False):
                             output=error.args[0][1], stderr=error.args[0][2]) from error
                     raise
                 output += transcript.decode(errors="replace")
-                if binding and line is not None:
+                if binding:
                     assert caller.returncode == 0, "explicit detachment failed"
                 else:
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = errors.decode()
-                if not binding or line is None:
-                    assert (reason if binding else "CanonicalStoreFailure") in errors, errors
+                if line is None:
+                    # Once the terminal is restored, the start's recovery again.
+                    started = json.loads(proxy.exchanges[0][0])["key"]
+                    assert f"use rui request recover {started}. Do not start it again." in errors, errors
+                if not binding:
+                    assert "CanonicalStoreFailure" in errors, errors
                 elif route == "/v1/configure":
                     # The in-screen command showed its own diagnostic; exit
                     # prints only command output that was never shown.
@@ -565,10 +580,8 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert proxy.exchanges[0][0] == accepted_request
                 assert "admitted:" not in output and "Configured." not in output, output
                 assert "You: " not in output, output
-                if not binding or line is None:
+                if not binding:
                     assert "Detached." not in output, output
-                    if line is None:
-                        assert "› " not in output, "unaccepted fresh configuration entered the frontend"
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal), "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
@@ -577,6 +590,10 @@ def interactive_cases(state, binding=False, null_code=False):
                 key = json.loads(request)["key"]
                 record = home / ".config/rui/requests" / f"{key}.json"
                 assert json.loads(record.read_bytes())["key"] == key
+                if line is None:
+                    # The admitted first Message takes its own answer before
+                    # the next case asks for one.
+                    fixture.wait_for(lambda: len(endpoint.requests) > requested, "overview start's model request")
             finally:
                 if sys.exc_info()[0] is not None:
                     preserve_failure_metadata(state / "pty-failure.json", lambda: {
@@ -607,7 +624,7 @@ def interactive_cases(state, binding=False, null_code=False):
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
         assert not endpoint_thread.is_alive(), "provider fixture did not join"
-    print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
+    print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/overview start fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
 def permission_read_cases(state):

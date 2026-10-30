@@ -21,7 +21,7 @@ Preconditions:
 
 - A run with `--seed 3` or more, `doctor` PASS, and a terminal on `demo`.
 
-- **Status.** Run `$V send "$RUN" s1 --text /status`, `--keys Enter`, then `$V wait "$RUN" s1 --marker 'Session: demo' --after G`. The frame starts with `Browsing · Esc returns` and contains `Permission: bypass (Bash runs without asking)` and a `Work:` row that matches `$V rui "$RUN" session inspect --store STORE --session demo` (with seeded history that is `completed`, not `idle`).
+- **Status.** Run `$V send "$RUN" s1 --text /status`, `--keys Enter`, then `$V wait "$RUN" s1 --marker 'Session: ' --after G`. The frame starts with `Browsing · Esc returns` and contains `Permission: bypass (Bash runs without asking)` and a `Work:` row that matches `$V rui "$RUN" session inspect --store STORE ID`, where ID is `sessions.demo` in the run's `run.json` (with seeded history that is `completed`, not `idle`).
 - **Return.** Run `$V send "$RUN" s1 --keys C-g` and `wait --marker '›' --composer --after G`. The live view shows no `Browsing` line.
 - **Refresh during work.** Send `slow please` and Enter, then `/status` while it streams. `Work:` names the running Message. After the answer, the open page must not keep `Work: in_flight` once `Working…` is gone (a known 968d909 defect, C1); a fresh `/status` shows the completed work.
 - **Page.** Run `$V send "$RUN" s1 --keys PgUp` repeatedly until `wait --marker 'Start of conversation'`. Then `PgDn` until the composer is live.

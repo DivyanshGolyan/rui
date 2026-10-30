@@ -110,7 +110,11 @@ class Run:
         env.update(extra)
         return env
 
-    def rui_cmd(self, *args, timeout=30, log=True):
+    def sid(self, name):
+        """The ID `session start` gave a seeded Session, or NAME itself."""
+        return self.meta.get("sessions", {}).get(name, name)
+
+    def rui_cmd(self, *args, timeout=30, log=True, input=None):
         """One-shot Rui CLI call with explicit --store; logged with its result."""
         args = [str(a) for a in args]
         # `request list` is the only command without --store: it lists captures
@@ -119,7 +123,7 @@ class Run:
             die(f"refusing Rui call without --store: {args}")
         started = now_ns()
         result = subprocess.run([str(self.rui), *args], env=self.env(), cwd=self.project,
-                                capture_output=True, text=True, timeout=timeout)
+                                capture_output=True, text=True, timeout=timeout, input=input)
         if log:
             append_jsonl(self.evidence / "commands.jsonl", {
                 "t_ns": started, "t_end_ns": now_ns(), "argv": [str(self.rui), *args],
@@ -193,7 +197,7 @@ def cmd_build(args):
               "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
-              "host": os.uname().nodename, "macos": subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip()}
+              "host": os.uname().nodename, "macos": macos_version()}
     manifest.write_text(json.dumps(record, indent=1) + "\n")
     print(json.dumps(record, indent=1))
 
@@ -216,6 +220,7 @@ def fixture_main(args):
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
+      * text containing "rate limit": HTTP 429 with Retry-After 8 the first time, then the echo answer
       * otherwise: "Fixture answer N: received <json of the exact text>"
     Unbounded: it never exhausts, so extra submissions stay visible instead of failing.
     """
@@ -229,6 +234,7 @@ def fixture_main(args):
     bodies.mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
     counter = {"n": 0}
+    limited = set()
 
     def bash(call, cmd, description):
         return ("bash", call, json.dumps({"cmd": cmd, "description": description, "timeout_ms": None}))
@@ -260,6 +266,24 @@ def fixture_main(args):
                     part.get("text", "") for part in content if isinstance(part, dict))
             tool_results = [i for i in items[(last_user or 0):] if i.get("type") == "function_call_output"]
             chunk_delay = 0
+            with lock:
+                refuse = bool(user_text and "rate limit" in user_text and not tool_results and user_text not in limited)
+                if refuse:
+                    limited.add(user_text)
+            if refuse:
+                (bodies / f"request-{n:04d}.json").write_bytes(body)
+                append_jsonl(log, {"t_ns": received, "n": n, "path": self.path, "kind": "rate-limited", "user_text": user_text})
+                refusal = b'{"error":{"message":"rate limited"}}'
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(refusal)))
+                self.send_header("Retry-After", "8")
+                self.send_header("X-Request-Id", f"fixture-request-{n}")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(refusal)
+                self.close_connection = True
+                return
             if tool_results:
                 kind = "tool-summary"
                 payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
@@ -279,7 +303,8 @@ def fixture_main(args):
                 payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
                     f"Fixture answer {n}: received {json.dumps(user_text, ensure_ascii=False)}")[0]
                 if user_text and "slow" in user_text:
-                    kind, chunk_delay = "echo-slow", 0.03
+                    # About 10 s in flight, whatever the answer's length.
+                    kind, chunk_delay = "echo-slow", 10.0 / -(-len(payload) // 64)
             (bodies / f"request-{n:04d}.json").write_bytes(body)
             append_jsonl(log, {"t_ns": received, "n": n, "path": self.path, "kind": kind,
                                "user_text": user_text, "tool_results": len(tool_results), "input_items": len(items),
@@ -307,7 +332,9 @@ def fixture_main(args):
         def log_message(self, *_):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # Rui's client speaks HTTP/2; the integration fixture's server answers both.
+    from host_process import TestHTTPServer
+    server = TestHTTPServer(("127.0.0.1", 0), Handler)
     atomic_write(run.scratch / "fixture.port", str(server.server_port))
     server.serve_forever()
 
@@ -571,7 +598,7 @@ def cmd_new(args):
     meta["fixture_url"] = f"http://127.0.0.1:{port}/responses"
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
-    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", "2",
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(args.active_capacity),
                  "--provider-endpoint", meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
     host = subprocess.Popen(host_argv, env=run.env(), cwd=run.project, stdin=subprocess.DEVNULL,
                             stdout=open(run.evidence / "host.stdout.log", "w"), stderr=open(run.evidence / "host.log", "w"),
@@ -587,19 +614,36 @@ def cmd_new(args):
         time.sleep(0.1)
     meta["host_instance"] = json.loads(status.stdout).get("instance")
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
-    for session, mode in (("demo", "bypass"), ("approve", "ask")):
-        result = run.rui_cmd("session", "configure", "--store", run.store, "--session", session, "--workspace", run.project,
-                             "--provider", "codex", "--model", "model-a", "--permission-mode", mode)
+    # Sessions have Host-allocated IDs: start each one labelled with its name
+    # and keep the ID for --session NAME.
+    meta["sessions"] = {}
+    for session, mode in () if args.no_sessions else (("demo", "bypass"), ("approve", "ask")):
+        result = run.rui_cmd("session", "start", "--store", run.store, "--workspace", run.project,
+                             "--provider", "codex", "--model", "gpt-5.5", "--permission-mode", mode, "--label", session,
+                             input=f"verify-rui opened {session}")
         if result.returncode != 0:
-            die(f"configure {session} failed: {result.stderr}")
+            die(f"start {session} failed: {result.stderr}")
+        meta["sessions"][session] = result.stdout.strip()
+        handle = re.search(r"request: (\S+)", result.stderr)
+        if handle:
+            wait_request(run, handle.group(1))
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    run.meta = meta
     for index in range(args.seed):
         text = f"Seed history message {index + 1}: " + "lorem ipsum dolor sit amet " * 12
-        result = run.rui_cmd("session", "send", "--store", run.store, "--session", "demo", text)
+        result = run.rui_cmd("session", "send", "--store", run.store, "--to", run.sid("demo"), input=text)
         if result.returncode != 0:
             die(f"seed send failed: {result.stderr}")
         handle = re.search(r"request: (\S+)", result.stderr)
         wait_request(run, handle.group(1))
     print(root)
+
+
+def macos_version():
+    """The macOS release, or "" on another system."""
+    if shutil.which("sw_vers") is None:
+        return ""
+    return subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip()
 
 
 def wait_request(run, handle, timeout=30):
@@ -657,7 +701,7 @@ def cmd_doctor(args):
     check("owned Host process holds this Store open", any(line[1:].startswith(str(run.store)) for line in held.splitlines()),
           f"pid={host_pid}")
     sessions = run.rui_cmd("session", "list", "--store", run.store, "--all", log=False)
-    check("configured Sessions present", sessions.returncode == 0 and '"demo"' in sessions.stdout and '"approve"' in sessions.stdout,
+    check("configured Sessions present", sessions.returncode == 0 and all(f'"{run.sid(name)}"' in sessions.stdout for name in ("demo", "approve")),
           sessions.stdout.strip()[:300] or sessions.stderr.strip()[:300])
     if run.sock.exists():
         server = run.tmux("display-message", "-p", "#{pid} #{socket_path}", check=False)
@@ -690,10 +734,10 @@ def accessibility():
 
 
 def session_argv(run, session):
-    if session == "new":
-        # Bare `rui` would select the default Store; use explicit resume of a fresh configured Session.
-        die("use --session demo|approve|NAME (create NAME first with `verify-rui rui RUN session configure ...`)")
-    return [str(run.rui), "session", "resume", "--store", str(run.store), "--", session]
+    if session == "overview":
+        # Bare `rui`, with this run's Store: the overview of every Session.
+        return [str(run.rui), "--store", str(run.store)]
+    return [str(run.rui), "session", "resume", "--store", str(run.store), run.sid(session)]
 
 
 def cmd_term(args):
@@ -734,7 +778,11 @@ def cmd_term(args):
             server_pid = int(run.tmux("display-message", "-p", "#{pid}").stdout.strip())
             run.own("tmux-server", server_pid, socket=str(run.sock))
         else:
+            # tmux 3.4 exits if it makes a window while window-size is manual.
+            size_mode = run.tmux("show-options", "-gv", "window-size").stdout.strip()
+            run.tmux("set-option", "-g", "window-size", "latest")
             run.tmux("new-window", "-d", "-t", "verify-rui", "-n", name, "-c", run.project, pane_cmd)
+            run.tmux("set-option", "-g", "window-size", size_mode)
         target = f"=verify-rui:={name}"
         run.tmux("resize-window", "-t", target, "-x", columns, "-y", rows, check=False)
         pane = run.tmux("display-message", "-p", "-t", target, "#{pane_id} #{pane_pid} #{pane_tty}").stdout.split()
@@ -863,7 +911,8 @@ def composer_ready(screen, cursor):
     if "Opening…" in screen or y >= len(lines):
         return False
     line = lines[y]
-    return x >= 2 and (line == "›" or line.startswith("› "))
+    # The overview's composer is indented one cell, and is ASCII under LANG=C.
+    return x >= 2 and (line in ("›", " ›", " >") or line.startswith(("› ", " › ", " > ")))
 
 
 def cmd_wait(args):
@@ -942,8 +991,8 @@ def cmd_evidence(args):
     exports = {}
     for name, argv in (("request-list", ["request", "list"]),
                        ("sessions", ["session", "list", "--store", run.store, "--all"]),
-                       ("demo-inspect", ["session", "inspect", "--store", run.store, "--session", "demo", "--profile", "full"]),
-                       ("approve-inspect", ["session", "inspect", "--store", run.store, "--session", "approve", "--profile", "full"])):
+                       ("demo-inspect", ["session", "inspect", "--store", run.store, run.sid("demo"), "--profile", "full"]),
+                       ("approve-inspect", ["session", "inspect", "--store", run.store, run.sid("approve"), "--profile", "full"])):
         result = run.rui_cmd(*argv)
         (out / f"{name}.json").write_text(result.stdout)
         if result.stderr:
@@ -1588,6 +1637,8 @@ def main():
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("new", help="new run: synthetic HOME/Store, fixture provider, Host, Sessions demo(bypass)/approve(ask)")
     p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")
+    p.add_argument("--no-sessions", action="store_true", help="an empty Store: start neither demo nor approve")
+    p.add_argument("--active-capacity", type=int, default=2, help="the Host's Active Capacity")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_new)
     p = sub.add_parser("doctor", help="read-only: right binary/SHA, owned Host ready, owned fixture, private tmux")
@@ -1596,7 +1647,8 @@ def main():
     p = sub.add_parser("term", help="open a Rui terminal: pty | tmux-detached | tmux-attached")
     p.add_argument("run"); p.add_argument("name")
     p.add_argument("--surface", choices=["pty", "tmux-detached", "tmux-attached"], required=True)
-    p.add_argument("--session", default="demo"); p.add_argument("--size", default="80x24")
+    p.add_argument("--session", default="demo", help="demo | approve | overview (bare rui) | a Session ID")
+    p.add_argument("--size", default="80x24")
     p.add_argument("--no-tap", action="store_true", help="tmux only: run Rui directly in the pane (control; no byte log)")
     p.add_argument("argv", nargs="*", help="override argv (must still pass --store)")
     p.set_defaults(func=cmd_term)

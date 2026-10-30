@@ -50,7 +50,7 @@ The installer checks the download's SHA-256 digest and keeps your Stores, creden
 
 By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command, and you type `a` to allow it or `d` to deny it.
 
-To leave, type `/exit` or press Ctrl+C. Work continues in the background. Rui prints the `rui session resume` command that returns you to the conversation. `rui session list` shows this project's conversations and their IDs.
+To leave, type `/exit` or press Ctrl+C. Work continues in the background. Run `rui` again to see every conversation and press Enter on one to return to it.
 
 ## Build from source
 

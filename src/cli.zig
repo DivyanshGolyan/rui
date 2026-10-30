@@ -2,9 +2,7 @@ const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
-const SessionFrontend = @import("SessionFrontend.zig");
-const SessionScreen = @import("SessionScreen.zig");
-const SessionTerminal = @import("SessionTerminal.zig");
+const Overview = @import("Overview.zig");
 const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
@@ -1019,30 +1017,61 @@ fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void
     }
 }
 
+/// Bare `rui`: the overview of every Session in the Store. It creates none;
+/// its composer starts one.
 fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
-    try requireInteractiveTerminal(init, "to create a Session");
-    const saved = (try createSession(init, options)) orelse return;
-    runSession(init, saved.store.slice(), saved.session.slice()) catch |err| {
-        // Configuration acceptance and local entry are independent outcomes.
-        var bytes: [256]u8 = undefined;
-        var notice = std.Io.Writer.fixed(&bytes);
-        notice.print("\nrui: Session configuration accepted.\nConfiguration request: {s} (rui request inspect {s})\n", .{ saved.key.slice(), saved.key.slice() }) catch return err;
-        _ = @import("stderr.zig").write(notice.buffered());
-        return err;
-    };
+    try requireInteractiveTerminal(init, "to open the overview");
+    const entry = try init.gpa.create(OverviewEntry);
+    defer init.gpa.destroy(entry);
+    if (!try prepareOverview(init, options, entry)) return;
+    return openOverview(init, .{
+        .store = entry.paths.store.slice(),
+        .workspace = entry.workspace_buffer[0..entry.workspace_len],
+        .home = entry.home,
+        .directory = undefined,
+        .provider = entry.binding.provider.slice(),
+        .model = entry.binding.model.slice(),
+        .login_at = entry.login_at,
+    });
 }
 
-fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_reply.MutationIdentity {
+fn openOverview(init: std.process.Init, options: Overview.Options) !void {
+    // The overview runs under this frame, so its buffers live on the heap.
+    const directory_buffer = try init.gpa.create([std.Io.Dir.max_path_bytes]u8);
+    defer init.gpa.destroy(directory_buffer);
+    var with_directory = options;
+    with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = writeSessionStatus, .captured = captureGate });
+}
+
+fn captureGate(io: std.Io) !void {
+    return testGate(io, "RUI_TEST_CAPTURE_GATE");
+}
+
+/// What bare `rui` settles before the overview opens: a ready Host with the
+/// model capability, the cwd, and the binding the composer's Sessions get.
+const OverviewEntry = struct {
+    paths: platform.Paths,
+    workspace_buffer: [protocol.max_workspace_bytes]u8,
+    workspace_len: usize,
+    home: []const u8,
+    binding: new_session_selection.Binding,
+    /// Set when this terminal just signed in.
+    login_at: ?u64,
+};
+
+/// Selects the Store and the new-Session binding, offering login when no
+/// provider is ready, and starts the Host. False when the person deferred.
+fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry) !bool {
     if (options.model) |model| try requireSupportedModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    const workspace_length = try cwd.realPath(init.io, &workspace_buffer);
-    const workspace = workspace_buffer[0..workspace_length];
+    entry.workspace_len = try cwd.realPath(init.io, &entry.workspace_buffer);
 
     const home = init.environ_map.get("HOME") orelse return homeRequired("a new Session reads saved defaults and request captures under HOME");
+    entry.home = home;
     var snapshot: new_session_selection.Snapshot = undefined;
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1086,16 +1115,15 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         if (selection) |binding| break binding;
         if (after_choice) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect or rui auth login codex when ready; existing work is unchanged.\n");
-            return null;
+            return false;
         }
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No locally ready provider for a new Session. Choose Codex login or defer; saved work remains inspectable.\n");
         try guideProviderLogin(init);
         after_choice = true;
     };
     try startHost(init, selected_store, true, null);
-    const paths = try platform.resolveClientPaths(init.io, selected_store);
-    const destination = paths.store.slice();
-    const ready = switch (client.hostStatus(init.io, destination)) {
+    entry.paths = try platform.resolveClientPaths(init.io, selected_store);
+    const ready = switch (client.hostStatus(init.io, entry.paths.store.slice())) {
         .ready => |current| current,
         else => return error.HostReadinessUnconfirmed,
     };
@@ -1103,35 +1131,9 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         TerminalText.diagnostic("rui: selected Host has no model capability; it was not restarted. Inspect rui host status before creating a Session.\n", .{});
         return error.HostModelUnavailable;
     }
-    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try client.captureConfigure(init.io, .{
-        .store = destination,
-        .session = .create,
-        .require_model = true,
-        .workspace = .{ .present = true, .value = workspace },
-        .provider = .{ .present = true, .value = selected.provider.slice() },
-        .model = .{ .present = true, .value = selected.model.slice() },
-        .tools = product_defaults.tools,
-        .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
-    }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
-    const saved = captured.identity().*;
-    const replay = captured.replay;
-    var reply_buffer: client.ReplyBuffer = .{};
-    const reply = blk: {
-        defer captured.close(init.io);
-        try testGate(init.io, "RUI_TEST_CAPTURE_GATE");
-        break :blk (client.Requests{ .io = init.io }).sendCaptured(&captured, &reply_buffer).get() catch |err| {
-            TerminalText.diagnostic("rui: configuration not confirmed ({s}); use rui request recover {s}. Do not replace uncertain work.\n", .{ @errorName(err), saved.key.slice() });
-            return err;
-        };
-    };
-    if (!reply.isAccepted()) {
-        try writeMutationReply(init.io, reply, .human, replay);
-        return error.SessionConfigurationRejected;
-    }
-    var configured = saved;
-    configured.session = reply.context.session;
-    return configured;
+    entry.binding = selected;
+    entry.login_at = if (after_choice) @intCast(codex_auth.nowSeconds(init.io)) else null;
+    return true;
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
@@ -1606,77 +1608,6 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
     try writer.flush();
 }
 
-fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8) anyerror!void {
-    const Interrupt = struct {
-        var cancellation: client.Cancellation = .{};
-        var previous: [2]std.posix.Sigaction = undefined;
-        fn stop(_: std.posix.SIG) callconv(.c) void {
-            cancellation.requestStop();
-        }
-        fn install(on: bool) void {
-            const action: std.posix.Sigaction = .{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
-            inline for (.{ std.posix.SIG.INT, std.posix.SIG.TERM }, 0..) |signal, i| {
-                if (on) std.posix.sigaction(signal, &action, &previous[i]) else std.posix.sigaction(signal, &previous[i], null);
-            }
-        }
-    };
-    // Callers own canonical Store resolution and complete Session selection.
-    const outcome: anyerror!void = run: {
-        confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
-            if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
-            break :run err;
-        };
-        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const directory = requestDirectory(init, &directory_buffer) catch |err| break :run err;
-        const scratch = renderScratch(init) catch |err| break :run err;
-        defer scratch.close(init.io);
-        const action = renderScratch(init) catch |err| break :run err;
-        defer action.close(init.io);
-        const inspection = renderScratch(init) catch |err| break :run err;
-        defer inspection.close(init.io);
-        const status = renderScratch(init) catch |err| break :run err;
-        defer status.close(init.io);
-        const screen = init.gpa.create(SessionScreen) catch |err| break :run err;
-        defer init.gpa.destroy(screen);
-        const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
-        screen.init(init.io, init.environ_map, no_colour.len == 0) catch |err| break :run err;
-        defer screen.deinit();
-        Interrupt.cancellation.stopped.store(false, .release);
-        Interrupt.install(true);
-        defer Interrupt.install(false);
-        var terminal = SessionTerminal.begin(screen) catch |err| break :run err;
-        var frontend: SessionFrontend = undefined;
-        const ended = frontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection, .status = status }, sessionCommand, sessionRequests, writeSessionStatus, &terminal, &Interrupt.cancellation);
-        const departure = frontend.leave(ended, terminal.finish());
-        const end = departure.end catch |err| {
-            if (departure.failure_notice) terminal.detached(destination, reference, departure.action) catch |notice_error|
-                TerminalText.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
-            break :run err;
-        };
-        switch (end) {
-            .detached, .interrupted => terminal.detached(destination, reference, departure.action) catch |err| {
-                if (!departure.recovery_shown) frontend.recoveryGuide();
-                break :run err;
-            },
-        }
-    };
-    return outcome catch |err| {
-        notice: {
-            // Four bytes per escaped selector byte, plus labels and hex syntax.
-            var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
-            var notice = std.Io.Writer.fixed(&bytes);
-            if (err == error.InvalidTemporaryDirectory)
-                notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch break :notice;
-            notice.writeAll("\nResume: rui session resume --store ") catch break :notice;
-            TerminalText.writeShellWord(&notice, destination) catch break :notice;
-            TerminalText.writeShellSession(&notice, reference, true) catch break :notice;
-            notice.writeByte('\n') catch break :notice;
-            _ = @import("stderr.zig").write(notice.buffered());
-        }
-        return err;
-    };
-}
-
 fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     // The grammar admits exactly one of ID and --session, and dispatch has
     // checked it is a Session ID.
@@ -1686,7 +1617,33 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
     try startHost(init, destination, true, null);
-    return runSession(init, destination, reference);
+    const open = reference[0..protocol.session_id_bytes].*;
+    confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
+        if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
+        return Overview.printFailure(err, destination, open, null);
+    };
+    var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
+    defer cwd.close(init.io);
+    const workspace_buffer = try init.gpa.create([protocol.max_workspace_bytes]u8);
+    defer init.gpa.destroy(workspace_buffer);
+    const workspace = workspace_buffer[0..try cwd.realPath(init.io, workspace_buffer)];
+    // Esc leads to the overview, whose composer starts Sessions with the
+    // saved defaults. The Host refuses a start that resolves no binding.
+    const home = init.environ_map.get("HOME");
+    const binding: ?new_session_selection.Binding = blk: {
+        const snapshot: new_session_selection.Snapshot = .{ .intent = .{}, .defaults = preferences.load(home orelse break :blk null) catch break :blk null };
+        const resolved = (snapshot.resolve(.configured) catch null) orelse break :blk null;
+        break :blk if (model_capability.supportsModel(resolved.model.slice())) resolved else null;
+    };
+    return openOverview(init, .{
+        .store = destination,
+        .workspace = workspace,
+        .home = home orelse "",
+        .directory = undefined,
+        .provider = if (binding) |*value| value.provider.slice() else null,
+        .model = if (binding) |*value| value.model.slice() else null,
+        .open = open,
+    });
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {

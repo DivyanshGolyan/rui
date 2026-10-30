@@ -532,6 +532,75 @@ def composer_ready(screen, x, y):
     return x >= 2 and (line == "›" or line.startswith("› ") or line == ">" or line.startswith("> "))
 
 
+def overview_composer(screen, x, y):
+    """Input is accepted at the overview's composer: the cursor is on its row."""
+    lines = screen.split("\n")
+    line = lines[y] if y < len(lines) else ""
+    return x >= 2 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
+
+
+def keyed_frame(master, keys, accept, timeout=15):
+    """Write `keys`; return the first committed frame after them that
+    `accept`s, given the frame and its cursor. With no keys, the frame shown
+    now counts."""
+    capture = terminal_capture(master)
+    found = []
+
+    def observe(screen, x, y):
+        if not found and accept(screen, x, y):
+            found.append(screen)
+
+    capture.listener = observe
+    try:
+        if keys:
+            os.write(master, keys)
+        elif accept(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y):
+            return capture.completed
+        deadline = time.monotonic() + timeout
+        while not found:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
+                "keyed frame", keys, capture.completed)
+            chunk = os.read(master, 65536)
+            assert chunk, ("terminal closed before keyed frame", keys)
+            capture.feed(chunk)
+    finally:
+        capture.listener = None
+    return found[0]
+
+
+def overview_frame(master, accept, keys=b"", timeout=15):
+    """The first overview frame after `keys` that `accept`s, with its
+    composer taking input."""
+    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
+
+
+def leave_overview(master, timeout=15):
+    """Ctrl-D on an empty composer leaves the overview; returns the text
+    printed after it, through the notice's Overview line."""
+    capture = terminal_capture(master)
+    total = capture.plain_total
+    os.write(master, b"\x04")
+    deadline = time.monotonic() + timeout
+    while True:
+        plain = capture.plain_since(total)
+        at = plain.find("Overview: rui --store ")
+        if at >= 0 and "\n" in plain[at:]:
+            return plain
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([master], [], [], remaining)[0], ("overview notice", plain)
+        chunk = os.read(master, 65536)
+        assert chunk, ("terminal closed before the overview notice", plain)
+        capture.feed(chunk)
+
+
+def overview_store(notice):
+    """The Store the overview's notice names, without its shell quoting."""
+    line = notice.split("Overview: rui --store ", 1)[1].splitlines()[0]
+    assert line.startswith("$'") and line.endswith("'") and "\\" not in line, line
+    return line[2:-1]
+
+
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
     """Wait until a committed frame shows `marker`; return the frames shown.
 
@@ -1052,6 +1121,109 @@ def terminal_step(master, command, marker, *, composer=False):
     return read_terminal(master, marker)
 
 
+def overview_cases():
+    """Bare `rui` opens the overview of every Session. Enter opens one and
+    Esc returns; the composer starts one with /configure's settings;
+    `session resume` opens inside the overview; a start the process never
+    sent recovers from its saved request."""
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-overview."))
+    home = state / "home"
+    (home / ".config/rui").mkdir(parents=True, mode=0o700)
+    store = state / "store"
+    workspace = state / "workspace"
+    workspace.mkdir()
+    codex_fixture.credentials(home / ".config/rui/codex.json")
+    endpoint = fixture.SuccessEndpoint([], {
+        "Fix the flaky test": fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "Flaky test fixed.")[0],
+        "captured then killed": fixture.sse_answer("killed-answer", "killed-reason", "killed-message", "Recovered start answered.")[0],
+    })
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    host = caller = None
+    completed = False
+    master, slave = open_pty()
+    records = home / ".config/rui/requests"
+    env = {**os.environ, "HOME": str(home)}
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
+        original = termios.tcgetattr(slave)
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        # An empty Store shows the composer and a hint.
+        empty = overview_frame(master, lambda frame: "No Sessions yet. Describe a task below to start one." in frame)
+        assert "describe a task for a new Session" in empty and not records.exists(), empty
+        held = overview_frame(master, lambda frame: "--permission-mode ask" in frame,
+            keys=b'/configure --permission-mode ask --label "lane four"\n')
+        assert "start settings:" in held, held
+        # The composer starts a Session with those settings and opens it.
+        os.write(master, b"Fix the flaky test\n")
+        read_terminal(master, "Flaky test fixed.", composer=True)
+        record, = records.glob("*.json")
+        saved = json.loads(record.read_bytes())
+        assert saved["require_model"] is True and saved["session"] == "" and saved["store"] == str(store.resolve()), saved
+        configuration = saved["configuration"]
+        assert configuration["workspace"] == {"state": "value", "value": str(workspace.resolve())}, saved
+        assert configuration["model"] == {"state": "value", "value": "gpt-6-luna"}, saved
+        assert configuration["permission_mode"] == {"state": "value", "value": "ask"}, saved
+        assert configuration["label"] == {"state": "value", "value": "lane four"}, saved
+        started = fixture.observe(store, record.stem)["target"]
+        status = status_frame(master, started)
+        assert "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
+        # Esc leaves the page, then the conversation for the overview.
+        keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
+        listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
+        assert "Your conversations" in listed, listed
+        # Enter opens the selected Session; Esc returns.
+        os.write(master, b"\n")
+        read_terminal(master, "Flaky test fixed.", composer=True)
+        overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
+        notice = leave_overview(master)
+        assert "Detached. Host work continues." in notice and "Resume:" not in notice, notice
+        assert overview_store(notice) == str(store.resolve()), notice
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+        # Resume opens the Session inside the overview: Esc returns to it.
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", started], cwd=workspace, env=env,
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "Flaky test fixed.", composer=True)
+        overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
+        leave_overview(master)
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        assert len(endpoint.requests) == 1, "opening, returning or resuming submitted work"
+        # A start captured and never sent is recovered from its saved request.
+        before = set(records.glob("*.json"))
+        gate = state / "overview-capture"
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env={**env, "RUI_TEST_CAPTURE_GATE": str(gate)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        overview_frame(master, lambda frame: "lane four" in frame)
+        os.write(master, b"captured then killed\n")
+        fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "overview start captured")
+        killed, = set(records.glob("*.json")) - before
+        assert json.loads(killed.read_bytes())["require_model"] is True
+        caller.kill()
+        caller.wait(timeout=5)
+        caller.stderr.close()
+        recovered = json.loads(run(home, "request", "recover", killed.stem))
+        assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
+        allocated = recovered["answer"]["session"]
+        assert recovered["context"]["session"] == allocated and allocated != started, recovered
+        fixture.wait_for(lambda: len(endpoint.requests) == 2, "recovered start's Turn")
+        completed = True
+        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview and recovery of a start never sent passed", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
+                    lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("overview failure state", state)
+
+
 def command_entry_cases():
     """Familiar entry routes use the same captured intent and conversation."""
     import canonical_failure_integration as canonical
@@ -1228,23 +1400,22 @@ def command_entry_cases():
         assert not (workspace / "must-not-run").exists(), current
         assert "result" not in fixture.observe(store, blocked["request"]), "blocked send completed"
         assert len(endpoint.requests) == 7, "blocked send authorized or continued work"
-        # Accepted configuration survives failure before conversation entry.
+        # A failure before the overview draws changes nothing and says how
+        # to fix it; one before a resumed Session opens names that Session.
         records = home / ".config/rui/requests"
         before_entry = set(records.glob("*.json"))
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
             env={**env, "TMPDIR": "not-absolute"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
         assert caller.returncode != 0 and b"InvalidTemporaryDirectory" in errors, (output, errors)
-        caller.stderr.close()
+        assert b"Fix or unset TMPDIR before opening the overview." in errors and b"Resume: " not in errors, errors
+        assert set(records.glob("*.json")) == before_entry, "the overview captured a request"
+        allocated_entry = admit(home, "session", "configure", cwd=workspace)["admission"]["answer"]["session"]
         added = set(records.glob("*.json")) - before_entry
-        assert len(added) == 1, added
-        saved = json.loads(next(iter(added)).read_bytes())
-        assert "configuration" in saved, saved
-        recovered_entry = json.loads(run(home, "request", "recover", saved["key"]))
-        assert recovered_entry["answer"]["replayed"] is True
-        allocated_entry = recovered_entry["answer"]["session"]
-        assert saved["session"] == "" and recovered_entry["context"]["session"] == allocated_entry, recovered_entry
-        assert f"Configuration request: {saved['key']}".encode() in errors, errors
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", allocated_entry], cwd=workspace,
+            env={**env, "TMPDIR": "not-absolute"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        output, errors = terminal_exit(caller, master)
+        assert caller.returncode != 0 and b"InvalidTemporaryDirectory" in errors, (output, errors)
         assert b"Fix or unset TMPDIR before resuming." in errors, errors
         resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
         assert "rui session resume --store " in resume, resume
@@ -1325,7 +1496,7 @@ def command_entry_cases():
         assert set(records.glob("*.json")) == before_resume
         assert len(endpoint.requests) == 9, "entry recovery submitted provider work"
         completed = True
-        print("CLI entry/resume/send: literal prompt, exact resume beside newer Sessions and activity, colour/NO_COLOR, fresh default Configure, admission-only held send with exact saved answer, stdin, literal dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block and accepted-entry recovery controls passed", flush=True)
+        print("CLI entry/resume/send: literal prompt, exact resume beside newer Sessions and activity, colour/NO_COLOR, fresh default Configure, admission-only held send with exact saved answer, stdin, literal dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block and entry failure guidance controls passed", flush=True)
     finally:
         dispose_all(
             held_release.set, permission_release.set,
@@ -2686,18 +2857,20 @@ def store_selection_cases(state, workspace, valid_store):
                 settlement_timeout = response_deadline - time.monotonic()
                 assert settlement_timeout > 0, "saved-Store deferral did not settle within 5 seconds"
             if not case.startswith("saved"):
-                greeting = read_terminal(master, "› ")
+                greeting = overview_frame(master, lambda frame: frame.startswith(" rui "))
                 assert "Session:" not in greeting and "request:" not in greeting, greeting
-                terminal_step(master, "/exit", "Detached.")
+                notice = leave_overview(master)
+                assert overview_store(notice) == str(explicit.resolve()), (case, notice)
             _, errors = caller.communicate(timeout=settlement_timeout)
             if case.startswith("saved"):
                 assert caller.returncode != 0 and b"FileNotFound" in errors, (case, errors)
                 assert not destination.exists() and not (home / ".config/rui/requests").exists()
             else:
                 assert caller.returncode == 0, (case, errors)
-                record, = (home / ".config/rui/requests").glob("*.json")
-                binding = json.loads(record.read_bytes())
-                assert binding["store"] == str(explicit.resolve()) and binding["require_model"] is True
+                # The overview starts nothing until its composer is used.
+                assert not list((home / ".config/rui/requests").glob("*.json")), case
+                assert json.loads(run(home, "host", "status", "--store", explicit))["status"] == "ready"
+                assert case != "explicit-override" or not destination.exists(), case
             print("Store provenance:", case, "passed", flush=True)
         finally:
             def stop_created_host():
@@ -5176,6 +5349,7 @@ def main(selected="all"):
         opaque_session_commands_case()
         silent_read_edit_cases()
         command_entry_cases()
+        overview_cases()
         persistent_opening_case()
         scroll_return_case()
         persistent_pending_case()
@@ -5571,18 +5745,11 @@ def main(selected="all"):
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            os.write(master, b"d\n")
-            welcome = read_terminal(master, "› ", timeout=10)
+            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n", timeout=10)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
-            record, = (explicit_config / "requests").glob("*.json")
-            saved = json.loads(record.read_bytes())
-            assert saved["session"] == "" and saved["configuration"]["model"] == {"state": "value", "value": "gpt-6-luna"}, saved
-            allocated = fixture.observe(store, record.stem)["target"]
-            assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", allocated), allocated
-            binding = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {allocated}" in binding and "Provider: codex" in binding and "Model: gpt-6-luna" in binding and permission_row(binding, "bypass"), binding
+            assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert overview_store(leave_overview(master)) == str(store.resolve())
             assert explicit.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
@@ -5610,13 +5777,9 @@ def main(selected="all"):
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credential"] == "renewal_due"
-            welcome = terminal_step(master, "d", "› ")
+            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
-            binding = terminal_step(master, "/status", "Session: ", composer=True)
-            latest = max((explicit_config / "requests").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
-            allocated = fixture.observe(store, latest.stem)["target"]
-            assert f"Session: {allocated}" in binding and permission_row(binding, "bypass"), binding
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            leave_overview(master)
             assert expiring.wait(timeout=5) == 0
             assert malformed.read_text() == "version=9\n"
         finally:
@@ -5646,17 +5809,10 @@ def main(selected="all"):
                     assert "No locally ready provider" in provider_prompt(master, ready_read)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
-                    welcome = terminal_step(master, "d", "› ")
+                    welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n")
                     assert all(noise not in welcome for noise in ("Diagnostics:", "request:", "Session:")), welcome
-                    record, = (changing_home / ".config/rui/requests").glob("*.json")
-                    handle = record.stem
-                    selected = json.loads(record.read_bytes())
-                    assert selected["store"] == str(after.resolve()), selected
-                    allocated = fixture.observe(after, handle)["target"]
-                    current = fixture.command("session", "inspect", "--store", after,
-                        "--session", allocated)
-                    assert current["session"]["model"] == "gpt-6-luna", current
-                    assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                    assert overview_store(leave_overview(master)) == str(after.resolve())
+                    assert not (changing_home / ".config/rui/requests").exists(), "the overview captured a request"
                     assert changing.wait(timeout=5) == 0
                 finally:
                     dispose_all(lambda: stop_process(changing, timeout=5),
@@ -5693,44 +5849,24 @@ def main(selected="all"):
                 assert mode == "bypass" or "without asking" not in status, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
-        created = []
         records = preferences_home / ".config/rui/requests"
-        for fresh in range(2):
-            before_records = set(records.glob("*.json"))
-            master, slave = open_pty()
-            caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
-                env={**os.environ, "HOME": str(preferences_home)},
-                stdin=slave, stdout=slave, stderr=slave)
-            try:
-                welcome = read_terminal(master, "› ")
-                assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
-                new_records = set(records.glob("*.json")) - before_records
-                assert len(new_records) == 1, new_records
-                handle = new_records.pop().stem
-                reference = fixture.observe(store, handle)["target"]
-                assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", reference), reference
-                saved = json.loads((records / f"{handle}.json").read_bytes())
-                assert saved["require_model"] is True and saved["store"] == str(store.resolve())
-                assert saved["session"] == "" and saved["configuration"]["workspace"] == {"state": "value", "value": str(workspace.resolve())}
-                mode = "bypass"
-                assert saved["configuration"]["tools"] == {"state": "value", "value": ["bash"]} and saved["configuration"]["permission_mode"] == {"state": "value", "value": mode}
-                assert all(noise not in welcome for noise in ("request:", "New Session intent:", reference, "Workspace:", "Provider:", "Permission:")), welcome
-                status = terminal_step(master, "/status", "Session: ", composer=True)
-                assert f"Session: {reference}" in status and permission_row(status, "bypass"), status
-                assert "Bash runs without" not in welcome, ("bypass is quiet", welcome)
-                assert "Bash commands can run without asking you" not in welcome, welcome
-                current = fixture.command("session", "inspect", "--store", store, "--session", reference)
-                assert current["session"]["permission_mode"] == mode, current
-                assert current["session"]["workspace"] == str(workspace.resolve()), current
-                assert current["session"]["provider"] == "codex" and current["session"]["model"] == "gpt-6-luna", current
-                assert json.loads(run(preferences_home, "request", "recover", handle))["answer"]["replayed"] is True
-                created.append(reference)
-                assert "Detached." in terminal_step(master, "/exit", "Detached.")
-                assert caller.wait(timeout=5) == 0
-            finally:
-                dispose_all(lambda: stop_process(caller, timeout=5),
-                            lambda: os.close(master), lambda: os.close(slave))
-        assert len(set(created)) == 2, "independent new intent reused a reference"
+        before_records = set(records.glob("*.json"))
+        sessions_before = run(preferences_home, "session", "list", "--store", store, "--all")
+        master, slave = open_pty()
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(preferences_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        try:
+            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "))
+            assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
+            assert all(noise not in welcome for noise in ("request:", "New Session intent:", "Workspace:", "Provider:", "Permission:")), welcome
+            leave_overview(master)
+            assert caller.wait(timeout=5) == 0
+            assert set(records.glob("*.json")) == before_records, "the overview captured a request"
+            assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
+        finally:
+            dispose_all(lambda: stop_process(caller, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
         blocked_config.mkdir(parents=True, mode=0o700)
@@ -5746,46 +5882,21 @@ def main(selected="all"):
         try:
             blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            # Capture fails before the send/uncertain-admission diagnostic.
+            # The composer's capture fails before any send: the draft stays.
+            overview_frame(master, lambda frame: frame.startswith(" rui "))
+            refused = overview_frame(master, lambda frame: "Could not start a Session: NotDir" in frame, keys=b"never captured\n")
+            assert "never captured" in refused, refused
+            os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
             # discard unread PTY bytes when the last slave closes.
             output, errors = terminal_exit(blocked, master, timeout=20)
-            assert blocked.returncode == 1 and b"error: NotDir" in errors, (output, errors)
-            combined = output + errors
-            assert all(text not in combined for text in (b"New Session intent", b"request: ", "› ".encode())), combined
+            assert blocked.returncode == 0 and errors == b"", (output, errors)
+            assert b"Detached. Host work continues." in output and b"request: " not in output, output
             assert termios.tcgetattr(slave) == original_mode
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
         finally:
             dispose_all(lambda: stop_process(blocked, timeout=5) if blocked is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave))
-        before = set(json.loads(run(preferences_home, "request", "list")))
-        gate = state / "new-session-capture"
-        master, slave = open_pty()
-        interrupted = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
-            env={**os.environ, "HOME": str(preferences_home), "RUI_TEST_CAPTURE_GATE": str(gate)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
-            fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "fresh configuration captured")
-            early = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
-            assert b"New Session intent" not in early, "announced before the capture callback"
-            after = set(json.loads(run(preferences_home, "request", "list")))
-            assert len(after - before) == 1, (before, after)
-            handle = (after - before).pop()
-            captured = json.loads((preferences_home / ".config/rui/requests" / f"{handle}.json").read_text())
-            assert captured["require_model"] is True, captured
-            interrupted.kill()
-            interrupted.wait(timeout=5)
-            recovered = json.loads(run(preferences_home, "request", "recover", handle))
-            assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
-            recovered_again = json.loads(run(preferences_home, "request", "recover", handle))
-            assert recovered_again["answer"]["replayed"], recovered_again
-            allocated = recovered["answer"]["session"]
-            assert recovered_again["answer"]["session"] == allocated and recovered["context"]["session"] == allocated, (recovered, recovered_again)
-            assert fixture.command("session", "inspect", "--store", store,
-                "--session", allocated)["session"]["permission_mode"] == "bypass"
-        finally:
-            dispose_all(lambda: stop_process(interrupted, timeout=5),
                         lambda: os.close(master), lambda: os.close(slave))
         credential.unlink()
         initial = fixture.command("session", "inspect", "--store", store, "--session", session)
