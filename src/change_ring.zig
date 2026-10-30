@@ -50,8 +50,10 @@ pub const Touched = struct {
 pub const Entry = struct { session: Id, workspace: u64 };
 
 pub const Ring = struct {
+    // One column per field: an Entry array would pad each to 16 bytes.
     generations: [capacity]u64 = @splat(0),
-    entries: [capacity]Entry = undefined,
+    sessions: [capacity]Id = undefined,
+    workspaces: [capacity]u64 = undefined,
     /// The slot the next entry takes.
     next: usize = 0,
     len: usize = 0,
@@ -64,7 +66,8 @@ pub const Ring = struct {
             self.forget(self.generations[self.next]);
         } else self.len += 1;
         self.generations[self.next] = generation;
-        self.entries[self.next] = entry;
+        self.sessions[self.next] = entry.session;
+        self.workspaces[self.next] = entry.workspace;
         self.next = (self.next + 1) % capacity;
     }
 
@@ -83,16 +86,15 @@ pub const Ring = struct {
     /// null. Fewer means there are no more.
     pub fn changed(self: *const Ring, since: u64, through: u64, workspace: ?u64, after: ?*const Id, out: []Id) []Id {
         var count: usize = 0;
-        for (self.generations[0..self.len], self.entries[0..self.len]) |generation, *entry| {
+        for (self.generations[0..self.len], self.sessions[0..self.len], self.workspaces[0..self.len]) |generation, *id, entry_workspace| {
             if (generation <= since or generation > through) continue;
-            if (workspace) |key| if (entry.workspace != key) continue;
-            const id = &entry.session;
+            if (workspace) |key| if (entry_workspace != key) continue;
             if (after) |previous| if (std.mem.order(u8, id, previous) != .gt) continue;
             // Insert into the sorted prefix, keeping the smallest IDs.
+            if (count == out.len and std.mem.order(u8, id, &out[count - 1]) != .lt) continue;
             var index: usize = 0;
             while (index < count and std.mem.order(u8, &out[index], id) == .lt) index += 1;
             if (index < count and std.mem.eql(u8, &out[index], id)) continue;
-            if (index == out.len) continue;
             const kept = @min(count, out.len - 1);
             var move = kept;
             while (move > index) : (move -= 1) out[move] = out[move - 1];
@@ -172,6 +174,12 @@ test "a ring names each Session changed since a generation once, in ID order" {
     const rest = ring.changed(0, 3, null, &first[1], &two);
     try std.testing.expectEqual(@as(usize, 1), rest.len);
     try std.testing.expectEqualStrings("zzzzzz", &rest[0]);
+    // A smaller ID recorded after a page fills still displaces the largest.
+    var late: Ring = .{};
+    recordAll(&late, 1, 1, &.{ "zzzzzz", "yyyyyy", "a00000" });
+    const smallest = late.changed(0, 1, null, null, &two);
+    try std.testing.expectEqualStrings("a00000", &smallest[0]);
+    try std.testing.expectEqualStrings("yyyyyy", &smallest[1]);
 }
 
 test "an overwritten change stops the ring covering earlier generations" {
