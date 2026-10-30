@@ -30,6 +30,19 @@ inline fn oneOf(comptime column: []const u8, comptime set: anytype) []const u8 {
     return sql ++ ")";
 }
 
+/// The Resolutions whose output later context reads, as fixed literals: the
+/// `model_operation_context_history` predicate and every query that must
+/// repeat it term for term share this set, so the Store format never follows
+/// `turn_policy.accepted` silently.
+const accepted_resolutions = [_]turn_policy.Resolution{ .answer, .compacted, .tool_proposals };
+comptime {
+    if (!std.mem.eql(turn_policy.Resolution, &accepted_resolutions, &turn_policy.accepted))
+        @compileError("turn_policy.accepted changed: change accepted_resolutions under a new schema_version");
+}
+
+const reasoning_effort_column_sql = " reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR " ++
+    oneOf("reasoning_effort", .{ .none, .low, .medium, .high, .xhigh, .max }) ++ "),\n";
+
 inline fn resolutionIs(comptime column: []const u8, comptime resolution: turn_policy.Resolution) []const u8 {
     return column ++ "='" ++ @tagName(resolution) ++ "'";
 }
@@ -3111,7 +3124,7 @@ pub const Store = struct {
         const statement = try self.cached("SELECT 1 FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
             "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
             "WHERE item.session_ref=?1 AND item.session_position BETWEEN ?2 AND ?3 AND item.item_kind=2 " ++
-            "AND op.purpose=0 AND " ++ oneOf("op.resolution_code", &turn_policy.accepted) ++
+            "AND op.purpose=0 AND " ++ oneOf("op.resolution_code", &accepted_resolutions) ++
             " AND CASE WHEN e.entry_kind=3 AND e.source_operation_id=item.operation_id AND e.source_item_ordinal=item.item_ordinal " ++
             "AND e.content_id=item.message_content_id AND e.turn_id=op.turn_id AND op.session_ref=item.session_ref " ++
             "AND item.attempt_ordinal=op.attempt_ordinal THEN 0 ELSE 1 END=1 LIMIT 1");
@@ -3140,7 +3153,7 @@ pub const Store = struct {
                 "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
                 "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
                 "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal AND source.private=1 " ++
-                "AND " ++ oneOf("o.resolution_code", &turn_policy.accepted) ++ ")) THEN 1 ELSE 0 END," ++
+                "AND " ++ oneOf("o.resolution_code", &accepted_resolutions) ++ ")) THEN 1 ELSE 0 END," ++
                 "CASE WHEN e.entry_kind=1 THEN m.admitted_at END,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END,e.recorded_at FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
@@ -5508,7 +5521,7 @@ pub const Store = struct {
         var result_admission = frontier;
         const usage = try self.cached("SELECT o.usage_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
             "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-            "WHERE o.session_ref=?1 AND " ++ oneOf("o.resolution_code", &turn_policy.accepted) ++ " " ++
+            "WHERE o.session_ref=?1 AND " ++ oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
             "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
         defer resetCached(usage);
         try bindText(usage, 1, session_ref);
@@ -5537,7 +5550,7 @@ pub const Store = struct {
             "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED BY model_operation_context_history " ++
             "CROSS JOIN model_tool_call call ON call.operation_id=o.operation_id " ++
             "JOIN content c ON c.content_id=call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
-            "AND " ++ oneOf("o.resolution_code", &turn_policy.accepted) ++ " AND call.acceptance_position>max(?2,?3)) + " ++
+            "AND " ++ oneOf("o.resolution_code", &accepted_resolutions) ++ " AND call.acceptance_position>max(?2,?3)) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
             "WHERE a.session_ref=?1 AND a.acceptance_position>max(?2,?3)) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
@@ -6038,7 +6051,7 @@ pub const Store = struct {
             "FROM model_output_item item WHERE item.operation_id=source.operation_id) " ++
             "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
             "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
-            "AND source.admission_position<?4 AND " ++ oneOf("source.resolution_code", &turn_policy.accepted) ++ " " ++
+            "AND source.admission_position<?4 AND " ++ oneOf("source.resolution_code", &accepted_resolutions) ++ " " ++
             "ORDER BY source.admission_position,source.operation_id LIMIT 1");
         defer resetCached(source);
         try bindU64(source, 1, view.binding.operation_id);
@@ -6198,7 +6211,7 @@ pub const Store = struct {
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) UNION ALL " ++
                 "SELECT item.session_position,3,item.content_id," ++ historical_content_columns_sql ++ ",r.model,r.provider,item.item_kind,item.item_id_digest," ++
-                oneOf("owner.resolution_code", &turn_policy.accepted) ++ " AND owner.session_ref=item.session_ref " ++
+                oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
                 "AND owner_turn.session_ref=item.session_ref " ++
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
@@ -7771,12 +7784,15 @@ pub const Store = struct {
         try bindText(select, 1, session);
         if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.SessionPositionExhausted;
         const position = try readNullablePositiveI64(select, 0) orelse return error.CorruptStore;
-        if (position > std.math.maxInt(i64) - @as(i64, @intCast(count))) return error.SessionPositionExhausted;
-        const update = try self.cached("UPDATE session SET next_position=?2 WHERE session_ref=?1");
+        const claimed: i64 = @intCast(count);
+        if (position > std.math.maxInt(i64) - claimed) return error.SessionPositionExhausted;
+        const update = try self.cached("UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
         defer resetCached(update);
         try bindText(update, 1, session);
-        try bindI64(update, 2, position + @as(i64, @intCast(count)));
+        try bindI64(update, 2, position + claimed);
+        try bindI64(update, 3, position);
         try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
         return @intCast(position);
     }
 
@@ -8036,7 +8052,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ revision INTEGER NOT NULL CHECK(revision>0),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
-    ++ " reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR " ++ oneOf("reasoning_effort", .{ .none, .low, .medium, .high, .xhigh, .max }) ++ "),\n" ++
+    ++ reasoning_effort_column_sql ++
         \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
         \\ created_at INTEGER NOT NULL CHECK(created_at>0),
         \\ next_position INTEGER NOT NULL CHECK(next_position>0)
@@ -8068,7 +8084,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
-    ++ " reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR " ++ oneOf("reasoning_effort", .{ .none, .low, .medium, .high, .xhigh, .max }) ++ "),\n" ++
+    ++ reasoning_effort_column_sql ++
         \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
         \\ PRIMARY KEY(session_ref,revision)
         \\) STRICT, WITHOUT ROWID;
@@ -8131,7 +8147,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),
-    ++ " reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR " ++ oneOf("reasoning_effort", .{ .none, .low, .medium, .high, .xhigh, .max }) ++ "),\n" ++
+    ++ reasoning_effort_column_sql ++
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
         \\
     ++ std.fmt.comptimePrint(" attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND {d}),\n", .{retry_policy.maximum_attempts}) ++
@@ -8286,7 +8302,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\
     ++ "CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE " ++
-        oneOf("resolution_code", &turn_policy.accepted) ++ ";\n" ++
+        oneOf("resolution_code", &accepted_resolutions) ++ ";\n" ++
         "CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND " ++
         resolutionIs("resolution_code", .compacted) ++ ";\n" ++
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
@@ -11571,6 +11587,13 @@ test "closed value columns accept exactly their values" {
     const columns = [_]Column{
         .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
         .{ .update = "UPDATE model_output_item SET message_content_id=NULL,item_kind={s}", .accepted = &.{ "1", "2", "3", "4" }, .rejected = &.{ "0", "5" } },
+        .{
+            .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END," ++
+                "source_revision=CASE WHEN v.k=2 THEN 1 END,source_operation_id=CASE WHEN v.k=3 THEN (SELECT min(operation_id) FROM model_output_item) END," ++
+                "source_item_ordinal=CASE WHEN v.k=3 THEN 0 END FROM (SELECT {s} AS k) v WHERE entry_kind=1",
+            .accepted = &.{ "1", "2", "3" },
+            .rejected = &.{ "0", "4" },
+        },
         .{ .update = "UPDATE session SET reasoning_effort={s}", .accepted = &efforts, .rejected = &not_efforts },
         .{ .update = "UPDATE session_revision SET reasoning_effort={s}", .accepted = &efforts, .rejected = &not_efforts },
         .{ .update = "UPDATE model_operation SET reasoning_effort={s}", .accepted = &efforts, .rejected = &not_efforts },
@@ -11581,7 +11604,8 @@ test "closed value columns accept exactly their values" {
             .rejected = &.{ "'interrupted'", "'Failed'", "''" },
         },
     };
-    var sql: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1"));
+    var sql: [512]u8 = undefined;
     inline for (columns) |column| {
         for (column.accepted) |value|
             try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, try std.mem.printSentinel(&sql, column.update, .{value}, 0)));
@@ -11590,7 +11614,7 @@ test "closed value columns accept exactly their values" {
     }
 }
 
-test "claiming Session positions stops at the largest position without moving the counter" {
+test "claiming Session positions stops at the largest position, and fails when its write does not land" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -11603,12 +11627,24 @@ test "claiming Session positions stops at the largest position without moving th
     {
         const access = try storage.enter(.none);
         defer access.release();
+        try storage.execute("BEGIN IMMEDIATE");
         try std.testing.expectEqual(last - 2, try storage.claimSessionPositions(session.slice(), 2));
         try std.testing.expectError(error.SessionPositionExhausted, storage.claimSessionPositions(session.slice(), 1));
         try std.testing.expectEqual(last, try storage.claimSessionPositions(session.slice(), 0));
         try std.testing.expectError(error.SessionPositionExhausted, storage.claimSessionPositions(session.slice(), last + 1));
+        try storage.execute("COMMIT");
     }
     try std.testing.expectEqual(last, try queryU64(storage.database, "SELECT next_position FROM session"));
+
+    try execSessionSql(storage.database, "UPDATE session SET next_position=1 WHERE session_ref=?1", session.slice());
+    try exec(storage.database, "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
+    {
+        const access = try storage.enter(.none);
+        defer access.release();
+        try storage.execute("BEGIN IMMEDIATE");
+        try std.testing.expectError(error.CorruptStore, storage.claimSessionPositions(session.slice(), 1));
+        try storage.execute("ROLLBACK");
+    }
 }
 
 test "each state-bearing row keeps exactly the time its state owns" {
