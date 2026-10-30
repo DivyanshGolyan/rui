@@ -2,6 +2,8 @@
 //! or diagnostic custody: a lost observation fails evidence, never semantic work.
 const std = @import("std");
 const c = @import("posix");
+const Int = @import("json_scalar.zig").Int;
+const Text = @import("json_scalar.zig").Text;
 const Self = @This();
 const TestHold = struct {
     var before_retirement: ?*const fn () void = null;
@@ -71,48 +73,48 @@ const FieldId = enum(u8) {
     journal_mode = 41,
 };
 const Record = struct {
-    rui_test_phase: []const u8,
-    subject_kind: ?[]const u8 = null,
-    subject: ?[]const u8 = null,
-    at_ns: ?[]const u8 = null,
-    turn: ?[]const u8 = null,
-    operation: ?[]const u8 = null,
-    attempt: ?[]const u8 = null,
-    action: ?[]const u8 = null,
-    scratch_used_bytes: ?[]const u8 = null,
-    command_key: ?[]const u8 = null,
-    kind: ?[]const u8 = null,
-    control_key: ?[]const u8 = null,
-    store_queued_at_ns: ?[]const u8 = null,
-    lock_acquired_at_ns: ?[]const u8 = null,
-    store_complete_at_ns: ?[]const u8 = null,
-    reply_complete_at_ns: ?[]const u8 = null,
-    queue_wait_ns: ?[]const u8 = null,
-    store_lock_wait_ns: ?[]const u8 = null,
-    store_service_ns: ?[]const u8 = null,
-    post_commit_reply_ns: ?[]const u8 = null,
-    host_total_ns: ?[]const u8 = null,
-    start_ns: ?[]const u8 = null,
-    wait_ns: ?[]const u8 = null,
-    custody_occupied: ?[]const u8 = null,
-    new_connections: ?i64 = null,
-    replays: ?i64 = null,
-    work_bytes: ?[]const u8 = null,
-    work_items: ?[]const u8 = null,
-    request_bytes: ?[]const u8 = null,
-    process_memory_current_bytes: ?i64 = null,
-    process_memory_highwater_bytes: ?i64 = null,
-    cache_used_bytes: ?i64 = null,
-    cache_spills: ?i64 = null,
-    hard_heap_limit_bytes: ?i64 = null,
-    page_size_bytes: ?i64 = null,
-    cache_size_setting: ?i64 = null,
-    cache_spill_threshold: ?i64 = null,
-    mmap_size_bytes: ?i64 = null,
-    synchronous: ?i64 = null,
-    temp_store: ?i64 = null,
-    busy_timeout_ms: ?i64 = null,
-    journal_mode: ?[]const u8 = null,
+    rui_test_phase: Text,
+    subject_kind: ?Text = null,
+    subject: ?Text = null,
+    at_ns: ?Text = null,
+    turn: ?Text = null,
+    operation: ?Text = null,
+    attempt: ?Text = null,
+    action: ?Text = null,
+    scratch_used_bytes: ?Text = null,
+    command_key: ?Text = null,
+    kind: ?Text = null,
+    control_key: ?Text = null,
+    store_queued_at_ns: ?Text = null,
+    lock_acquired_at_ns: ?Text = null,
+    store_complete_at_ns: ?Text = null,
+    reply_complete_at_ns: ?Text = null,
+    queue_wait_ns: ?Text = null,
+    store_lock_wait_ns: ?Text = null,
+    store_service_ns: ?Text = null,
+    post_commit_reply_ns: ?Text = null,
+    host_total_ns: ?Text = null,
+    start_ns: ?Text = null,
+    wait_ns: ?Text = null,
+    custody_occupied: ?Text = null,
+    new_connections: ?Int(i64) = null,
+    replays: ?Int(i64) = null,
+    work_bytes: ?Text = null,
+    work_items: ?Text = null,
+    request_bytes: ?Text = null,
+    process_memory_current_bytes: ?Int(i64) = null,
+    process_memory_highwater_bytes: ?Int(i64) = null,
+    cache_used_bytes: ?Int(i64) = null,
+    cache_spills: ?Int(i64) = null,
+    hard_heap_limit_bytes: ?Int(i64) = null,
+    page_size_bytes: ?Int(i64) = null,
+    cache_size_setting: ?Int(i64) = null,
+    cache_spill_threshold: ?Int(i64) = null,
+    mmap_size_bytes: ?Int(i64) = null,
+    synchronous: ?Int(i64) = null,
+    temp_store: ?Int(i64) = null,
+    busy_timeout_ms: ?Int(i64) = null,
+    journal_mode: ?Text = null,
 };
 
 comptime {
@@ -290,10 +292,11 @@ fn record(self: *Self, json: []const u8) void {
     var length: usize = header_bytes;
     inline for (comptime std.meta.fieldNames(FieldId)) |name| {
         var number_buffer: [20]u8 = undefined;
-        const value: ?[]const u8 = if (@FieldType(Record, name) == ?i64)
-            if (@field(parsed.value, name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number}) catch unreachable else null
-        else
-            @field(parsed.value, name);
+        const value: ?[]const u8 = switch (@FieldType(Record, name)) {
+            ?Int(i64) => if (@field(parsed.value, name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number.value}) catch unreachable else null,
+            ?Text => if (@field(parsed.value, name)) |text| text.slice else null,
+            else => @field(parsed.value, name).slice,
+        };
         if (value) |text| {
             if (length + 3 + text.len > bytes.len) {
                 _ = self.shared.state.fetchOr(1, .acq_rel);

@@ -6,6 +6,7 @@
 //! polling loop; selection and admission live in `codex_credential_policy.zig`.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
+const Text = @import("json_scalar.zig").Text;
 
 pub const issuer = "https://auth.openai.com";
 pub const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -86,20 +87,21 @@ pub const DeviceStart = struct {
 pub fn parseDeviceStart(status: u16, body: []const u8, arena: *[wire_arena_bytes]u8, destination: *DeviceStart) !void {
     if (status == 404) return error.DeviceAuthenticationUnavailable;
     if (status < 200 or status >= 300) return error.LoginStartRejected;
-    const Device = struct { device_auth_id: []const u8, user_code: ?[]const u8 = null, usercode: ?[]const u8 = null, interval: []const u8 };
+    const Device = struct { device_auth_id: Text, user_code: ?Text = null, usercode: ?Text = null, interval: Text };
     defer std.crypto.secureZero(u8, arena);
     var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(Device, fixed.allocator(), body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceResponse;
-    const user_code = parsed.value.user_code orelse parsed.value.usercode orelse return error.InvalidDeviceResponse;
-    if (!policy.safeAscii(parsed.value.device_auth_id) or !policy.safeAscii(user_code) or
-        std.mem.indexOfAny(u8, parsed.value.device_auth_id, "\"\\") != null or
+    const device_auth_id = parsed.value.device_auth_id.slice;
+    const user_code = (parsed.value.user_code orelse (parsed.value.usercode orelse return error.InvalidDeviceResponse)).slice;
+    if (!policy.safeAscii(device_auth_id) or !policy.safeAscii(user_code) or
+        std.mem.indexOfAny(u8, device_auth_id, "\"\\") != null or
         std.mem.indexOfAny(u8, user_code, "\"\\") != null)
         return error.InvalidDeviceResponse;
-    const interval = std.fmt.parseInt(u16, parsed.value.interval, 10) catch return error.InvalidDeviceResponse;
+    const interval = std.fmt.parseInt(u16, parsed.value.interval.slice, 10) catch return error.InvalidDeviceResponse;
     if (interval == 0 or interval > 900) return error.InvalidDeviceResponse;
     destination.* = .{ .interval_seconds = interval, .user_code_len = user_code.len };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
-    destination.poll_len = (std.fmt.bufPrint(&destination.poll, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\"}}", .{ parsed.value.device_auth_id, user_code }) catch
+    destination.poll_len = (std.fmt.bufPrint(&destination.poll, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\"}}", .{ device_auth_id, user_code }) catch
         return error.InvalidDeviceResponse).len;
 }
 
@@ -113,8 +115,8 @@ pub fn classifyPoll(status: u16, body: []const u8) !Poll {
         var arena: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &arena);
         var fixed = std.heap.FixedBufferAllocator.init(&arena);
-        const parsed = std.json.parseFromSlice(struct { @"error": ?[]const u8 = null }, fixed.allocator(), body, .{ .ignore_unknown_fields = true }) catch return .pending;
-        const code = parsed.value.@"error" orelse return .pending;
+        const parsed = std.json.parseFromSlice(struct { @"error": ?Text = null }, fixed.allocator(), body, .{ .ignore_unknown_fields = true }) catch return .pending;
+        const code = (parsed.value.@"error" orelse return .pending).slice;
         if (std.mem.eql(u8, code, "access_denied")) return error.LoginDenied;
         if (std.mem.eql(u8, code, "expired_token")) return error.LoginExpired;
         return error.LoginPollRejected;
@@ -125,11 +127,11 @@ pub fn classifyPoll(status: u16, body: []const u8) !Poll {
 
 /// Builds the authorization-code exchange from a device grant body.
 pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8, arena: *[wire_arena_bytes]u8) !Request {
-    const Grant = struct { authorization_code: []const u8, code_challenge: []const u8, code_verifier: []const u8 };
+    const Grant = struct { authorization_code: Text, code_challenge: Text, code_verifier: Text };
     defer std.crypto.secureZero(u8, arena);
     var fixed = std.heap.FixedBufferAllocator.init(arena);
     const grant = std.json.parseFromSlice(Grant, fixed.allocator(), grant_body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceGrant;
-    return .{ .url = token_url, .content_type = form_content, .body = try formEncode(buffer, grant.value.authorization_code, grant.value.code_verifier) };
+    return .{ .url = token_url, .content_type = form_content, .body = try formEncode(buffer, grant.value.authorization_code.slice, grant.value.code_verifier.slice) };
 }
 
 /// Parses a complete authorization-code exchange response into
@@ -140,9 +142,9 @@ pub fn parseTokenResponse(status: u16, json: []const u8, arena: *[wire_arena_byt
     const wire = try parseWire(json, arena);
     destination.* = .{};
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
-    const id = wire.id_token orelse return error.MissingIdToken;
-    const access = wire.access_token orelse return error.MissingAccessToken;
-    const refresh = wire.refresh_token orelse return error.MissingRefreshToken;
+    const id = (wire.id_token orelse return error.MissingIdToken).slice;
+    const access = (wire.access_token orelse return error.MissingAccessToken).slice;
+    const refresh = (wire.refresh_token orelse return error.MissingRefreshToken).slice;
     try destination.id_token.set(id);
     try destination.access_token.set(access);
     try destination.refresh_token.set(refresh);
@@ -166,7 +168,8 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     if (status < 200 or status >= 300) return refreshRejection(json, &scratch.json);
     defer std.crypto.secureZero(u8, &scratch.json);
     const wire = try parseWire(json, &scratch.json);
-    if (wire.id_token) |id| {
+    if (wire.id_token) |text| {
+        const id = text.slice;
         var account: policy.Account = undefined;
         try policy.parseAccount(id, &scratch.claims, &account);
         if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice())) return error.AccountChanged;
@@ -175,8 +178,8 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
         if (account.fedramp != fedramp) return error.AccountChanged;
         try replacement.id_token.set(id);
     }
-    if (wire.access_token) |access| try replacement.access_token.set(access);
-    if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh);
+    if (wire.access_token) |access| try replacement.access_token.set(access.slice);
+    if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh.slice);
     try deriveClaims(replacement, &scratch.claims);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
@@ -186,19 +189,11 @@ fn refreshRejection(json: []const u8, arena: *[wire_arena_bytes]u8) error{ Refre
     if (json.len > response_limit) return error.RefreshRejected;
     defer std.crypto.secureZero(u8, arena);
     var fixed = std.heap.FixedBufferAllocator.init(arena);
-    const parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), json, .{}) catch return error.RefreshRejected;
-    if (parsed.value != .object) return error.RefreshRejected;
-    var code: ?[]const u8 = null;
-    if (parsed.value.object.get("error")) |value| {
-        if (value == .string) code = value.string else if (value == .object) {
-            if (value.object.get("code")) |nested| {
-                if (nested == .string) code = nested.string;
-            }
-        }
-    }
+    const parsed = std.json.parseFromSlice(Rejection, fixed.allocator(), json, .{ .ignore_unknown_fields = true }) catch return error.RefreshRejected;
+    var code: ?[]const u8 = if (parsed.value.@"error") |value| value.code else null;
     if (code == null or std.mem.trim(u8, code.?, " \r\n\t").len == 0) {
-        if (parsed.value.object.get("code")) |value| {
-            if (value == .string) code = value.string;
+        if (parsed.value.code) |value| {
+            if (value.text) |text| code = text;
         }
     }
     const name = code orelse return error.RefreshRejected;
@@ -208,6 +203,36 @@ fn refreshRejection(json: []const u8, arena: *[wire_arena_bytes]u8) error{ Refre
     return error.RefreshRejected;
 }
 
+/// A refresh rejection names its code in `error`, as a string or an object's
+/// `code`, or else in `code`. A value of another type counts as absent.
+const Rejection = struct {
+    @"error": ?ErrorCode = null,
+    code: ?LooseText = null,
+
+    const ErrorCode = struct {
+        code: ?[]const u8,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ErrorCode {
+            if (try source.peekNextTokenType() != .object_begin)
+                return .{ .code = (try LooseText.jsonParse(allocator, source, options)).text };
+            const nested = try std.json.innerParse(struct { code: ?LooseText = null }, allocator, source, options);
+            return .{ .code = if (nested.code) |value| value.text else null };
+        }
+    };
+
+    const LooseText = struct {
+        text: ?[]const u8,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !LooseText {
+            if (try source.peekNextTokenType() != .string) {
+                try source.skipValue();
+                return .{ .text = null };
+            }
+            return .{ .text = (try Text.jsonParse(allocator, source, options)).slice };
+        }
+    };
+};
+
 /// Parse room for one issuer response.
 pub const wire_arena_bytes = 48 * 1024;
 
@@ -215,9 +240,9 @@ pub const wire_arena_bytes = 48 * 1024;
 /// nonempty, at most `token_limit` bytes, and borrows the response or the
 /// parse arena.
 const TokenWire = struct {
-    id_token: ?[]const u8 = null,
-    access_token: ?[]const u8 = null,
-    refresh_token: ?[]const u8 = null,
+    id_token: ?Text = null,
+    access_token: ?Text = null,
+    refresh_token: ?Text = null,
 };
 
 fn parseWire(json: []const u8, arena: *[wire_arena_bytes]u8) !TokenWire {
@@ -228,8 +253,8 @@ fn parseWire(json: []const u8, arena: *[wire_arena_bytes]u8) !TokenWire {
     }) catch return error.InvalidTokenResponse;
     inline for (.{ "id_token", "access_token", "refresh_token" }) |name| {
         if (@field(parsed.value, name)) |value| {
-            if (value.len == 0) return error.EmptyCredentialValue;
-            if (value.len > token_limit) return error.CredentialValueTooLong;
+            if (value.slice.len == 0) return error.EmptyCredentialValue;
+            if (value.slice.len > token_limit) return error.CredentialValueTooLong;
         }
     }
     return parsed.value;
@@ -324,6 +349,7 @@ test "refresh rejection bodies preserve distinct safe failure codes" {
             "{\"error\":\"" ++ case[0] ++ "\"}",
             "{\"error\":{\"code\":\"" ++ case[0] ++ "\",\"message\":\"private echoed credential\"}}",
             "{\"code\":\"" ++ case[0] ++ "\"}",
+            "{\"error\":[1.5],\"code\":\"" ++ case[0] ++ "\"}",
         }) |body| {
             try std.testing.expectError(case[1], parseRefreshResponse(&current, 401, body, 77, &replacement, &scratch));
             try std.testing.expectEqualStrings(case[2], policy.failureCode(case[1]));

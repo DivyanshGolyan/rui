@@ -8,6 +8,7 @@
 //! stay in `codex_credentials.zig` and `codex_auth.zig`. See ARCHITECTURE.md,
 //! "Authentication and transport lifetime".
 const std = @import("std");
+const json_scalar = @import("json_scalar.zig");
 
 pub const max_account_id_bytes = 1024;
 pub const max_token_bytes = 16 * 1024;
@@ -298,10 +299,10 @@ fn decimal(comptime T: type, value: anytype) !T {
 
 const Claims = struct {
     @"https://api.openai.com/auth": ?struct {
-        chatgpt_account_id: ?[]const u8 = null,
+        chatgpt_account_id: ?json_scalar.Text = null,
         chatgpt_account_is_fedramp: ?bool = null,
     } = null,
-    chatgpt_account_id: ?[]const u8 = null,
+    chatgpt_account_id: ?json_scalar.Text = null,
 };
 
 pub fn safeAscii(bytes: []const u8) bool {
@@ -387,7 +388,7 @@ pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Acco
         namespace.chatgpt_account_id orelse parsed.value.chatgpt_account_id
     else
         parsed.value.chatgpt_account_id;
-    const id = claim orelse return error.MissingAccountClaim;
+    const id = (claim orelse return error.MissingAccountClaim).slice;
     if (!safeAscii(id)) return error.InvalidAccountClaim;
     account.* = .{ .id = .{}, .fedramp = if (parsed.value.@"https://api.openai.com/auth") |namespace|
         namespace.chatgpt_account_is_fedramp orelse false
@@ -405,11 +406,12 @@ pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
     defer std.crypto.secureZero(u8, payload);
     defer std.crypto.secureZero(u8, &scratch.arena);
     var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    const parsed = std.json.parseFromSlice(struct { exp: ?i64 = null }, fixed.allocator(), payload, .{
+    const parsed = std.json.parseFromSlice(struct { exp: ?json_scalar.Int(i64) = null }, fixed.allocator(), payload, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenClaims;
-    if (parsed.value.exp) |expiry| if (expiry <= 0) return error.InvalidTokenClaims;
-    return parsed.value.exp;
+    const expiry = (parsed.value.exp orelse return null).value;
+    if (expiry <= 0) return error.InvalidTokenClaims;
+    return expiry;
 }
 
 /// Fixture expiry encoded in `fixture_access_token`.

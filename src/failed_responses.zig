@@ -12,6 +12,7 @@ const attempt = @import("attempt.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
+const Text = @import("json_scalar.zig").Text;
 
 pub const directory = "diagnostics/failed-responses";
 pub const capture_cap_bytes: u64 = 16 * 1024 * 1024;
@@ -122,29 +123,29 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     const metadata_bytes = &scratch.metadata;
     const metadata_length = try readWindow(io, dir, metadata_name, 0, metadata_bytes, null, max_metadata_bytes);
     const Header = struct {
-        operation: []const u8,
-        attempt: []const u8,
-        turn: []const u8,
+        operation: Text,
+        attempt: Text,
+        turn: Text,
         status: Status,
-        body: ?[]const u8,
-        retained_bytes: []const u8,
-        retained_sha256: ?[]const u8,
+        body: ?Text,
+        retained_bytes: Text,
+        retained_sha256: ?Text,
     };
     var arena = std.heap.FixedBufferAllocator.init(&scratch.parse_arena);
     const metadata = std.json.parseFromSlice(Header, arena.allocator(), metadata_bytes[0..metadata_length], .{ .ignore_unknown_fields = true }) catch return error.InvalidFailedResponseRecord;
     defer metadata.deinit();
     const header = metadata.value;
-    if ((std.fmt.parseInt(u64, header.operation, 10) catch return error.InvalidFailedResponseRecord) != binding.operation_id or
-        (std.fmt.parseInt(u64, header.attempt, 10) catch return error.InvalidFailedResponseRecord) != binding.attempt_ordinal or
-        (std.fmt.parseInt(u64, header.turn, 10) catch return error.InvalidFailedResponseRecord) != binding.turn_id) return error.InvalidFailedResponseRecord;
+    if ((std.fmt.parseInt(u64, header.operation.slice, 10) catch return error.InvalidFailedResponseRecord) != binding.operation_id or
+        (std.fmt.parseInt(u64, header.attempt.slice, 10) catch return error.InvalidFailedResponseRecord) != binding.attempt_ordinal or
+        (std.fmt.parseInt(u64, header.turn.slice, 10) catch return error.InvalidFailedResponseRecord) != binding.turn_id) return error.InvalidFailedResponseRecord;
     if (part == .metadata) return sink.append(metadata_bytes[0..metadata_length]);
     if (header.status == .omitted) return error.FailedResponseBodyOmitted;
     const body_name = nameFor(&name_buffer, record.sequence, binding, .body);
-    if (!std.mem.eql(u8, header.body orelse return error.InvalidFailedResponseRecord, body_name)) return error.InvalidFailedResponseRecord;
-    const length = std.fmt.parseInt(u64, header.retained_bytes, 10) catch return error.InvalidFailedResponseRecord;
+    if (!std.mem.eql(u8, (header.body orelse return error.InvalidFailedResponseRecord).slice, body_name)) return error.InvalidFailedResponseRecord;
+    const length = std.fmt.parseInt(u64, header.retained_bytes.slice, 10) catch return error.InvalidFailedResponseRecord;
     if (length > capture_cap_bytes) return error.InvalidFailedResponseRecord;
     var expected: [32]u8 = undefined;
-    const hex = header.retained_sha256 orelse return error.InvalidFailedResponseRecord;
+    const hex = (header.retained_sha256 orelse return error.InvalidFailedResponseRecord).slice;
     if (hex.len != 64) return error.InvalidFailedResponseRecord;
     _ = std.fmt.hexToBytes(&expected, hex) catch return error.InvalidFailedResponseRecord;
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
