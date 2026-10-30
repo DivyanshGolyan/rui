@@ -91,11 +91,14 @@ const continues_with_input_sql =
 /// `continuation_operation_id` stores this fact so selection can walk an index.
 const continues_without_input_sql =
     "(" ++ oneOf("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
-const runnable_eligibility_sql =
+/// A Message `m` no Turn has taken and no Session stop excludes.
+const queued_input_sql =
     "m.turn_id IS NULL AND NOT EXISTS(" ++
     " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
     " AND m.admission_id<=stopped.admission_cutoff" ++
-    ") AND (NOT EXISTS(" ++
+    ")";
+const runnable_eligibility_sql =
+    queued_input_sql ++ " AND (NOT EXISTS(" ++
     " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -116,11 +119,19 @@ const runnable_selection_sql =
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
+// A Turn ready without input also takes queued input, so any queued Message
+// in its Session is message selection's work, with no per-Turn eligibility read.
+comptime {
+    for (turn_policy.continues_without_input) |resolution| {
+        if (!turn_policy.contains(&turn_policy.continues_with_input, resolution))
+            @compileError("a Turn that continues without input must also continue with it");
+    }
+}
 const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active INDEXED BY turn_tool_continuation JOIN session s ON s.session_ref=active.session_ref " ++
     "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
-    "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
+    "WHERE m.session_ref=active.session_ref AND " ++ queued_input_sql ++
     ") ORDER BY active.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
@@ -12126,6 +12137,31 @@ test "kind-specific admission selects a tool continuation despite fresh input an
     try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
     const fresh = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
     try std.testing.expect(fresh.turn_id != first.turn_id);
+    try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
+}
+
+test "tool continuation selection leaves a ready Turn with queued input to message selection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    const queued_session = try configureTestSessionAsk(&storage, "queued-config");
+    const ready_session = try configureTestSessionAsk(&storage, "ready-config");
+    try submitTestMessage(&storage, &tmp, "queued-start", "queued-start", queued_session.slice(), "start");
+    const queued = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, queued, "queued-output", &calls);
+    try submitTestMessage(&storage, &tmp, "ready-start", "ready-start", ready_session.slice(), "start");
+    const ready = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, ready, "ready-output", &calls);
+    try submitTestMessage(&storage, &tmp, "queued-input", "queued-input", queued_session.slice(), "more");
+
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    try std.testing.expectEqual(ready.turn_id, continued.turn_id);
+    try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+    const joined = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try std.testing.expectEqual(queued.turn_id, joined.turn_id);
     try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
 }
 
