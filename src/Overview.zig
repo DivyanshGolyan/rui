@@ -16,6 +16,7 @@ const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const stderr = @import("stderr.zig");
+const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
@@ -1197,13 +1198,12 @@ test "Ctrl-C ends the overview while the terminal takes no output" {
         /// Frees the terminal only if the overview has not left within two
         /// seconds.
         fn drain(fd: c_int) void {
-            for (0..200) |_| {
-                if (release.load(.acquire)) return;
-                std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch return;
-            }
-            drained.store(true, .release);
-            var bytes: [4096]u8 = undefined;
-            while (std.c.read(fd, &bytes, bytes.len) > 0) {}
+            const io = std.testing.io;
+            test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &release, test_poll.isSet) catch {
+                drained.store(true, .release);
+                var bytes: [4096]u8 = undefined;
+                while (std.c.read(fd, &bytes, bytes.len) > 0) {}
+            };
         }
     };
     var cancellation: client.Cancellation = .{};
