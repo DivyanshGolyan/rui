@@ -9,6 +9,7 @@ import mmap
 import os
 from pathlib import Path
 import re
+import site
 import struct
 import subprocess
 import sys
@@ -453,11 +454,15 @@ def fixture_entries():
 
 class FixtureEntryTest(unittest.TestCase):
     def simulated_user(self, directory, euid):
-        """A PYTHONPATH under which Python reports `euid`, so these run alike as root or not."""
-        site = Path(directory) / f"simulated-{euid}"
-        site.mkdir()
-        (site / "sitecustomize.py").write_text(f"import os\nos.geteuid = lambda: {euid}\n")
-        return str(site)
+        """A PYTHONPATH under which Python reports `euid`, so these run alike as root or not.
+
+        These children get a scratch HOME, which hides a user-site install of
+        the fixture packages (CI's pip defaults to one), so the caller's user
+        site rides along."""
+        simulated = Path(directory) / f"simulated-{euid}"
+        simulated.mkdir()
+        (simulated / "sitecustomize.py").write_text(f"import os\nos.geteuid = lambda: {euid}\n")
+        return os.pathsep.join([str(simulated), site.getusersitepackages()])
 
     def test_every_fixture_entry_refuses_root_before_it_starts(self):
         entries = list(fixture_entries())
