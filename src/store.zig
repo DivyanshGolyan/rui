@@ -68,6 +68,13 @@ const complete_tool_results_sql =
     " call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
     ")" ++
     ")";
+/// Whether the Turn's `current` Operation lets it continue once input arrives.
+const continues_with_input_sql =
+    "(" ++ resolutionIn("current.resolution_code", &turn_policy.continues_with_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
+/// Whether the Turn's `current` Operation lets it continue without input.
+/// `continuation_operation_id` stores this fact so selection can walk an index.
+const continues_without_input_sql =
+    "(" ++ resolutionIn("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
 const runnable_eligibility_sql =
     "m.turn_id IS NULL AND NOT EXISTS(" ++
     " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
@@ -77,7 +84,7 @@ const runnable_eligibility_sql =
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    " AND (" ++ resolutionIn("current.resolution_code", &turn_policy.continues_with_input) ++ " OR (" ++ complete_tool_results_sql ++ "))" ++
+    " AND " ++ continues_with_input_sql ++
     "))";
 const content_lookup_sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3";
 
@@ -88,15 +95,11 @@ const runnable_selection_sql =
     "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
     "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    "AND (" ++ resolutionIn("current.resolution_code", &turn_policy.continues_with_input) ++ " OR (" ++ complete_tool_results_sql ++ "))) " ++
+    "AND " ++ continues_with_input_sql ++ ") " ++
     "FROM candidate chosen JOIN message_admission m INDEXED BY message_admission_session_order " ++
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
-/// Whether the Turn's `current` Operation lets it continue without input.
-/// `continuation_operation_id` stores this fact so selection can walk an index.
-const continues_without_input_sql =
-    "(" ++ resolutionIn("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
 const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active INDEXED BY turn_tool_continuation JOIN session s ON s.session_ref=active.session_ref " ++
@@ -5571,6 +5574,7 @@ pub const Store = struct {
         switch (c.sqlite3_step(select)) {
             c.SQLITE_ROW => {},
             c.SQLITE_DONE => {
+                try self.validateRecordedContinuations();
                 try self.validateBlockedToolCalls();
                 return null;
             },
@@ -5815,21 +5819,6 @@ pub const Store = struct {
     /// from malformed canonical classification. Only each active Turn's
     /// current Operation can be blocking successor discovery.
     fn validateBlockedToolCalls(self: *Store) !void {
-        {
-            // A Turn whose stored continuation disagrees with its Operation
-            // would never be selected, or would be selected too early.
-            const disagreeing = try self.cached(
-                "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-                    "WHERE active.outcome_code IS NULL AND (active.continuation_operation_id IS active.operation_id)!=" ++
-                    "(CASE WHEN " ++ continues_without_input_sql ++ " THEN 1 ELSE 0 END) LIMIT 1",
-            );
-            defer resetCached(disagreeing);
-            switch (c.sqlite3_step(disagreeing)) {
-                c.SQLITE_DONE => {},
-                c.SQLITE_ROW => return error.CorruptStore,
-                else => return error.CallReadFailed,
-            }
-        }
         const statement = try self.cached(
             "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
                 "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
@@ -5845,6 +5834,21 @@ pub const Store = struct {
             c.SQLITE_DONE => return,
             else => return error.CallReadFailed,
         };
+    }
+
+    /// Rejects an active Turn whose stored continuation disagrees with its Operation, since selection would skip it or take it too early.
+    fn validateRecordedContinuations(self: *Store) !void {
+        const disagreeing = try self.cached(
+            "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+                "WHERE active.outcome_code IS NULL AND (active.continuation_operation_id IS active.operation_id)!=" ++
+                "(CASE WHEN " ++ continues_without_input_sql ++ " THEN 1 ELSE 0 END) LIMIT 1",
+        );
+        defer resetCached(disagreeing);
+        switch (c.sqlite3_step(disagreeing)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.CorruptStore,
+            else => return error.TurnReadFailed,
+        }
     }
 
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
@@ -11868,7 +11872,9 @@ test "a Turn whose continuation was never recorded fences the Store" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "unrecorded-metadata", &calls);
     try exec(storage.database, "UPDATE turn SET continuation_operation_id=NULL");
+    try std.testing.expect(!storage.isFenced());
     try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
+    try std.testing.expect(storage.isFenced());
 }
 
 test "a stored continuation never names a later Operation than its Turn's" {
