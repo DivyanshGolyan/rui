@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 
-import host_process  # noqa: F401, admits this fixture before it starts the matrix
+import host_process  # noqa: F401, admits this fixture and builds its environment
 
 
 def vectors():

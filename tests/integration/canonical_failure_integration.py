@@ -925,9 +925,6 @@ def proxy_swap_cases(state):
 
 
 def main(selected="all"):
-    # Callers inherit this environment; an explicit credential path would
-    # take precedence over the synthetic HOME credential this fixture owns.
-    os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:

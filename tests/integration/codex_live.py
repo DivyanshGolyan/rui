@@ -16,7 +16,7 @@ import threading
 
 import bash_integration as bash
 import model_fixture as caller
-from host_process import start_ready_process
+from host_process import NETWORK, start_ready_process
 import os_semantics
 
 
@@ -108,6 +108,8 @@ def run(model, external_credential=None):
     workspace.mkdir()
     credential = external_credential or private / "codex.json"
     os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
+    # The live journey reaches the real provider through the caller's proxy and trust store.
+    os.environ.update(NETWORK)
     command = "printf 'once\\n' >> effect-count; shasum -a 256 effect-count"
     prompt = (
         "Call Bash once with description exactly 'Append and hash effect counter', "

@@ -4,7 +4,8 @@ import os
 import sys
 
 # Every fixture process imports this module, so this is the one place a
-# fixture is admitted. Root is refused before the fixture packages load, since
+# fixture is admitted: not as root, and with an environment built here rather
+# than inherited. Root is refused before the fixture packages load, since
 # root's Python often lacks them.
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -18,6 +19,32 @@ FIXTURE_ENTERED = "RUI_FIXTURE_ENTERED"
 
 if os.geteuid() == 0:
     sys.exit(NON_ROOT_INSTRUCTION)
+
+# The only variables a fixture keeps from its caller. Anything else a developer
+# or runner exported, such as RUI_* settings, TLS trust or a proxy, would change
+# what the fixture proves. Fixtures set their own variables after this import.
+INHERITED = (
+    # Programs, the caller's home and temporary directory, and text decoding.
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+    # CI's retention directory for failed fixture roots.
+    "RUI_FAILURE_ARTIFACTS",
+    # The terminal notice binary that build.zig and check.sh pass.
+    "RUI_TEST_TERMINAL_NOTICE",
+    # Opt-in retention and measurement switches that a person or workflow sets.
+    "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
+    # The runner's Zig caches, for fixtures that build Rui (install.sh, the sequence model).
+    "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LOCAL_PKG_DIR",
+    # session_sequence_model_test.py drives the sequence model's stub zig through these.
+    "TD1_BINARY", "TD1_BUILD_EXIT", "TD1_COMMAND", "TD1_COMMAND_MARKER", "TD1_DIRECT_EXIT",
+    "TD1_DIRECT_MARKER", "TD1_DRIFT_KIND", "TD1_DRIFT_STAGE", "TD1_LINK_TARGET",
+)
+# Withheld from every fixture; only the opt-in live journey hands it to its Host.
+NETWORK = {name: os.environ[name] for name in
+           ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR")
+           if name in os.environ}
+_inherited = {name: os.environ[name] for name in INHERITED if name in os.environ}
+os.environ.clear()
+os.environ.update(_inherited)
 
 import atexit
 import http.client

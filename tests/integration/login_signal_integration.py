@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-import host_process  # noqa: F401, admits this fixture before it launches Rui
+import host_process  # noqa: F401, admits this fixture and builds its environment
 import os_semantics
 
 
@@ -77,12 +77,7 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
 }
 """)
         subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(library)], check=True)
-        environment = {
-            key: value for key, value in os.environ.items()
-            if not key.startswith("RUI_") and not any(
-                word in key.upper() for word in ("TOKEN", "SECRET", "CREDENTIAL", "API_KEY")
-            )
-        }
+        environment = dict(os.environ)
         # Parent-owned monotonic bytes, not optional stderr, are the effect oracle.
         with tempfile.TemporaryFile(dir=root) as witness:
             witness.write(b"000")
