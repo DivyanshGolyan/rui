@@ -136,6 +136,8 @@ def main():
             caller(store, "content", calls[0]["position"], 0, ok=False)
             caller(store, "content", pending[0]["position"], 0, session=foreign, ok=False)
             for row in pending[:2]: assert caller(store, "content", row["position"], 0) == TEXT.encode()
+            assert caller(store, "prefix", pending[0]["position"]) == TEXT.split("\n")[0].encode()
+            caller(store, "prefix", calls[0]["position"], ok=False)
             message(state, store, "second", SESSION, TEXT)
             queued_end, queued = history(store)
             assert queued[-1]["value"]["admission"]["state"] == "queued" and queued[-1]["value"]["admission"]["turn"] is None

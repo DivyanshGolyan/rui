@@ -190,6 +190,8 @@ pub const ActivityCursor = struct {
     }
 };
 pub const ActivityPageReply = union(enum) { page: ActivityPage, failure: ReadFailure };
+/// `line` borrows the caller's buffer, without its line break.
+pub const ActivityPrefixReply = union(enum) { line: []const u8, failure: ReadFailure };
 pub const ActivityPage = struct {
     facts: protocol.ActivityFacts,
 
