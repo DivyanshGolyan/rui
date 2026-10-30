@@ -4103,12 +4103,17 @@ pub const Store = struct {
     /// the oldest running Action's saved description.
     fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bounded(protocol.max_tool_description_bytes)) !session_work.Inputs.Actions {
         const group = try self.cached(
-            "SELECT count(*),count(*) FILTER (WHERE resolution_code IS NULL)," ++
-                "count(*) FILTER (WHERE resolution_code IS NULL AND authorized=0)," ++
-                "min(CASE WHEN resolution_code IS NULL AND authorized=0 THEN action_id END)," ++
-                "count(*) FILTER (WHERE resolution_code IS NULL AND attempt_ordinal=1)," ++
-                "coalesce(max(max(coalesce(decided_at,0),coalesce(resolved_at,0))),0) " ++
-                "FROM action_operation WHERE parent_operation_id=?1",
+            "SELECT count(*),count(*) FILTER (WHERE a.resolution_code IS NULL)," ++
+                "count(*) FILTER (WHERE a.resolution_code IS NULL AND a.authorized=0)," ++
+                "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END)," ++
+                "count(*) FILTER (WHERE a.resolution_code IS NULL AND a.attempt_ordinal=1)," ++
+                // The last resolution is the one at the greatest position.
+                "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)," ++
+                // Under an `ask` revision only an `allow_once` decision
+                // authorizes; under `bypass` the proposal did.
+                "max(a.decided_at) FILTER (WHERE a.resolution_code IS NULL AND r.permission_mode=0) " ++
+                "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
+                "WHERE a.parent_operation_id=?1",
         );
         defer resetCached(group);
         try bindU64(group, 1, operation_id);
@@ -4119,7 +4124,8 @@ pub const Store = struct {
             .awaiting = try readCount(group, 2),
             .first_awaiting = try readOptionalPositive(group, 3),
             .running = try readCount(group, 4),
-            .latest_change_at = try readCount(group, 5),
+            .latest_resolution_at = try readOptionalPositive(group, 5),
+            .latest_decision_at = try readOptionalPositive(group, 6),
         };
         if (actions.running == 0) return actions;
         const oldest = try self.cached(
@@ -4141,7 +4147,7 @@ pub const Store = struct {
     fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.Inputs) !void {
         const cutoff = try self.latestSessionStopCutoff(session_ref);
         const queued = try self.cached(
-            "SELECT admitted_at FROM message_admission INDEXED BY message_admission_session_pending " ++
+            "SELECT admitted_at,admission_position FROM message_admission INDEXED BY message_admission_session_pending " ++
                 "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
         );
         defer resetCached(queued);
@@ -4149,7 +4155,7 @@ pub const Store = struct {
         try bindU64(queued, 2, cutoff);
         switch (c.sqlite3_step(queued)) {
             c.SQLITE_ROW => {
-                inputs.oldest_pending_at = try readPositive(queued, 0);
+                inputs.oldest_pending = .{ .at = try readPositive(queued, 0), .position = try readPositive(queued, 1) };
                 return;
             },
             c.SQLITE_DONE => {},
@@ -18608,6 +18614,91 @@ test "a Tool Result is dated by its group's last acceptance, even when the clock
     };
     try std.testing.expectEqual(@as(usize, 2), results);
     try std.testing.expect(!storage.isFenced());
+}
+
+fn denyForTesting(storage: *Store, session: []const u8, key: []const u8, action_id: u64) !void {
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .deny };
+    try deny.key.set(key);
+    try deny.session.set(session);
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+}
+
+test "Session work dates a tool group by its last acceptance, even when the clock stepped back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    // Ask: denying one Action leaves the other awaiting, so the Session
+    // awaits approval from that denial, though the clock read earlier than
+    // at the proposal.
+    const ask = try configureTestSessionAsk(&storage, "stepped-ask");
+    try submitTestMessage(&storage, &tmp, "stepped-ask-input", "stepped-ask-input", ask.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-ask-calls");
+    const first = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation");
+    try denyForTesting(&storage, ask.slice(), "stepped-deny-first", first);
+    try exec(storage.database, "UPDATE model_operation SET resolved_at=300;UPDATE action_operation SET resolved_at=100 WHERE resolution_code IS NOT NULL");
+    try std.testing.expectEqual(@as(u64, 100), try expectOneWork(&storage, &tmp, ask.slice(), "approval"));
+    // Denying the other settles the group: pending from the later denial,
+    // whose clock read earlier still.
+    try denyForTesting(&storage, ask.slice(), "stepped-deny-second", try queryU64(storage.database, "SELECT max(action_id) FROM action_operation"));
+    try exec(storage.database, "UPDATE action_operation SET resolved_at=" ++
+        "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 50 ELSE 100 END");
+    try std.testing.expectEqual(@as(u64, 50), try expectOneWork(&storage, &tmp, ask.slice(), "pending"));
+
+    // Bypass: both Actions are authorized with the proposal. Once one has
+    // run, the other waits for a slot from that run's resolution, not from
+    // its own authorization, whatever the clock read.
+    const bypass = try configureTestSessionAsk(&storage, "stepped-bypass");
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("stepped-bypass-mode");
+    try update.session.set(bypass.slice());
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&update, true, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "stepped-bypass-input", "stepped-bypass-input", bypass.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-bypass-calls");
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    var sql: [256]u8 = undefined;
+    try exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++
+        "UPDATE action_operation SET decided_at=300 WHERE session_ref='{0s}';" ++
+        "UPDATE action_operation SET resolved_at=70 WHERE session_ref='{0s}' AND resolution_code IS NOT NULL", .{bypass.slice()}, 0));
+    try std.testing.expectEqual(@as(u64, 70), try expectOneWork(&storage, &tmp, bypass.slice(), "pending"));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "queued input is pending from the newer of its admission and the latest outcome, even when the clock stepped back" {
+    for ([_]enum { behind_the_turn, after_the_outcome }{ .behind_the_turn, .after_the_outcome }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "stepped-queue-config");
+        switch (case) {
+            // Queued behind the active Turn, which then fails: pending from
+            // the outcome, though the clock read earlier than at admission.
+            .behind_the_turn => {
+                try submitTestMessage(&storage, &tmp, "stepped-queue-first", "stepped-queue-first", session.slice(), "first");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try submitTestMessage(&storage, &tmp, "stepped-queue-input", "stepped-queue-input", session.slice(), "queued");
+                var diagnostic: [512]u8 = undefined;
+                const quota: @import("transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
+                try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{} } }, .ordinary, .{});
+                try exec(storage.database, "UPDATE message_admission SET admitted_at=200 WHERE command_key='stepped-queue-input';UPDATE turn SET outcome_at=100");
+            },
+            // Admitted after the outcome: pending from the admission, though
+            // the clock read earlier than at the outcome.
+            .after_the_outcome => {
+                const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+                try answerTestTurn(&storage, &tmp, session.slice(), "stepped-queue-answer", &answer);
+                try submitTestMessage(&storage, &tmp, "stepped-queue-input", "stepped-queue-input", session.slice(), "queued");
+                try exec(storage.database, "UPDATE turn SET outcome_at=200;UPDATE message_admission SET admitted_at=100 WHERE command_key='stepped-queue-input'");
+            },
+        }
+        try std.testing.expectEqual(@as(u64, 100), try expectOneWork(&storage, &tmp, session.slice(), "pending"));
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "persisted tool label corruption fences every publication route" {

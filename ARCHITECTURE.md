@@ -1159,15 +1159,16 @@ Message work follows its own processing binding or exclusion. Unbound queued inp
 | The active Turn's model Operation waits for a retry due in the future | `retrying`, with due time, cause and the failed Attempt's ordinal | retry scheduling |
 | That retry is already due | `pending` | its due second, never before scheduling |
 | A Bash Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's saved description, the running count and the count awaiting permission | the oldest launch |
-| Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the later of the proposing resolution and the group's latest change |
-| Otherwise, with an active Turn | `pending` | the later of the Operation's resolution and the group's latest change |
-| No active Turn, and an eligible Message is queued | `pending` | the later of the oldest queued admission and the latest outcome |
+| Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
+| Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
+| No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
 | No active Turn, and a stop excluded input newer than the latest Turn's input, after its outcome | `stopped`, cause `stop` | that stop |
 | The latest Turn completed | `finished` | its outcome |
 | The latest Turn was cancelled | `stopped`, cause `stop` when a stop selected it, else `interruption` | its outcome |
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
+- **Latest** and **before** follow the Session's order, never the clock, which can step back. A tool group's changes follow its proposal, and its resolutions follow one another by acceptance position; a queued admission and an outcome compare by position. An `allow_once` decision and a Bash launch claim no position: a decision is ordered against a resolution by time, and `bash` dates from the earliest launch time among running Actions. Authorization under `bypass` comes with the proposal and is not a decision.
 - **`pending`** means eligible, not admitted. Whether Active Capacity is why it waits is not a Store fact; host information's slots in use supply that context.
 - **A stop that selected no Turn** counts only if it excluded queued Messages. A stop that excluded nothing leaves the state unchanged.
 - **A retry falling due** commits nothing, so Session listing's `since` does not report it. Every reader applies the same past-due rule when it reads, so a past-due retry reads `pending` everywhere.

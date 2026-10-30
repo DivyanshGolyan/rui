@@ -100,13 +100,15 @@ pub const Inputs = struct {
     created_at: u64,
     /// The Session's latest Turn and its current Operation, if any.
     latest: ?Turn = null,
-    /// Without an active Turn: `admitted_at` of the oldest eligible queued
-    /// Message. Ignored beside an active Turn.
-    oldest_pending_at: ?u64 = null,
+    /// Without an active Turn: the oldest eligible queued Message. Ignored
+    /// beside an active Turn.
+    oldest_pending: ?Pending = null,
     /// Without an active Turn: the newest admission a stop excluded, with the
     /// earliest stop that excluded it. Ignored beside an active Turn.
     excluded: ?Excluded = null,
 
+    /// A queued Message's `admitted_at` and its admission position.
+    pub const Pending = struct { at: u64, position: u64 };
     pub const Excluded = struct { admission: u64, stop_position: u64, stop_at: u64 };
 
     pub const Turn = struct {
@@ -152,8 +154,13 @@ pub const Inputs = struct {
         /// Unresolved with a launched Attempt.
         running: u64 = 0,
         oldest_running: ?Running = null,
-        /// The latest decision or resolution in the group, 0 when none.
-        latest_change_at: u64 = 0,
+        /// `resolved_at` of the group's last resolution, the one at the
+        /// greatest acceptance position. Null while none resolved.
+        latest_resolution_at: ?u64 = null,
+        /// `decided_at` of the latest `allow_once` decision on an Action
+        /// still unresolved. Authorization under `bypass` came with the
+        /// proposal and is not a decision.
+        latest_decision_at: ?u64 = null,
 
         pub const Running = struct { at: u64, description: ?[]const u8 };
     };
@@ -178,7 +185,8 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     const actions = latest.actions;
     if (actions.unresolved > actions.total or actions.awaiting + actions.running > actions.unresolved or
         (actions.awaiting == 0) != (actions.first_awaiting == null) or
-        (actions.running == 0) != (actions.oldest_running == null)) return error.CorruptStore;
+        (actions.running == 0) != (actions.oldest_running == null) or
+        (actions.unresolved == actions.total) != (actions.latest_resolution_at == null)) return error.CorruptStore;
     // Only an active Turn's tool proposals own Actions.
     const proposed = latest.op == .resolved and latest.op.resolved.resolution == .tool_proposals;
     if (actions.total != 0 and (latest.terminal != null or !proposed)) return error.CorruptStore;
@@ -214,7 +222,14 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
                 .running = actions.running,
                 .approvals = actions.awaiting,
             } };
-            const since = @max(resolved.at, actions.latest_change_at);
+            // Every change in the group follows its proposal, and
+            // resolutions follow one another by position. A decision claims
+            // no position, so only its time orders it against a resolution:
+            // the one clock comparison in this table.
+            const since = if (actions.latest_resolution_at) |resolved_at|
+                if (actions.latest_decision_at) |decided_at| @max(resolved_at, decided_at) else resolved_at
+            else
+                actions.latest_decision_at orelse resolved.at;
             break :state if (actions.unresolved != 0 and actions.awaiting == actions.unresolved)
                 .{ .approval = .{ .since = since } }
             else
@@ -225,9 +240,13 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
 }
 
 /// Queued or stop-excluded input decides a Session with no active Turn
-/// before its latest outcome does.
+/// before its latest outcome does. Positions say which fact is newer.
 fn settled(inputs: Inputs, terminal: ?Inputs.Terminal) ?WorkState {
-    if (inputs.oldest_pending_at) |at| return .{ .pending = .{ .since = @max(at, if (terminal) |t| t.at else 0) } };
+    if (inputs.oldest_pending) |pending| {
+        // Queued behind the Turn, the input became eligible at its outcome.
+        const behind = if (terminal) |t| pending.position < t.position else false;
+        return .{ .pending = .{ .since = if (behind) terminal.?.at else pending.at } };
+    }
     const excluded = inputs.excluded orelse return null;
     if (inputs.latest) |latest| {
         // A Turn binds every eligible queued Message at its start, and an
@@ -302,7 +321,7 @@ fn fixed(comptime capacity: usize, value: []const u8) Bounded(capacity) {
 
 test "a Session with no Turn is idle, pending or stopped by its queue" {
     try expectState(.{ .idle = .{ .since = 100 } }, .{ .now_ms = 0, .created_at = 100 });
-    try expectState(.{ .pending = .{ .since = 120 } }, .{ .now_ms = 0, .created_at = 100, .oldest_pending_at = 120 });
+    try expectState(.{ .pending = .{ .since = 120 } }, .{ .now_ms = 0, .created_at = 100, .oldest_pending = .{ .at = 120, .position = 3 } });
     try expectState(.{ .stopped = .{ .since = 130, .cause = .stop } }, .{
         .now_ms = 0,
         .created_at = 100,
@@ -312,7 +331,7 @@ test "a Session with no Turn is idle, pending or stopped by its queue" {
     try expectState(.{ .pending = .{ .since = 140 } }, .{
         .now_ms = 0,
         .created_at = 100,
-        .oldest_pending_at = 140,
+        .oldest_pending = .{ .at = 140, .position = 3 },
         .excluded = .{ .admission = 1, .stop_position = 2, .stop_at = 130 },
     });
     const work = try derive(.{ .now_ms = 0, .created_at = 100 });
@@ -352,7 +371,7 @@ test "a proposal group is Bash, approval or pending by its Actions" {
         .first_awaiting = 41,
         .running = 2,
         .oldest_running = .{ .at = 350, .description = "Run the resize tests" },
-        .latest_change_at = 360,
+        .latest_resolution_at = 360,
     };
     try expectState(.{ .bash = .{ .since = 350, .description = fixed(max_description_bytes, "Run the resize tests"), .running = 2, .approvals = 1 } }, .{
         .now_ms = 0,
@@ -373,16 +392,33 @@ test "a proposal group is Bash, approval or pending by its Actions" {
     try expectState(.{ .approval = .{ .since = 340 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), awaiting) });
     var after_sibling = awaiting;
     after_sibling.total = 3;
-    after_sibling.latest_change_at = 380;
+    after_sibling.latest_resolution_at = 380;
     try expectState(.{ .approval = .{ .since = 380 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), after_sibling) });
 
     // Approved Bash awaiting a slot, a settled group awaiting continuation,
     // or proposals that were all rejected and own no Action.
-    const approved: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 42, .latest_change_at = 390 };
+    const approved: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 42, .latest_decision_at = 390 };
     try expectState(.{ .pending = .{ .since = 390 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), approved) });
-    const settled_group: Inputs.Actions = .{ .total = 2, .latest_change_at = 395 };
+    const settled_group: Inputs.Actions = .{ .total = 2, .latest_resolution_at = 395 };
     try expectState(.{ .pending = .{ .since = 395 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), settled_group) });
     try expectState(.{ .pending = .{ .since = 340 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), .{}) });
+    // A decision and a resolution share no position: the later time wins.
+    var allowed_after_sibling = approved;
+    allowed_after_sibling.total = 3;
+    allowed_after_sibling.latest_resolution_at = 380;
+    try expectState(.{ .pending = .{ .since = 390 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), allowed_after_sibling) });
+}
+
+test "the newer fact dates work, even when the clock stepped back" {
+    // A resolution or a decision always follows its group's proposal.
+    const after_sibling: Inputs.Actions = .{ .total = 2, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .latest_resolution_at = 300 };
+    try expectState(.{ .approval = .{ .since = 300 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), after_sibling) });
+    const allowed: Inputs.Actions = .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 42, .latest_decision_at = 330 };
+    try expectState(.{ .pending = .{ .since = 330 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), allowed) });
+    // Queued behind the Turn (position 39, before its outcome at 40), the
+    // input became eligible at the outcome; admitted after it, at admission.
+    try expectState(.{ .pending = .{ .since = 500 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 600, .position = 39 } });
+    try expectState(.{ .pending = .{ .since = 450 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 450, .position = 41 } });
 }
 
 test "a stop that selected the active Turn outranks its Operation" {
@@ -391,7 +427,7 @@ test "a stop that selected the active Turn outranks its Operation" {
         .unresolved = 1,
         .running = 1,
         .oldest_running = .{ .at = 350, .description = null },
-        .latest_change_at = 350,
+        .latest_resolution_at = 350,
     });
     turn.stopped_at = 400;
     try expectState(.{ .stopping = .{ .since = 400 } }, .{ .now_ms = 0, .created_at = 1, .latest = turn });
@@ -410,8 +446,8 @@ test "a settled Session reports its latest outcome unless input came after it" {
     });
 
     // Queued input after the outcome makes the Session pending again.
-    try expectState(.{ .pending = .{ .since = 510 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending_at = 510 });
-    try expectState(.{ .pending = .{ .since = 500 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending_at = 490 });
+    try expectState(.{ .pending = .{ .since = 510 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 510, .position = 41 } });
+    try expectState(.{ .pending = .{ .since = 500 } }, .{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .oldest_pending = .{ .at = 490, .position = 39 } });
 
     // A stop after the outcome that excluded newer input stops the Session.
     try expectState(.{ .stopped = .{ .since = 520, .cause = .stop } }, .{
@@ -456,7 +492,7 @@ test "inputs no writer produces are corrupt" {
     const unresolved: Inputs.Op = .{ .in_flight = .{ .attempt_at = 300 } };
     const group: Inputs.Actions = .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 };
     var ended_with_group = endedTurn(.cancelled, "cancelled");
-    ended_with_group.actions = .{ .total = 1 };
+    ended_with_group.actions = .{ .total = 1, .latest_resolution_at = 1 };
     for ([_]Inputs.Turn{
         // Actions beside an unresolved or non-proposal Operation, or a Turn
         // that already ended.
@@ -470,6 +506,9 @@ test "inputs no writer produces are corrupt" {
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 1, .description = null } }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .running = 1 }),
+        // A resolved Action without its time, or a time with none resolved.
+        activeTurn(proposals(340), .{ .total = 1 }),
+        activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .latest_resolution_at = 1 }),
         // A terminal Turn whose Operation never resolved.
         .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .terminal = .{ .outcome = .completed, .code = "completed", .at = 500, .position = 40 }, .op = unresolved },
         // A saved code beyond its bound.
