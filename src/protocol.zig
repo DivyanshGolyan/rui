@@ -18,6 +18,13 @@ pub const max_code_bytes = 96;
 pub const max_tool_description_bytes = 100;
 /// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = max_tool_description_bytes;
+
+/// Whether `bytes` is a Session Label: one non-blank line of UTF-8 within
+/// `max_label_bytes`.
+pub fn validLabel(bytes: []const u8) bool {
+    comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
+    return ToolPresentation.validDescription(bytes);
+}
 pub const Provider = enum { codex };
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
@@ -2909,6 +2916,14 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
             try std.testing.expect(request == .conversation_page);
         }
     }
+}
+
+test "a Label is one non-blank line of at most 100 bytes" {
+    const longest: [max_label_bytes]u8 = @splat('x');
+    const overlong: [max_label_bytes + 1]u8 = @splat('x');
+    try std.testing.expect(validLabel("Review PR 412") and validLabel(&longest) and validLabel("Café"));
+    for ([_][]const u8{ "", " \t", "one\ntwo", "one\u{2028}two", "\xff", &overlong }) |invalid|
+        try std.testing.expect(!validLabel(invalid));
 }
 
 test "configuration token heuristics and effort parse sparsely and bind idempotency" {

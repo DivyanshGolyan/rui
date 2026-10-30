@@ -1342,7 +1342,7 @@ fn configurationBeforeWorkspace(
             return .model_is_immutable;
         }
     }
-    if (requested.label.state == .value and !protocol.ToolPresentation.validDescription(requested.label.value.slice())) return .invalid_label;
+    if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
     if (requested.reasoning_effort.state == .value) {
         const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
@@ -8313,7 +8313,7 @@ fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bound
     if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
     var label: protocol.Bounded(protocol.max_label_bytes) = .{};
     try readText(statement, column, &label);
-    if (!protocol.ToolPresentation.validDescription(label.slice())) return error.CorruptStore;
+    if (!protocol.validLabel(label.slice())) return error.CorruptStore;
     return label;
 }
 

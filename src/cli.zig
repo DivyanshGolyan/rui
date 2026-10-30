@@ -1269,11 +1269,10 @@ test "policy arguments reset and preserve spelling" {
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
-/// A Label obeys the saved Bash description rule; "" is the one spelling
-/// that clears it and can never be a Label.
+/// "" is the one spelling that clears a Label and can never be one.
 fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
     if (text.len == 0) return .{ .present = true, .value = null };
-    if (protocol.ToolPresentation.validDescription(text)) return .{ .present = true, .value = text };
+    if (protocol.validLabel(text)) return .{ .present = true, .value = text };
     _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed.\n" ++ cli_args.label_help);
     return error.InvalidLabel;
 }

@@ -835,7 +835,7 @@ pub const Current = struct {
             return .unconfigured;
         };
         if (!protocol.validSessionId(settings.reference.slice()) or !settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
-            (if (settings.label) |label| !protocol.ToolPresentation.validDescription(label.slice()) else false) or
+            (if (settings.label) |label| !protocol.validLabel(label.slice()) else false) or
             settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
@@ -1094,7 +1094,7 @@ pub const SessionListPage = struct {
 
         fn decode(wire: anytype) !Row {
             if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
-            if (wire.label) |label| if (!protocol.ToolPresentation.validDescription(label.slice())) return error.InvalidCharacter;
+            if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
             var row: Row = .{
                 .reference = wire.reference.value,
                 .workspace = wire.workspace.value,
