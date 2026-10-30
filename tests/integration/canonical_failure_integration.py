@@ -21,6 +21,7 @@ import threading
 import time
 
 import model_fixture as fixture
+import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
 
@@ -925,9 +926,6 @@ def proxy_swap_cases(state):
 
 
 def main(selected="all"):
-    # Callers inherit this environment; an explicit credential path would
-    # take precedence over the synthetic HOME credential this fixture owns.
-    os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
@@ -946,4 +944,5 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else "all")

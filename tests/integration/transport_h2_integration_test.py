@@ -16,6 +16,7 @@ from unittest.mock import patch
 import codex_h2_integration as codex_h2
 import os_semantics
 import transport_h2_integration as transport
+import host_process
 
 
 class HostReply:
@@ -814,4 +815,5 @@ class ObservationDeadlineTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     unittest.main(argv=[sys.argv[0]])

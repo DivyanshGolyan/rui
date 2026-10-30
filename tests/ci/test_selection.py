@@ -712,6 +712,7 @@ class FullCheckPartitionTest(unittest.TestCase):
             # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
+if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2; exec "$@"; fi
 fixture=$(basename "${1:-$0}")
 base_fixture=$fixture
 case "$fixture" in

@@ -23,6 +23,9 @@ import tempfile
 import threading
 import time
 
+import host_process
+from host_process import dispose_all
+
 
 SELECTORS = ("focus", "pages", "acknowledgement", "retention", "publication")
 SCRATCH = {".git", ".zig-cache", "zig-out", ".amp", "__pycache__"}
@@ -123,9 +126,8 @@ def execute(command, overlay, log, retention, cache):
         return subprocess.run(command, cwd=overlay, env=environment, stdout=log, stderr=subprocess.STDOUT).returncode
     # Use the existing real Host/provider fixture. The UI's first scan, not a
     # sleep, releases the held answer. No ReplyProxy/socket replacement is used.
+    # Imported here: model_fixture reads its binary from this process's argv at import.
     import model_fixture as fixture
-    from host_process import dispose_all
-
     fixture.RUI = overlay / "zig-out/bin/rui"
     build = subprocess.run(["zig", "build", "-j2", "--cache-dir", str(cache / "build")],
                            cwd=overlay, stdout=log, stderr=subprocess.STDOUT)
@@ -337,6 +339,7 @@ test "TD1 sequence model {name}" {{
 
 
 if __name__ == "__main__":
+    host_process.enter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)

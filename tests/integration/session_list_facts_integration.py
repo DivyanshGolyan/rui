@@ -8,6 +8,7 @@ import tempfile
 
 from canonical_failure_integration import ERROR_BYTES, ReplyProxy
 import model_fixture as fixture
+import host_process
 
 
 def main():
@@ -125,4 +126,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

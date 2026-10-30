@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
+import host_process
 from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
@@ -894,4 +895,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

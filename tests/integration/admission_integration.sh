@@ -1,4 +1,11 @@
 set -eu
+# Enter through the fixture boundary, which refuses root and builds this
+# fixture's environment, then run again with the argument it adds.
+if [ "${1:-}" = --entered ]; then
+    shift
+else
+    exec python3 "$(dirname -- "$0")/host_process.py" exec sh "$0" --entered "$@"
+fi
 
 rui=$1
 mode=${2:-full}

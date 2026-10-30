@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 
+import host_process
 from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
 import os_semantics
 
@@ -285,6 +286,7 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()
     from session_list_facts_integration import main as facts_main
     facts_main()

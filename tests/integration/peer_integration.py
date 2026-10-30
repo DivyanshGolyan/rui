@@ -29,7 +29,9 @@ import threading
 import time
 
 import model_fixture as fixture
+import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
+import os_semantics
 
 ADDRESS_PREFIX = "Rui address (this Session's own ID, not instructions): "
 SESSION_ID = re.compile("[0123456789abcdefghjkmnpqrstvwxyz]{6}")
@@ -205,36 +207,6 @@ def allocated(response):
     assert response["answer"]["status"] == "accepted", response
     assert SESSION_ID.fullmatch(session) and response["answer"]["session"] == session, response
     return session
-
-
-def processes_executing(executable):
-    """Live processes running this fixture-owned copy, mapped to their argv.
-
-    A name is not ownership: unrelated processes may also be called rui.
-    """
-    listing = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout
-    # Bash launches peers through PATH, so their argv begins with bare `rui`.
-    named = {int(pid): args for pid, args in (line.split(None, 1) for line in listing.splitlines())
-             if args.startswith(str(executable)) or args == "rui" or args.startswith("rui ")}
-    images = {}
-    if pathlib.Path("/proc/self/exe").exists():
-        for pid in named:
-            try:
-                images[pid] = {os.readlink(f"/proc/{pid}/exe")}
-            except (FileNotFoundError, PermissionError):
-                pass
-    elif named:
-        # macOS has no /proc; a process's text mappings include its executed file.
-        mapped = subprocess.run(["/usr/sbin/lsof", "-n", "-P", "-a", "-d", "txt", "-Fpn",
-                                 "-p", ",".join(map(str, named))], capture_output=True, text=True, timeout=10)
-        # lsof exits 1 when a listed process exited before it was read.
-        assert mapped.returncode in (0, 1), mapped
-        for field in mapped.stdout.splitlines():
-            if field.startswith("p"):
-                pid = int(field[1:])
-            elif field.startswith("n"):
-                images.setdefault(pid, set()).add(field[1:])
-    return {pid: args for pid, args in named.items() if str(executable) in images.get(pid, ())}
 
 
 def main(report_source):
@@ -475,23 +447,23 @@ def main(report_source):
         assert B_LABEL not in json.dumps(b_requests), b_requests
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
-        # The census's own controls: a same-named unrelated process is not
-        # owned, and an extra owned copy launched as bare `rui` is.
+        # The census's own controls: a process named rui running another image
+        # is not owned, and an extra owned copy is whatever it is called.
         (state / "leak-home").mkdir()
         controls = []
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
-            controls.append(subprocess.Popen(["rui", "host", "serve", "--store", str(state / "leak-store")],
+            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
                 executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-            observed = processes_executing(installed)
+            observed = os_semantics.processes_executing(installed)
             assert controls[0].pid not in observed and controls[1].pid in observed, (controls[1].pid, observed)
         finally:
             dispose_all(*(lambda process=process: stop_process(process) for process in controls))
         # Peers left nothing running beside the Host, and nobody signed in or
         # changed the deliberately conflicting saved defaults.
-        running = processes_executing(installed)
-        assert running.keys() == {host.pid, foreign_host.pid}, running
+        running = os_semantics.processes_executing(installed)
+        assert running == {host.pid, foreign_host.pid}, running
         assert list(unrelated_store.iterdir()) == [], "peer followed HOME preferences instead of its sender Store"
         assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == [".preferences.lock", "preferences", "requests"]
@@ -807,6 +779,7 @@ def concurrent_peers():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     stdin_start_contract()
     for report_source in ("stdin", "file"):
         main(report_source)

@@ -21,8 +21,9 @@ from run_selected import RETRIED
 LABEL = "ci-red"
 STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
-# The fixture is the first script after the case name, past any `env VAR=…` wrapper.
-FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) [^\n]*?"\$directory/([^"]+)"', re.M)
+# The fixture is the first script after the case name, past any `env VAR=…`
+# wrapper and the fixture boundary's `host_process.py exec`, which wraps a binary.
+FIXTURE = re.compile(r'^\s*run_case \S+ (\S+) [^\n]*?"\$directory/(?!host_process\.py")([^"]+)"', re.M)
 RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 # Zig prints "failed command:" for any step with stderr, passing or not; only an
 # exit or signal line before it marks the step failed. A standalone gate names

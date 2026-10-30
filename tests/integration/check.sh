@@ -9,6 +9,9 @@ print(f"Integration Python: {sys.version.split()[0]} ({sys.executable})")
 PY
 
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Refuse root once, before any case starts. Every case also enters the fixture
+# boundary itself, which builds its environment.
+python3 "$directory/host_process.py" exec true
 release_safe=$1
 debug=$2
 printf 'Actual native platform: %s %s\n' "$(uname -s)" "$(uname -m)"
@@ -137,7 +140,8 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
     names=
     phase=batch
     if [ "$part" = parallel ]; then
-        run_case execution native env RUI_TEST_EXACT_INACTIVITY=0 "$test_binary"
+        # Every other case enters the fixture boundary itself.
+        run_case execution native python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 "$test_binary"
     fi
     cases
     set -- $pids

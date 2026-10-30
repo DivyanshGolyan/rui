@@ -11,6 +11,7 @@ import tempfile
 import threading
 
 import model_fixture as fixture
+import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 
@@ -199,4 +200,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

@@ -5,8 +5,10 @@ once, with its reason, instead of in a `sys.platform` branch at the call site.
 tests/ci/platform_boundary.py lets no other fixture read the platform, and a
 PR that changes this file runs Mac Selected.
 """
+import os
 import pathlib
 import platform
+import subprocess
 import sys
 import termios
 from unittest import mock
@@ -96,3 +98,26 @@ def shared_library_command(source, library):
     darwin = _module.DARWIN
     return ["cc", "-dynamiclib" if darwin else "-shared", "-fPIC", str(source),
             *([] if darwin else ["-ldl"]), "-o", str(library)]
+
+
+def processes_executing(executable):
+    """Pids of live processes whose executed image is `executable`, whatever they are called."""
+    image = os.stat(executable)
+    if _module.PROC_FS:
+        pids = set()
+        for entry in pathlib.Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    running = os.stat(entry / "exe")
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    continue
+                if (running.st_dev, running.st_ino) == (image.st_dev, image.st_ino):
+                    pids.add(int(entry.name))
+        return pids
+    # Darwin has no procfs; lsof matches the file's text mappings by device and inode.
+    mapped = subprocess.run(["/usr/sbin/lsof", "-w", "-n", "-P", "-a", "-d", "txt", "-Fp", "--", str(executable)],
+                            capture_output=True, text=True, timeout=10)
+    # lsof exits 1 both when no process maps the file and when it fails. With
+    # warnings off (-w), only a failure writes to stderr.
+    assert mapped.returncode == 0 or (mapped.returncode == 1 and not mapped.stderr), mapped
+    return {int(field[1:]) for field in mapped.stdout.splitlines() if field.startswith("p")}

@@ -16,6 +16,7 @@ import threading
 
 import bash_integration as bash
 import model_fixture as caller
+import host_process
 from host_process import start_ready_process
 import os_semantics
 
@@ -253,6 +254,8 @@ def run(model, external_credential=None):
 
 
 if __name__ == "__main__":
+    # The live journey reaches the real provider through the caller's proxy and trust store.
+    os.environ.update(host_process.enter())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rui", type=pathlib.Path, help="built Rui binary")
     parser.add_argument("--live", action="store_true", help="explicitly authorize a live authenticated journey")

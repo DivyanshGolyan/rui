@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import sys
 
+import host_process
+
 
 def vectors():
     # Literal control/kitty/modifyOtherKeys vectors. ESC-prefix cannot encode
@@ -83,4 +85,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     sys.exit(main())

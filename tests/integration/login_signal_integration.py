@@ -13,6 +13,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+
+import host_process
 import os_semantics
 
 
@@ -75,17 +77,11 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
 }
 """)
         subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(library)], check=True)
-        environment = {
-            key: value for key, value in os.environ.items()
-            if not key.startswith("RUI_") and not any(
-                word in key.upper() for word in ("TOKEN", "SECRET", "CREDENTIAL", "API_KEY")
-            )
-        }
         # Parent-owned monotonic bytes, not optional stderr, are the effect oracle.
         with tempfile.TemporaryFile(dir=root) as witness:
             witness.write(b"000")
             witness.flush()
-            environment.update(HOME=str(root), TMPDIR=str(root), LD_PRELOAD=str(library),
+            environment = dict(os.environ, HOME=str(root), TMPDIR=str(root), LD_PRELOAD=str(library),
                                RUI_LOGIN_WITNESS_FD=str(witness.fileno()))
             child = subprocess.run([str(binary), "auth", "login", "codex"], env=environment,
                                    capture_output=True, timeout=10, pass_fds=(witness.fileno(),),
@@ -109,4 +105,5 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
 
 
 if __name__ == "__main__":
+    host_process.enter()
     run(sys.argv[1])

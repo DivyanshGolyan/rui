@@ -1,5 +1,64 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
+import os
+import sys
+
+NON_ROOT_INSTRUCTION = (
+    "Rui fixtures must run as a non-root user. This fixture is running as root "
+    "(effective user ID 0), and root bypasses the file and socket permission denials "
+    "that fixtures assert, so their results would be wrong. Run the same command again "
+    "as an ordinary user, for example a dedicated tester account that owns its own "
+    "checkout, Zig caches and Python environment."
+)
+# The only variables a fixture keeps from its caller. Anything else a developer
+# or runner exported, such as RUI_* settings, TLS trust or a proxy, would change
+# what the fixture proves. PYTHONPATH and VIRTUAL_ENV are left out on purpose:
+# PATH selects the interpreter.
+INHERITED = (
+    # Programs, the caller's home and temporary directory, and text decoding.
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+    # CI's retention directory for failed fixture roots.
+    "RUI_FAILURE_ARTIFACTS",
+    # The terminal notice binary that build.zig and check.sh pass.
+    "RUI_TEST_TERMINAL_NOTICE",
+    # Opt-in retention and measurement switches that a person or workflow sets.
+    "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
+    "RUI_MEASURE_GLIBC_TUNABLES",
+    # The runner's Zig caches and packages: install.sh builds the previous
+    # release with them, and the sequence model builds its overlay against them.
+    "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LOCAL_PKG_DIR",
+)
+# Withheld from every fixture; only the opt-in live journey hands them to its Host.
+NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def enter():
+    """Admit this process as a fixture, before it starts anything.
+
+    Every fixture entry calls this first: a Python fixture in its main block,
+    anything else through `host_process.py exec COMMAND...`. Root is refused.
+    The environment becomes INHERITED plus TERM=xterm-256color, since fixtures
+    drive Rui as a cursor-addressing terminal and Rui refuses TERM=dumb; a case
+    about TERM sets its own. Returns the withheld NETWORK variables.
+    """
+    if os.geteuid() == 0:
+        sys.exit(NON_ROOT_INSTRUCTION)
+    network = {name: os.environ[name] for name in NETWORK if name in os.environ}
+    kept = {name: os.environ[name] for name in INHERITED if name in os.environ}
+    os.environ.clear()
+    os.environ.update(kept, TERM="xterm-256color")
+    return network
+
+
+if __name__ == "__main__":
+    # The entry for fixtures that are not Python modules, such as shell
+    # fixtures, native tests and Go measurements. It runs before the fixture
+    # packages load, since root's Python often lacks them.
+    enter()
+    if sys.argv[1:2] != ["exec"] or len(sys.argv) < 3:
+        sys.exit("usage: host_process.py exec COMMAND [ARGUMENT...]")
+    os.execvp(sys.argv[2], sys.argv[2:])
+
 import atexit
 import http.client
 import http.server
@@ -9,7 +68,6 @@ import functools
 import io
 import json
 import mmap
-import os
 import pathlib
 import selectors
 import socket
@@ -19,7 +77,6 @@ import ssl
 import stat
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 import time

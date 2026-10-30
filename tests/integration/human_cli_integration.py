@@ -20,6 +20,7 @@ import termios
 import threading
 import time
 
+import host_process
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
 
 
@@ -5139,9 +5140,6 @@ def renderer_cases():
 
 
 def main(selected="all"):
-    # Callers inherit this environment; an explicit credential path would
-    # take precedence over the synthetic HOME credential this fixture owns.
-    os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
@@ -6707,4 +6705,5 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else "all")

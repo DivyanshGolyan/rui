@@ -12,6 +12,7 @@ import threading
 import bash_integration as bash
 import model_fixture as fixture
 import human_cli_integration as human
+import host_process
 from host_process import HostDiagnostics
 from terminal_process import terminal_process
 
@@ -172,4 +173,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

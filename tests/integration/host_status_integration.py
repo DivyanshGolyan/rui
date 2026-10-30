@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 
+import host_process
 from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
 
@@ -669,4 +670,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()
