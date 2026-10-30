@@ -52,7 +52,7 @@ Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of e
 | Ctrl-D | Leaves, when the composer is empty. |
 | Ctrl-C | Leaves. |
 
-A stop works like `rui session stop`: if its reply is lost, the overview names the `rui request recover` command, and names it again after you leave. A stop still waiting to be sent when you leave is reported as not sent. The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered. Sessions the stopped Session messaged keep running.
+A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave. A stop still waiting to be sent when you leave is reported as not sent. The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered. Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one. It asks the terminal for its background as it opens and uses night when the terminal does not say. It uses 24-bit colour when `COLORTERM` is `truecolor` or `24bit`, and the nearest 256 colours otherwise. `NO_COLOR` keeps the terminal's own colours, with bold and reverse only. A conversation you open shows your terminal's own colours, and so does the shell after you leave.
 
