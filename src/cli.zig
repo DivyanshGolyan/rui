@@ -3,6 +3,8 @@ const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
+const SessionScreen = @import("SessionScreen.zig");
+const SessionTerminal = @import("SessionTerminal.zig");
 const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
@@ -1006,7 +1008,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     try requireInteractiveTerminal(init, "to create a Session");
     const saved = (try createSession(init, options)) orelse return;
-    runSession(init, saved.store.slice(), saved.session.slice(), null) catch |err| {
+    runSession(init, saved.store.slice(), saved.session.slice()) catch |err| {
         // Configuration acceptance and local entry are independent outcomes.
         var bytes: [256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
@@ -1587,7 +1589,20 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
     try writer.flush();
 }
 
-fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8, initial_text: ?[]const u8) anyerror!void {
+fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8) anyerror!void {
+    const Interrupt = struct {
+        var cancellation: client.Cancellation = .{};
+        var previous: [2]std.posix.Sigaction = undefined;
+        fn stop(_: std.posix.SIG) callconv(.c) void {
+            cancellation.requestStop();
+        }
+        fn install(on: bool) void {
+            const action: std.posix.Sigaction = .{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
+            inline for (.{ std.posix.SIG.INT, std.posix.SIG.TERM }, 0..) |signal, i| {
+                if (on) std.posix.sigaction(signal, &action, &previous[i]) else std.posix.sigaction(signal, &previous[i], null);
+            }
+        }
+    };
     // Callers own canonical Store resolution and complete Session selection.
     const outcome: anyerror!void = run: {
         confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
@@ -1604,7 +1619,29 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         defer inspection.close(init.io);
         const status = renderScratch(init) catch |err| break :run err;
         defer status.close(init.io);
-        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection, .status = status }, sessionCommand, sessionRequests, writeSessionStatus, initial_text);
+        const screen = init.gpa.create(SessionScreen) catch |err| break :run err;
+        defer init.gpa.destroy(screen);
+        const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
+        screen.init(init.io, init.environ_map, no_colour.len == 0) catch |err| break :run err;
+        defer screen.deinit();
+        Interrupt.cancellation.stopped.store(false, .release);
+        Interrupt.install(true);
+        defer Interrupt.install(false);
+        var terminal = SessionTerminal.begin(screen) catch |err| break :run err;
+        var frontend: SessionFrontend = undefined;
+        const ended = frontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection, .status = status }, sessionCommand, sessionRequests, writeSessionStatus, &terminal, &Interrupt.cancellation);
+        const departure = frontend.leave(ended, terminal.finish());
+        const end = departure.end catch |err| {
+            if (departure.failure_notice) terminal.detached(destination, reference, departure.action) catch |notice_error|
+                TerminalText.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
+            break :run err;
+        };
+        switch (end) {
+            .detached, .interrupted => terminal.detached(destination, reference, departure.action) catch |err| {
+                if (!departure.recovery_shown) frontend.recoveryGuide();
+                break :run err;
+            },
+        }
     };
     return outcome catch |err| {
         notice: {
@@ -1632,7 +1669,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
     try startHost(init, destination, true, null);
-    return runSession(init, destination, reference, null);
+    return runSession(init, destination, reference);
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
