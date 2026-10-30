@@ -279,11 +279,11 @@ def main():
             # work that an explicit restart would later execute.
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
+                    # Configure keys follow the parser's wire order; any other
+                    # order is rejected before capture, not held.
                     fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
-                        "configuration": {name: {"state": "omitted"} for name in
-                            ("workspace", "provider", "model", "tools", "permission_mode", "output_schema")}}
-                    if kind == "configure":
-                        fields["configuration"]["instructions"] = {"state": "value", "value": "x" * 8192}
+                        "configuration": {name: {"state": "value", "value": "x" * 8192} if name == "instructions" else {"state": "omitted"}
+                            for name in ("workspace", "provider", "model", "instructions", "tools", "permission_mode", "output_schema")}}
                     body = json.dumps({"version": "1", "kind": kind, "store": str(store),
                         "key": f"late-{kind}-{phase}", "session": session, **fields}).encode()
                     header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
@@ -321,6 +321,15 @@ def main():
             pending.close()
             pending = None
             for upload, remainder in uploads:
+                # Stop retires held input without a reply; an early rejection
+                # would leave its reply buffered here.
+                try:
+                    reply = upload.recv(1, socket.MSG_PEEK)
+                except OSError as error:
+                    if not is_peer_disconnect(error):
+                        raise
+                    reply = b""
+                assert reply == b"", "late upload was answered instead of held"
                 response = finish(upload, remainder)
                 assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
