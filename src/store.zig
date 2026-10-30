@@ -91,11 +91,14 @@ const continues_with_input_sql =
 /// `continuation_operation_id` stores this fact so selection can walk an index.
 const continues_without_input_sql =
     "(" ++ oneOf("current.resolution_code", &turn_policy.continues_without_input) ++ " OR (" ++ complete_tool_results_sql ++ "))";
-const runnable_eligibility_sql =
+/// A Message `m` no Turn has taken and no Session stop excludes.
+const queued_input_sql =
     "m.turn_id IS NULL AND NOT EXISTS(" ++
     " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
     " AND m.admission_id<=stopped.admission_cutoff" ++
-    ") AND (NOT EXISTS(" ++
+    ")";
+const runnable_eligibility_sql =
+    queued_input_sql ++ " AND (NOT EXISTS(" ++
     " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -116,11 +119,16 @@ const runnable_selection_sql =
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
+// Excluding only queued input matches runnable eligibility because the indexed
+// Turn is its Session's only active one (turn_one_active_per_session), the two
+// continuation predicates share complete_tool_results_sql and turn_policy keeps
+// continues_without_input inside continues_with_input. It also trusts the stored
+// column, which validateRecordedContinuations fences.
 const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active INDEXED BY turn_tool_continuation JOIN session s ON s.session_ref=active.session_ref " ++
     "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
-    "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
+    "WHERE m.session_ref=active.session_ref AND " ++ queued_input_sql ++
     ") ORDER BY active.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
@@ -12129,6 +12137,31 @@ test "kind-specific admission selects a tool continuation despite fresh input an
     try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
 }
 
+test "tool continuation selection leaves a ready Turn with queued input to message selection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    const queued_session = try configureTestSessionAsk(&storage, "queued-config");
+    const ready_session = try configureTestSessionAsk(&storage, "ready-config");
+    try submitTestMessage(&storage, &tmp, "queued-start", "queued-start", queued_session.slice(), "start");
+    const queued = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, queued, "queued-output", &calls);
+    try submitTestMessage(&storage, &tmp, "ready-start", "ready-start", ready_session.slice(), "start");
+    const ready = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, ready, "ready-output", &calls);
+    try submitTestMessage(&storage, &tmp, "queued-input", "queued-input", queued_session.slice(), "more");
+
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    try std.testing.expectEqual(ready.turn_id, continued.turn_id);
+    try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+    const joined = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try std.testing.expectEqual(queued.turn_id, joined.turn_id);
+    try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
+}
+
 test "tool continuation admission runs its selection once" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -12212,6 +12245,23 @@ test "a Turn whose continuation was never recorded fences the Store" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "unrecorded-metadata", &calls);
     try exec(storage.database, "UPDATE turn SET continuation_operation_id=NULL");
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a continuation recorded for a Turn waiting on its tool results fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "premature-config");
+    try submitTestMessage(&storage, &tmp, "premature", "premature", session.slice(), "propose");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "premature-config");
+    try submitTestMessage(&storage, &tmp, "premature-input", "premature-input", session.slice(), "more");
+    try exec(storage.database, "UPDATE turn SET continuation_operation_id=operation_id");
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
     try std.testing.expect(storage.isFenced());
