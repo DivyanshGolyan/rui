@@ -129,17 +129,17 @@ pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8) !Request {
 /// Parses a complete authorization-code exchange response.
 pub fn parseTokenResponse(status: u16, json: []const u8) !Tokens {
     if (status < 200 or status >= 300) return error.TokenExchangeRejected;
-    var wire: OwnedWire = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
-    try parseWire(json, &wire);
+    var arena: [wire_arena_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &arena);
+    const wire = try parseWire(json, &arena);
     var result: Tokens = .{};
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&result));
-    if (!wire.has_id) return error.MissingIdToken;
-    if (!wire.has_access) return error.MissingAccessToken;
-    if (!wire.has_refresh) return error.MissingRefreshToken;
-    result.id_token = wire.id;
-    result.access_token = wire.access;
-    result.refresh_token = wire.refresh;
+    const id = wire.id_token orelse return error.MissingIdToken;
+    const access = wire.access_token orelse return error.MissingAccessToken;
+    const refresh = wire.refresh_token orelse return error.MissingRefreshToken;
+    try result.id_token.set(id);
+    try result.access_token.set(access);
+    try result.refresh_token.set(refresh);
     return result;
 }
 
@@ -159,18 +159,18 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     replacement.* = current.*;
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
     if (status < 200 or status >= 300) return refreshRejection(json);
-    var wire: OwnedWire = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
-    try parseWire(json, &wire);
-    if (wire.has_id) {
-        const account = try policy.parseAccount(wire.id.slice());
+    var arena: [wire_arena_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &arena);
+    const wire = try parseWire(json, &arena);
+    if (wire.id_token) |id| {
+        const account = try policy.parseAccount(id);
         if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice()) or
             account.fedramp != (try policy.parseAccount(current.id_token.slice())).fedramp)
             return error.AccountChanged;
-        try replacement.id_token.set(wire.id.slice());
+        try replacement.id_token.set(id);
     }
-    if (wire.has_access) try replacement.access_token.set(wire.access.slice());
-    if (wire.has_refresh) try replacement.refresh_token.set(wire.refresh.slice());
+    if (wire.access_token) |access| try replacement.access_token.set(access);
+    if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh);
     try deriveClaims(replacement);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
@@ -203,42 +203,30 @@ fn refreshRejection(json: []const u8) error{ RefreshRejected, RefreshTokenExpire
     return error.RefreshRejected;
 }
 
+const wire_arena_bytes = 48 * 1024;
+
+/// The token fields of one exchange response. Each present value is
+/// nonempty, at most `token_limit` bytes, and borrows the response or the
+/// parse arena.
 const TokenWire = struct {
     id_token: ?[]const u8 = null,
     access_token: ?[]const u8 = null,
     refresh_token: ?[]const u8 = null,
 };
 
-const OwnedWire = struct {
-    id: Required(token_limit) = .{},
-    access: Required(token_limit) = .{},
-    refresh: Required(token_limit) = .{},
-    has_id: bool = false,
-    has_access: bool = false,
-    has_refresh: bool = false,
-};
-
-fn parseWire(json: []const u8, result: *OwnedWire) !void {
+fn parseWire(json: []const u8, arena: *[wire_arena_bytes]u8) !TokenWire {
     if (json.len > response_limit) return error.ResponseTooLong;
-    var arena_bytes: [48 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena_bytes);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(TokenWire, fixed.allocator(), json, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenResponse;
-    result.* = .{};
-    if (parsed.value.id_token) |value| {
-        try result.id.set(value);
-        result.has_id = true;
+    inline for (.{ "id_token", "access_token", "refresh_token" }) |name| {
+        if (@field(parsed.value, name)) |value| {
+            if (value.len == 0) return error.EmptyCredentialValue;
+            if (value.len > token_limit) return error.CredentialValueTooLong;
+        }
     }
-    if (parsed.value.access_token) |value| {
-        try result.access.set(value);
-        result.has_access = true;
-    }
-    if (parsed.value.refresh_token) |value| {
-        try result.refresh.set(value);
-        result.has_refresh = true;
-    }
+    return parsed.value;
 }
 
 fn formEncode(buffer: []u8, code: []const u8, verifier: []const u8) ![]const u8 {
