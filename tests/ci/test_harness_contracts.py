@@ -2,7 +2,9 @@
 
 import ast
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+import json
 import mmap
 import os
 from pathlib import Path
@@ -445,6 +447,59 @@ class FixtureUserTest(unittest.TestCase):
     def test_ordinary_user_proceeds(self):
         with patch.object(FIXTURE_USER.os, "geteuid", return_value=30033):
             self.assertIsNone(FIXTURE_USER.main())
+
+
+FIXTURE_DIRECTORIES = ("tests/integration", "tests/qualification/direct-pty")
+# Libraries and harness self-tests that launch no Rui and so need no fixture boundary.
+LAUNCH_NO_RUI = {"tests/integration/os_semantics.py", "tests/integration/product_defaults.py",
+                 "tests/integration/terminal_screen.py", "tests/integration/session_sequence_model_test.py"}
+
+
+class FixtureEntryTest(unittest.TestCase):
+    def test_every_fixture_entry_refuses_root_before_it_starts(self):
+        entries = sorted({path.relative_to(ROOT).as_posix() for directory in FIXTURE_DIRECTORIES
+                          for pattern in ("*.py", "*.sh") for path in (ROOT / directory).glob(pattern)} - LAUNCH_NO_RUI)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "simulated-root"
+            root.mkdir()
+            (root / "sitecustomize.py").write_text("import os\nos.geteuid = lambda: 0\n")
+            scratch = Path(directory) / "tmp"
+            scratch.mkdir()
+            environment = {"PATH": os.environ["PATH"], "HOME": directory, "TMPDIR": str(scratch),
+                           "PYTHONPATH": str(root)}
+
+            def run(entry):
+                command = ["sh", entry] if entry.endswith(".sh") else [sys.executable, "-B", entry]
+                return entry, subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
+                                             text=True, timeout=30)
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(run, entries))
+            started = [(entry, result.returncode, result.stdout[-300:] + result.stderr[-300:])
+                       for entry, result in results
+                       if result.returncode == 0 or "must run as a non-root user" not in result.stderr]
+            self.assertEqual(started, [], "fixture entries ran past the shared root refusal")
+            self.assertEqual(list(scratch.iterdir()), [], "a refused fixture created state")
+
+    def test_fixture_children_receive_only_the_fixture_environment(self):
+        source = ("import json, subprocess, sys\n"
+                  "sys.path.insert(0, sys.argv[1])\n"
+                  "import host_process\n"
+                  "print(subprocess.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'],"
+                  " capture_output=True, text=True, check=True).stdout)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            planted = {"RUI_CODEX_CREDENTIAL_FILE": str(Path(directory) / "absent.json"),
+                       "RUI_STORE": str(Path(directory) / "foreign-store"), "RUI_ADDRESS": "zzzzzz",
+                       "RUI_SENDER_HANDLE": "inherited", "SSL_CERT_FILE": str(Path(directory) / "absent.pem"),
+                       "HTTPS_PROXY": "http://127.0.0.1:9", "TERM": "dumb"}
+            named = {"PATH": os.environ["PATH"], "HOME": directory, "TMPDIR": directory,
+                     "RUI_FAILURE_ARTIFACTS": str(Path(directory) / "retained")}
+            result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
+                                    env={**planted, **named}, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            child = json.loads(result.stdout)
+            self.assertEqual({name: child.get(name) for name in planted}, dict.fromkeys(planted))
+            self.assertEqual({name: child.get(name) for name in named}, named)
 
 
 class ImportSafetyTest(unittest.TestCase):

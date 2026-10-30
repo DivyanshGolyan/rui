@@ -475,13 +475,13 @@ def main(report_source):
         assert B_LABEL not in json.dumps(b_requests), b_requests
         assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
-        # The census's own controls: a same-named unrelated process is not
-        # owned, and an extra owned copy launched as bare `rui` is.
+        # The census's own controls: a process named rui running another image
+        # is not owned, and an extra owned copy is whatever it is called.
         (state / "leak-home").mkdir()
         controls = []
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
-            controls.append(subprocess.Popen(["rui", "host", "serve", "--store", str(state / "leak-store")],
+            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
                 executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             observed = processes_executing(installed)
