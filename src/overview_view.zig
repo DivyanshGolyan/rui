@@ -39,8 +39,6 @@ pub const max_line_bytes = 256;
 /// The shell reads this much of a first line: one byte more than a row keeps,
 /// so a longer line shows that it was cut.
 pub const max_line_read_bytes = max_line_bytes + 1;
-/// The composer's text, which becomes a new Session's first Message.
-pub const max_draft_bytes = 64 * 1024;
 /// Rows a folded group shows before its "more" line.
 pub const fold_rows = 5;
 /// Starts and stops the ledger holds at once.
@@ -114,24 +112,28 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
     .ended = .{ .title = "Failed or stopped", .folds = true },
 });
 
-/// A key the shell decoded. Text is typed or pasted UTF-8.
-pub const Key = union(enum) { text: []const u8, up, down, home, end, enter, escape, backspace, ctrl_c, ctrl_d, ctrl_x };
-pub const Action = enum { insert, previous, next, first, last, enter, escape, erase, exit, end_of_input, stop };
+/// A key the overview itself takes. The shell's line editor, the one a
+/// conversation uses, owns the draft and takes every other key.
+pub const Key = enum { up, down, home, end, escape, ctrl_c, ctrl_x };
+pub const Action = enum { previous, next, first, last, escape, exit, stop };
 
 /// The one key table.
-pub const bindings = std.enums.EnumArray(std.meta.Tag(Key), Action).init(.{
-    .text = .insert,
+pub const bindings = std.enums.EnumArray(Key, Action).init(.{
     .up = .previous,
     .down = .next,
     .home = .first,
     .end = .last,
-    .enter = .enter,
     .escape = .escape,
-    .backspace = .erase,
     .ctrl_c = .exit,
-    .ctrl_d = .end_of_input,
     .ctrl_x = .stop,
 });
+
+/// What the line editor made of the composer's input: an edit, or the end
+/// of its line. Rejected lines say why.
+pub const Composed = enum { edited, submit, eof, invalid, overflow, edit_rejected, unbound };
+
+/// The composer's text and caret, lent by the shell's line editor.
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0 };
 
 pub const Delta = enum {
     not_modified,
@@ -259,6 +261,7 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     key: Key,
+    composer: Composed,
     /// The shell's clock, in Unix milliseconds.
     tick: u64,
     list: ListReply,
@@ -293,12 +296,14 @@ pub const Effect = union(enum) {
     start: struct { settings: *const StartSettings, text: []const u8 },
     open: Reference,
     stop: Reference,
+    /// Empty the line editor.
+    clear_draft,
     exit,
 };
 
-/// Each event brings at most one effect today; the shell runs them in order.
+/// Each event brings at most two effects today; the shell runs them in order.
 pub const Effects = struct {
-    items: [1]Effect = undefined,
+    items: [2]Effect = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const Effects) []const Effect {
@@ -443,8 +448,10 @@ pub const State = struct {
     selected: ?Reference = null,
     prompt: ?Prompt = null,
     notice: ?Notice = null,
-    draft: [max_draft_bytes]u8 = undefined,
-    draft_len: usize = 0,
+    /// The line editor's draft, which the shell lends before each step and
+    /// render. The core reads it and never edits it; `.clear_draft` asks
+    /// the editor to.
+    draft: Draft = .{},
     settings: StartSettings = .{},
     /// Every start and stop without an answer the overview showed, oldest first.
     requests: [max_requests]Request = undefined,
@@ -473,8 +480,7 @@ pub const State = struct {
         login_at: ?u64 = null,
     };
 
-    /// Initializes in place, since the state holds the whole draft. The
-    /// caller owns `home` for the state's lifetime.
+    /// The caller owns `home` for the state's lifetime.
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
         self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at };
         errdefer self.deinit();
@@ -484,10 +490,6 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
         inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys }) |vec| vec.deinit(self.gpa);
-    }
-
-    pub fn draftText(self: *const State) []const u8 {
-        return self.draft[0..self.draft_len];
     }
 
     /// The row of `reference`, if listed.
@@ -677,6 +679,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .key => |key| keyPress(state, key, &effects),
+        .composer => |composed| compose(state, composed, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -710,7 +713,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     state.requests[at].session = started.reference;
                     state.answer(at, .done, started.handle);
                     if (state.left) return effects;
-                    state.draft_len = 0;
+                    effects.add(.clear_draft);
                     state.settings = .{};
                     state.selected = started.reference;
                     state.next_list_ms = 0;
@@ -724,7 +727,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     // The saved request holds the text; recovery, not a
                     // second Enter, finds out whether it started.
                     state.answer(at, .unknown, handle);
-                    state.draft_len = 0;
+                    if (!state.left) effects.add(.clear_draft);
                     state.settings = .{};
                     state.next_list_ms = 0;
                     state.say(.attention, "! Unconfirmed: rui request recover {s}", .{handle});
@@ -984,31 +987,53 @@ fn codepointStart(bytes: []const u8, at: usize) usize {
 
 fn keyPress(state: *State, key: Key, effects: *Effects) void {
     const action = bindings.get(key);
-    state.notice = null;
-    if (state.prompt) |prompt| {
-        state.prompt = null;
-        if (action == .stop) return confirmStop(state, prompt.stop, effects);
-        // Esc only cancels; any other key cancels and then acts.
-        if (action == .escape) return;
-    }
+    if (dismissed(state, action, effects)) return;
     switch (action) {
-        .insert => insert(state, key.text),
-        .erase => if (!state.starting() and state.draft_len != 0) {
-            state.draft_len = codepointStart(state.draftText(), state.draft_len - 1);
-        },
         .previous, .next, .first, .last => move(state, action),
-        .enter => enter(state, effects),
         .escape => if (!state.starting()) {
-            if (state.draft_len != 0) state.draft_len = 0 else state.settings = .{};
+            if (state.draft.bytes.len != 0) effects.add(.clear_draft) else state.settings = .{};
         },
         .exit => effects.add(.exit),
-        .end_of_input => if (state.draft_len == 0 and !state.starting()) effects.add(.exit),
         .stop => {
             const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session to stop.", .{});
             if (rules.get(shownKind(state, row)).stoppable) {
                 state.prompt = .{ .stop = row.reference };
             } else refuseStop(state, row);
         },
+    }
+}
+
+/// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
+/// the prompt and Esc only cancels it; true when that was all it did.
+fn dismissed(state: *State, action: ?Action, effects: *Effects) bool {
+    state.notice = null;
+    const prompt = state.prompt orelse return false;
+    state.prompt = null;
+    if (action == .stop) {
+        confirmStop(state, prompt.stop, effects);
+        return true;
+    }
+    return action == .escape;
+}
+
+/// The line editor's outcome. The shell sends none while a start holds the draft.
+fn compose(state: *State, composed: Composed, effects: *Effects) void {
+    std.debug.assert(!state.starting());
+    _ = dismissed(state, null, effects);
+    switch (composed) {
+        .edited => {},
+        .submit => enter(state, effects),
+        .eof => effects.add(.exit),
+        .invalid => {
+            effects.add(.clear_draft);
+            state.say(.attention, "! That text had bytes that are not text, so it was not sent.", .{});
+        },
+        .overflow => {
+            effects.add(.clear_draft);
+            state.say(.attention, "! The composer holds at most 64 KiB.", .{});
+        },
+        .edit_rejected => state.say(.attention, "! That character cannot stand alone, so it was not added.", .{}),
+        .unbound => state.say(.attention, "! That key combination does nothing here.", .{}),
     }
 }
 
@@ -1030,20 +1055,12 @@ fn shownKind(state: *const State, row: *const Row) Kind {
     return if (state.openStop(row.reference) != null) .stopping else row.state;
 }
 
-fn insert(state: *State, text: []const u8) void {
-    if (state.starting()) return;
-    if (text.len > max_draft_bytes - state.draft_len) return state.say(.attention, "! The composer holds at most 64 KiB.", .{});
-    @memcpy(state.draft[state.draft_len..][0..text.len], text);
-    state.draft_len += text.len;
-}
-
 fn enter(state: *State, effects: *Effects) void {
-    if (state.starting()) return;
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
-    const text = state.draftText();
+    const text = state.draft.bytes;
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
-        state.draft_len = 0;
+        if (text.len != 0) effects.add(.clear_draft);
         const row = state.selectedRow() orelse return;
         return effects.add(.{ .open = row.reference });
     }
@@ -1055,7 +1072,7 @@ fn enter(state: *State, effects: *Effects) void {
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
     if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown command · /configure sets the next Session's settings, /exit leaves", .{});
-    if (configure(state, text[name.len..])) state.draft_len = 0;
+    if (configure(state, text[name.len..])) effects.add(.clear_draft);
 }
 
 const configure_usage = blk: {
@@ -1391,11 +1408,9 @@ pub fn render(gpa: Allocator, state: *const State, width: u16, height: u16, caps
     if (row < bottom) try list(&painter, state, lines[row..bottom]);
     if (height >= 6) {
         lines[height - 3] = try ruleLine(&painter);
-        lines[height - 2] = try composer(&painter, state);
+        var column: usize = 3;
+        lines[height - 2] = try composer(&painter, state, &column);
         lines[height - 1] = try hints(&painter, state);
-        // The caret ends the draft, the composer's last span.
-        const spans = lines[height - 2];
-        const column = if (state.draft_len == 0 or spans.len == 0) 3 else spans[spans.len - 1].column + spans[spans.len - 1].cells;
         if (!state.starting()) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
     }
     return screen;
@@ -1672,13 +1687,20 @@ fn ruleLine(painter: *Painter) error{OutOfMemory}![]const Span {
     return painter.finish();
 }
 
-fn composer(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
+/// The draft on one line, its caret in view: text before the caret keeps
+/// its end, text after it its start. `caret` gets the caret's column.
+fn composer(painter: *Painter, state: *const State, caret: *usize) error{OutOfMemory}![]const Span {
     painter.begin(false);
     _ = try painter.put(1, painter.glyphs.prompt, 1, .{ .colour = .quiet });
-    if (state.draft_len == 0) {
-        _ = try painter.put(3, "describe a task for a new Session", painter.width -| 4, .{ .colour = .quiet });
+    const draft = state.draft;
+    const room = painter.width -| 4;
+    if (draft.bytes.len == 0) {
+        _ = try painter.put(3, "describe a task for a new Session", room, .{ .colour = .quiet });
     } else {
-        _ = try painter.putTail(3, state.draftText(), painter.width -| 4, .{ .colour = if (state.starting()) .quiet else .normal });
+        const style: Style = .{ .colour = if (state.starting()) .quiet else .normal };
+        const before = try painter.putTail(3, draft.bytes[0..draft.cursor], room, style);
+        caret.* = 3 + before;
+        if (draft.cursor < draft.bytes.len and room > before) _ = try painter.put(caret.*, draft.bytes[draft.cursor..], room - before, style);
     }
     return painter.finish();
 }
@@ -1702,7 +1724,7 @@ fn hints(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span
         const suffix = try std.fmt.allocPrint(painter.arena, " {s} esc clears", .{dot});
         const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
         _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
-    } else if (state.draft_len != 0) {
+    } else if (state.draft.bytes.len != 0) {
         const text = try std.fmt.allocPrint(painter.arena, "enter starts a new Session {s} esc clears", .{dot});
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
@@ -1975,8 +1997,16 @@ fn press(state: *State, key: Key) !Effects {
     return step(state, .{ .key = key });
 }
 
+/// Lends `text` as the draft, its caret at the end, as the shell's line
+/// editor does after an edit.
 fn typeText(state: *State, text: []const u8) !void {
-    try expectEffects(&.{}, try press(state, .{ .text = text }));
+    state.draft = .{ .bytes = text, .cursor = text.len };
+    try expectEffects(&.{}, try step(state, .{ .composer = .edited }));
+}
+
+/// The line editor's Enter.
+fn submit(state: *State) !Effects {
+    return step(state, .{ .composer = .submit });
 }
 
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
@@ -2005,7 +2035,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
-            .exit => {},
+            .clear_draft, .exit => {},
         }
     }
 }
@@ -2205,11 +2235,10 @@ test "enter on a row opens it" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try press(&state, .down));
-    try expectEffects(&.{.{ .open = "r4t9vw".* }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .open = "r4t9vw".* }}, try submit(&state));
     // A blank draft is no request: Enter still opens the row.
     try typeText(&state, "  ");
-    try expectEffects(&.{.{ .open = "r4t9vw".* }}, try press(&state, .enter));
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
+    try expectEffects(&.{ .clear_draft, .{ .open = "r4t9vw".* } }, try submit(&state));
     try expectSelected(&state, "r4t9vw");
 }
 
@@ -2217,15 +2246,14 @@ test "esc clears the draft, then held start settings, and otherwise does nothing
     var state = try opened(&mixed);
     defer state.deinit();
     try typeText(&state, "/configure --permission-mode ask");
-    try expectEffects(&.{}, try press(&state, .enter));
+    try expectEffects(&.{.clear_draft}, try submit(&state));
     try typeText(&state, "Fix the docs");
-    try expectEffects(&.{}, try press(&state, .escape));
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
+    try expectEffects(&.{.clear_draft}, try press(&state, .escape));
     try std.testing.expect(!state.settings.empty());
+    try typeText(&state, "");
     try expectEffects(&.{}, try press(&state, .escape));
     try std.testing.expect(state.settings.empty());
     try expectEffects(&.{}, try press(&state, .escape));
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
     try expectSelected(&state, "k7m2qx");
     try expectNotice(&state, null);
 }
@@ -2233,30 +2261,26 @@ test "esc clears the draft, then held start settings, and otherwise does nothing
 test "the composer starts a Session with its text and opens it" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try typeText(&state, "Fix the flaky ");
-    try typeText(&state, "resize testx");
-    try expectEffects(&.{}, try press(&state, .backspace));
+    try typeText(&state, "Fix the flaky resize test");
     const empty: StartSettings = .{};
-    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "Fix the flaky resize test" } }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "Fix the flaky resize test" } }}, try submit(&state));
     try std.testing.expect(state.starting());
-    // The composer stays locked until the result: the effect borrows it.
-    try typeText(&state, "more");
-    try expectEffects(&.{}, try press(&state, .enter));
+    // The draft stays until the result: the effect borrows it, and Esc
+    // does not clear it.
     try expectEffects(&.{}, try press(&state, .escape));
-    try std.testing.expectEqualStrings("Fix the flaky resize test", state.draftText());
-    try expectEffects(&.{.{ .open = "z9y8x7".* }}, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
+    try std.testing.expectEqualStrings("Fix the flaky resize test", state.draft.bytes);
+    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
     try std.testing.expect(!state.starting());
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
     try expectSelected(&state, "z9y8x7");
     // The next tick lists at once, so the new row is there on return.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
 
     // A failed start keeps the text for another Enter.
     try typeText(&state, "Try again");
-    _ = try press(&state, .enter);
+    _ = try submit(&state);
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
     try expectNotice(&state, "! Could not start a Session: model_capability_unavailable");
-    try std.testing.expectEqualStrings("Try again", state.draftText());
+    try std.testing.expectEqualStrings("Try again", state.draft.bytes);
     try std.testing.expect(!state.starting());
 }
 
@@ -2264,12 +2288,11 @@ test "the composer starts text with one slash from //, as a conversation does" {
     var state = try opened(&mixed);
     defer state.deinit();
     try typeText(&state, "/home/me/project needs investigating");
-    try expectEffects(&.{}, try press(&state, .enter));
+    try expectEffects(&.{}, try submit(&state));
     try expectNotice(&state, "! Unknown command · /configure sets the next Session's settings, /exit leaves");
-    try expectEffects(&.{}, try press(&state, .escape));
     try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
-    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state));
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -2277,25 +2300,24 @@ test "the composer sends its draft byte for byte, as a conversation does" {
     defer state.deinit();
     try typeText(&state, "    return x\n");
     const empty: StartSettings = .{};
-    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "    return x\n" } }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "    return x\n" } }}, try submit(&state));
 
     var other = try opened(&mixed);
     defer other.deinit();
     try typeText(&other, " /exit");
-    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = " /exit" } }}, try press(&other, .enter));
+    try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = " /exit" } }}, try submit(&other));
 }
 
 test "/configure holds start settings for the Session the next Enter starts" {
     var state = try opened(&mixed);
     defer state.deinit();
     try typeText(&state, "/configure --permission-mode ask --label \"lane four\"");
-    try expectEffects(&.{}, try press(&state, .enter));
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
+    try expectEffects(&.{.clear_draft}, try submit(&state));
     try expectNotice(&state, null);
     try expectScreenLine(&state, 23, " start settings: --permission-mode ask --label \"lane four\" · esc clears");
     // A later value replaces an earlier one; the rest stay.
     try typeText(&state, "/configure --label \"lane \\\"five\\\"\" --model gpt-5.5");
-    try expectEffects(&.{}, try press(&state, .enter));
+    try expectEffects(&.{.clear_draft}, try submit(&state));
     var buffer: [2 * start_options.len][]const u8 = undefined;
     const args = state.settings.args(&buffer);
     try std.testing.expectEqual(@as(usize, 6), args.len);
@@ -2307,7 +2329,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     try held.put(4, "ask");
     try held.put(8, "lane \"five\"");
     try typeText(&state, "Run the tests");
-    try expectEffects(&.{.{ .start = .{ .settings = &held, .text = "Run the tests" } }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .start = .{ .settings = &held, .text = "Run the tests" } }}, try submit(&state));
     _ = try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } });
     try std.testing.expect(state.settings.empty());
 
@@ -2324,11 +2346,10 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/status", "! Unknown command · /configure sets the next Session's settings, /exit leaves" },
     }) |case| {
         try typeText(&state, case[0]);
-        try expectEffects(&.{}, try press(&state, .enter));
+        try expectEffects(&.{}, try submit(&state));
         try expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
-        try std.testing.expectEqualStrings(case[0], state.draftText());
-        _ = try press(&state, .escape);
+        try std.testing.expectEqualStrings(case[0], state.draft.bytes);
     }
 }
 
@@ -2346,16 +2367,33 @@ fn expectScreenLine(state: *const State, line: usize, expected: []const u8) !voi
     try std.testing.expectEqualStrings(expected, lines.next().?);
 }
 
-test "ctrl-d leaves from an empty composer; ctrl-c and /exit always leave" {
+test "end of input, ctrl-c and /exit leave" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.exit}, try press(&state, .ctrl_d));
+    try expectEffects(&.{.exit}, try step(&state, .{ .composer = .eof }));
     try typeText(&state, "draft");
-    try expectEffects(&.{}, try press(&state, .ctrl_d));
     try expectEffects(&.{.exit}, try press(&state, .ctrl_c));
-    _ = try press(&state, .escape);
     try typeText(&state, "/exit");
-    try expectEffects(&.{.exit}, try press(&state, .enter));
+    try expectEffects(&.{.exit}, try submit(&state));
+}
+
+test "a line the editor rejects says why once; text it could not take clears" {
+    for ([_]struct { Composed, []const u8, bool }{
+        .{ .invalid, "! That text had bytes that are not text, so it was not sent.", true },
+        .{ .overflow, "! The composer holds at most 64 KiB.", true },
+        .{ .edit_rejected, "! That character cannot stand alone, so it was not added.", false },
+        .{ .unbound, "! That key combination does nothing here.", false },
+    }) |case| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        try typeText(&state, "first");
+        const effects = try step(&state, .{ .composer = case[0] });
+        try expectEffects(if (case[2]) &.{.clear_draft} else &.{}, effects);
+        try expectNotice(&state, case[1]);
+        // The next edit clears the notice.
+        try typeText(&state, "second");
+        try expectNotice(&state, null);
+    }
 }
 
 test "session resume opens its Session through the overview, which then keeps it selected" {
@@ -2377,14 +2415,13 @@ test "an unconfirmed start clears the composer and names the request that recove
     try std.testing.expectEqualStrings("", departure.written());
 
     try typeText(&state, "/configure --permission-mode ask");
-    _ = try press(&state, .enter);
+    _ = try submit(&state);
     try typeText(&state, "Fix the flaky resize test");
-    _ = try press(&state, .enter);
+    _ = try submit(&state);
     const handle = "0f8e2c1a-7b3d-4e5f-9a6b-1c2d3e4f5a6b";
-    try expectEffects(&.{}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
-    try std.testing.expect(!state.starting());
     // Another Enter would be a second Session, so the text is not kept.
-    try std.testing.expectEqual(@as(usize, 0), state.draft_len);
+    try expectEffects(&.{.clear_draft}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
+    try std.testing.expect(!state.starting());
     try std.testing.expect(state.settings.empty());
     try expectNotice(&state, "! Unconfirmed: rui request recover " ++ handle);
     try expectScreenLine(&state, 23, " ! Unconfirmed: rui request recover " ++ handle);
@@ -2393,8 +2430,8 @@ test "an unconfirmed start clears the composer and names the request that recove
     // A second unconfirmed start keeps the first one's handle.
     const second = "9a0b1c2d-3e4f-4a6b-8c7d-0f8e2c1a7b3d";
     try typeText(&state, "Fix it again");
-    _ = try press(&state, .enter);
-    try expectEffects(&.{}, try step(&state, .{ .start = .{ .unconfirmed = second } }));
+    _ = try submit(&state);
+    try expectEffects(&.{.clear_draft}, try step(&state, .{ .start = .{ .unconfirmed = second } }));
     try writeDeparture(&state, &departure.writer);
     try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n" ++
         "rui: A new Session's start was not confirmed; use rui request recover " ++ second ++ ". Do not start it again.\n", departure.written());
@@ -2412,7 +2449,7 @@ test "leaving with a start in flight says what became of it" {
         var state = try opened(&mixed);
         defer state.deinit();
         try typeText(&state, "Fix the flaky resize test");
-        _ = try press(&state, .enter);
+        _ = try submit(&state);
         try expectEffects(&.{}, try step(&state, .leave));
         // An accepted start no longer opens: the terminal is gone.
         if (case.result) |result| try expectEffects(&.{}, try step(&state, .{ .start = result }));
@@ -2444,12 +2481,21 @@ test "the cursor sits at the composer's caret and hides while a start is locked"
     try expectCursor(&state, 80, .{ .row = 22, .column = 3 });
     try typeText(&state, "Fix 中");
     try expectCursor(&state, 80, .{ .row = 22, .column = 9 });
-    // A draft wider than the composer keeps its end, and the caret, in view.
-    const long: [100]u8 = @splat('x');
-    try typeText(&state, &long);
+    // The caret sits where the editor holds it, with the text after it.
+    state.draft.cursor = 4;
+    try expectCursor(&state, 80, .{ .row = 22, .column = 7 });
+    try expectScreenLine(&state, 22, " › Fix 中");
+    // A draft wider than the composer keeps the caret in view: the text
+    // before it keeps its end, the text after it its start.
+    const long = "Fix " ++ @as([100]u8, @splat('x')) ++ " end";
+    try typeText(&state, long);
     try expectCursor(&state, 80, .{ .row = 22, .column = 79 });
     try expectCursor(&state, 6, .{ .row = 22, .column = 5 });
-    _ = try press(&state, .enter);
+    state.draft.cursor = 4;
+    try expectCursor(&state, 80, .{ .row = 22, .column = 7 });
+    try expectScreenLine(&state, 22, " › Fix " ++ @as([71]u8, @splat('x')) ++ "…");
+    state.draft.cursor = long.len;
+    _ = try submit(&state);
     try expectCursor(&state, 80, null);
 }
 
@@ -2579,7 +2625,7 @@ test "the selection stays on its Session when it moves from working to finished"
     _ = try refresh(&state, .changed, testToken(2), &.{session("e5f6g7", .{ .finished = ago(0) }, .{ .label = "List unused build steps" })});
     try expectSelected(&state, "e5f6g7");
     try std.testing.expectEqual(Group.finished, state.find("e5f6g7".*).?.group());
-    try expectEffects(&.{.{ .open = "e5f6g7".* }}, try press(&state, .enter));
+    try expectEffects(&.{.{ .open = "e5f6g7".* }}, try submit(&state));
     try expectScreenLine(&state, 19, " ✓ List unused build steps                                                   1s");
     // Moving on goes to the next row on screen, not the next old index.
     _ = try press(&state, .down);

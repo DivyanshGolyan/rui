@@ -20,6 +20,7 @@ const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
+const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
@@ -169,7 +170,7 @@ const Job = union(enum) {
     /// The traversal's next page.
     list,
     lines: view.Reads,
-    /// Borrows the state, whose composer stays locked until the result.
+    /// Borrows the draft, which takes no input until the result.
     start: struct { settings: *const view.StartSettings, text: []const u8 },
     stop: view.Reference,
 };
@@ -211,6 +212,9 @@ caps: view.Caps,
 terminal: *SessionTerminal,
 interrupted: *client.Cancellation,
 input: TerminalInput = .{},
+/// The composer's line editor, the conversation's, which owns the draft.
+composer: TerminalEditor = undefined,
+draft: [SessionInput.capacity]u8 = undefined,
 /// The worker's descriptors: it writes one byte as its job ends.
 done: [2]c_int = .{ -1, -1 },
 /// Signal wakes.
@@ -314,6 +318,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .terminal = undefined,
         .interrupted = interrupted,
     };
+    self.composer = .{ .buffer = &self.draft };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -418,6 +423,7 @@ fn drain(fd: c_int) void {
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    self.lendDraft();
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
     for (effects.slice()) |effect| switch (effect) {
@@ -430,9 +436,14 @@ fn event(self: *Self, value: view.Event) !?Next {
         .start => |start| self.queue(.{ .start = .{ .settings = start.settings, .text = start.text } }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .open => |reference| next = .{ .open = reference },
+        .clear_draft => self.composer = .{ .buffer = &self.draft },
         .exit => return .leave,
     };
     return next;
+}
+
+fn lendDraft(self: *Self) void {
+    self.state.draft = .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor };
 }
 
 fn queue(self: *Self, job: Job) void {
@@ -573,15 +584,36 @@ fn readInput(self: *Self, wait: i32) !?Next {
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             },
-            else => if (keyOf(decoded)) |key| if (try self.event(.{ .key = key })) |next| return next,
+            else => if (try self.compose(decoded)) |next| return next,
         };
     }
     return null;
 }
 
-/// The overview key a decoded terminal event names, if any. Bracketed paste
-/// arrives as text, its line ends included.
-fn keyOf(decoded: TerminalInput.Decoded) ?view.Key {
+/// Gives the overview its own keys and the line editor everything else,
+/// then steps the core with what the editor made of it. A start borrows the
+/// draft, so the editor takes nothing until its answer.
+fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
+    const locked = self.state.starting();
+    if (overviewKey(decoded, locked or self.composer.length == 0)) |key| return self.event(.{ .key = key });
+    if (locked) return null;
+    return switch (self.composer.apply(decoded)) {
+        .none, .page_up, .page_down, .latest, .expand => null,
+        .append, .redraw => self.event(.{ .composer = .edited }),
+        // Past the draft's first or last line, Up and Down select rows,
+        // as they scroll a conversation.
+        .scroll_up => self.event(.{ .key = .up }),
+        .scroll_down => self.event(.{ .key = .down }),
+        .close_view => self.event(.{ .key = .escape }),
+        .interrupt => self.event(.{ .key = .ctrl_c }),
+        inline .submit, .eof, .invalid, .overflow, .edit_rejected, .unbound => |outcome| self.event(.{ .composer = @field(view.Composed, @tagName(outcome)) }),
+    };
+}
+
+/// The overview's own key a decoded event names, if any. Ctrl-C leaves even
+/// while a start holds the draft. The arrows, Home and End select rows only
+/// while the editor has no draft to move through.
+fn overviewKey(decoded: TerminalInput.Decoded, selects: bool) ?view.Key {
     const value = switch (decoded) {
         .event => |value| value,
         else => return null,
@@ -590,30 +622,23 @@ fn keyOf(decoded: TerminalInput.Decoded) ?view.Key {
         .key_press => |key| key,
         else => return null,
     };
+    if (value.pasted) return null;
     const Key = vaxis.Key;
-    if (value.pasted) {
-        if (key.matchExact('j', .{ .ctrl = true }) or key.matchExact(Key.enter, .{})) return .{ .text = "\n" };
-        return if (key.text) |text| .{ .text = text } else null;
-    }
-    // The terminal keeps ICRNL, so Enter arrives as Ctrl-J.
-    if (key.matchExact(Key.enter, .{}) or key.matchExact('j', .{ .ctrl = true })) return .enter;
-    if (key.matchExact('c', .{ .ctrl = true })) return .ctrl_c;
-    if (key.matchExact('d', .{ .ctrl = true })) return .ctrl_d;
-    if (key.matchExact('x', .{ .ctrl = true })) return .ctrl_x;
     if (key.matchExact(Key.escape, .{}) or key.matchExact(Key.escape, .{ .alt = true })) return .escape;
+    if (key.matchExact('c', .{ .ctrl = true })) return .ctrl_c;
+    if (key.matchExact('x', .{ .ctrl = true })) return .ctrl_x;
+    if (!selects) return null;
     if (key.matchExact(Key.up, .{})) return .up;
     if (key.matchExact(Key.down, .{})) return .down;
     if (key.matchExact(Key.home, .{})) return .home;
     if (key.matchExact(Key.end, .{})) return .end;
-    if (key.matchExact(Key.backspace, .{})) return .backspace;
-    if (TerminalEditor.addsLine(key)) return .{ .text = "\n" };
-    if (key.mods.ctrl or key.mods.alt or key.mods.super) return null;
-    return if (key.text) |text| .{ .text = text } else null;
+    return null;
 }
 
 /// Draws the core's screen, unless the terminal already shows it.
 fn draw(self: *Self) !?Next {
     const size = self.terminal.geometry();
+    self.lendDraft();
     var screen = try view.render(self.init.gpa, &self.state, size.col, size.row, self.caps, 0);
     defer screen.deinit();
     self.frame.clearRetainingCapacity();
@@ -1357,40 +1382,96 @@ test "leaving with a stop still queued says it was not sent" {
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
-test "terminal keys reach the core as overview keys, and pasted line ends as text" {
-    const Case = struct { bytes: []const u8, keys: []const view.Key };
-    const line: view.Key = .{ .text = "\n" };
-    const cases = [_]Case{
-        .{ .bytes = "\n", .keys = &.{.enter} },
-        .{ .bytes = "\r", .keys = &.{.enter} },
-        .{ .bytes = "\x03\x04\x18\x7f", .keys = &.{ .ctrl_c, .ctrl_d, .ctrl_x, .backspace } },
-        .{ .bytes = "\x1b[A\x1b[B\x1b[H\x1b[F", .keys = &.{ .up, .down, .home, .end } },
-        .{ .bytes = "a\xc3\xa9", .keys = &.{ .{ .text = "a" }, .{ .text = "\xc3\xa9" } } },
-        .{ .bytes = "\x1b[200~a\nb\x1b[201~", .keys = &.{ .{ .text = "a" }, .{ .text = "\n" }, .{ .text = "b" } } },
-        // Shift-Enter and Alt-Enter add a line, as in a conversation, in
-        // legacy and extended encodings.
-        .{ .bytes = "a\x1b\rb", .keys = &.{ .{ .text = "a" }, line, .{ .text = "b" } } },
-        .{ .bytes = "\x1b\n\x1b[13;2u\x1b[13;2;13u\x1b[13:13;2u\x1b[27;2;13~", .keys = &.{ line, line, line, line, line } },
-        .{ .bytes = "\x1b[13;3u\x1b[13;3;13u\x1b[27;3;13~", .keys = &.{ line, line, line } },
-        // Other control keys do nothing.
-        .{ .bytes = "\x01\x1b[1;5A", .keys = &.{} },
-    };
-    for (cases) |case| {
-        var input: TerminalInput = .{};
-        var count: usize = 0;
-        for (case.bytes) |byte| {
-            var decoded = input.feed(byte, 0);
-            // Text borrows the decoder until its next event.
-            while (decoded != .none) : (decoded = input.next()) if (keyOf(decoded)) |key| {
-                try std.testing.expect(count < case.keys.len);
-                const want = case.keys[count];
-                try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(key));
-                if (want == .text) try std.testing.expectEqualStrings(want.text, key.text);
-                count += 1;
-            };
-        }
-        try std.testing.expectEqual(case.keys.len, count);
+/// Types `bytes` into a fresh overview and returns the first Message of the
+/// Session Enter started, or null when none started.
+fn startFrom(rig: *Rig, bytes: []const u8) !?[]const u8 {
+    const before = Seen.now.starts;
+    var at: usize = 0;
+    // Each read takes at most 4096 bytes; a pipe holds less than a draft.
+    while (at < bytes.len) : (at = @min(at + 4096, bytes.len)) {
+        try std.testing.expect(try rig.press(bytes[at..@min(at + 4096, bytes.len)]) == null);
     }
+    try std.testing.expect(try rig.settle() == null);
+    return if (Seen.now.starts == before) null else Seen.now.start.text.slice();
+}
+
+fn expectStarted(rig: *Rig, bytes: []const u8, expected: ?[]const u8) !void {
+    const text = try startFrom(rig, bytes);
+    if (expected) |want| try std.testing.expectEqualStrings(want, text orelse return error.TestExpectedStart) else try std.testing.expectEqual(@as(?[]const u8, null), text);
+}
+
+fn openComposer() !*Rig {
+    const Shared = struct {
+        var cancellation: client.Cancellation = .{};
+    };
+    return Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &Shared.cancellation);
+}
+
+test "bytes that are not text reject the composer's line at Enter, as in a conversation" {
+    const rig = try openComposer();
+    defer rig.close();
+    try expectStarted(rig, "\x1b[200~first\xffsecond\x1b[201~\r", null);
+    try std.testing.expectEqualStrings("! That text had bytes that are not text, so it was not sent.", rig.overview.state.notice.?.text());
+    try expectStarted(rig, "typed\xff\r", null);
+    // The rejected line is gone; the next one starts alone.
+    try expectStarted(rig, "next\r", "next");
+}
+
+test "Shift-Enter and Alt-Enter add a line in every encoding, and a paste keeps its line ends" {
+    const rig = try openComposer();
+    defer rig.close();
+    for ([_][]const u8{ "\x1b\r", "\x1b\n", "\x1b[13;2u", "\x1b[13;2;13u", "\x1b[13:13;2u", "\x1b[27;2;13~", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[27;3;13~" }) |chord| {
+        var bytes: [32]u8 = undefined;
+        try expectStarted(rig, try std.fmt.bufPrint(&bytes, "one{s}two\r", .{chord}), "one\ntwo");
+    }
+    try expectStarted(rig, "\x1b[200~one\ntwo\n\x1b[201~\r", "one\ntwo\n");
+    try std.testing.expectEqual(@as(usize, 10), Seen.now.starts);
+}
+
+test "a draft past the editor's capacity starts nothing" {
+    const rig = try openComposer();
+    defer rig.close();
+    const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~\r";
+    try expectStarted(rig, pasted, null);
+    try std.testing.expectEqualStrings("! The composer holds at most 64 KiB.", rig.overview.state.notice.?.text());
+    try expectStarted(rig, "next\r", "next");
+}
+
+test "the composer edits at its caret, as a conversation's draft does" {
+    const rig = try openComposer();
+    defer rig.close();
+    try expectStarted(rig, "abd\x1b[Dc\r", "abcd");
+    // Home and End move the caret once there is a draft.
+    try expectStarted(rig, "bc\x1b[Ha\x1b[Fd\r", "abcd");
+    // Up moves to the line above; Ctrl-D deletes forward in a draft.
+    try expectStarted(rig, "a\x1b\rb\x1b[AX\x1b[D\x04\r", "a\nb");
+    try expectStarted(rig, "one two\x17three\r", "one three");
+    // Esc clears the draft, a rejected one included.
+    try expectStarted(rig, "junk\x02\x1b[27uok\r", "ok");
+}
+
+test "a start holds its draft until the answer; the editor takes nothing meanwhile" {
+    const rig = try openComposer();
+    defer rig.close();
+    try expectStarted(rig, "hello\r\x7f\x7fXY\x1b[27u", "hello");
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.length);
+    // The next frame shows the empty composer, not the text it lent.
+    try std.testing.expect(try rig.overview.draw() == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    const frame = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "describe a task for a new Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "hello") == null);
+    try expectStarted(rig, "next\r", "next");
+}
+
+test "keys the editor declines say so and leave the draft" {
+    const rig = try openComposer();
+    defer rig.close();
+    try expectStarted(rig, "\u{200d}", null);
+    try std.testing.expectEqualStrings("! That character cannot stand alone, so it was not added.", rig.overview.state.notice.?.text());
+    try expectStarted(rig, "ab\x1bx", null);
+    try std.testing.expectEqualStrings("! That key combination does nothing here.", rig.overview.state.notice.?.text());
+    try expectStarted(rig, "c\r", "abc");
 }
 
 test "the terminal's width report sets how the core measures text" {

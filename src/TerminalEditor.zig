@@ -34,13 +34,6 @@ pub fn endsLine(event: Event) bool {
     };
 }
 
-/// The chords that add a line instead of sending. Ghostty and other
-/// terminals send Shift-Enter as ESC CR, which decodes exactly as Kitty's
-/// Alt-Enter.
-pub fn addsLine(value: vaxis.Key) bool {
-    return value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true });
-}
-
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
 
@@ -319,7 +312,9 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     // it still means Esc. Legacy ESC ESC already decodes as Esc.
     if (value.matchExact(Key.escape, .{}) or value.matchExact(Key.escape, .{ .alt = true })) return .close_view;
     if (value.matchExact(Key.tab, .{})) return self.insert('\t', false);
-    if (addsLine(value)) return self.insert('\n', true);
+    // Alt-Enter adds a line in every form: Ghostty and other terminals send
+    // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
+    if (value.matchExact(Key.enter, .{ .shift = true }) or value.matchExact(Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
     if (value.matchExact(Key.page_up, .{}) or value.matchExact(Key.page_up, .{ .shift = true })) return .page_up;
     if (value.matchExact(Key.page_down, .{}) or value.matchExact(Key.page_down, .{ .shift = true })) return .page_down;
     if (value.matchExact(Key.up, .{ .shift = true })) return .scroll_up;
