@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
-from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
 
@@ -217,16 +217,6 @@ def observe(state, store, ordinal):
     )["observation"]
 
 
-def wait_for(predicate, description, timeout=10):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.025)
-    raise AssertionError(f"timed out waiting for {description}")
-
-
 def failed_result(state, store, ordinal):
     observation = observe(state, store, ordinal)
     return observation if observation.get("result", {}).get("code") == "provider_http_422" else None
@@ -381,7 +371,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             admitted_at_gate(diagnostics, ordinal)
             if ordinal == 0:
                 os.write(keeper, b"x")
-                wait_for(markers[0].exists, "first Bash process")
+                wait_for(markers[0].exists, "first Bash process", timeout=10)
 
         socket_path = ready["socket"]
         diagnostics.borrower_census(time.monotonic() + 10, expected_routes)
@@ -410,7 +400,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
 
         os.write(keeper, b"x")
-        wait_for(markers[1].exists, "second Bash spawn with full clients")
+        wait_for(markers[1].exists, "second Bash spawn with full clients", timeout=10)
         assert_connections_live(held)
         deadline = time.monotonic() + 10
         for connection, started in zip(held[:10], starts):
@@ -458,9 +448,9 @@ def prove_bash_spawn_with_full_client_population(state, required):
             return result
         for ordinal, session in enumerate(sessions):
             deadline = time.monotonic() + 10
-            wait_for(lambda session=session: bounded_probe(lambda: bash.resolution(store, session) == "succeeded"), f"Bash {ordinal} result")
+            wait_for(lambda session=session: bounded_probe(lambda: bash.resolution(store, session) == "succeeded"), f"Bash {ordinal} result", timeout=10)
         deadline = time.monotonic() + 10
-        wait_for(lambda: bounded_probe(lambda: execution_idle(state, store, sessions[0])), "Bash overlap execution drain")
+        wait_for(lambda: bounded_probe(lambda: execution_idle(state, store, sessions[0])), "Bash overlap execution drain", timeout=10)
         assert host.poll() is None, diagnostics.tail()
         completed = True
     except BaseException:
@@ -597,12 +587,12 @@ def prove_accept_pressure(state):
             baseline = sum(code == 0 for code, _ in accept_records(log))
             held = connect(ready["socket"])
             held.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
-            wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting accepted peer")
+            wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting accepted peer", timeout=10)
             if label == "shutdown-mfile":
                 baseline = sum(code == 0 for code, _ in accept_records(log))
                 stopping = connect(ready["socket"])
                 stopping.sendall(b"POST /v1/control/host-stop HTTP/1.1\r\n")
-                wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting stop peer")
+                wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting stop peer", timeout=10)
             if injected is not None:
                 arm.touch()
                 pending = connect(ready["socket"])
@@ -614,7 +604,7 @@ def prove_accept_pressure(state):
                 # alone must not be mistaken for the required EMFILE receipt.
                 backlog_hold.touch()
                 pending = connect(ready["socket"])
-                wait_for(backlog_ready.exists, "held accept before backlog fill")
+                wait_for(backlog_ready.exists, "held accept before backlog fill", timeout=10)
                 attempts, deadline = 0, time.monotonic() + 10
                 while attempts < 600 and time.monotonic() < deadline:
                     try:
@@ -630,7 +620,7 @@ def prove_accept_pressure(state):
                         break
                 assert backlog_release.exists(), "real listener backlog was not exercised"
             expected = injected or errno.EMFILE
-            wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion")
+            wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion", timeout=10)
             # Existing accepted peers still progress during pressure.
             body = json.dumps({"version": "1", "kind": "host_info", "store": str(store)}).encode()
             held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
@@ -638,7 +628,7 @@ def prove_accept_pressure(state):
             assert head.startswith(b"HTTP/1.1 200 "), (label, head, diagnostics.tail())
             identity = json.loads(response)["instance"]
             if injected is not None:
-                wait_for(lambda: len([at for code, at in accept_records(log) if code == expected]) >= 4, "bounded retry samples")
+                wait_for(lambda: len([at for code, at in accept_records(log) if code == expected]) >= 4, "bounded retry samples", timeout=10)
                 attempts = [at for code, at in accept_records(log) if code == expected]
                 assert all(b - a >= 50_000_000 for a, b in zip(attempts, attempts[1:])), (label, attempts)
                 if label == "shutdown-mfile":
@@ -666,8 +656,8 @@ def prove_accept_pressure(state):
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(response)["instance"] == identity
             endpoint.release.set()
             endpoint.wait_for("completed", 1)
-            wait_for(lambda: failed_result(root, store, 0), "original admitted work without interruption")
-            wait_for(lambda: execution_idle(root, store, session), "recovered execution drainage")
+            wait_for(lambda: failed_result(root, store, 0), "original admitted work without interruption", timeout=10)
+            wait_for(lambda: execution_idle(root, store, session), "recovered execution drainage", timeout=10)
             head, response = control.raw_request(ready["socket"], "/v1/host-info", body)
             assert head.startswith(b"HTTP/1.1 200 ") and json.loads(response)["instance"] == identity
             assert host.poll() is None, diagnostics.tail()
@@ -729,14 +719,14 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         hold.touch()
         peer = socket.socket(socket.AF_UNIX)
         peer.connect(fields["socket"])
-        wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags")
+        wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags", timeout=10)
         # Open a competing launch window, not a timing acceptance assertion.
         # The child reports exact socket identity whether it spawns during or
         # after acquisition. The unfixed-path control must witness inheritance.
         timer = threading.Timer(2, release.touch)
         timer.start()
         os.write(keeper, b"x")
-        wait_for(lambda: report.exists() and report.read_bytes().endswith(b"\n"), "real Bash launch descriptor report")
+        wait_for(lambda: report.exists() and report.read_bytes().endswith(b"\n"), "real Bash launch descriptor report", timeout=10)
         evidence = json.loads(report.read_text())
         print("accept inheritance child:", json.dumps(evidence), flush=True)
         assert evidence["stat_error"] in (None, errno.EBADF), json.dumps(evidence)
@@ -850,8 +840,8 @@ def main():
         endpoint.release.set()
         endpoint.wait_for("completed", 2)
         for ordinal in range(2):
-            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result")
-        wait_for(lambda: execution_idle(state, store, sessions[0]), "first complete execution drain")
+            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result", timeout=10)
+        wait_for(lambda: execution_idle(state, store, sessions[0]), "first complete execution drain", timeout=10)
 
         endpoint.release.clear()
         message(state, store, sessions[2], 2)
@@ -862,8 +852,8 @@ def main():
         endpoint.release.set()
         endpoint.wait_for("completed", 4)
         for ordinal in range(2, 4):
-            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result")
-        wait_for(lambda: execution_idle(state, store, sessions[2]), "second complete execution drain")
+            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result", timeout=10)
+        wait_for(lambda: execution_idle(state, store, sessions[2]), "second complete execution drain", timeout=10)
         assert host.poll() is None, diagnostics.tail()
 
         documented_store = state / "documented-store"

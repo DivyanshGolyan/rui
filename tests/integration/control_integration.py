@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from host_process import STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for_execution_release
+from host_process import STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -378,19 +378,6 @@ def observe(store, key, *, deadline=None):
     assert remaining > 0, "result observation exhausted original deadline"
     return command("request", "inspect", "--store", store, "--key", key,
                    timeout=remaining)["observation"]
-
-
-def wait_for(predicate, description, timeout=8, *, deadline=None):
-    if deadline is None:
-        deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if time.monotonic() >= deadline:
-            break
-        if value:
-            return value
-        time.sleep(0.025)
-    raise AssertionError(f"timed out waiting for {description}")
 
 
 def percentile_95(values):
@@ -871,21 +858,21 @@ def prove_pre_handoff_stop(state):
                 assert remaining > 0, ("missing post-superseded execution boundary", superseded)
                 milestones.condition.wait(remaining)
         assert endpoint.count() == 0, endpoint.count()
-        execution = None
-        while True:
+
+        def inspection():
             remaining = release_deadline - time.monotonic()
-            assert remaining > 0, ("superseded custody did not release within 8s", execution, boundary)
+            assert remaining > 0, ("superseded custody did not release within 8s", boundary)
             execution = peers.call("inspect", lambda: inspect_execution(
                 store, session, timeout=remaining,
             ), deadline=release_deadline)
             assert execution["dispatch_fenced"] is False, execution
             assert execution["scratch_used_bytes"] == "0", execution
-            if execution["custody_occupied"] == "0":
-                assert time.monotonic() <= release_deadline, ("late custody release", execution)
-                break
-            # Inspection can sample a temporary no-work admission reservation;
-            # require an actual zero, never an allowance or a stable idle census.
-            time.sleep(min(0.01, max(0, release_deadline - time.monotonic())))
+            return execution
+        # Inspection can sample a temporary no-work admission reservation;
+        # require an actual zero, never an allowance or a stable idle census.
+        execution = wait_for(inspection, f"superseded custody release within 8s after boundary {boundary}",
+                             interval=0.01, deadline=release_deadline,
+                             ready=lambda execution: execution["custody_occupied"] == "0")
         assert endpoint.count() == 0, endpoint.count()
         print("pre-handoff release:", json.dumps({
             "superseded": superseded,

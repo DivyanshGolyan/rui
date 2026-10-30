@@ -13,7 +13,6 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
-import time
 
 import bash_integration as bash
 import model_fixture as caller
@@ -41,17 +40,14 @@ def observations(host):
     return records, thread
 
 
-def wait_for(store, key, predicate, label):
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
+def wait_for_observation(store, key, predicate, label):
+    def observed():
         value = caller.observe(store, key)
-        if predicate(value):
-            return value
         result = value.get("result", {})
-        if result.get("code") or result.get("status") in ("failed", "stopped"):
+        if not predicate(value) and (result.get("code") or result.get("status") in ("failed", "stopped")):
             raise AssertionError(f"{label}: saved failure {result.get('code', result.get('status'))}")
-        time.sleep(0.5)
-    raise AssertionError(f"timed out waiting for {label}")
+        return value
+    return caller.wait_for(observed, label, timeout=180, interval=0.5, ready=predicate)
 
 
 def decode_model_evidence(value):
@@ -168,7 +164,7 @@ def run(model, external_credential=None):
             "vertices (4,7) and (10,9). Show a careful inclusion-exclusion derivation "
             "with binomial coefficients; do not use tools or write code.",
         )
-        reasoning = wait_for(store, "reasoning", lambda value: value.get("result", {}).get("status") == "completed", "reasoning answer")
+        reasoning = wait_for_observation(store, "reasoning", lambda value: value.get("result", {}).get("status") == "completed", "reasoning answer")
         assert not (workspace / "effect-count").exists(), "reasoning request caused a Bash effect"
         enabled = caller.command(
             "session", "configure", "--store", store, "--record", state / "enable-bash.json",
@@ -176,22 +172,20 @@ def run(model, external_credential=None):
         )
         assert enabled["answer"]["status"] == "accepted", "Bash configuration rejected"
         caller.message(state, store, "first", session, prompt)
-        deadline = time.monotonic() + 180
-        action = None
-        while time.monotonic() < deadline:
-            action = bash.action_for(store, session)
-            if action:
-                break
+
+        def proposed():
+            if action := bash.action_for(store, session):
+                return action
             result = caller.observe(store, "first").get("result", {})
             if result.get("code"):
                 raise AssertionError(f"proposal failed: {result['code']}")
-            time.sleep(0.5)
-        assert action is not None, "no inspectable Bash proposal"
+            return None
+        action = caller.wait_for(proposed, "an inspectable Bash proposal", timeout=180, interval=0.5)
         args = json.loads(caller.read_action(store, session, action["action"], "arguments"))
         assert args == {"cmd": command, "timeout_ms": None, "description": "Append and hash effect counter"}, "proposal differed from the safe command; nothing approved"
         assert action["authorization"] == "pending" and not (workspace / "effect-count").exists()
         bash.allow(state, store, "approve", session, action["action"])
-        first = wait_for(store, "first", lambda value: value.get("result", {}).get("status") == "completed", "first answer")
+        first = wait_for_observation(store, "first", lambda value: value.get("result", {}).get("status") == "completed", "first answer")
         bash_report = caller.command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         actions = bash_report["full"]["actions"]
         assert len(actions) == 1 and actions[0]["resolution"] == "succeeded", "Bash did not settle once"
@@ -224,7 +218,7 @@ def run(model, external_credential=None):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
 
         caller.message(state, store, "later", session, "What SHA-256 digest did the approved tool return earlier? Answer without Bash.")
-        later = wait_for(store, "later", lambda value: value.get("result", {}).get("status") == "completed", "post-restart answer")
+        later = wait_for_observation(store, "later", lambda value: value.get("result", {}).get("status") == "completed", "post-restart answer")
         assert expected.encode() in caller.read_result(store, "later"), "continued answer lost the tool witness"
         caller.wait_for(lambda: bash.execution_custody_idle(store, session), "post-restart cleanup", timeout=30)
         assert (workspace / "effect-count").read_bytes() == b"once\n"

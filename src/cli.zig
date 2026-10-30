@@ -21,6 +21,7 @@ const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const signal_stack = @import("signal_stack.zig");
 const product_defaults = @import("product_defaults.zig");
+const test_poll = @import("test_poll");
 
 // Zig otherwise reserves a 256 KiB alternate signal stack as static TLS, and
 // glibc zeroes every thread's TLS block, so each thread kept it resident.
@@ -714,11 +715,7 @@ test "login owner preserves interruption, publication and independent defaults" 
             fn hold(self: *@This(), held: std.Io.File) void {
                 const io = std.Io.Threaded.global_single_threaded.io();
                 defer held.close(io);
-                const start = std.Io.Clock.Timestamp.now(io, .awake);
-                while (!self.done.load(.acquire)) {
-                    if (start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.nanoseconds >= 2 * std.time.ns_per_s) return;
-                    std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
-                }
+                test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &self.done, test_poll.isSet) catch return;
                 self.completed_while_held = true;
             }
         };
@@ -743,17 +740,17 @@ test "login owner preserves interruption, publication and independent defaults" 
                 fn send(lock: std.Io.File) void {
                     const clock = std.Io.Threaded.global_single_threaded.io();
                     defer lock.close(clock);
-                    const start = std.Io.Clock.Timestamp.now(clock, .awake);
-                    while (login_state.load(.acquire) != .publishing) {
-                        if (start.durationTo(std.Io.Clock.Timestamp.now(clock, .awake)).raw.nanoseconds >= 2 * std.time.ns_per_s) {
-                            signal_failure = error.PublicationNotReached;
-                            return;
-                        }
-                        std.Io.sleep(clock, .fromMilliseconds(1), .awake) catch {};
-                    }
+                    test_poll.waitUntil(clock, test_poll.after(clock, .fromSeconds(2)), {}, publishing) catch {
+                        signal_failure = error.PublicationNotReached;
+                        return;
+                    };
                     std.posix.raise(.INT) catch |err| {
                         signal_failure = err;
                     };
+                }
+
+                fn publishing(_: void) bool {
+                    return login_state.load(.acquire) == .publishing;
                 }
             }.send, .{held});
             return tokens;

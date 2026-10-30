@@ -27,7 +27,7 @@ import time
 
 from host_process import (canonical_fixture_root, start_ready_process, stop_process,
                           dispose_all, preserve_failure_metadata, _failure_destination,
-                          copy_failure_diagnostics, STORE_SCHEMA)
+                          copy_failure_diagnostics, wait_for, STORE_SCHEMA)
 import codex_integration as codex_fixture
 from product_defaults import DEFAULTS
 import os_semantics
@@ -146,13 +146,8 @@ def assert_launch_adapter(root, env):
         assert result.returncode == 0, (mask, result)
     expected = [str(actor), "witness", "", "two words", "--not-a-launch-option", "final",
                 probe_env["RUI_LAUNCH_PROBE_VALUE"], "", env["HOME"], "/", "closed"]
-    deadline = time.monotonic() + 5
-    while True:
-        observed = output.read_bytes() if output.exists() else b""
-        if observed.endswith(b"closed") or observed.endswith(b"inherited"):
-            break
-        assert time.monotonic() < deadline, observed
-        time.sleep(0.01)
+    observed = wait_for(lambda: output.read_bytes() if output.exists() else b"", f"the launch witness in {output} to finish",
+                        timeout=5, interval=0.01, ready=lambda observed: observed.endswith((b"closed", b"inherited")))
     assert observed.split(b"\0") == [part.encode() for part in expected], observed
 
 
@@ -239,14 +234,8 @@ def matching_processes(store, *, descendants=False):
 
 
 def wait_for_processes(store, count, timeout=5):
-    deadline = time.monotonic() + timeout
-    while True:
-        found = matching_processes(store)
-        if len(found) == count:
-            return found
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"expected {count} Host processes, found {found}")
-        time.sleep(0.02)
+    return wait_for(lambda: matching_processes(store), f"{count} Host processes", timeout=timeout, interval=0.02,
+                    ready=lambda found: len(found) == count)
 
 
 def forced_crash_cleanup(store, *, descendants=False):
@@ -257,10 +246,8 @@ def forced_crash_cleanup(store, *, descendants=False):
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    deadline = time.monotonic() + 5
-    while matching_processes(store, descendants=descendants) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not matching_processes(store, descendants=descendants), "forced-crash cleanup did not reap detached Host"
+    wait_for(lambda: matching_processes(store, descendants=descendants), "forced-crash cleanup to reap the detached Host",
+             timeout=5, interval=0.02, ready=lambda found: not found)
 
 
 def assert_diagnostics(store, credential, reported):

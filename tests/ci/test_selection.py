@@ -19,7 +19,7 @@ from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, se
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-from host_process import dispose_all
+from host_process import dispose_all, wait_for
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
@@ -677,20 +677,13 @@ class FullCheckPartitionTest(unittest.TestCase):
     def wait_for_group_retirement(group, deadline):
         # A delivered signal, leader reap and pipe EOF do not retire private
         # peers with redirected captures. Zombies cannot create more files.
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"live driver group {group} did not retire")
+        def live_members():
             census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                    text=True, check=True, timeout=remaining)
-            live = False
-            for row in census.stdout.splitlines():
-                pgid, state = row.split()
-                if int(pgid) == group and not state.startswith("Z"):
-                    live = True
-            if not live:
-                return
-            time.sleep(min(.005, max(0, deadline - time.monotonic())))
+                                    text=True, check=True, timeout=max(0, deadline - time.monotonic()))
+            return [state for pgid, state in (row.split() for row in census.stdout.splitlines())
+                    if int(pgid) == group and not state.startswith("Z")]
+        wait_for(live_members, f"live driver group {group} to retire", interval=.005, deadline=deadline,
+                 ready=lambda live: not live)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
                  timeout=60, python_delay=0, fail_at=""):
@@ -829,10 +822,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     try:
                         try:
                             if timing:
-                                while not all((root / f"{fixture}.started").exists() for fixture in fixtures):
+                                def timed_started():
                                     self.assertIsNone(process.poll())
-                                    self.assertLess(time.monotonic(), deadline, "both timed fixtures must start")
-                                    time.sleep(.005)
+                                    return all((root / f"{fixture}.started").exists() for fixture in fixtures)
+                                wait_for(timed_started, "both timed fixtures to start", interval=.005, deadline=deadline)
                                 if fail_at == "timed_ready":
                                     self.fail("injected failure at timed_ready")
                                 clock.with_suffix(".next").write_text("13000000000")
@@ -840,19 +833,21 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 os.write(releases[1], b"r\n")
                                 # Completion timing belongs to the peer, not
                                 # the later inventory-order wait for it.
-                                while not any(path.read_text().strip() for path in root.glob("rui-check.*/preference-policy.status")):
+                                def timing_recorded():
                                     self.assertIsNone(process.poll())
-                                    self.assertLess(time.monotonic(), deadline, "completed peer must record timing before inventory wait")
-                                    time.sleep(.005)
+                                    return any(path.read_text().strip()
+                                               for path in root.glob("rui-check.*/preference-policy.status"))
+                                wait_for(timing_recorded, "the completed peer to record timing before the inventory wait",
+                                         interval=.005, deadline=deadline)
                                 if fail_at == "timed_recorded":
                                     self.fail("injected failure at timed_recorded")
                                 clock.with_suffix(".next").write_text("30000000000")
                                 clock.with_suffix(".next").replace(clock)
                             elif hold:
-                                while not list(root.glob(f"{hold}.*.started")):
+                                def held_started():
                                     self.assertIsNone(process.poll())
-                                    self.assertLess(time.monotonic(), deadline)
-                                    time.sleep(.005)
+                                    return any(root.glob(f"{hold}.*.started"))
+                                wait_for(held_started, f"held {hold} to start", interval=.005, deadline=deadline)
                                 if fail_at == "held_ready":
                                     self.fail("injected failure at held_ready")
                                 # Held authority, not scheduler speed, prevents
@@ -956,17 +951,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn(identity, peers)
                     # Grandchildren may briefly be zombies awaiting their OS
                     # reaper, but cannot remain live or hold the capture pipes.
-                    deadline = time.monotonic() + 5
-                    while True:
+                    def peer_state(identity=identity):
                         observed = subprocess.run(["ps", "-o", "stat=", "-p", peers[identity]],
                                                   capture_output=True, text=True)
                         self.assertIn(observed.returncode, (0, 1), observed.stderr)
                         self.assertFalse(observed.stderr)
-                        state = observed.stdout.strip()
-                        if not state or state.startswith("Z"):
-                            break
-                        self.assertLess(time.monotonic(), deadline, (identity, state))
-                        time.sleep(.005)
+                        return observed.stdout.strip()
+                    wait_for(peer_state, f"held peer {identity} to retire", timeout=5, interval=.005,
+                             ready=lambda state: not state or state.startswith("Z"))
 
     def test_disposal_and_diagnostic_faults_preserve_the_primary_failure(self):
         read_text = Path.read_text

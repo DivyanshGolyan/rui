@@ -1,7 +1,7 @@
 """Private fixture schema checks, discovered by the existing CI policy gate."""
 
 import ast
-from collections import Counter, namedtuple
+from collections import Counter
 import importlib.util
 import mmap
 import os
@@ -100,231 +100,79 @@ class QualificationEvidenceTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+# Tests wait through one poll helper per language; every other sleep in test
+# code counts against SLEEP_ORDERED. The helper's own key is the one exemption.
+ZIG_POLL_HELPER = ("src/testing/poll.zig", "waitUntil")
+PYTHON_POLL_HELPER = ("tests/integration/host_process.py", "wait_for")
 ZIG_SLEEP = re.compile(r"\b(?:sleep|nanosleep|usleep)\s*\(|\bpoll\(\s*&\[_\][\w.]*pollfd\{\}\s*,\s*0\s*,")
 ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
-ZIG_WHILE = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?while\b")
-ZIG_FOR = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\b")
-ZIG_LOOP = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?(?:while|for)\b")
-ZIG_RETRY = re.compile(r"(?:\w+\s*:\s*)?(?:inline\s+)?for\s*\(\s*0\s*\.\.")
-ZIG_EXIT = re.compile(r"\breturn\b|\bbreak\b(?:\s*:\s*(\w+))?")
-ZIG_CONTAINER = re.compile(r"\b(\w+)\s*=\s*(?:(?:extern|packed)\s+)?(?:struct|union|enum)\b[^=]*$")
-ZIG_PREFIX = re.compile(r"(?:if\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\|[^|]*\|\s*)?|else\s+|return\s+"
-                        r"|(?:(?:pub\s+)?(?:const|var)\s+)?[\w.\[\]]+\s*(?::[^=]*)?[-+*/|&]?=(?!=)\s*)*")
-ZIG_ERROR_SET = re.compile(r"(?:^|\W)error$")
-ZIG_TEST = re.compile(r'\btest\s+"((?:\\.|[^"\\])*)"')
-ZIG_UNNAMED_TEST = re.compile(r"\btest\s*$")
-ZIG_FN = re.compile(r"\b(pub\s+)?(?:(?:export|extern|inline)\s+)?fn\s+(\w+)\s*\(")
-Scope = namedtuple("Scope", "head start end kind name public")
+ZIG_TEST = re.compile(r'\s*test\s*(?:"((?:\\.|[^"\\])*)"|(\w+))?\s*')
+ZIG_DECLARATION = re.compile(r"\b(?:fn|const|var)\s+(\w+)")
+ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
+ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
 
 
 def zig_sleep_ordering(path, text):
-    """Straight-line sleeps in Zig tests and test-only helpers, by test name.
-
-    A sleep is a wait only when its nearest enclosing loop re-checks a
-    condition: a `while` loop, or a `for (0..n) |_|` retry loop with an early
-    exit. A helper that sleeps outside such a loop charges each test that uses
-    it. Production code, including code a test calls, is out of scope.
-    """
+    """Sleeps in `test` blocks, by test, and elsewhere in a test-only file, by top-level declaration."""
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
-    declarations = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] in "\"'" else " " * len(match[0]), text)
-    # `.{` literals and `error{` sets are expressions, not bodies, so they keep
-    # the enclosing statement's header.
-    blocks, open_blocks, head = [], [], 0
+    names = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] == '"' else " " * len(match[0]), text)
+    tests, declarations, open_blocks, head, top_head = [], [], [], 0, 0
     for index, char in enumerate(code):
         if char == "{":
-            last = index - 1
-            while last >= 0 and code[last].isspace():
-                last -= 1
-            expression = code[last] == "." or ZIG_ERROR_SET.match(code, max(0, last - 5), last + 1) is not None
-            open_blocks.append((head, index, expression))
+            open_blocks.append((head, index))
             head = index + 1
         elif char == "}":
-            block_head, start, expression = open_blocks.pop()
-            if expression:
-                head = block_head
-            else:
-                blocks.append((block_head, start, index))
-                head = index + 1
+            block_head, start = open_blocks.pop()
+            if test := ZIG_TEST.fullmatch(names, block_head, start):
+                tests.append((start, index, test[1] or test[2] or "<unnamed test>"))
+            # `.{` literals and `error{` sets inside a declaration's header do not end it.
+            if not open_blocks and not ZIG_EXPRESSION.search(code, top_head, start):
+                if declaration := ZIG_DECLARATION.search(code, top_head, start):
+                    declarations.append((start, index, declaration[1]))
+                top_head = index + 1
+            head = index + 1
         elif char == ";":
             head = index + 1
-    scopes, unnamed = [], 0
-    for head, start, end in sorted(blocks, key=lambda block: block[1]):
-        if test := ZIG_TEST.search(declarations[head:start]):
-            scopes.append(Scope(head, start, end, "test", test[1], False))
-        elif ZIG_UNNAMED_TEST.search(declarations[head:start]):
-            unnamed += 1
-            scopes.append(Scope(head, start, end, "test", f"unnamed test {unnamed}", False))
-        elif fn := ZIG_FN.search(code[head:start]):
-            scopes.append(Scope(head, start, end, "fn", fn[2], bool(fn[1])))
-    test_only = re.search(r"(?:^|/)(?:tests|testing)/|tests?\.zig$", path) is not None
-
-    def enclosing(position):
-        return [scope for scope in scopes if scope.start < position < scope.end]
-
-    def innermost(position):
-        tests = [scope for scope in enclosing(position) if scope.kind == "test"]
-        return tests[0] if tests else deepest(position)
-
-    def deepest(position):
-        return max(enclosing(position), key=lambda scope: scope.start, default=None)
-
-    def loop_header(head, start):
-        """The statement text before a body, past an unbraced `if (...)`, `else`,
-        `return` or initializer that the loop sits under or produces a value for."""
-        header = code[head:start].strip()
-        return header[ZIG_PREFIX.match(header).end():]
-
-    def retry(header):
-        """`for (0..n) |_|`, with `n` any balanced expression."""
-        if not (opened := ZIG_RETRY.match(header)):
-            return False
-        depth = 1
-        for index in range(opened.end(), len(header)):
-            depth += {"(": 1, ")": -1}.get(header[index], 0)
-            if depth == 0:
-                return re.match(r"\s*\|_\|", header[index + 1:]) is not None
-        return False
-
-    def in_fn(position, start):
-        return any(start < scope.start < position < scope.end for scope in scopes if scope.kind == "fn")
-
-    def in_loop(position, start):
-        statement = max(code.rfind(c, start, position) for c in ";{}") + 1
-        return (ZIG_LOOP.match(loop_header(statement, position)) is not None
-                or any(start < inner < position < end and ZIG_LOOP.match(loop_header(head, inner))
-                       for head, inner, end in blocks))
-
-    def exits(header, start, end):
-        """A `return`, or a `break` that leaves this loop rather than one inside it."""
-        label = re.match(r"(\w+)\s*:", header)
-        for exit in ZIG_EXIT.finditer(code, start, end):
-            if in_fn(exit.start(), start):
-                continue
-            if exit[0] == "return" or (label and exit[1] == label[1]) or (
-                    exit[1] is None and not in_loop(exit.start(), start)):
-                return True
-        return False
-
-    def waits(position, scope):
-        statement = max(code.rfind(c, 0, position) for c in ";{}") + 1
-        header = loop_header(statement, position)
-        if ZIG_WHILE.match(header):
-            return True
-        if ZIG_FOR.match(header):
-            return retry(header) and ZIG_EXIT.search(header) is not None
-        for head, start, end in sorted(blocks, key=lambda block: -block[1]):
-            if (scope.start if scope else -1) < start < position < end:
-                header = loop_header(head, start)
-                if ZIG_WHILE.match(header):
-                    return True
-                if ZIG_FOR.match(header):
-                    return retry(header) and exits(header, start, end)
-        return False
-
-    def container(scope):
-        """The name a member helper is qualified by: its enclosing `const Name = struct`."""
-        holders = [(head, start) for head, start, end in blocks if start < scope.start < end]
-        if not holders:
-            return None
-        head, start = max(holders, key=lambda block: block[1])
-        named = ZIG_CONTAINER.search(code[head:start])
-        return named[1] if named else None
-
-    def references(scope):
-        """Bare calls, or calls qualified by the helper's own container; other members share only a name."""
-        qualifiers = {None, container(scope)}
-        return [match.start(2) for match in re.finditer(rf"(?<![\w@.])(?:(\w+)\s*\.\s*)?({scope.name})\b", code)
-                if match[1] in qualifiers and not re.search(r"\bfn\s+$", code[max(0, match.start() - 16):match.start()])
-                and not scope.head <= match.start() <= scope.end]
-
-    test_code = {}
-
-    def is_test_code(scope):
-        if test_only or (scope and scope.kind == "test"):
-            return True
-        if scope is None or scope.public:
-            return False
-        if scope not in test_code:
-            test_code[scope] = False
-            users = [innermost(position) for position in references(scope)]
-            test_code[scope] = bool(users) and all(is_test_code(user) for user in users)
-        return test_code[scope]
-
-    def charge(position, helpers, callback=False):
-        # A helper passed as a callback runs on its own, so the loop that
-        # registers it does not wait on its sleeps.
-        scope = innermost(position)
-        if (not callback and waits(position, deepest(position))) or not is_test_code(scope):
-            return
-        if scope and scope.kind == "fn" and scope not in helpers and (uses := references(scope)):
-            for use in uses:
-                charge(use, helpers | {scope}, not re.match(r"\s*\(", code[use + len(scope.name):use + len(scope.name) + 8]))
-        else:
-            offenses[(path, scope.name if scope else "<top level>")] += 1
-
+            if not open_blocks:
+                top_head = index + 1
+    test_only = ZIG_TEST_ONLY.search(path) is not None
     offenses = Counter()
     for match in ZIG_SLEEP.finditer(code):
-        if not code[:match.start()].rstrip().endswith("fn"):
-            charge(match.start(), frozenset())
+        if code[:match.start()].rstrip().endswith("fn"):
+            continue
+        within = [name for start, end, name in tests if start < match.start() < end]
+        if within:
+            offenses[(path, within[-1])] += 1
+        elif test_only:
+            offenses[(path, next((name for start, end, name in declarations if start < match.start() < end),
+                                 "<top level>"))] += 1
+    offenses.pop(ZIG_POLL_HELPER, None)
     return offenses
 
 
 def python_sleep_ordering(path, text):
-    """Straight-line `time.sleep`/`asyncio.sleep` calls, by top-level function.
+    """`time.sleep`/`asyncio.sleep` calls, by top-level function or method.
 
-    The wait rule matches Zig's: the nearest enclosing loop in the same
-    function is a `while` loop, or a `for _ in range(n)` retry loop with an
-    early exit. Nested functions charge the top-level function or method that
-    holds them. Sleeps in child-program source strings are not calls.
+    Nested functions charge the function that holds them. Sleeps in
+    child-program source strings are not calls.
     """
     offenses = Counter()
 
-    loops = (ast.While, ast.For, ast.AsyncFor)
-
-    def exits(node, own):
-        """A `return`, or a `break` that leaves the loop whose body holds `node` (`own`)."""
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-            return False
-        if isinstance(node, ast.Return) or (own and isinstance(node, ast.Break)):
-            return True
-        if isinstance(node, loops):
-            return any(exits(child, False) for child in node.body) or any(exits(child, own) for child in node.orelse)
-        return any(exits(child, own) for child in ast.iter_child_nodes(node))
-
-    def retry(loop):
-        return (isinstance(loop.target, ast.Name) and loop.target.id == "_"
-                and isinstance(loop.iter, ast.Call) and getattr(loop.iter.func, "id", None) == "range"
-                and any(exits(node, True) for node in loop.body))
-
-    def visit(children, node, name, polling):
-        for child in children:
-            child_name, child_polling = name, polling
+    def visit(node, name):
+        for child in ast.iter_child_nodes(node):
+            child_name = name
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if name is None:
                     child_name = child.name
                 elif isinstance(node, ast.ClassDef) and "." not in name:
                     child_name = f"{name}.{child.name}"
-                child_polling = False
-            elif isinstance(child, ast.Lambda):
-                child_polling = False
-            elif isinstance(child, ast.While):
-                child_polling = True
-            elif isinstance(child, (ast.For, ast.AsyncFor)):
-                child_polling = retry(child)
-            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
-                  and child.func.attr == "sleep" and getattr(child.func.value, "id", None) in ("time", "asyncio")
-                  and not polling):
+            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "sleep"
+                  and getattr(child.func.value, "id", None) in ("time", "asyncio")):
                 offenses[(path, name or "<module>")] += 1
-            if isinstance(child, loops):
-                # The else suite runs once after the loop, outside its polling.
-                after = {id(part) for part in child.orelse}
-                visit([part for part in ast.iter_child_nodes(child) if id(part) not in after], child, name, child_polling)
-                visit(child.orelse, child, name, polling)
-            else:
-                visit(ast.iter_child_nodes(child), child, child_name, child_polling)
+            visit(child, child_name)
 
-    tree = ast.parse(text)
-    visit(ast.iter_child_nodes(tree), tree, None, False)
+    visit(ast.parse(text), None)
+    offenses.pop(PYTHON_POLL_HELPER, None)
     return offenses
 
 
@@ -361,13 +209,27 @@ def review_base_sources(root=ROOT):
         contents = contents[size + 1:]
 
 
+def review_base_ceiling(root=ROOT):
+    """Per key, the larger of the rule's count at the review base and that base's own allowance."""
+    # Lets an honest rule change move a sleep between keys without granting new allowance.
+    sources = dict(review_base_sources(root))
+    ceiling = sleep_ordering(sources.items())
+    allowlists = [node.value for node in ast.parse(sources["tests/ci/test_harness_contracts.py"]).body
+                  if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "SLEEP_ORDERED"]
+    if len(allowlists) != 1:
+        raise AssertionError("review base has no single SLEEP_ORDERED allowlist")
+    for key, (count, _) in ast.literal_eval(allowlists[0]).items():
+        ceiling[key] = max(ceiling[key], count)
+    return ceiling
+
+
 def sleep_allowlist_problems(offenses, allowed, trusted):
     problems = []
     for key in sorted(set(offenses) | set(allowed)):
         found, listed = offenses.get(key, 0), allowed.get(key, (0, ""))[0]
         if found > listed:
-            problems.append(f"{key}: {found} sleep-ordered step(s), {listed} allowed; "
-                            "wait on a gate or event the other actor sets")
+            problems.append(f"{key}: {found} test sleep(s) outside wait_for/waitUntil, {listed} allowed; "
+                            "poll through the helper, gate on an event, or list it with a reason")
         elif found < listed:
             problems.append(f"{key}: {listed} allowed but {found} found; lower or remove its allowlist entry")
         if listed > trusted.get(key, 0):
@@ -380,29 +242,37 @@ def sleep_allowlist_problems(offenses, allowed, trusted):
 # and no count may exceed what the review base measures.
 SLEEP_ORDERED = {
     ("src/client.zig", "Host processing wait does not consume response transfer inactivity"):
-        (1, "delayedResponse peer sleeps against the client's real inactivity deadline"),
+        (1, "peer sleeps before replying against the client's real inactivity deadline"),
     ("src/client.zig", "Host processing wait starts inactivity only after the first response byte"):
-        (1, "delayedResponse peer sleeps against the client's real inactivity deadline"),
+        (1, "peer sleeps before replying against the client's real inactivity deadline"),
     ("src/client.zig", "Host-info first byte is bounded independently of normal processing waits"):
-        (1, "delayedResponse peer sleeps against the client's real inactivity deadline"),
+        (1, "peer sleeps before replying against the client's real inactivity deadline"),
     ("src/client.zig", "mutation response progress renews inactivity through header and body"):
         (2, "producer sleeps 4.5 s and 1 s against a 5 s inactivity limit"),
     ("src/client.zig", "response deadlines include partial header and body"):
-        (1, "delayedResponse peer sleeps against the client's real response deadline"),
+        (1, "peer sleeps before replying against the client's real response deadline"),
     ("src/client.zig", "response transfer inactivity begins after the first byte"):
-        (1, "delayedResponse peer sleeps against the client's real inactivity deadline"),
+        (1, "peer sleeps before replying against the client's real inactivity deadline"),
     ("src/client.zig", "transport cancellation quanta neither expire nor renew inactivity and observed stop wins"):
         (1, "stopper requests stop after 700 ms instead of at an observed blocked write"),
     ("src/client.zig", "transport cancellation saturated Unix backlog is not a connected writable socket"):
         (1, "stopper requests stop after 150 ms instead of at an observed blocked connect"),
+    ("src/h2/tests.zig", "PeerThread"):
+        (1, "pump: the peer thread services its sockets every 1 ms until the test stops it"),
+    ("src/server.zig", "reply delivery interrupted poll consumes the existing inactivity budget"):
+        (1, "pump: the interrupter signals the blocked writer every 5 ms until the test stops it"),
     ("src/store.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
         (2, "sleeps out a 5 ms retry wait on the real clock"),
+    ("tests/ci/test_selection.py", "FullCheckPartitionTest.run_part"):
+        (1, "samples for 0.1 s that held authority starts no isolated work"),
     ("tests/integration/codex_integration.py", "forced_refresh_journey"):
         (3, "sleeps 0.4 s to show no refresh or resend follows a settled failure"),
     ("tests/integration/codex_integration.py", "run"):
         (1, "sleeps 0.4 s to show no resend follows a settled rejection"),
     ("tests/integration/control_integration.py", "prove_retry_wait_control"):
         (1, "sleeps past the retry wait to show no Attempt follows cancellation"),
+    ("tests/integration/descriptor_capacity_integration.py", "prove_accept_pressure"):
+        (1, "pauses 10 ms after releasing a held accept before the next connect"),
     ("tests/integration/dispatch_integration.py", "main"):
         (9, "settle sleeps before asserting no further provider request or result"),
     ("tests/integration/host_status_integration.py", "discovery_body_deadline"):
@@ -415,6 +285,8 @@ SLEEP_ORDERED = {
         (14, "settle sleeps before screen and request assertions"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
+    ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
+        (1, "paces SSE chunks by the scenario's chunk_delay"),
     ("tests/integration/terminal_restoration_integration.py", "persistent_cases"):
         (1, "sleeps 0.5 s after a command so it can reach blocked output before Ctrl-C"),
     ("tests/integration/terminal_restoration_integration.py", "renderer_backpressure_case"):
@@ -431,236 +303,94 @@ class SleepOrderingTest(unittest.TestCase):
 
     def test_tree_matches_the_shrink_only_allowlist(self):
         self.assertEqual(sleep_allowlist_problems(sleep_ordering(tree_sources()), SLEEP_ORDERED,
-                                                  sleep_ordering(review_base_sources())), [])
+                                                  review_base_ceiling()), [])
 
-    def test_zig_straight_line_sleeps_are_charged_to_their_test(self):
-        source = '''
-fn pause(ms: c_int) void {
-    _ = std.c.poll(&[_]std.c.pollfd{}, 0, ms);
-}
+    def test_zig_sleeps_count_in_tests_and_test_only_files(self):
+        source = r'''
 fn production(io: std.Io) void {
     io.sleep(.fromMilliseconds(5), .awake) catch {};
 }
-pub fn serve(io: std.Io) void {
-    production(io);
+fn peer(io: std.Io) void {
+    io.sleep(.fromMilliseconds(5), .awake) catch {};
 }
-test "peer sleeps before it replies" {
-    const Peer = struct {
-        fn run(io: std.Io) void {
-            std.Io.sleep(io, .fromMilliseconds(150), .awake) catch {};
-        }
-    };
-    _ = Peer;
-    pause(150);
+test "a bare sleep counts" {
     // std.testing.io.sleep(.fromMilliseconds(1), .awake) in a comment
     const text = "std.testing.io.sleep(.fromMilliseconds(1), .awake)";
-    _ = text;
-}
-test "polls wait on a condition" {
-    while (!done()) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    while (true) {
-        if (done()) break;
-        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-    }
-    for (0..1000) |_| {
-        if (done()) break;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    for (items) |item| {
-        if (item) break;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    while (!done()) {
-        for (items) |_| try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    production(std.testing.io);
-    // test "commented out" declares nothing
-    while (!done()) {
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    while (!ready(.{})) {
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-}
-fn settle() error{Oops}!void {
-    try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-}
-test "an error-set helper still charges its test" {
-    try settle();
-}
-test "a peer declared inside a poll still sleeps first" {
-    while (!done()) {
-        const Peer = struct {
-            fn run(io: std.Io) void {
-                std.Io.sleep(io, .fromMilliseconds(150), .awake) catch {};
-            }
-        };
-        _ = Peer;
-    }
-}
-test {
     try std.testing.io.sleep(.fromMilliseconds(150), .awake);
 }
-test "an inner loop's exit does not make its outer loop poll" {
-    for (0..10) |_| {
-        for (items) |item| {
-            if (item) break;
+test "a sleep inside a loop still counts" {
+    while (!done()) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    const Peer = struct {
+        fn run() void {
+            _ = std.c.poll(&[_]std.c.pollfd{}, 0, 1);
         }
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    for (0..10) |_| {
-        for (items) |item| if (item) break;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    for (0..10) |_| {
-        const Probe = struct {
-            fn ready() bool {
-                return true;
-            }
-        };
-        _ = Probe;
-        _ = blk: {
-            break :blk 1;
-        };
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    while (!done()) {} else {
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-}
-fn nap() void {
-    std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
-}
-pub fn drive(thing: anytype) void {
-    thing.nap();
-}
-test "an unrelated member call does not make a helper production code" {
-    nap();
-}
-const Helper = struct {
-    fn doze() void {
-        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
-    }
-};
-test "a container-qualified helper call charges its test" {
-    Helper.doze();
-}
-test "a poll under an unbraced condition still waits" {
-    if (enabled) while (!done()) {
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    if (enabled) while (!done()) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    if (enabled) {} else for (0..10) |_| {
-        if (done()) break;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-}
-fn peer() void {
-    std.testing.io.sleep(.fromMilliseconds(150), .awake) catch {};
-}
-test "a callback spawned inside a poll still sleeps first" {
-    while (!done()) {
-        const thread = try std.Thread.spawn(.{}, peer, .{});
-        thread.join();
-    }
-}
-test "a retry bound may call, and a poll may produce a value" {
-    for (0..@as(usize, @min(10, limit()))) |_| {
-        if (ready()) break;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    const result = while (true) {
-        if (ready()) break true;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     };
-    _ = result;
-    total += for (0..10) |_| {
-        if (ready()) break 1;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    } else 0;
-}
-test "a labeled break from an inner loop leaves the retry" {
-    outer: for (0..10) |_| {
-        for (items) |item| if (item) break :outer;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
+    try test_poll.waitUntil(std.testing.io, deadline, &flag, test_poll.isSet);
 }
 '''
         self.assertEqual(zig_sleep_ordering("src/a.zig", source), {
-            ("src/a.zig", "peer sleeps before it replies"): 2,
-            ("src/a.zig", "polls wait on a condition"): 2,
-            ("src/a.zig", "an error-set helper still charges its test"): 1,
-            ("src/a.zig", "a peer declared inside a poll still sleeps first"): 1,
-            ("src/a.zig", "unnamed test 1"): 1,
-            ("src/a.zig", "an inner loop's exit does not make its outer loop poll"): 4,
-            ("src/a.zig", "an unrelated member call does not make a helper production code"): 1,
-            ("src/a.zig", "a container-qualified helper call charges its test"): 1,
-            ("src/a.zig", "a callback spawned inside a poll still sleeps first"): 1,
+            ("src/a.zig", "a bare sleep counts"): 1,
+            ("src/a.zig", "a sleep inside a loop still counts"): 2,
         })
+        helper = r'''
+pub fn waitUntil(io: std.Io, deadline: std.Io.Clock.Timestamp, context: anytype, comptime condition: anytype) error{Timeout}!void {
+    while (!condition(context)) try io.sleep(.fromMilliseconds(1), deadline.clock);
+}
+pub fn pump(io: std.Io) void {
+    io.sleep(.fromMilliseconds(1), .awake) catch {};
+}
+'''
+        self.assertEqual(zig_sleep_ordering(ZIG_POLL_HELPER[0], helper), {(ZIG_POLL_HELPER[0], "pump"): 1})
+        self.assertEqual(zig_sleep_ordering("src/h2/tests.zig", helper), {
+            ("src/h2/tests.zig", "waitUntil"): 1, ("src/h2/tests.zig", "pump"): 1})
 
-    def test_python_straight_line_sleeps_are_charged_to_their_function(self):
+    def test_python_sleeps_count_everywhere_but_the_poll_helper(self):
         source = '''
 import time
+def wait_for(predicate, description):
+    while not predicate():
+        time.sleep(0.01)
 def scenario():
     def peer():
         time.sleep(0.5)
     while not ready():
         time.sleep(0.01)
-    for _ in range(100):
-        if ready():
-            break
-        time.sleep(0.01)
-    for case in cases:
-        time.sleep(0.2)
+    wait_for(ready, "ready")
     child = "import time; time.sleep(30)"
 class Handler:
     def do_POST(self):
         time.sleep(2.5)
-def inner_exits():
-    for _ in range(10):
-        for item in items:
-            if item:
-                break
-        time.sleep(1)
-    for _ in range(10):
-        def probe():
-            return True
-        time.sleep(1)
-    for _ in range(10):
-        for item in items:
-            pass
-        else:
-            break
-        time.sleep(0.01)
-def lambda_peer():
-    while not ready():
-        threading.Thread(target=lambda: time.sleep(1)).start()
-def after_the_loop():
-    while not ready():
-        time.sleep(0.01)
-    else:
-        time.sleep(1)
-    for _ in range(10):
-        if ready():
-            break
-        time.sleep(0.01)
-    else:
-        time.sleep(1)
 '''
         self.assertEqual(python_sleep_ordering("tests/integration/x.py", source), {
+            ("tests/integration/x.py", "wait_for"): 1,
             ("tests/integration/x.py", "scenario"): 2,
-            ("tests/integration/x.py", "inner_exits"): 2,
-            ("tests/integration/x.py", "after_the_loop"): 2,
-            ("tests/integration/x.py", "lambda_peer"): 1,
             ("tests/integration/x.py", "Handler.do_POST"): 1,
         })
+        self.assertEqual(python_sleep_ordering(PYTHON_POLL_HELPER[0], source), {
+            (PYTHON_POLL_HELPER[0], "scenario"): 2,
+            (PYTHON_POLL_HELPER[0], "Handler.do_POST"): 1,
+        })
+
+    def test_python_poll_helper_refuses_a_late_observation_and_reports_the_last_one(self):
+        now = [0.0]
+        clock = SimpleNamespace(monotonic=lambda: now[0], sleep=lambda delay: now.__setitem__(0, now[0] + delay))
+        with patch.object(HOST, "time", clock):
+            observations = iter([{"n": 1}, {}])
+            self.assertEqual(HOST.wait_for(lambda: next(observations), "empty", timeout=1, interval=0.025,
+                                           ready=lambda observed: observed == {}), {})
+
+            def late():
+                now[0] += 1
+                return [1, 2]
+            with self.assertRaisesRegex(HOST.WaitTimeout, r"timed out waiting for two; last observed \[1, 2\]"):
+                HOST.wait_for(late, "two", timeout=0.5, ready=lambda found: len(found) == 2)
 
     def test_allowlist_rejects_new_offenders_and_keeps_shrinking(self):
         key = ("src/a.zig", "peer sleeps before it replies")
         one, two, allow = Counter({key: 1}), Counter({key: 2}), {key: (1, "seeded")}
         self.assertEqual(sleep_allowlist_problems(one, allow, one), [])
-        self.assertIn("2 sleep-ordered step(s), 1 allowed", sleep_allowlist_problems(two, allow, two)[0])
-        self.assertIn("1 sleep-ordered step(s), 0 allowed", sleep_allowlist_problems(one, {}, one)[0])
+        self.assertIn("2 test sleep(s) outside wait_for/waitUntil, 1 allowed", sleep_allowlist_problems(two, allow, two)[0])
+        self.assertIn("1 test sleep(s) outside wait_for/waitUntil, 0 allowed", sleep_allowlist_problems(one, {}, one)[0])
         self.assertIn("remove its allowlist entry", sleep_allowlist_problems(Counter(), allow, one)[0])
         self.assertIn("lower", sleep_allowlist_problems(one, {key: (2, "seeded")}, two)[0])
         self.assertEqual(sleep_allowlist_problems(two, {key: (2, "seeded")}, one),
@@ -675,6 +405,31 @@ def after_the_loop():
         self.assertEqual(sources["src/h2/tests.zig"], subprocess.run(
             ["git", "-C", str(ROOT), "show", f"{base}:src/h2/tests.zig"],
             capture_output=True, text=True, check=True).stdout)
+
+    def test_review_base_ceiling_keeps_the_allowance_of_a_sleep_a_rule_change_moved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests/ci").mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/a.zig").write_text(
+                'fn peer(io: std.Io) void {\n    io.sleep(.fromMilliseconds(5), .awake) catch {};\n}\n'
+                'test "measured" {\n    try std.testing.io.sleep(.fromMilliseconds(5), .awake);\n}\n')
+            (root / "tests/ci/test_harness_contracts.py").write_text(
+                'SLEEP_ORDERED = {("src/a.zig", "moved"): (1, "peer"), ("src/a.zig", "measured"): (1, "settle")}\n')
+
+            def git(*args):
+                subprocess.run(["git", "-C", directory, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                                "-c", "commit.gpgsign=false", *args], capture_output=True, check=True)
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.assertEqual(review_base_ceiling(root), {("src/a.zig", "moved"): 1, ("src/a.zig", "measured"): 1})
+            (root / "tests/ci/test_harness_contracts.py").write_text("ALLOWED = {}\n")
+            git("commit", "-qam", "renamed")
+            git("update-ref", "refs/remotes/origin/main", "HEAD")
+            with self.assertRaisesRegex(AssertionError, "no single SLEEP_ORDERED"):
+                review_base_ceiling(root)
 
     def test_every_allowlist_entry_has_a_reason(self):
         self.assertEqual([key for key, (count, reason) in SLEEP_ORDERED.items()

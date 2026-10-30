@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_logic_tests.step);
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
-    if (addH2(b, target, .ReleaseSafe, pinned_transport)) |h2| {
+    if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = if (test_filter) |filter| &.{filter} else &.{} });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
@@ -952,8 +952,16 @@ fn configureTransport(
     options.addOption([]const u8, "revision", buildRevision(b));
     options.addOption([]const u8, "version", buildVersion(b));
     compile.root_module.addOptions("transport_options", options);
-    const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned) orelse return;
+    const test_poll = addTestPoll(b);
+    compile.root_module.addImport("test_poll", test_poll);
+    const h2 = addH2(b, target, compile.root_module.optimize.?, maybe_pinned, test_poll) orelse return;
     compile.root_module.addImport("h2", h2);
+}
+
+/// The one helper Rui's and h2's tests poll through. A module, so both
+/// share one copy of the file.
+fn addTestPoll(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
 }
 
 /// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
@@ -964,6 +972,7 @@ fn addH2(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
+    test_poll: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -972,6 +981,7 @@ fn addH2(
         .optimize = optimize,
         .link_libc = true,
     });
+    module.addImport("test_poll", test_poll);
     const bindings = addBindings(b, module, "h2_c",
         \\#include <nghttp2/nghttp2.h>
         \\#include <openssl/ssl.h>

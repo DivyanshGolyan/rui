@@ -16,7 +16,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for_execution_release
+from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 def install(checkout):
@@ -120,20 +120,18 @@ def database_hashes(store):
 
 def stop_detached(dialect, binary, store):
     deadline = time.monotonic() + 10
-    stop_requested = False
-    while True:
+
+    def status():
         remaining = deadline - time.monotonic()
         assert remaining > 0, "Store ownership release unconfirmed"
-        state, shown = dialect.host_status(binary, store, min(5, remaining))
-        if state == "unavailable":
-            return
-        if state == "ready" and not stop_requested:
-            stop_requested = True
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, shown
-            subprocess.run([binary, "host", "stop", "--store", store],
-                           check=True, timeout=min(5, remaining))
-        time.sleep(.025)
+        return dialect.host_status(binary, store, min(5, remaining))
+    state, shown = wait_for(status, "a ready or released Host", deadline=deadline,
+                            ready=lambda observed: observed[0] in ("ready", "unavailable"))
+    if state == "ready":
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, shown
+        subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=min(5, remaining))
+        wait_for(status, "Store ownership release", deadline=deadline, ready=lambda observed: observed[0] == "unavailable")
 
 
 def main():
