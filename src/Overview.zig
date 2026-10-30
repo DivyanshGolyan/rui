@@ -22,6 +22,7 @@ const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
+const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
 const Self = @This();
@@ -605,6 +606,7 @@ fn keyOf(decoded: TerminalInput.Decoded) ?view.Key {
     if (key.matchExact(Key.home, .{})) return .home;
     if (key.matchExact(Key.end, .{})) return .end;
     if (key.matchExact(Key.backspace, .{})) return .backspace;
+    if (TerminalEditor.addsLine(key)) return .{ .text = "\n" };
     if (key.mods.ctrl or key.mods.alt or key.mods.super) return null;
     return if (key.text) |text| .{ .text = text } else null;
 }
@@ -1357,6 +1359,7 @@ test "leaving with a stop still queued says it was not sent" {
 
 test "terminal keys reach the core as overview keys, and pasted line ends as text" {
     const Case = struct { bytes: []const u8, keys: []const view.Key };
+    const line: view.Key = .{ .text = "\n" };
     const cases = [_]Case{
         .{ .bytes = "\n", .keys = &.{.enter} },
         .{ .bytes = "\r", .keys = &.{.enter} },
@@ -1364,6 +1367,11 @@ test "terminal keys reach the core as overview keys, and pasted line ends as tex
         .{ .bytes = "\x1b[A\x1b[B\x1b[H\x1b[F", .keys = &.{ .up, .down, .home, .end } },
         .{ .bytes = "a\xc3\xa9", .keys = &.{ .{ .text = "a" }, .{ .text = "\xc3\xa9" } } },
         .{ .bytes = "\x1b[200~a\nb\x1b[201~", .keys = &.{ .{ .text = "a" }, .{ .text = "\n" }, .{ .text = "b" } } },
+        // Shift-Enter and Alt-Enter add a line, as in a conversation, in
+        // legacy and extended encodings.
+        .{ .bytes = "a\x1b\rb", .keys = &.{ .{ .text = "a" }, line, .{ .text = "b" } } },
+        .{ .bytes = "\x1b\n\x1b[13;2u\x1b[13;2;13u\x1b[13:13;2u\x1b[27;2;13~", .keys = &.{ line, line, line, line, line } },
+        .{ .bytes = "\x1b[13;3u\x1b[13;3;13u\x1b[27;3;13~", .keys = &.{ line, line, line } },
         // Other control keys do nothing.
         .{ .bytes = "\x01\x1b[1;5A", .keys = &.{} },
     };
