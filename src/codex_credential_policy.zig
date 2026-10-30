@@ -288,11 +288,40 @@ pub fn safeAscii(bytes: []const u8) bool {
 }
 
 fn validBase64Url(bytes: []const u8) bool {
-    const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(bytes) catch return false;
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const size = decoder.calcSizeForSlice(bytes) catch return false;
     if (size > max_token_bytes) return false;
-    var decoded: [max_token_bytes]u8 = undefined;
-    std.base64.url_safe_no_pad.Decoder.decode(decoded[0..size], bytes) catch return false;
+    // Whole 4-character groups decode independently, so decoding the text
+    // in chunks of whole groups accepts exactly what one decode would.
+    var decoded: [768]u8 = undefined;
+    defer std.crypto.secureZero(u8, &decoded);
+    var rest = bytes;
+    while (rest.len > 0) {
+        const chunk = rest[0..@min(rest.len, decoded.len / 3 * 4)];
+        decoder.decode(decoded[0 .. decoder.calcSizeForSlice(chunk) catch return false], chunk) catch return false;
+        rest = rest[chunk.len..];
+    }
     return true;
+}
+
+test "chunked base64url validation agrees with one decode at every length" {
+    var text: [2100]u8 = undefined;
+    var whole: [2100]u8 = undefined;
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (&text, 0..) |*c, i| c.* = alphabet[(i * 37 + 11) % alphabet.len];
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    for (0..text.len) |len| {
+        // The last character decides whether the unused trailing bits are zero.
+        for ([_]u8{ 'A', 'B', '_', '=' }) |last| {
+            var sample = text;
+            if (len > 0) sample[len - 1] = last;
+            const one = if (decoder.calcSizeForSlice(sample[0..len])) |size|
+                (if (decoder.decode(whole[0..size], sample[0..len])) |_| true else |_| false)
+            else |_|
+                false;
+            try std.testing.expectEqual(one, validBase64Url(sample[0..len]));
+        }
+    }
 }
 
 fn tokenPayload(token: []const u8, destination: []u8) ![]const u8 {
