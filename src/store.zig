@@ -2871,13 +2871,7 @@ pub const Store = struct {
         const session = (try self.readSession(session_ref)) orelse return error.CorruptStore;
         const work = (try self.readWorkLocked(session_ref, session.created_at, try readUnixMilliseconds(self.io))).work;
         if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
-        const status: protocol.MessageProgressStatus = switch (work.state.status()) {
-            .runnable => .runnable,
-            .in_flight => .in_flight,
-            .waiting_for_permission => .waiting_for_permission,
-            .idle, .completed, .cancelled, .failed => return error.CorruptStore,
-        };
-        return .{ .status = status, .action_id = work.first_action };
+        return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {

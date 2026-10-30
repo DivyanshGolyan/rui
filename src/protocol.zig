@@ -323,7 +323,7 @@ pub const PermissionDecisionRejection = enum {
     target_mismatch,
     action_not_pending,
 };
-pub const MessageProgressStatus = enum { runnable, in_flight, waiting_for_permission };
+pub const MessageProgressStatus = WorkState.Progress;
 pub const ConversationItemKind = enum { user, assistant, tool_result };
 
 pub const PermissionDecisionCommand = struct {

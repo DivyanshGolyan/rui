@@ -59,20 +59,19 @@ pub const WorkState = union(Kind) {
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
     pub const Stopped = struct { since: u64, cause: StopCause };
 
-    /// The coarse work status of ARCHITECTURE.md's "Work state and wait
-    /// conditions": a retry due in the future is `in_flight`, a past-due one
-    /// and approved Bash awaiting a slot are `runnable`.
-    pub const Status = enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed };
+    /// Work under way, as a pending Message's progress reports it
+    /// (ARCHITECTURE.md, "Work state and wait conditions"): a retry due in
+    /// the future is `in_flight`, a past-due one and approved Bash awaiting
+    /// a slot are `runnable`.
+    pub const Progress = enum { runnable, in_flight, waiting_for_permission };
 
-    pub fn status(self: WorkState) Status {
+    /// Null when no work is under way: idle, or the latest Turn ended.
+    pub fn progress(self: WorkState) ?Progress {
         return switch (self) {
-            .idle => .idle,
             .pending => .runnable,
             .working, .retrying, .bash, .stopping => .in_flight,
             .approval => .waiting_for_permission,
-            .finished => .completed,
-            .failed => .failed,
-            .stopped => .cancelled,
+            .idle, .finished, .failed, .stopped => null,
         };
     }
 
@@ -491,18 +490,18 @@ test "inputs no writer produces are corrupt" {
     }
 }
 
-test "the coarse status follows the work table" {
-    const expected = std.enums.EnumArray(Kind, WorkState.Status).init(.{
-        .idle = .idle,
+test "progress follows the work table" {
+    const expected = std.enums.EnumArray(Kind, ?WorkState.Progress).init(.{
+        .idle = null,
         .pending = .runnable,
         .working = .in_flight,
         .retrying = .in_flight,
         .bash = .in_flight,
         .approval = .waiting_for_permission,
         .stopping = .in_flight,
-        .finished = .completed,
-        .failed = .failed,
-        .stopped = .cancelled,
+        .finished = null,
+        .failed = null,
+        .stopped = null,
     });
     inline for (comptime std.enums.values(Kind)) |kind| {
         const state = @unionInit(WorkState, @tagName(kind), switch (kind) {
@@ -512,7 +511,7 @@ test "the coarse status follows the work table" {
             .stopped => .{ .since = 1, .cause = .stop },
             else => .{ .since = 1 },
         });
-        try std.testing.expectEqual(expected.get(kind), state.status());
+        try std.testing.expectEqual(expected.get(kind), state.progress());
         try std.testing.expectEqual(@as(u64, 1), state.since());
         // Only a due retry changes with time.
         try std.testing.expectEqual(kind == .retrying, std.meta.activeTag(state.asOf(5_000)) != kind);

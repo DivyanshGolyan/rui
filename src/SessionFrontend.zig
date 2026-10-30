@@ -656,7 +656,7 @@ fn drawFrame(self: *Self) !void {
             .submitting => "Sending…",
             .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
             .rejected => "Rejected · /discard",
-        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.state.status()),
+        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.state),
     };
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
@@ -758,23 +758,25 @@ test "a paged Action keeps what runs, where and for how long beside the choice" 
     try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
 }
 
-const WorkStatus = protocol.WorkState.Status;
-
-fn workStatus(status: WorkStatus) []const u8 {
-    return switch (status) {
+fn workStatus(state: protocol.WorkState) []const u8 {
+    return switch (state.progress() orelse return "") {
         .runnable, .in_flight => "Working…",
         .waiting_for_permission => "Needs approval",
-        .idle, .completed, .failed, .cancelled => "",
     };
 }
 
 test "the composer status shows only live work, not an ending the transcript already shows" {
     // The ended Turn's line sits directly above the composer; a second
     // copy pointing at /status would add nothing /status does not repeat.
-    for ([_]WorkStatus{ .failed, .cancelled, .idle, .completed }) |ended|
-        try std.testing.expectEqualStrings("", workStatus(ended));
-    try std.testing.expectEqualStrings("Working…", workStatus(.in_flight));
-    try std.testing.expectEqualStrings("Needs approval", workStatus(.waiting_for_permission));
+    for ([_]protocol.WorkState{
+        .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } },
+        .{ .stopped = .{ .since = 1, .cause = .stop } },
+        .{ .idle = .{ .since = 1 } },
+        .{ .finished = .{ .since = 1 } },
+    }) |ended| try std.testing.expectEqualStrings("", workStatus(ended));
+    try std.testing.expectEqualStrings("Working…", workStatus(.{ .working = .{ .since = 1 } }));
+    try std.testing.expectEqualStrings("Working…", workStatus(.{ .pending = .{ .since = 1 } }));
+    try std.testing.expectEqualStrings("Needs approval", workStatus(.{ .approval = .{ .since = 1 } }));
 }
 
 fn pump(raw: *anyopaque) !void {
