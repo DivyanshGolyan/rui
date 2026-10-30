@@ -2520,33 +2520,56 @@ pub const max_conversation_page_response_bytes = blk: {
     break :blk shapeBytes(page.head) + jsonListBytes(public_conversation_page_items, item) + maxShapeBytes(.{ page.last, page.more });
 };
 
+/// The one JSON rendering vocabulary, over any writer. A writer that runs out
+/// of room is `BufferTooLarge`, so a renderer reads the same whether it writes
+/// into a Host reply's heap body or a client's fixed buffer.
+pub const JsonOut = struct {
+    writer: *std.Io.Writer,
+
+    pub fn append(self: JsonOut, value: []const u8) error{BufferTooLarge}!void {
+        self.writer.writeAll(value) catch return error.BufferTooLarge;
+    }
+
+    pub fn appendFmt(self: JsonOut, comptime format: []const u8, args: anytype) error{BufferTooLarge}!void {
+        self.writer.print(format, args) catch return error.BufferTooLarge;
+    }
+
+    pub fn appendShape(self: JsonOut, comptime shape: anytype, args: anytype) error{BufferTooLarge}!void {
+        writeShape(self.writer, shape, args) catch return error.BufferTooLarge;
+    }
+
+    pub fn appendJsonString(self: JsonOut, value: []const u8) error{BufferTooLarge}!void {
+        std.json.Stringify.encodeJsonString(value, .{}, self.writer) catch return error.BufferTooLarge;
+    }
+};
+
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
         len: usize = 0,
 
-        pub fn append(self: *@This(), value: []const u8) !void {
-            if (self.len + value.len > self.bytes.len) return error.BufferTooLarge;
-            @memcpy(self.bytes[self.len..][0..value.len], value);
-            self.len += value.len;
-        }
-
-        pub fn appendFmt(self: *@This(), comptime format: []const u8, args: anytype) !void {
-            const value = std.fmt.bufPrint(self.bytes[self.len..], format, args) catch
-                return error.BufferTooLarge;
-            self.len += value.len;
-        }
-
-        pub fn appendShape(self: *@This(), comptime shape: anytype, args: anytype) !void {
+        /// Calls `renderer(out, args...)` over the unused bytes. A failed
+        /// render keeps nothing it wrote.
+        pub fn render(self: *@This(), comptime renderer: anytype, args: anytype) !void {
             var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
-            defer self.len += writer.end;
-            writeShape(&writer, shape, args) catch return error.BufferTooLarge;
+            try @call(.auto, renderer, .{JsonOut{ .writer = &writer }} ++ args);
+            self.len += writer.end;
         }
 
-        pub fn appendJsonString(self: *@This(), value: []const u8) !void {
-            var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
-            defer self.len += writer.end;
-            std.json.Stringify.encodeJsonString(value, .{}, &writer) catch return error.BufferTooLarge;
+        pub fn append(self: *@This(), value: []const u8) error{BufferTooLarge}!void {
+            return self.render(JsonOut.append, .{value});
+        }
+
+        pub fn appendFmt(self: *@This(), comptime format: []const u8, args: anytype) error{BufferTooLarge}!void {
+            return self.render(JsonOut.appendFmt, .{ format, args });
+        }
+
+        pub fn appendShape(self: *@This(), comptime shape: anytype, args: anytype) error{BufferTooLarge}!void {
+            return self.render(JsonOut.appendShape, .{ shape, args });
+        }
+
+        pub fn appendJsonString(self: *@This(), value: []const u8) error{BufferTooLarge}!void {
+            return self.render(JsonOut.appendJsonString, .{value});
         }
 
         pub fn slice(self: *const @This()) []const u8 {

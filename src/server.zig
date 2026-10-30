@@ -243,7 +243,7 @@ const Intake = struct {
                 error.UnsupportedControl => .unsupported,
                 else => .invocation_error,
             };
-            respondStatic(self.host.io, reply, status, kind, code);
+            respondStatic(reply, status, kind, code);
             // Detect a disconnected predecessor before classifying another
             // peer in this socket pass. Half-closed clients still receive
             // their bounded error through the ordinary reply state.
@@ -1066,8 +1066,12 @@ const ControlTiming = struct {
         }
     }
 
-    fn replyComplete(self: *ControlTiming) void {
-        if (!self.host.hooks.phase_trace) return;
+    /// An inline guard and a noinline body, like the server_host traces.
+    inline fn replyComplete(self: *ControlTiming) void {
+        if (self.host.hooks.phase_trace) self.writeReplyComplete();
+    }
+
+    noinline fn writeReplyComplete(self: *ControlTiming) void {
         const reply_complete_ns = nowNs(self.host);
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var publication = beginTestObservation(self.host, "control_timing", null);
@@ -1138,15 +1142,15 @@ const Header = struct {
 
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
-        return respondStatic(host.io, fd, 409, .invocation_error, "wrong_store_identity");
+        return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
         if (!std.mem.eql(u8, &instance, &host.instance)) {
-            return respondStatic(host.io, fd, 409, .invocation_error, "host_instance_changed");
+            return respondStatic(fd, 409, .invocation_error, "host_instance_changed");
         }
     }
     if (header.route == .host_stop and header.instance == null) {
-        return respondStatic(host.io, fd, 400, .invocation_error, "host_instance_required");
+        return respondStatic(fd, 400, .invocation_error, "host_instance_required");
     }
     if (header.drop == .before_admission) return;
     if (header.drop == .during_admission and socket_os.shutdown(socket, std.c.SHUT.RDWR) == .failed) {
@@ -1155,15 +1159,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
 
     switch (request.*) {
         .host_info => {
-            if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, .host_unavailable, "dispatch_fenced");
-            var response: protocol.ResponseBuffer = .{};
+            if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try renderHostInfo(&response, host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null);
-            try fd.setJson(200, response.slice());
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null });
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
-            if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
+            if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
             const result = host.store.configure(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
@@ -1171,14 +1173,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            var response: protocol.ResponseBuffer = .{};
-            try renderConfigureReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            deliverResponse(host.io, fd, status, response.slice());
+            try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
             const result = host.store.submitMessageWithModel(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
@@ -1186,14 +1186,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            var response: protocol.ResponseBuffer = .{};
-            try renderMessageReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            deliverResponse(host.io, fd, status, response.slice());
+            try fd.json(status, protocol.max_response_bytes, renderMessageReply, .{ command, result });
         },
         .session_stop => |*command| {
             var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
@@ -1203,14 +1201,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            var response: protocol.ResponseBuffer = .{};
-            try renderSessionStopReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            deliverResponse(host.io, fd, status, response.slice());
+            try fd.json(status, protocol.max_response_bytes, renderSessionStopReply, .{ command, result });
             fd.timing = timing;
         },
         .model_interruption => |*command| {
@@ -1221,14 +1217,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            var response: protocol.ResponseBuffer = .{};
-            try renderModelInterruptionReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            deliverResponse(host.io, fd, status, response.slice());
+            try fd.json(status, protocol.max_response_bytes, renderModelInterruptionReply, .{ command, result });
             fd.timing = timing;
         },
         .permission_decision => |*command| {
@@ -1239,46 +1233,42 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            var response: protocol.ResponseBuffer = .{};
-            try renderPermissionDecisionReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            deliverResponse(host.io, fd, status, response.slice());
+            try fd.json(status, protocol.max_response_bytes, renderPermissionDecisionReply, .{ command, result });
             fd.timing = timing;
         },
-        .observe_command => |command| {
+        .observe_command => |*command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
                 fenceDispatch(host, "command observation", err);
-                return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
-            var response: protocol.ResponseBuffer = .{};
-            try renderCommandObservation(&response, command.key.slice(), observation);
-            deliverResponse(host.io, fd, 200, response.slice());
+            try fd.json(200, protocol.max_response_bytes, renderCommandObservation, .{ command.key.slice(), observation });
         },
-        .read_result => |command| {
+        .read_result => |*command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
-                error.ResultNotFound => return respondStatic(host.io, fd, 409, .result_unavailable, "result_not_found"),
-                error.ResultNotReady => return respondStatic(host.io, fd, 409, .result_unavailable, "result_not_ready"),
-                error.ResultFailed => return respondStatic(host.io, fd, 409, .result_unavailable, "result_failed"),
+                error.ResultNotFound => return respondStatic(fd, 409, .result_unavailable, "result_not_found"),
+                error.ResultNotReady => return respondStatic(fd, 409, .result_unavailable, "result_not_ready"),
+                error.ResultFailed => return respondStatic(fd, 409, .result_unavailable, "result_failed"),
                 else => {
                     fenceDispatch(host, "result observation", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             const location = host.store.openContent(reference) catch |err| {
                 fenceDispatch(host, "result content read", err);
-                return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
             try fd.setContent(location, 0, true, false);
         },
-        .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
-        .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
-        .inspect_session => |request_value| {
+        .read_action_arguments => |*command| deliverActionContent(host, fd, command, false),
+        .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
+        .inspect_session => |*request_value| {
             if (request_value.failed_response != null) {
-                const capture = host.store.captureFailedResponse(request_value, host.lease.store_dir, .{
+                const capture = host.store.captureFailedResponse(request_value.*, host.lease.store_dir, .{
                     .scratch_path = host.lease.paths.scratch.slice(),
                     .scratch_budget = host.retention.sharedBudget(),
                     .request_number = request_number,
@@ -1286,13 +1276,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 }) catch |err| {
                     if (err == error.ReportScratchCleanupFailed) {
                         fenceDispatch(host, "failed response export scratch cleanup", err);
-                        return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
+                        return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                     }
                     if (host.store.isFenced()) {
                         fenceDispatch(host, "failed response identity", err);
-                        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                     }
-                    return respondStatic(host.io, fd, 409, .failed_response_unavailable, @errorName(err));
+                    return respondStatic(fd, 409, .failed_response_unavailable, @errorName(err));
                 };
                 try fd.setReport(capture);
                 try fd.prepareHeader(200, "application/octet-stream", capture.length);
@@ -1308,19 +1298,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "session report scratch cleanup", err);
-                    return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
+                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "session inspection", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 }
-                return respondStatic(
-                    host.io,
-                    fd,
-                    if (err == error.ReportScratchExhausted) 507 else 500,
-                    .observation_error,
-                    @errorName(err),
-                );
+                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
             };
             try fd.setReport(report);
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
@@ -1328,17 +1312,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.holdDelivery(host.hooks.inspection_reply);
             if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
         },
-        .list_sessions => |request_value| {
+        .list_sessions => |*request_value| {
             // Nothing changed since the token: answered from atomics, with no
             // Store lock, scratch or SQLite.
             if (request_value.since) |since| {
                 if (request_value.changed == null and host.store.notModified(since)) {
-                    var response: protocol.ResponseBuffer = .{};
-                    try renderSessionsNotModified(&response, since);
-                    return deliverResponse(host.io, fd, 200, response.slice());
+                    return fd.json(200, protocol.max_response_bytes, renderSessionsNotModified, .{since});
                 }
             }
-            const page = host.store.captureSessionList(request_value, .{
+            const page = host.store.captureSessionList(request_value.*, .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
                 .request_number = request_number,
@@ -1346,67 +1328,63 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "Session list scratch cleanup", err);
-                    return respondStatic(host.io, fd, 500, .observation_error, "report_scratch_cleanup_failed");
+                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "Session list", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 }
-                return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
+                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
             };
             try fd.setReport(page);
         },
-        .conversation_page => |command| {
-            const page = host.store.publicConversationPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
+        .conversation_page => |*command| {
+            const page = host.store.publicConversationPage(command.*) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "conversation page", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
-            try renderConversationPage(&response, &page);
-            deliverResponse(host.io, fd, 200, response.slice());
+            try fd.json(200, protocol.max_conversation_page_response_bytes, renderConversationPage, .{&page});
         },
-        .conversation_content => |command| try prepareConversationContent(host, fd, command),
-        .proposal_page => |command| {
-            const page = host.store.proposalPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
+        .conversation_content => |*command| try prepareConversationContent(host, fd, command),
+        .proposal_page => |*command| {
+            const page = host.store.proposalPage(command.*) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal page", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            var response: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{};
-            try renderProposalPage(&response, &page);
-            deliverResponse(host.io, fd, 200, response.slice());
+            try fd.json(200, protocol.max_proposal_page_response_bytes, renderProposalPage, .{&page});
         },
-        .proposal_field => |command| {
-            const location = host.store.openProposalField(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
+        .proposal_field => |*command| {
+            const location = host.store.openProposalField(command.*) catch |err| switch (err) {
+                error.ContentNotFound => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
-        .activity_page => |command| {
-            const page = host.store.activityPage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
+        .activity_page => |*command| {
+            const page = host.store.activityPage(command.*) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity page", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try prepareActivityPage(host.io, fd, &page);
+            try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{&page});
         },
-        .activity_content => |command| {
-            const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
+        .activity_content => |*command| {
+            const location = host.store.openActivityContent(command.*) catch |err| switch (err) {
+                error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
-                    return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
             try deliverPublicContent(host, fd, location, 0, true);
@@ -1414,30 +1392,25 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
     }
 }
 
-// The response buffer is needed only after Store/SQLite reads return. Do not
-// keep it on the intake worker's bounded stack during recursive SQL planning.
-fn prepareActivityPage(io: std.Io, reply: *Reply, page: *const protocol.ActivityFacts) !void {
-    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
-    var out = std.Io.Writer.fixed(&buffer);
-    try page.writeJson(&out);
-    deliverResponse(io, reply, 200, out.buffered());
+fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
+    page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
     var reply = Reply{ .io = host.io, .allocator = host.allocator };
     defer reply.deinit();
-    try prepareConversationContent(host, &reply, command);
+    try prepareConversationContent(host, &reply, &command);
     reply.deliver(fd) catch |err| {
         if (host.store.isFenced()) fenceDispatch(host, "public content", err);
     };
 }
 
-fn prepareConversationContent(host: *Host, fd: *Reply, command: protocol.ConversationContent) !void {
-    const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
+fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
+    const location = host.store.openPublicConversationContent(command.*) catch |err| switch (err) {
+        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
-            return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
     return deliverPublicContent(host, fd, location, command.start, command.stream);
@@ -1447,7 +1420,7 @@ fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentL
     fd.setContent(location, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
         fd.deinit();
-        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
     };
 }
 
@@ -1458,15 +1431,15 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
     else
         host.store.actionArguments(command.session.slice(), command.action_id);
     const resolved = reference catch |err| switch (err) {
-        error.ActionNotFound => return respondStatic(host.io, fd, 404, .action_unavailable, "action_not_found"),
+        error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
         else => {
             fenceDispatch(host, phase, err);
-            return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
     const location = host.store.openContent(resolved) catch |err| {
         fenceDispatch(host, phase, err);
-        return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
     };
     fd.setContent(location, 0, true, false) catch {};
 }
@@ -1577,7 +1550,7 @@ const HeaderReader = struct {
 };
 
 fn renderConfigureReply(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     command: *const protocol.ConfigureCommand,
     result: store_module.ConfigureReply,
 ) !void {
@@ -1593,8 +1566,9 @@ fn renderConfigureReply(
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
     inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }) |render| {
+        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
         var response = protocol.ResponseBuffer{};
-        try render(&response, &.{}, .infrastructure_failure);
+        try response.render(render, .{ &Command{}, .infrastructure_failure });
         try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
     }
@@ -1695,7 +1669,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
                     else => {},
                 }
                 var response: protocol.ResponseBuffer = .{};
-                try render(&response, &command, result);
+                try response.render(render, .{ &command, result });
                 const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
                 const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
                 try std.testing.expectEqual(status, decoded.status);
@@ -1725,7 +1699,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
             idle.accepted.selection.selected_turn_id = null;
             idle.accepted.completion = .completed;
             var response: protocol.ResponseBuffer = .{};
-            try render(&response, &command, idle);
+            try response.render(render, .{ &command, idle });
             const answer = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, session, target).answer;
             try std.testing.expectEqual(@as(?u64, null), answer.result.accepted.session_stop.turn);
             try std.testing.expectEqual(.completed, answer.result.accepted.session_stop.completion);
@@ -1735,7 +1709,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
 }
 
 fn renderMessageReply(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     command: *const protocol.MessageCommand,
     result: store_module.MessageReply,
 ) !void {
@@ -1754,12 +1728,12 @@ test "initial Message reply binds its allocated Session and original input befor
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
-    try renderMessageReply(&response, &.{ .configuration = .{} }, .{ .accepted = .{
+    try response.render(renderMessageReply, .{ &protocol.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
         .session = allocated,
-    } });
+    } } });
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = content.length, .digest = content.digest, .creates_session = true } };
     const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target);
     try std.testing.expect(reply.isAccepted());
@@ -1772,16 +1746,16 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", changed).answer);
     response = .{};
     try allocated.set("BAD-ID");
-    try renderMessageReply(&response, &.{ .configuration = .{} }, .{ .accepted = .{
+    try response.render(renderMessageReply, .{ &protocol.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
         .session = allocated,
-    } });
+    } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
 }
 
-fn renderConversationPage(response: *protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes), page: *const store_module.PublicConversationPage) !void {
+fn renderConversationPage(response: protocol.JsonOut, page: *const store_module.PublicConversationPage) !void {
     const shapes = protocol.conversation_page_reply;
     try response.appendShape(shapes.head, .{page.end});
     for (page.items[0..page.count], 0..) |item, index| {
@@ -1802,7 +1776,7 @@ fn renderConversationPage(response: *protocol.FixedJsonBuffer(protocol.max_conve
     } else try response.appendShape(shapes.last, .{});
 }
 
-fn renderProposalPage(response: *protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes), page: *const store_module.ProposalPage) !void {
+fn renderProposalPage(response: protocol.JsonOut, page: *const store_module.ProposalPage) !void {
     const shapes = protocol.proposal_page_reply;
     try response.appendShape(shapes.head, .{page.end});
     for (page.items[0..page.count], 0..) |item, index| {
@@ -1818,7 +1792,7 @@ fn renderProposalPage(response: *protocol.FixedJsonBuffer(protocol.max_proposal_
 }
 
 fn renderSessionStopReply(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     command: *const protocol.SessionStopCommand,
     result: store_module.SessionStopReply,
 ) !void {
@@ -1833,7 +1807,7 @@ fn renderSessionStopReply(
 }
 
 fn renderModelInterruptionReply(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     command: *const protocol.ModelInterruptionCommand,
     result: store_module.ModelInterruptionReply,
 ) !void {
@@ -1848,7 +1822,7 @@ fn renderModelInterruptionReply(
 }
 
 fn renderPermissionDecisionReply(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     command: *const protocol.PermissionDecisionCommand,
     result: store_module.PermissionDecisionReply,
 ) !void {
@@ -1863,7 +1837,7 @@ fn renderPermissionDecisionReply(
 }
 
 fn renderCommandObservation(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     key: []const u8,
     observation: store_module.CommandObservation,
 ) !void {
@@ -1904,7 +1878,7 @@ fn renderCommandObservation(
 }
 
 fn renderHostInfo(
-    response: *protocol.ResponseBuffer,
+    response: protocol.JsonOut,
     store: []const u8,
     instance: protocol.InstanceId,
     active_capacity: u64,
@@ -1918,28 +1892,20 @@ fn renderHostInfo(
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
     try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, model, managed_authentication });
-    std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
 }
 
 /// Nothing changed since the token: it comes back, with no rows.
-fn renderSessionsNotModified(response: *protocol.ResponseBuffer, since: protocol.SinceToken) !void {
+fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
 }
 
-fn renderStatic(response: *protocol.ResponseBuffer, kind: protocol.ErrorType, code: []const u8) !void {
+fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
     try response.appendShape(protocol.error_reply, .{ kind, code });
 }
 
-fn respondStatic(io: std.Io, reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
-    var response: protocol.ResponseBuffer = .{};
-    renderStatic(&response, kind, code) catch return;
-    deliverResponse(io, reply, status, response.slice());
-}
-
-fn deliverResponse(_: std.Io, reply: *Reply, status: u16, body: []const u8) void {
-    // Allocation failure cannot revoke an already saved semantic answer.
-    reply.setJson(status, body) catch {};
+fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
+    reply.json(status, protocol.max_control_error_response_bytes, renderStatic, .{ kind, code }) catch {};
 }
 
 // A reply retains its reader, not a handler stack or a complete content copy.
@@ -2011,11 +1977,23 @@ const Reply = struct {
         self.renew();
     }
 
-    fn setJson(self: *Reply, status: u16, bytes: []const u8) !void {
+    /// Renders one JSON body straight into heap storage reserved at the
+    /// renderer's proven bound. The reservation writes none of its bytes, so
+    /// only rendered pages become resident, and the body then shrinks to its
+    /// exact length. Allocation failure leaves no body and the exchange
+    /// retires unanswered: it cannot revoke an already saved semantic answer.
+    /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
+    fn json(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
         std.debug.assert(self.body == .none);
-        self.body = .{ .json = try self.allocator.dupe(u8, bytes) };
+        var body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
+        defer body.deinit();
+        try @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args);
+        if (body.written().len > max_bytes) return error.BufferTooLarge;
+        const bytes = body.toOwnedSlice() catch return;
+        self.body = .{ .json = bytes };
         self.end = bytes.len;
-        try self.prepareHeader(status, "application/json", bytes.len);
+        // A JSON header fits its buffer for every status and length.
+        self.prepareHeader(status, "application/json", bytes.len) catch unreachable;
     }
 
     /// Moves a report, including its scratch charge, into delivery custody.
@@ -2144,7 +2122,7 @@ fn httpReason(status: u16) []const u8 {
 fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
     var reply = Reply{ .io = io, .allocator = std.testing.allocator, .absolute_deadline = deadline };
     defer reply.deinit();
-    try reply.setJson(status, body);
+    try reply.json(status, 64 * 1024, protocol.JsonOut.append, .{body});
     try reply.deliver(fd);
 }
 
@@ -2511,7 +2489,7 @@ test "delayed control replies retain command identity after request storage reus
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
         defer _ = std.c.close(sockets[0]);
         defer _ = std.c.close(sockets[1]);
-        try reply.setJson(200, "{\"accepted\":true}");
+        try reply.json(200, protocol.max_response_bytes, protocol.JsonOut.append, .{"{\"accepted\":true}"});
         try reply.deliver(sockets[0]);
         var bytes: [TestObservation.record_bytes]u8 = undefined;
         const length = native.read(descriptors[0], &bytes, bytes.len);
@@ -2533,7 +2511,7 @@ test "message observation renders every closed queue state without fabricated re
     const Expect = struct {
         fn rendered(observation: store_module.CommandObservation, expected: []const u8) !void {
             var response: protocol.ResponseBuffer = .{};
-            try renderCommandObservation(&response, "k", observation);
+            try response.render(renderCommandObservation, .{ "k", observation });
             try std.testing.expectEqualStrings(expected, response.slice());
         }
     };
@@ -2610,7 +2588,7 @@ test "Message observation progress fits the resident response bound with escaped
         .progress = .{ .status = .waiting_for_permission, .action_id = std.math.maxInt(u64) },
     };
     var response: protocol.ResponseBuffer = .{};
-    try renderCommandObservation(&response, &escaped_key, observation);
+    try response.render(renderCommandObservation, .{ &escaped_key, observation });
     try std.testing.expect(response.len <= protocol.command_observation_reply.maxBytes(.message));
 }
 
@@ -2641,7 +2619,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try renderSessionStopReply(&response, command, result);
+            try response.render(renderSessionStopReply, .{ command, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -2651,7 +2629,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try renderModelInterruptionReply(&response, command, result);
+            try response.render(renderModelInterruptionReply, .{ command, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -2661,7 +2639,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try renderCommandObservation(&response, key, observation);
+            try response.render(renderCommandObservation, .{ key, observation });
             try std.testing.expectEqual(expected, response.len);
         }
     };
@@ -2675,14 +2653,14 @@ test "control response variants fit exact worst-case JSON bounds" {
         .completion = .completed,
     } }, protocol.shapeBytes(protocol.session_stop_reply.accepted));
     var pending_response: protocol.ResponseBuffer = .{};
-    try renderSessionStopReply(&pending_response, &stop_command, .{ .accepted = .{
+    try pending_response.render(renderSessionStopReply, .{ &stop_command, store_module.SessionStopReply{ .accepted = .{
         .replayed = false,
         .selection = .{
             .selected_turn_id = std.math.maxInt(u64),
             .admission_cutoff = std.math.maxInt(u64),
         },
         .completion = .pending,
-    } });
+    } } });
     try std.testing.expect(std.mem.endsWith(
         u8,
         pending_response.slice(),
@@ -2777,7 +2755,7 @@ test "an unchanged listing echoes its token with no rows, as a client reads it" 
     const io = std.testing.io;
     const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
     var response: protocol.ResponseBuffer = .{};
-    try renderSessionsNotModified(&response, since);
+    try response.render(renderSessionsNotModified, .{since});
     try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2818,7 +2796,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             var bytes: usize = 0;
             inline for (results) |result| {
                 var response: protocol.ResponseBuffer = .{};
-                try render(&response, command, result);
+                try response.render(render, .{ command, result });
                 bytes = @max(bytes, response.len);
             }
             return bytes;
@@ -2826,7 +2804,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
         fn observation(key: []const u8, value: store_module.CommandObservation) !usize {
             var response: protocol.ResponseBuffer = .{};
-            try renderCommandObservation(&response, key, value);
+            try response.render(renderCommandObservation, .{ key, value });
             return response.len;
         }
     };
@@ -2872,11 +2850,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     }));
 
     var failure: protocol.ResponseBuffer = .{};
-    try renderStatic(&failure, Worst.tag(protocol.ErrorType), &escaped_code);
+    try failure.render(renderStatic, .{ Worst.tag(protocol.ErrorType), &escaped_code });
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try renderHostInfo(&host_info, &escaped_store, @splat(0xff), max, max, max, max, max, false, false);
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, false });
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -2940,7 +2918,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .sender = if (kind == .user) .{ .session = session } else null,
         };
         var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
-        try renderConversationPage(&response, &page);
+        try response.render(renderConversationPage, .{&page});
         longest_conversation = @max(longest_conversation, response.len);
     }
     try std.testing.expectEqual(protocol.max_conversation_page_response_bytes, longest_conversation);
@@ -2956,7 +2934,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .fields = @splat(.{ .length = max, .digest = content.digest }),
     };
     var proposal_response: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{};
-    try renderProposalPage(&proposal_response, &proposals);
+    try proposal_response.render(renderProposalPage, .{&proposals});
     try std.testing.expectEqual(protocol.max_proposal_page_response_bytes, proposal_response.len);
 
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
