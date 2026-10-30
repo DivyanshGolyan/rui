@@ -145,7 +145,8 @@ action_summary: View.ActionSummary = .{},
 // A frontend-owned change the next frame must show: input, notices, status,
 // live text or scrolling. The Screen's own changes make it stale() instead.
 dirty: bool = true,
-detached: bool = false,
+/// How the person is leaving, once they asked to.
+leaving: ?Outcome = null,
 notice: ?[]const u8 = null,
 notice_buffer: [1536]u8 = undefined,
 
@@ -171,8 +172,9 @@ fn launch(self: *Self, job: Job, worker: Task.Run) !void {
 }
 
 /// How the frontend stopped. Either way it stopped only its own client waits;
-/// Host work it started continues.
-pub const Outcome = enum { detached, interrupted };
+/// Host work it started continues. `returned` goes back to the overview that
+/// lent the terminal, which stays begun.
+pub const Outcome = enum { detached, interrupted, returned };
 
 /// Draws the Session on a lent terminal until the person leaves or the caller's
 /// `interrupted` stops. Returns with the terminal still begun and the reader,
@@ -189,10 +191,24 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
     defer self.stop();
     self.driveActive() catch |err| switch (err) {
         // A pumped write reports a detach as an interruption too.
-        error.InteractiveInterrupted => return if (interrupted.stopped.load(.acquire)) .interrupted else .detached,
+        error.InteractiveInterrupted => return if (interrupted.stopped.load(.acquire)) .interrupted else self.leaving orelse .detached,
         else => return err,
     };
-    return .detached;
+    return self.leaving orelse .detached;
+}
+
+/// After `run` returned `returned`, which Esc only asks for: settles the
+/// stopped borrowers as `leave` does, while the terminal stays lent. Esc
+/// needs no running command and no unresolved submission, so they observe
+/// their stop within one transport poll. Null goes back to the overview;
+/// a failure or recovery to show is instead the ending of a normal `leave`.
+pub fn back(self: *Self) ?(anyerror!Outcome) {
+    std.debug.assert(self.leaving == .returned);
+    const plan = departure.exit(self.settle({}), null, self.submission.view() != null);
+    if (plan.failure) |err| return err;
+    if (plan.recovery_before_notice or self.reading.pending_diagnostic != null) return .detached;
+    self.submission.close();
+    return null;
 }
 
 /// What the restored screen shows after `leave`.
@@ -420,7 +436,7 @@ fn requestHistory(self: *Self, history: History) void {
 /// queues for the reader.
 fn slashCommand(self: *Self, text: []const u8) void {
     switch (parse(text)) {
-        .exit => self.detached = true,
+        .exit => self.leaving = .detached,
         .history => |history| self.requestHistory(history),
         .inspection => self.input.queueCommand(text),
         .discard => {
@@ -521,6 +537,29 @@ test "frontend consumed canonical reader and admission failures survive external
     }
 }
 
+test "Esc goes back to the overview only when the joined reader leaves nothing to show" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *Task) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.CanonicalStoreFailure;
+        }
+    };
+    for ([_]struct { Task.Run, ?anyerror }{ .{ Worker.read, null }, .{ Worker.fail, error.CanonicalStoreFailure } }) |case| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        // The reader is still running as Esc returns.
+        try self.reader.start(std.testing.io, &self, case[0]);
+        self.stop();
+        const failure: ?anyerror = if (self.back()) |ending| if (ending) |_| error.TestUnexpectedResult else |err| err else null;
+        try std.testing.expectEqual(case[1], failure);
+    }
+}
+
 test "frontend cleanup joins both borrowers before reporting restoration failure" {
     const Worker = struct {
         fn read(_: *anyopaque, task: *Task) !void {
@@ -552,7 +591,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
 }
 
 fn driveActive(self: *Self) !void {
-    while (!self.detached) {
+    while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
@@ -643,9 +682,9 @@ fn driveActive(self: *Self) !void {
         // that frame, draw its replacement before reading further input.
         for (0..1024) |_| {
             if (try self.step(0) != .byte) break;
-            if (self.detached or self.terminal.screen.stale()) break;
+            if (self.leaving != null or self.terminal.screen.stale()) break;
         }
-        if (self.detached) break;
+        if (self.leaving != null) break;
         // Finish chat paste/UTF-8 under its original decoder before consent.
         if (self.reader.thread == null and self.reading.prepared_action != null and self.input.pending() == .none) {
             // Preparation is complete and the file remains immutable through
@@ -677,10 +716,10 @@ fn draw(self: *Self) !bool {
             service = try self.step(0);
             if (service != .byte) break;
             service = .budget_exhausted;
-            if (self.detached) break;
+            if (self.leaving != null) break;
         }
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.detached) return true;
+        if (self.leaving != null) return true;
         if (self.consentReceipt(service)) try Editor.testChoiceReady(self.init.io);
     }
     return false;
@@ -835,7 +874,7 @@ test "the composer status shows only live work, not an ending the transcript alr
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
-    if (self.detached or self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+    if (self.leaving != null or self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
 }
 
 fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
@@ -884,6 +923,21 @@ fn navigation(self: *Self, event: Editor.Event) !void {
         .latest, .close_view => {
             // Leaving also abandons a Message page not yet shown.
             self.dropMessageRequest();
+            if (event == .close_view and self.settledView()) {
+                if (self.submission.view()) |submission| {
+                    self.notice = switch (submission.state) {
+                        .rejected => "Esc returns to the overview once /discard clears the rejected original.",
+                        .submitting => "Esc returns to the overview once the original is confirmed.",
+                        .not_started, .unconfirmed => "Esc returns to the overview once Ctrl-R retries the original.",
+                    };
+                } else if (self.input.composition().bytes.len == 0) {
+                    self.leaving = .returned;
+                    return;
+                } else {
+                    // No draft outlives the frontend, so leaving would lose it.
+                    self.notice = "Esc returns to the overview once the draft is empty.";
+                }
+            }
             if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
         },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
@@ -896,6 +950,14 @@ fn navigation(self: *Self, event: Editor.Event) !void {
         else => return,
     }
     self.dirty = true;
+}
+
+/// The latest view with nothing to dismiss: no Action, sub-view or command.
+/// Esc leaves it once no submission or draft would be lost.
+fn settledView(self: *const Self) bool {
+    const screen = self.terminal.screen;
+    return screen.view == .live and screen.action_view == null and self.live.work.first_action == null and
+        self.reading.prepared_action == null and !self.commandActive();
 }
 
 const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
@@ -1024,7 +1086,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 screen.restartChoice();
             }
             try self.draftEvent(decoded);
-            if (self.detached) screen.interruptConsent();
+            if (self.leaving != null) screen.interruptConsent();
         },
     }
 }
@@ -1037,7 +1099,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         // Discard text; the stream keeps any fragmented sequence.
         if (event == .interrupt or event == .eof) {
             screen.interruptConsent();
-            self.detached = true;
+            self.leaving = .detached;
         }
         try self.navigation(event);
         switch (event) {
@@ -1084,7 +1146,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         },
         .interrupt, .eof => {
             screen.interruptConsent();
-            self.detached = true;
+            self.leaving = .detached;
         },
         else => {},
     }
@@ -1123,7 +1185,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => try self.navigation(event),
-            .interrupt, .eof => self.detached = true,
+            .interrupt, .eof => self.leaving = .detached,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .unbound => self.notice = "! Key combination not recognized; ignored. Draft unchanged.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
@@ -1767,7 +1829,7 @@ test "each source admits a slash command while another is active as it always di
         try Keys.send(self, "\r");
         try std.testing.expectEqualStrings(text, self.input.composition().bytes);
         try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.notice.?);
-        try std.testing.expect(!self.detached);
+        try std.testing.expect(self.leaving == null);
         try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
         self.input.clear();
     }
@@ -1787,7 +1849,58 @@ test "each source admits a slash command while another is active as it always di
     self.choiceCommand("/details");
     try std.testing.expectEqual(@as(?History, .latest), self.transcript.history_requested);
     self.choiceCommand("/exit");
-    try std.testing.expect(self.detached);
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+}
+
+test "Esc at the latest view returns to the overview only with nothing to lose or dismiss" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Keys = struct {
+        fn send(frontend: *Self, bytes: []const u8) !void {
+            for (bytes) |byte| {
+                var decoded = frontend.input.stream.feed(byte, 0);
+                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
+            }
+        }
+    };
+    // No draft outlives the frontend: Esc keeps it and says why.
+    try Keys.send(self, "draft\x07");
+    try std.testing.expect(self.leaving == null);
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+    self.input.clear();
+    // An unresolved submission keeps the conversation open and says what
+    // resolves it.
+    self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
+    defer self.submission.intent = null;
+    for ([_]struct { Submission.State, []const u8 }{
+        .{ .rejected, "Esc returns to the overview once /discard clears the rejected original." },
+        .{ .unconfirmed, "Esc returns to the overview once Ctrl-R retries the original." },
+    }) |case| {
+        self.submission.state = case[0];
+        self.notice = null;
+        try Keys.send(self, "\x07");
+        try std.testing.expect(self.leaving == null);
+        try std.testing.expectEqualStrings(case[1], self.notice.?);
+    }
+    self.submission.intent = null;
+    self.submission.state = .not_started;
+    // A running command keeps the conversation open.
+    self.inspection.command_running = true;
+    try Keys.send(self, "\x07");
+    try std.testing.expect(self.leaving == null);
+    self.inspection.command_running = false;
+    // A pending Action: Esc returns to it, not to the overview.
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    try Keys.send(self, "\x07");
+    try std.testing.expect(self.leaving == null);
+    held.screen.withdrawAction();
+    self.live.work.first_action = null;
+    // Ctrl-G stands for Esc and Alt-Esc, which close_view joins.
+    try Keys.send(self, "\x07");
+    try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
 test "a held ready choice decides nothing after a command queued in the same frame" {

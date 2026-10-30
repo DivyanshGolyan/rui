@@ -35,13 +35,13 @@ You can edit and paste multiline text at the prompt. There is no input history o
 
 The conversation uses the full terminal screen. When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
-Scroll with PgUp, PgDn, the arrow keys or the mouse wheel. Keep scrolling up to read older conversation. Esc returns to the latest messages.
+Scroll with PgUp, PgDn, the arrow keys or the mouse wheel. Keep scrolling up to read older conversation. Esc returns to the latest messages, and from there to the overview.
 
 Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup. If that happens, run your terminal's reset command.
 
 ## Sessions
 
-Rui calls a saved conversation a **Session**. Bare `rui` always creates a new Session in the current directory. When you leave, Rui prints the exact command that resumes it.
+Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of every Session in this Store; each row shows its project. Type in its composer to start a new Session; Enter on a row opens one, and Esc returns. Ctrl-X stops the selected Session, and Ctrl-D leaves. `rui session resume` still opens one Session directly, inside the overview.
 
 ```sh
 rui session resume SESSION_REF     # an exact Session

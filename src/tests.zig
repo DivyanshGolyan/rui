@@ -39,6 +39,7 @@ test {
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
     _ = @import("SessionFrontend.zig");
+    _ = @import("Overview.zig");
     _ = @import("session_reads.zig");
     _ = @import("SessionTerminal.zig");
     _ = @import("SessionScreen.zig");

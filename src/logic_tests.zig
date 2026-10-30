@@ -127,7 +127,8 @@ test "the overview core reads session list pages as the client decodes them" {
 
     // A changed listing whose next page is full starts over as that full
     // listing: the core keeps only the full listing's rows and token.
-    var state = try overview_view.State.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
+    var state: overview_view.State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/home/d/code/rui", .home = "/home/d" });
     defer state.deinit();
     _ = try overview_view.step(&state, .{ .tick = 1_792_925_500_000 });
     _ = try overview_view.step(&state, .{ .list = .{ .page = read } });
@@ -245,7 +246,8 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
     var render_allocations: usize = 0;
     for (0..runs) |run| {
         var counting: CountingAllocator = .{ .child = std.heap.smp_allocator };
-        var state = try overview_view.State.init(counting.allocator(), .{ .cwd = "/home/d/code/project-0", .home = "/home/d" });
+        var state: overview_view.State = undefined;
+        try state.init(counting.allocator(), .{ .cwd = "/home/d/code/project-0", .home = "/home/d" });
         defer state.deinit();
         _ = try overview_view.step(&state, .{ .tick = now_s * 1000 });
         benchmarkRows(rows, now_s, 0);

@@ -90,7 +90,8 @@ pub fn finish(self: *Self) !void {
 }
 
 /// Optional exit notice cannot hold a restored caller on stdout backpressure.
-pub fn detached(self: *Self, store: []const u8, session: []const u8, action: ?u64) !void {
+/// Without a Session it names the overview instead.
+pub fn detached(self: *Self, store: []const u8, session: ?[]const u8, action: ?u64) !void {
     return self.detachedWithOps(store, session, action, NativeNoticeOps{});
 }
 
@@ -103,12 +104,18 @@ const NativeNoticeOps = struct {
     }
 };
 
-fn detachedWithOps(self: *Self, store: []const u8, session: []const u8, action: ?u64, ops: anytype) !void {
+fn detachedWithOps(self: *Self, store: []const u8, opened: ?[]const u8, action: ?u64, ops: anytype) !void {
     std.debug.assert(!self.active);
     // Resume plus three exact pending-Action commands; one bounded nonblocking
     // write after restoration. No Action means the original inline bytes.
     var buffer: [4 * (4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128)]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
+    const session = opened orelse {
+        try notice.writeAll("\nDetached. Host work continues.\nOverview: rui --store ");
+        try Text.writeShellWord(&notice, store);
+        try notice.writeAll("\n");
+        return self.noticeWithOps(notice.buffered(), ops);
+    };
     try notice.writeAll("\nDetached. Host work continues.\nResume: rui session resume --store ");
     try Text.writeShellWord(&notice, store);
     try Text.writeShellSession(&notice, session, true);
@@ -192,6 +199,9 @@ test "detached notice restores flags and requires one complete nonblocking write
     }
     var output: Output = .{ .enable_failed = false, .restore_failed = false, .delivery = .full };
     var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .screen = undefined, .active = false };
+    // Leaving the overview names the overview, not a Session.
+    try terminal.detachedWithOps("/tmp/store", null, null, &output);
+    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nOverview: rui --store $'/tmp/store'\n", output.bytes[0..output.len]);
     try terminal.detachedWithOps("/tmp/store", "09azvw", 913, &output);
     try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/store' 09azvw\n" ++
         "Pending Action: inspect the complete proposal before deciding.\n" ++
@@ -224,7 +234,9 @@ pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
     return .{ .byte = byte[0], .at = std.Io.Clock.awake.now(io).nanoseconds };
 }
 
-fn write(self: *Self, bytes: []const u8) !void {
+/// Writes all of `bytes`. On a full terminal the pump runs, if the borrower
+/// set one; otherwise the write fails.
+pub fn write(self: *Self, bytes: []const u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         const n = std.c.write(self.output, bytes[offset..].ptr, bytes.len - offset);

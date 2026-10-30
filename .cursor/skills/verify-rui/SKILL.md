@@ -33,17 +33,20 @@ The helper is `scripts/verify-rui`. Set `V=.cursor/skills/verify-rui/scripts/ver
    This prints the evidence root `~/.cache/verify-rui/runs/ID`. Scratch lives at `/private/tmp/vr.*` because Unix socket paths are short, and contains `home/` (with synthetic Codex credentials), `store/`, `project/` and `tmux.sock`. The run then:
    - starts the fixture provider and `rui host serve --store STORE --provider-endpoint FIXTURE`;
    - waits for `host status` to report `ready`;
-   - configures Session `demo` (bypass) and Session `approve` (ask);
+   - starts Session `demo` (bypass) and Session `approve` (ask), each labelled with its name, and records their IDs in `run.json` under `sessions`;
    - seeds N answered messages into `demo`. Use `--seed 3` or more when you need PgUp history.
+
+   `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
 
    Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below).
 
 3. **Open a terminal: one Rui client per name.**
 
    ```sh
-   $V term "$RUN" NAME --surface pty|tmux-detached|tmux-attached [--session demo|approve] [--size 80x24]
+   $V term "$RUN" NAME --surface pty|tmux-detached|tmux-attached [--session demo|approve|overview] [--size 80x24]
    ```
 
+   - `--session demo` or `approve` opens that Session with `rui session resume ID`, inside the overview, so Esc returns to it. `--session overview` runs bare `rui --store STORE` in the project directory: the overview of every Session.
    - `pty`: headless PTY. Input arrives through `send` into a FIFO.
    - `tmux-detached`: Rui in a window of the run's private tmux server, with no client attached.
    - `tmux-attached`: the same, plus an owned tmux client attached through its own recorded PTY, recorded as terminal `NAME.client`.
@@ -86,7 +89,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 | Replay input | `$V replay "$RUN" SRC NEW [--from-run OTHER] [--skip-reports]` (re-feeds SRC's received bytes, with original gaps, into a new PTY) |
 | Physical terminal | `$V physical FULLSHA` (guided, auto-graded L4 session for a present human; `--smoke` launch check, `--rehearse` tooling check). `$V gui "$RUN" NAME --open` attaches Terminal.app to one tmux window by hand |
 
-`wait` matches committed frames only. A committed frame is the cells at a synchronized-update close, decoded by the repo's `tests/integration/terminal_screen.ScreenCapture`. Raw-byte markers are not evidence. Always pass `--after GEN` from the previous step, so the match is a new frame and not history. `--composer` additionally requires the cursor to sit on the `› ` prompt row.
+`wait` matches committed frames only. A committed frame is the cells at a synchronized-update close, decoded by the repo's `tests/integration/terminal_screen.ScreenCapture`. Raw-byte markers are not evidence. Always pass `--after GEN` from the previous step, so the match is a new frame and not history. `--composer` additionally requires the cursor to sit on the `› ` prompt row, or on the overview's composer row.
 
 Stable handles from the product:
 - `›`: the composer prompt.
@@ -101,6 +104,7 @@ Fixture policy, chosen by the latest user text:
 - `tool demonstration`: three Bash calls (`ls`, `exit 127`, stderr plus `exit 1`), then a summary.
 - `consent check`: one 32-line Bash command, which needs consent in `approve`.
 - `slow`: the answer streams for about 10 s.
+- `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.
 - Anything else: an echo.
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.
