@@ -301,7 +301,59 @@ pub const Requests = struct {
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
     }
+
+    /// The first line of a Message admission row (ordinal 0), read into
+    /// `buffer`, whose length is the limit. Closing the connection early ends
+    /// the Host's exchange as an ordinary disconnect. The bytes are
+    /// unverified, because the digest is checked only at EOF: show them as a
+    /// hint, never store, compare or address by them.
+    pub fn readActivityPrefix(self: Requests, store_path: []const u8, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, 0 });
+        const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
+        defer closeSocket(self.io, fd);
+        return readFirstLine(self, fd, buffer);
+    }
 };
+
+/// Returns at the first line break, or once `buffer` is full, without reading
+/// the rest of the content.
+fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
+    if (head.status != 200) {
+        if (head.kind != .command_json) return error.InvalidResponse;
+        var reply_buffer: ReplyBuffer = .{};
+        return .{ .failure = try protocol_reply.decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, null), false) };
+    }
+    if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
+    const wanted: usize = @intCast(@min(head.content_length, buffer.len));
+    var filled: usize = 0;
+    const line = while (filled != wanted) {
+        const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
+        if (count == 0) return error.TruncatedResponse;
+        if (std.mem.indexOfScalar(u8, buffer[filled..][0..count], '\n')) |index| break buffer[0 .. filled + index];
+        filled += count;
+    } else if (wanted < head.content_length) wholeScalars(buffer[0..wanted]) else buffer[0..wanted];
+    const text = std.mem.trimEnd(u8, line, "\r");
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidResponse;
+    return .{ .line = text };
+}
+
+/// Drops a scalar the limit cut, so the line ends on a whole character.
+fn wholeScalars(bytes: []const u8) []const u8 {
+    var start = bytes.len;
+    while (start != 0 and bytes.len - start < 4) {
+        start -= 1;
+        if (bytes[start] & 0xc0 != 0x80) break;
+    }
+    if (start == bytes.len) return bytes;
+    const length = std.unicode.utf8ByteSequenceLength(bytes[start]) catch return bytes;
+    return if (start + length > bytes.len) bytes[0..start] else bytes;
+}
 
 fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
     const head = try readResponseHeadUntil(requests, fd, .{}, null);
@@ -3070,6 +3122,101 @@ test "Session list client streams a page larger than the resident reply buffer" 
     }
     try std.testing.expectEqual(@as(u64, page_bytes), try destination.length(std.testing.io));
     try std.testing.expectEqual(@as(usize, 0), reply_buffer.len);
+}
+
+fn writeContentTestHead(fd: std.posix.fd_t, length: u64) !void {
+    var buffer: [256]u8 = undefined;
+    try writeAll(fd, try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, length, length }));
+}
+
+test "a first-line read returns the text before the first line break, within the limit" {
+    const letters = struct {
+        fn of(comptime count: usize) [count]u8 {
+            return @splat('a');
+        }
+    }.of;
+    const cases = comptime [_]struct { content: []const u8, line: []const u8 }{
+        .{ .content = "Fix the flaky resize test", .line = "Fix the flaky resize test" },
+        .{ .content = "Fix the flaky resize test\nIt fails one run in ten.\n", .line = "Fix the flaky resize test" },
+        .{ .content = "Fix the flaky resize test\r\nIt fails one run in ten.\r\n", .line = "Fix the flaky resize test" },
+        .{ .content = " \t ", .line = " \t " },
+        .{ .content = " \t \r\n\n ", .line = " \t " },
+        .{ .content = "", .line = "" },
+        .{ .content = &letters(5000), .line = &letters(4096) },
+        .{ .content = letters(4094) ++ "中", .line = &letters(4094) },
+        .{ .content = letters(4093) ++ "🙂z", .line = &letters(4093) },
+        .{ .content = letters(4093) ++ "中z", .line = letters(4093) ++ "中" },
+        .{ .content = letters(4095) ++ "\r\n", .line = &letters(4095) },
+    };
+    for (cases) |case| {
+        const descriptors = try testPipe();
+        defer closeTestDescriptor(descriptors[0]);
+        {
+            defer closeTestDescriptor(descriptors[1]);
+            try writeContentTestHead(descriptors[1], case.content.len);
+            try writeAll(descriptors[1], case.content);
+        }
+        var buffer: [4096]u8 = undefined;
+        const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], &buffer);
+        try std.testing.expectEqualStrings(case.line, reply.line);
+    }
+}
+
+test "a first-line read of a 1 MiB Message returns after the first line, before the Host finishes sending" {
+    const sockets = try socketPair();
+    const capacity: c_int = 64 * 1024;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.setsockopt(sockets[1], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &capacity, @sizeOf(c_int)));
+    const Host = struct {
+        fd: std.posix.fd_t,
+        sent: u64 = 0,
+        failure: ?anyerror = null,
+
+        fn send(self: *@This()) void {
+            const length = 1024 * 1024;
+            writeContentTestHead(self.fd, length) catch |err| {
+                self.failure = err;
+                return;
+            };
+            var window: [protocol.content_window_bytes]u8 = @splat('x');
+            @memcpy(window[0..23], "Review the release plan");
+            window[23] = '\n';
+            while (self.sent < length) {
+                writeAll(self.fd, &window) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+                self.sent += window.len;
+                window = @splat('x');
+            }
+        }
+    };
+    var host = Host{ .fd = sockets[1] };
+    const thread = try std.Thread.spawn(.{}, Host.send, .{&host});
+    defer closeTestDescriptor(sockets[1]);
+    var buffer: [4096]u8 = undefined;
+    const reply = readFirstLine(.{ .io = std.testing.io }, sockets[0], &buffer);
+    closeTestDescriptor(sockets[0]);
+    thread.join();
+    try std.testing.expectEqualStrings("Review the release plan", (try reply).line);
+    try std.testing.expect(host.failure != null);
+    try std.testing.expect(host.sent < 1024 * 1024);
+}
+
+test "a first-line read returns the Host's refusal" {
+    const descriptors = try testPipe();
+    defer closeTestDescriptor(descriptors[0]);
+    var body: protocol.ResponseBuffer = .{};
+    try body.appendShape(protocol.error_reply, .{ protocol.ErrorType.activity_unavailable, "ContentNotFound" });
+    {
+        defer closeTestDescriptor(descriptors[1]);
+        var head: [256]u8 = undefined;
+        try writeAll(descriptors[1], try std.fmt.bufPrint(&head, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len}));
+        try writeAll(descriptors[1], body.slice());
+    }
+    var buffer: [4096]u8 = undefined;
+    const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], &buffer);
+    try std.testing.expectEqual(@as(u16, 409), reply.failure.status);
+    try std.testing.expect(reply.failure.diagnostic.code.eql("ContentNotFound"));
 }
 
 test "read result returns bounded command errors without touching destination" {

@@ -31,6 +31,12 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.flush();
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "content")) {
         if (try requests.readActivityContent(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), null, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+    } else if (args.len == 5 and std.mem.eql(u8, args[1], "prefix")) {
+        var buffer: [4096]u8 = undefined;
+        switch (try requests.readActivityPrefix(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), &buffer)) {
+            .line => |line| try std.Io.File.stdout().writeStreamingAll(init.io, line),
+            .failure => return error.ActivityUnavailable,
+        }
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "field")) {
         const field = std.meta.stringToEnum(client.ProposalField, args[5]) orelse return error.InvalidArguments;
         if (try requests.readProposalField(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), field, null, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
