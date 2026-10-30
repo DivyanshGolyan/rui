@@ -73,9 +73,6 @@ pub fn outputSchemaRejection(structured: bool, source_length: u64) ?OutputReject
     };
 }
 
-/// Tests' item grammar storage, off their stacks like the Host's.
-var testing_check: Output.ReplayValidationCursor = undefined;
-
 pub fn interpretOutput(
     io: std.Io,
     source: std.Io.File,
@@ -84,11 +81,11 @@ pub fn interpretOutput(
     event_data: *Output.EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
-    check: *Output.ReplayValidationCursor,
+    item_check: *Output.OutputItemCheck,
     faults: Output.Faults,
 ) OutputInterpretation {
     var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, check, faults) catch |err| return .{ .rejected = .{
+    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, item_check, faults) catch |err| return .{ .rejected = .{
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
@@ -221,7 +218,7 @@ test "provider interpretation preserves independently reported model evidence" {
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, &testing_check, .{});
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -285,7 +282,7 @@ test "provider interpretation closes failure variants without granting settlemen
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, &testing_check, .{ .metadata = case.fault });
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -306,7 +303,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, &testing_check, .{});
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{});
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -1179,8 +1176,11 @@ pub const Preparation = struct {
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        // The view moves straight into place: a local copy would add its
-        // ~84 KB to the caller's frame, all resident once probed.
+        // The view moves straight into place: a local copy would add the
+        // whole view to the caller's frame, all of it resident once probed.
+        // It moves only while no item is being read, since the grammar
+        // borrows its own nesting buffer.
+        std.debug.assert(view.itemCheckIdle());
         self.* = .{
             .view = view,
             .route = route,
@@ -1197,8 +1197,8 @@ pub const Preparation = struct {
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.@"provider-request".format(
             &name_buffer,
-            view.binding.operation_id,
-            view.binding.attempt_ordinal,
+            self.view.binding.operation_id,
+            self.view.binding.attempt_ordinal,
         );
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
@@ -1354,7 +1354,7 @@ pub const Preparation = struct {
                     .incompatible => self.continuation_unavailable = true,
                     .compatible => |compatible| if (!self.continuation_unavailable) return .{ .item = .{ .replayed_output = .{
                         .content = self.replay_entry.content.?,
-                        .omit_reasoning_text = compatible.reasoning_text,
+                        .omit_reasoning_text = compatible.omit_reasoning_text,
                     } } },
                 }
             },
@@ -3225,14 +3225,18 @@ test "request preparation resumes large private replay validation before emissio
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 100000);
-            // While the item is judged, nothing of it is emitted.
+            // While the item is judged, nothing of it is emitted, and the
+            // grammar reads no more than the advance charges.
             const judging = preparation.stage == .replay_verdict;
             const written = preparation.writer.offset;
+            const read_before = preparation.view.itemCheckBytes() orelse 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
             if (judging and preparation.stage == .replay_verdict) {
                 validation_turns += 1;
+                const read_after = preparation.view.itemCheckBytes().?;
+                try std.testing.expect(read_after >= read_before and read_after - read_before <= 7);
                 try std.testing.expectEqual(written, preparation.writer.offset);
                 try std.testing.expect(preparation.emission == .none);
                 try preparation.checkIntegrity(binding);
@@ -3452,7 +3456,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, &testing_check, .{})) {
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{})) {
         .accepted => |value| value,
         .rejected => return error.UnexpectedOutputRejection,
     };

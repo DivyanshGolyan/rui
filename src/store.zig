@@ -513,7 +513,7 @@ pub const HistoricalSettings = struct {
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results };
 
 /// How the one output item grammar judged a saved item under today's rules.
-pub const ReplayVerdict = provider_output.ReplayValidationCursor.Verdict;
+pub const ReplayVerdict = provider_output.OutputItemCheck.Verdict;
 
 pub const HistoricalEntry = struct {
     position: u64,
@@ -595,7 +595,7 @@ pub const HistoricalView = struct {
         entry: HistoricalEntry = undefined,
         reader: ?ContentReader = null,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-        validation: provider_output.ReplayValidationCursor = .{},
+        item_check: provider_output.OutputItemCheck = .{},
         /// The last item the grammar finished, kept until the next one starts.
         judged: ?struct { position: u64, verdict: ReplayVerdict } = null,
     };
@@ -675,6 +675,18 @@ pub const HistoricalView = struct {
             error.HistoricalPending => null,
             else => return err,
         };
+    }
+
+    /// Whether no output item is being read, so the view may move.
+    pub fn itemCheckIdle(self: *const HistoricalView) bool {
+        return self.output_check.reader == null and self.output_check.item_check.scanner == null;
+    }
+
+    /// Bytes the grammar has read of the output item being read; null when
+    /// none is.
+    pub fn itemCheckBytes(self: *const HistoricalView) ?u64 {
+        if (self.output_check.reader == null) return null;
+        return self.output_check.item_check.position;
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -5668,7 +5680,7 @@ pub const Store = struct {
                 return destination.len;
             }
         };
-        const judged = check.validation.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
+        const judged = check.item_check.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
             // Canonical items passed this grammar's syntax before acceptance.
             error.SyntaxError,
             error.UnexpectedEndOfInput,
@@ -5682,8 +5694,8 @@ pub const Store = struct {
         const verdict = judged orelse return error.HistoricalPending;
         var entry = check.entry;
         const identity = entry.content.?.item_identity.?;
-        try check.validation.authenticateIdentity(identity.kind, identity.id_digest);
-        if (identity.kind == .function_call) try check.validation.authenticate(identity.call_fields orelse return error.CorruptStore);
+        try check.item_check.authenticateIdentity(identity.kind, identity.id_digest);
+        if (identity.kind == .function_call) try check.item_check.authenticate(identity.call_fields orelse return error.CorruptStore);
         check.reader.?.close();
         check.reader = null;
         check.judged = .{ .position = entry.position, .verdict = verdict };
@@ -11056,14 +11068,15 @@ test "large historical readers and yielded group authentication leave checkpoint
 
 test "historical preparation rejects missing extra and reordered sibling classifications incrementally" {
     for ([_]bool{ false, true }) |covered| {
-        cases: for ([_][:0]const u8{
-            "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99",
-            "DELETE FROM model_tool_call WHERE call_ordinal=1",
-            "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1",
-            "DELETE FROM model_output_item WHERE item_ordinal=1; DELETE FROM model_tool_call WHERE call_ordinal=1",
-            "DELETE FROM model_output_item WHERE operation_id IN (SELECT operation_id FROM model_tool_call); DELETE FROM model_tool_call",
-            "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)",
-            "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
+        // `corrupts_bytes`: the fault breaks bytes the grammar reads, not rows.
+        cases: for ([_]struct { sql: [:0]const u8, corrupts_bytes: bool = false }{
+            .{ .sql = "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99" },
+            .{ .sql = "DELETE FROM model_tool_call WHERE call_ordinal=1" },
+            .{ .sql = "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1" },
+            .{ .sql = "DELETE FROM model_output_item WHERE item_ordinal=1; DELETE FROM model_tool_call WHERE call_ordinal=1" },
+            .{ .sql = "DELETE FROM model_output_item WHERE operation_id IN (SELECT operation_id FROM model_tool_call); DELETE FROM model_tool_call" },
+            .{ .sql = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .corrupts_bytes = true },
+            .{ .sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1", .corrupts_bytes = true },
         }) |fault| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -11085,7 +11098,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try exec(storage.database, fault);
+            try exec(storage.database, fault.sql);
             try exec(storage.database, "PRAGMA foreign_keys=ON");
             var view = try storage.openHistoricalView(next);
             defer view.close();
@@ -11098,7 +11111,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
             // entry is served. A call's bytes are read, and matched with its
             // certified fields, before that call is served: only the user
             // input is served, the first call fences, and no results follow.
-            const bytes_fault = std.mem.indexOf(u8, fault, "payload") != null or std.mem.indexOf(u8, fault, "field_metadata") != null;
+            const bytes_fault = fault.corrupts_bytes;
             var served: ?HistoricalEntry = null;
             while (true) {
                 var bytes: usize = 1;
@@ -11187,9 +11200,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         var event_data = try provider_output.EventData.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
         var rejection: @import("provider_output.zig").Rejection = .{};
-        const check = try std.testing.allocator.create(provider_output.ReplayValidationCursor);
-        defer std.testing.allocator.destroy(check);
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, check, .{});
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, provider_output.testingItemCheck(), .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");

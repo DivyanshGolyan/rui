@@ -761,24 +761,24 @@ const ItemSource = struct {
 };
 
 fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64, answer_hash: *std.crypto.hash.sha2.Sha256) !ItemValidation {
-    const check = response.check;
-    check.* = .{ .operation = response.operation };
+    const item_check = response.item_check;
+    item_check.* = .{ .operation = response.operation };
     var bytes: usize = std.math.maxInt(usize);
     var items: usize = std.math.maxInt(usize);
     // Unbounded allowances finish the item in one call.
-    switch ((try check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
+    switch ((try item_check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
         .compatible => {},
         .incompatible => |reason| return reason,
     }
-    const kind = check.item_kind.?;
-    const id_digest = check.idDigest();
+    const kind = item_check.item_kind.?;
+    const id_digest = item_check.idDigest();
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
         .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest },
         .function_call => {
             const tags = .{ output_format.OutputRecordTag.item_id, .name, .call_id, .arguments };
-            inline for (tags, check.decoded_fields, check.encoded_spans) |tag, decoded, span| {
+            inline for (tags, item_check.decoded_fields, item_check.encoded_spans) |tag, decoded, span| {
                 const encoded = try stringContents(window, item, span);
                 try response.metadata.append(.{
                     .tag = tag,
@@ -793,7 +793,7 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
             return .{ .kind = .function_call, .id_digest = id_digest };
         },
         .message => {
-            var array = try Array.init(window, .{ .start = item.start + check.content_span.start, .length = check.content_span.length });
+            var array = try Array.init(window, .{ .start = item.start + item_check.content_span.start, .length = item_check.content_span.length });
             var non_whitespace = false;
             while (try array.next()) |block| {
                 const block_fields = try readFields(window, block, &.{ "type", "text", "refusal" });
@@ -812,14 +812,14 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
                     .decoded_length = text.decoded_length,
                 });
             }
-            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = check.messagePhase() };
+            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = item_check.messagePhase() };
         },
     }
 }
 
 /// The encoded contents of a top-level string value inside `item`, between
 /// the quotes after its key's colon and its closing quote.
-fn stringContents(window: *Window, item: Range, span: ReplayValidationCursor.Span) !Range {
+fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Range {
     var source = try FileSource.init(window, .{ .start = item.start + span.after_key, .length = span.end - span.after_key });
     try source.expect(':');
     try source.expect('"');
@@ -833,7 +833,7 @@ fn stringContents(window: *Window, item: Range, span: ReplayValidationCursor.Spa
 /// retain only consequential field facts; errors in meaning are deferred
 /// until syntax and the complete source have validated.
 /// Initialize/use in final storage (the scanner borrows its nesting buffer).
-pub const ReplayValidationCursor = struct {
+pub const OutputItemCheck = struct {
     /// Set at import: the Operation the item arrives under, which decides
     /// whether a compaction or a call may appear at all. Replay leaves it
     /// null; an accepted item stays replayable under any later Operation.
@@ -858,14 +858,10 @@ pub const ReplayValidationCursor = struct {
     decoded_fields_seen: u4 = 0,
     /// The kind the item declares, once its type names a known kind.
     item_kind: ?output_format.OutputItemKind = null,
-    /// The read window: its item offset, its length and how much of it the
-    /// scanner has.
-    window_start: u64 = 0,
-    filled: usize = 0,
-    fed: usize = 0,
-    /// Item offsets of the scanner's current input, of the end of the latest
-    /// top-level key, and of each decoded field's encoded value.
-    input_start: u64 = 0,
+    /// The scanner's item offset, through its public diagnostics.
+    diagnostics: std.json.Scanner.Diagnostics = .{},
+    /// Item offsets of the end of the latest top-level key, and of each
+    /// decoded field's encoded value.
     key_end: u64 = 0,
     encoded_spans: [decoded_names.len]Span = undefined,
     /// The item's top-level `content` array, brackets included.
@@ -876,24 +872,50 @@ pub const ReplayValidationCursor = struct {
 
     /// How the grammar judged one complete item.
     pub const Verdict = union(enum) {
-        /// Today's rules accept the item. `reasoning_text`: it is a reasoning
-        /// item whose nonempty `content` holds only reasoning_text blocks,
-        /// private evidence that is never replay input.
-        compatible: struct { reasoning_text: bool },
+        /// Today's rules accept the item. `omit_reasoning_text`: it is a
+        /// reasoning item whose nonempty `content` holds only reasoning_text
+        /// blocks, private evidence that replay leaves out.
+        compatible: struct { omit_reasoning_text: bool },
         /// The first rule the item breaks, named as import reports it.
-        incompatible: anyerror,
+        incompatible: Incompatibility,
+    };
+
+    /// Every rule the grammar can find broken in a syntactically valid item.
+    pub const Incompatibility = error{
+        DuplicateJsonField,
+        MissingProviderField,
+        ExpectedJsonString,
+        ProviderValueTooLong,
+        EmptyProviderIdentity,
+        UnsupportedItemStatus,
+        ContinuationUnavailable,
+        UnexpectedJsonDelimiter,
+        UnsupportedContentBlock,
+        UnsupportedReasoningBlock,
+        UnsupportedItemType,
+        UnsupportedReasoningText,
+        UnsupportedProviderOutput,
+        UnsupportedAsyncCall,
+        InvalidJsonLiteral,
+        UnsupportedCallControl,
+        UnsupportedMessageRole,
+        UnsupportedMessagePhase,
+        MalformedProviderOutput,
+        UnsupportedAnnotation,
+        UnsupportedCaller,
+        UnsupportedMetadataAuthority,
     };
 
     /// Bind every retained item to its admission-certified type and ID.
     /// Compatibility errors are deferred until these canonical facts agree.
-    pub fn authenticateIdentity(self: *const ReplayValidationCursor, kind: output_format.OutputItemKind, id_digest: [32]u8) !void {
+    pub fn authenticateIdentity(self: *const OutputItemCheck, kind: output_format.OutputItemKind, id_digest: [32]u8) !void {
         const actual = try self.frames[0].get("type");
         if (!actual.is(@tagName(kind)) or self.decoded_fields_seen & 1 == 0 or
             !std.mem.eql(u8, &self.decoded_fields[0].digest, &id_digest)) return error.CorruptStore;
     }
 
     /// After a compatible item validates, the digest of its decoded `id`.
-    pub fn idDigest(self: *const ReplayValidationCursor) [32]u8 {
+    pub fn idDigest(self: *const OutputItemCheck) [32]u8 {
         std.debug.assert(self.decoded_fields_seen & 1 != 0);
         return self.decoded_fields[0].digest;
     }
@@ -901,7 +923,7 @@ pub const ReplayValidationCursor = struct {
     /// After advance completes, bind admission-certified fields to the exact
     /// decoded top-level strings. One token hasher and four results suffice;
     /// nested/open fields never acquire per-frame hashes or payload copies.
-    pub fn authenticate(self: *const ReplayValidationCursor, references: anytype) !void {
+    pub fn authenticate(self: *const OutputItemCheck, references: anytype) !void {
         if (self.decoded_fields_seen != 15) return error.CorruptStore;
         for (self.decoded_fields, references) |actual, expected| {
             if (actual.length != expected.length or !std.mem.eql(u8, &actual.digest, &expected.digest))
@@ -910,14 +932,14 @@ pub const ReplayValidationCursor = struct {
     }
 
     // Other kinds leave `content` open, duplicates included.
-    fn replaysReasoningText(self: *const ReplayValidationCursor) bool {
+    fn replaysReasoningText(self: *const OutputItemCheck) bool {
         if (self.item_kind != .reasoning) return false;
         const content = self.frames[0].get("content") catch unreachable;
         return content.shape == .array and content.length != 0;
     }
 
     /// After a compatible message validates, the phase it declares.
-    fn messagePhase(self: *const ReplayValidationCursor) @FieldType(ItemValidation, "phase") {
+    fn messagePhase(self: *const OutputItemCheck) @FieldType(ItemValidation, "phase") {
         const phase = self.frames[0].get("phase") catch unreachable;
         if (phase.is("commentary") or phase.is("partial_answer")) return .commentary;
         if (phase.is("final_answer")) return .final_answer;
@@ -939,12 +961,12 @@ pub const ReplayValidationCursor = struct {
         word: ?usize = null,
         length: u64 = 0,
         duplicate: bool = false,
-        // The first rule broken, in the order import looks fields up: under
-        // every reading, then under each one.
-        failure: ?anyerror = null,
-        output_failure: ?anyerror = null,
-        reasoning_failure: ?anyerror = null,
-        summary_failure: ?anyerror = null,
+        // The first rule broken, in rule order: under every reading, then
+        // under each one.
+        failure: ?Incompatibility = null,
+        output_failure: ?Incompatibility = null,
+        reasoning_failure: ?Incompatibility = null,
+        summary_failure: ?Incompatibility = null,
         /// Whether a field this value's meaning consumes is a duplicate,
         /// under every reading or under each one. Replay reports such
         /// canonical ambiguity before any other failure.
@@ -954,7 +976,7 @@ pub const ReplayValidationCursor = struct {
             return self.shape == .string and self.word != null and std.mem.eql(u8, words[self.word.?], word);
         }
 
-        fn failureAs(self: Value, comptime reading: Reading) ?anyerror {
+        fn failureAs(self: Value, comptime reading: Reading) ?Incompatibility {
             return self.failure orelse @field(self, @tagName(reading) ++ "_failure");
         }
 
@@ -978,13 +1000,13 @@ pub const ReplayValidationCursor = struct {
         fields: [names.len]Value = @splat(.{}),
         aggregate: Value = .{ .shape = .array },
 
-        fn get(self: *const Frame, comptime name: []const u8) !Value {
+        fn get(self: *const Frame, comptime name: []const u8) Incompatibility!Value {
             const value = self.fields[comptime index(name).?];
             if (value.duplicate) return error.DuplicateJsonField;
             return value;
         }
 
-        fn string(self: *const Frame, comptime name: []const u8) !Value {
+        fn string(self: *const Frame, comptime name: []const u8) Incompatibility!Value {
             const value = try self.get(name);
             return switch (value.shape) {
                 .string => value,
@@ -994,22 +1016,22 @@ pub const ReplayValidationCursor = struct {
         }
 
         /// A string compared with known words, readable only when short.
-        fn word(self: *const Frame, comptime name: []const u8) !Value {
+        fn word(self: *const Frame, comptime name: []const u8) Incompatibility!Value {
             const value = try self.string(name);
             if (value.length > max_evidence_bytes) return error.ProviderValueTooLong;
             return value;
         }
 
-        fn identity(self: *const Frame, comptime name: []const u8) !void {
+        fn identity(self: *const Frame, comptime name: []const u8) Incompatibility!void {
             if ((try self.string(name)).length == 0) return error.EmptyProviderIdentity;
         }
 
-        fn completed(self: *const Frame) !void {
+        fn completed(self: *const Frame) Incompatibility!void {
             if ((try self.get("status")).shape == .absent) return;
             if (!(try self.word("status")).is("completed")) return error.UnsupportedItemStatus;
         }
 
-        fn encrypted(self: *const Frame) !void {
+        fn encrypted(self: *const Frame) Incompatibility!void {
             const value = try self.get("encrypted_content");
             switch (value.shape) {
                 .absent => return error.ContinuationUnavailable,
@@ -1020,7 +1042,7 @@ pub const ReplayValidationCursor = struct {
 
         /// A nested array the reading consumes: when present, an array whose
         /// elements all satisfy that reading.
-        fn blocks(self: *const Frame, comptime name: []const u8, comptime reading: Reading) !void {
+        fn blocks(self: *const Frame, comptime name: []const u8, comptime reading: Reading) Incompatibility!void {
             const value = try self.get(name);
             if (value.shape == .absent) return;
             if (value.shape != .array) return error.UnexpectedJsonDelimiter;
@@ -1037,23 +1059,86 @@ pub const ReplayValidationCursor = struct {
             }
             return false;
         }
+    };
 
-        fn outputBlock(self: *const Frame, kind: Value) !void {
-            if (kind.is("refusal")) {
-                _ = try self.string("refusal");
-                return;
-            }
-            if (!kind.is("output_text")) return error.UnsupportedContentBlock;
-            try self.blocks("annotations", .output);
-            _ = try self.string("text");
+    /// The fields one object's rules consume: plain fields, and nested arrays
+    /// read under one reading. `judge` looks up only these, enforced at
+    /// compile time, and `ambiguity` finds a consumed duplicate among them.
+    const Consumed = struct {
+        plain: []const []const u8 = &.{},
+        nested: []const struct { []const u8, Reading } = &.{},
+
+        fn join(comptime a: Consumed, comptime b: Consumed) Consumed {
+            return .{ .plain = a.plain ++ b.plain, .nested = a.nested ++ b.nested };
         }
 
-        // Reasoning blocks retain annotations without interpreting them.
-        fn reasoningBlock(self: *const Frame, kind: Value, comptime expected: []const u8) !void {
-            if (!kind.is(expected)) return error.UnsupportedReasoningBlock;
-            _ = try self.string("text");
+        fn reads(comptime self: Consumed, comptime name: []const u8, comptime reading: ?Reading) bool {
+            if (reading == null) for (self.plain) |field| if (std.mem.eql(u8, field, name)) return true;
+            for (self.nested) |field| if (std.mem.eql(u8, field[0], name) and (reading == null or field[1] == reading.?)) return true;
+            return false;
+        }
+
+        fn duplicateIn(comptime self: Consumed, frame: *const Frame) bool {
+            if (frame.consumesDuplicate(self.plain, null)) return true;
+            inline for (self.nested) |field| if (frame.consumesDuplicate(&.{field[0]}, field[1])) return true;
+            return false;
         }
     };
+
+    const item_fields: Consumed = .{ .plain = &.{ "type", "id", "status", "internal_chat_message_metadata_passthrough" } };
+    fn kindFields(comptime kind: output_format.OutputItemKind) Consumed {
+        return item_fields.join(switch (kind) {
+            .reasoning => .{ .plain = &.{ "text", "encrypted_content" }, .nested = &.{ .{ "summary", .summary }, .{ "content", .reasoning } } },
+            .compaction => .{ .plain = &.{"encrypted_content"} },
+            .function_call => .{ .plain = &.{ "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" } },
+            .message => .{ .plain = &.{ "role", "phase" }, .nested = &.{.{ "content", .output }} },
+        });
+    }
+    const type_fields: Consumed = .{ .plain = &.{"type"} };
+    const refusal_fields: Consumed = .{ .plain = &.{"refusal"} };
+    const output_text_fields: Consumed = .{ .plain = &.{"text"}, .nested = &.{.{ "annotations", .output }} };
+    const text_fields: Consumed = .{ .plain = &.{"text"} };
+    const metadata_fields: Consumed = .{ .plain = &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" } };
+
+    /// A frame's lookups, limited to the fields `consumed` names.
+    fn Rules(comptime consumed: Consumed) type {
+        return struct {
+            frame: *const Frame,
+            const Self = @This();
+
+            fn require(comptime name: []const u8, comptime reading: ?Reading) void {
+                if (!comptime consumed.reads(name, reading)) @compileError("a rule reads " ++ name ++ ", which its fields table does not list");
+            }
+            fn get(self: Self, comptime name: []const u8) Incompatibility!Value {
+                require(name, null);
+                return self.frame.get(name);
+            }
+            fn string(self: Self, comptime name: []const u8) Incompatibility!Value {
+                require(name, null);
+                return self.frame.string(name);
+            }
+            fn word(self: Self, comptime name: []const u8) Incompatibility!Value {
+                require(name, null);
+                return self.frame.word(name);
+            }
+            fn identity(self: Self, comptime name: []const u8) Incompatibility!void {
+                require(name, null);
+                return self.frame.identity(name);
+            }
+            fn completed(self: Self) Incompatibility!void {
+                require("status", null);
+                return self.frame.completed();
+            }
+            fn encrypted(self: Self) Incompatibility!void {
+                require("encrypted_content", null);
+                return self.frame.encrypted();
+            }
+            fn blocks(self: Self, comptime name: []const u8, comptime reading: Reading) Incompatibility!void {
+                require(name, reading);
+                return self.frame.blocks(name, reading);
+            }
+        };
+    }
 
     fn index(name: []const u8) ?usize {
         for (names, 0..) |candidate, i| if (std.mem.eql(u8, candidate, name)) return i;
@@ -1062,41 +1147,14 @@ pub const ReplayValidationCursor = struct {
 
     /// Which decoded field the string being read is, if any: only the item's
     /// own top-level strings are hashed.
-    fn decodedField(self: *const ReplayValidationCursor) ?usize {
+    fn decodedField(self: *const OutputItemCheck) ?usize {
         if (self.depth != 1 or self.frames[0].wants_key) return null;
         const key = self.frames[0].key orelse return null;
         inline for (decoded_names, 0..) |name, i| if (key == comptime index(name).?) return i;
         return null;
     }
 
-    // The scanner checks string bytes one at a time. A plain run, which needs
-    // no escape, UTF-8 or end check (the window's UTF-8 is already valid),
-    // is skipped instead: the scanner returns it in the string's next token
-    // exactly as if it had read it. Input stops just after a quote that opens
-    // a long run, so the run starts the next input.
-    const long_run = 64;
-
-    fn feedScanner(self: *ReplayValidationCursor) void {
-        const scanner = &self.scanner.?;
-        const rest = self.input[self.fed..self.filled];
-        const skip = if (scanner.state == .string) plainStringLength(rest) else 0;
-        var end = rest.len;
-        var at = skip;
-        while (std.mem.indexOfScalarPos(u8, rest, at, '"')) |quote| {
-            const after = rest[quote + 1 ..];
-            if (after.len >= long_run and plainStringLength(after[0..long_run]) == long_run) {
-                end = quote + 1;
-                break;
-            }
-            at = quote + 1;
-        }
-        scanner.feedInput(rest[0..end]);
-        scanner.cursor = skip;
-        self.input_start = self.window_start + self.fed;
-        self.fed += end;
-    }
-
-    fn appendText(self: *ReplayValidationCursor, bytes: []const u8) !void {
+    fn appendText(self: *OutputItemCheck, bytes: []const u8) !void {
         if (self.decodedField() != null) self.token_hash.update(bytes);
         self.token_length = try std.math.add(u64, self.token_length, bytes.len);
         if (self.token_overflow or self.token_text.len + bytes.len > max_evidence_bytes) {
@@ -1107,7 +1165,7 @@ pub const ReplayValidationCursor = struct {
         }
     }
 
-    fn accept(self: *ReplayValidationCursor, value: Value) void {
+    fn accept(self: *OutputItemCheck, value: Value) void {
         if (self.depth == 0) {
             self.result = value;
             return;
@@ -1132,7 +1190,7 @@ pub const ReplayValidationCursor = struct {
         }
     }
 
-    fn childKind(self: *ReplayValidationCursor, object: bool) Kind {
+    fn childKind(self: *OutputItemCheck, object: bool) Kind {
         if (self.depth == 0) return if (object) .item else .ignored;
         const parent = &self.frames[self.depth - 1];
         if (!parent.object) return switch (parent.kind) {
@@ -1151,7 +1209,7 @@ pub const ReplayValidationCursor = struct {
         return .ignored;
     }
 
-    fn finishFrame(self: *ReplayValidationCursor, frame: *const Frame) Value {
+    fn finishFrame(self: *OutputItemCheck, frame: *const Frame) Value {
         if (!frame.object) return frame.aggregate;
         var result = Value{ .shape = .object, .ambiguous = ambiguity(frame) };
         self.judge(frame, &result) catch |err| {
@@ -1160,127 +1218,146 @@ pub const ReplayValidationCursor = struct {
         return result;
     }
 
-    // What each kind of object consumes, judged apart from the order of its
-    // rules: the same fields `judge` looks up, wherever they stand.
+    // A consumed duplicate, wherever it stands among the rules.
     fn ambiguity(frame: *const Frame) Readings {
         const declared = frame.fields[comptime index("type").?];
         return switch (frame.kind) {
-            .item => .{ .all = frame.consumesDuplicate(&.{ "type", "id", "status", "internal_chat_message_metadata_passthrough" }, null) or
-                if (declared.itemKind()) |kind| switch (kind) {
-                    .reasoning => frame.consumesDuplicate(&.{ "text", "encrypted_content" }, null) or
-                        frame.consumesDuplicate(&.{"summary"}, .summary) or frame.consumesDuplicate(&.{"content"}, .reasoning),
-                    .compaction => frame.consumesDuplicate(&.{"encrypted_content"}, null),
-                    .function_call => frame.consumesDuplicate(&.{ "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" }, null),
-                    .message => frame.consumesDuplicate(&.{ "role", "phase" }, null) or frame.consumesDuplicate(&.{"content"}, .output),
-                } else false },
+            .item => .{ .all = item_fields.duplicateIn(frame) or if (declared.itemKind()) |kind| switch (kind) {
+                inline else => |known| (comptime kindFields(known)).duplicateIn(frame),
+            } else false },
             .block => .{
-                .all = declared.duplicate,
+                .all = type_fields.duplicateIn(frame),
                 .output = if (declared.is("refusal"))
-                    frame.consumesDuplicate(&.{"refusal"}, null)
+                    refusal_fields.duplicateIn(frame)
                 else
-                    declared.is("output_text") and (frame.consumesDuplicate(&.{"text"}, null) or frame.consumesDuplicate(&.{"annotations"}, .output)),
-                .reasoning = declared.is("reasoning_text") and frame.consumesDuplicate(&.{"text"}, null),
-                .summary = declared.is("summary_text") and frame.consumesDuplicate(&.{"text"}, null),
+                    declared.is("output_text") and output_text_fields.duplicateIn(frame),
+                .reasoning = declared.is("reasoning_text") and text_fields.duplicateIn(frame),
+                .summary = declared.is("summary_text") and text_fields.duplicateIn(frame),
             },
-            .annotation, .caller => .{ .all = declared.duplicate },
-            .metadata => .{ .all = frame.consumesDuplicate(&.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }, null) },
+            .annotation, .caller => .{ .all = type_fields.duplicateIn(frame) },
+            .metadata => .{ .all = metadata_fields.duplicateIn(frame) },
             else => .{},
         };
     }
 
-    // Rules run in the order import has always looked fields up and
-    // reported the first one broken.
-    fn judge(self: *ReplayValidationCursor, frame: *const Frame, result: *Value) !void {
+    // Each object's rules run in a fixed order; the first one broken is its
+    // failure.
+    fn judge(self: *OutputItemCheck, frame: *const Frame, result: *Value) Incompatibility!void {
         switch (frame.kind) {
             .item => {
-                _ = try frame.word("type");
-                try frame.identity("id");
-                const metadata = try frame.get("internal_chat_message_metadata_passthrough");
+                const item = Rules(item_fields){ .frame = frame };
+                _ = try item.word("type");
+                try item.identity("id");
+                const metadata = try item.get("internal_chat_message_metadata_passthrough");
                 if (metadata.shape != .absent) {
                     if (metadata.shape != .object) return error.UnexpectedJsonDelimiter;
                     if (metadata.failure) |err| return err;
                 }
-                const kind = (try frame.get("type")).itemKind() orelse return error.UnsupportedItemType;
+                const kind = (try item.get("type")).itemKind() orelse return error.UnsupportedItemType;
                 self.item_kind = kind;
                 switch (kind) {
                     .reasoning => {
-                        try frame.completed();
-                        if ((try frame.get("text")).shape != .absent) return error.UnsupportedReasoningText;
-                        try frame.encrypted();
-                        try frame.blocks("summary", .summary);
-                        try frame.blocks("content", .reasoning);
+                        const rules = Rules(kindFields(.reasoning)){ .frame = frame };
+                        try rules.completed();
+                        if ((try rules.get("text")).shape != .absent) return error.UnsupportedReasoningText;
+                        try rules.encrypted();
+                        try rules.blocks("summary", .summary);
+                        try rules.blocks("content", .reasoning);
                     },
                     .compaction => {
+                        const rules = Rules(kindFields(.compaction)){ .frame = frame };
                         if (self.operation) |operation| if (operation != .compaction) return error.UnsupportedProviderOutput;
-                        try frame.completed();
-                        try frame.encrypted();
+                        try rules.completed();
+                        try rules.encrypted();
                     },
                     .function_call => {
+                        const rules = Rules(kindFields(.function_call)){ .frame = frame };
                         if (self.operation) |operation| if (operation == .compaction) return error.UnsupportedProviderOutput;
-                        try frame.completed();
-                        const caller = try frame.get("caller");
+                        try rules.completed();
+                        const caller = try rules.get("caller");
                         switch (caller.shape) {
                             .absent, .null_value => {},
                             .object => if (caller.failure) |err| return err,
                             else => return error.UnexpectedJsonDelimiter,
                         }
-                        switch ((try frame.get("async")).shape) {
+                        switch ((try rules.get("async")).shape) {
                             .absent, .null_value, .false_value => {},
                             .true_value => return error.UnsupportedAsyncCall,
                             else => return error.InvalidJsonLiteral,
                         }
                         inline for (.{ "namespace", "encrypted_function_args" }) |name| {
-                            const value = try frame.get(name);
+                            const value = try rules.get(name);
                             switch (value.shape) {
                                 .absent, .null_value => {},
                                 .string => if (value.length != 0) return error.UnsupportedCallControl,
                                 else => return error.ExpectedJsonString,
                             }
                         }
-                        inline for (.{ "name", "call_id" }) |name| try frame.identity(name);
-                        _ = try frame.string("arguments");
+                        inline for (.{ "name", "call_id" }) |name| try rules.identity(name);
+                        _ = try rules.string("arguments");
                     },
                     .message => {
-                        try frame.completed();
-                        if (!(try frame.word("role")).is("assistant")) return error.UnsupportedMessageRole;
-                        const phase = try frame.get("phase");
+                        const rules = Rules(kindFields(.message)){ .frame = frame };
+                        try rules.completed();
+                        if (!(try rules.word("role")).is("assistant")) return error.UnsupportedMessageRole;
+                        const phase = try rules.get("phase");
                         if (phase.shape != .absent and phase.shape != .null_value) {
-                            _ = try frame.word("phase");
+                            _ = try rules.word("phase");
                             if (!phase.is("commentary") and !phase.is("partial_answer") and !phase.is("final_answer")) return error.UnsupportedMessagePhase;
                         }
-                        const content = try frame.get("content");
+                        const content = try rules.get("content");
                         if (content.shape == .absent) return error.MissingProviderField;
-                        try frame.blocks("content", .output);
+                        try rules.blocks("content", .output);
                         if (content.length == 0) return error.MalformedProviderOutput;
                     },
                 }
             },
             .block => {
-                const kind = try frame.word("type");
-                frame.outputBlock(kind) catch |err| {
+                const kind = try (Rules(type_fields){ .frame = frame }).word("type");
+                outputBlock(frame, kind) catch |err| {
                     result.output_failure = err;
                 };
-                frame.reasoningBlock(kind, "reasoning_text") catch |err| {
+                textBlock(frame, kind, "reasoning_text") catch |err| {
                     result.reasoning_failure = err;
                 };
-                frame.reasoningBlock(kind, "summary_text") catch |err| {
+                textBlock(frame, kind, "summary_text") catch |err| {
                     result.summary_failure = err;
                 };
             },
             .annotation => {
-                if (!(try frame.word("type")).is("url_citation")) result.output_failure = error.UnsupportedAnnotation;
+                if (!(try (Rules(type_fields){ .frame = frame }).word("type")).is("url_citation")) result.output_failure = error.UnsupportedAnnotation;
             },
             .caller => {
-                if ((try frame.get("type")).shape == .absent) return error.UnsupportedCaller;
-                if (!(try frame.word("type")).is("direct")) return error.UnsupportedCaller;
+                const rules = Rules(type_fields){ .frame = frame };
+                if ((try rules.get("type")).shape == .absent) return error.UnsupportedCaller;
+                if (!(try rules.word("type")).is("direct")) return error.UnsupportedCaller;
             },
             .metadata => {
-                inline for (.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }) |name| {
-                    if ((try frame.get(name)).shape != .absent) return error.UnsupportedMetadataAuthority;
+                const rules = Rules(metadata_fields){ .frame = frame };
+                inline for (metadata_fields.plain) |name| {
+                    if ((try rules.get(name)).shape != .absent) return error.UnsupportedMetadataAuthority;
                 }
             },
             else => {},
         }
+    }
+
+    fn outputBlock(frame: *const Frame, kind: Value) Incompatibility!void {
+        if (kind.is("refusal")) {
+            _ = try (Rules(refusal_fields){ .frame = frame }).string("refusal");
+            return;
+        }
+        if (!kind.is("output_text")) return error.UnsupportedContentBlock;
+        const rules = Rules(output_text_fields){ .frame = frame };
+        try rules.blocks("annotations", .output);
+        _ = try rules.string("text");
+    }
+
+    // Reasoning and summary blocks retain annotations without interpreting
+    // them.
+    fn textBlock(frame: *const Frame, kind: Value, comptime expected: []const u8) Incompatibility!void {
+        if (!kind.is(expected)) return error.UnsupportedReasoningBlock;
+        _ = try (Rules(text_fields){ .frame = frame }).string("text");
     }
 
     /// Source implements contentLength/readContent. Each refill is charged at
@@ -1289,10 +1366,11 @@ pub const ReplayValidationCursor = struct {
     /// Null until the whole item is read. Syntax errors, and at replay a
     /// duplicate field the item's meaning consumes, are errors: canonical
     /// bytes cannot have them.
-    pub fn advance(self: *ReplayValidationCursor, source: anytype, bytes_left: *usize, items_left: *usize) !?Verdict {
+    pub fn advance(self: *OutputItemCheck, source: anytype, bytes_left: *usize, items_left: *usize) !?Verdict {
         if (self.scanner == null) {
             self.allocator = .init(&self.nesting);
             self.scanner = std.json.Scanner.initStreaming(self.allocator.allocator());
+            self.scanner.?.enableDiagnostics(&self.diagnostics);
             // Avoid ArrayList's cache-line-sized growth policy. These 128 bits
             // cover the depth guard plus the one opening token it observes.
             try self.scanner.?.stack.bytes.ensureTotalCapacityPrecise(self.nesting.len);
@@ -1301,25 +1379,22 @@ pub const ReplayValidationCursor = struct {
         while (items_left.* != 0) {
             const token = scanner.next() catch |err| switch (err) {
                 error.BufferUnderrun => {
-                    if (self.fed == self.filled) {
-                        if (bytes_left.* == 0) return null;
-                        const wanted: usize = @intCast(@min(@min(source.contentLength() - self.position, self.input.len), bytes_left.*));
-                        if (wanted == 0) {
-                            scanner.endInput();
-                            continue;
-                        }
-                        const count = try source.readContent(self.position, self.input[0..wanted]);
-                        if (count != wanted) return error.ShortSealedRead;
-                        self.window_start = self.position;
-                        self.position += count;
-                        bytes_left.* -= count;
-                        try self.utf8.feedSlice(self.input[0..count]);
-                        if (self.position == source.contentLength()) try self.utf8.finish();
-                        self.filled = count;
-                        self.fed = 0;
+                    if (bytes_left.* == 0) return null;
+                    const wanted: usize = @intCast(@min(@min(source.contentLength() - self.position, self.input.len), bytes_left.*));
+                    if (wanted == 0) {
+                        scanner.endInput();
+                        continue;
                     }
-                    self.feedScanner();
-                    if (self.fed == self.filled and self.position == source.contentLength()) scanner.endInput();
+                    const count = try source.readContent(self.position, self.input[0..wanted]);
+                    if (count != wanted) return error.ShortSealedRead;
+                    self.position += count;
+                    bytes_left.* -= count;
+                    try self.utf8.feedSlice(self.input[0..count]);
+                    scanner.feedInput(self.input[0..count]);
+                    if (self.position == source.contentLength()) {
+                        try self.utf8.finish();
+                        scanner.endInput();
+                    }
                     continue;
                 },
                 else => return err,
@@ -1341,12 +1416,12 @@ pub const ReplayValidationCursor = struct {
                         const frame = &self.frames[self.depth - 1];
                         frame.key = if (self.token_overflow) null else index(self.token_text.slice());
                         frame.wants_key = false;
-                        if (self.depth == 1) self.key_end = self.input_start + scanner.cursor;
+                        if (self.depth == 1) self.key_end = self.diagnostics.getByteOffset();
                     } else {
                         var value = Value{ .shape = .string, .length = self.token_length };
                         if (self.decodedField()) |i| {
                             self.decoded_fields[i] = .{ .length = self.token_length, .digest = self.token_hash.finalResult() };
-                            self.encoded_spans[i] = .{ .after_key = self.key_end, .end = self.input_start + scanner.cursor - 1 };
+                            self.encoded_spans[i] = .{ .after_key = self.key_end, .end = self.diagnostics.getByteOffset() - 1 };
                             self.decoded_fields_seen |= @as(u4, 1) << @intCast(i);
                             self.token_hash = protocol.contentHasher();
                         }
@@ -1363,7 +1438,7 @@ pub const ReplayValidationCursor = struct {
                     if (self.depth > protocol.max_json_depth) return error.JsonTooDeep;
                     const object = token == .object_begin;
                     if (self.depth == 1 and !object and self.frames[0].key == comptime index("content").?)
-                        self.content_span.start = self.input_start + scanner.cursor - 1;
+                        self.content_span.start = self.diagnostics.getByteOffset() - 1;
                     const kind = self.childKind(object);
                     self.frames[self.depth] = .{ .kind = kind, .object = object };
                     self.depth += 1;
@@ -1371,7 +1446,7 @@ pub const ReplayValidationCursor = struct {
                 .object_end, .array_end => {
                     self.depth -= 1;
                     if (self.depth == 1 and token == .array_end and self.frames[0].key == comptime index("content").?)
-                        self.content_span.length = self.input_start + scanner.cursor - self.content_span.start;
+                        self.content_span.length = self.diagnostics.getByteOffset() - self.content_span.start;
                     self.accept(self.finishFrame(&self.frames[self.depth]));
                 },
                 .partial_number => {},
@@ -1385,7 +1460,7 @@ pub const ReplayValidationCursor = struct {
                     // it always fails the item too; replay names it first.
                     const reason = self.result.failure orelse {
                         std.debug.assert(!self.result.ambiguous.all);
-                        return .{ .compatible = .{ .reasoning_text = self.replaysReasoningText() } };
+                        return .{ .compatible = .{ .omit_reasoning_text = self.replaysReasoningText() } };
                     };
                     if (self.operation == null) {
                         if (self.result.ambiguous.all) return error.DuplicateJsonField;
@@ -1402,13 +1477,10 @@ pub const ReplayValidationCursor = struct {
 
 /// Check one selected canonical item against current wire rules, without
 /// emitting metadata or retaining a payload. Store owns integrity validation.
-/// Test driver for the same bounded cursor used by request preparation.
-fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !ReplayValidationCursor.Verdict {
-    var cursor: ReplayValidationCursor = .{};
-    return validateReplayWith(&cursor, io, source, length);
-}
-
-fn validateReplayWith(cursor: *ReplayValidationCursor, io: std.Io, source: std.Io.File, length: u64) !ReplayValidationCursor.Verdict {
+/// Test driver for the same bounded grammar request preparation uses.
+fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !OutputItemCheck.Verdict {
+    const item_check = testingItemCheck();
+    item_check.* = .{};
     const Source = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1425,20 +1497,20 @@ fn validateReplayWith(cursor: *ReplayValidationCursor, io: std.Io, source: std.I
     while (true) {
         var bytes: usize = protocol.content_window_bytes;
         var items: usize = 64;
-        if (try cursor.advance(Source{ .io = io, .file = source, .length = length }, &bytes, &items)) |verdict| return verdict;
+        if (try item_check.advance(Source{ .io = io, .file = source, .length = length }, &bytes, &items)) |verdict| return verdict;
     }
 }
 
-fn expectCompatible(verdict: ReplayValidationCursor.Verdict) !void {
+fn expectCompatible(verdict: OutputItemCheck.Verdict) !void {
     try std.testing.expect(verdict == .compatible);
 }
 
-fn expectIncompatible(reason: anyerror, verdict: ReplayValidationCursor.Verdict) !void {
+fn expectIncompatible(reason: anyerror, verdict: OutputItemCheck.Verdict) !void {
     try std.testing.expect(verdict == .incompatible);
-    try std.testing.expectEqual(reason, verdict.incompatible);
+    try std.testing.expectEqual(reason, @as(anyerror, verdict.incompatible));
 }
 
-const replay_cases = [_]struct { item: []const u8, supported: bool, operation: output_format.ModelOperationKind = .assistant_response }{
+const replay_cases = [_]struct { item: []const u8, supported: bool, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false }{
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":{\"nested\":[null,true]}}", .supported = true },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .supported = false },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":null}", .supported = false },
@@ -1459,8 +1531,8 @@ const replay_cases = [_]struct { item: []const u8, supported: bool, operation: o
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"file_citation\"}]}]}", .supported = false },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[]}", .supported = false },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"user\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = false },
-    .{ .item = "{\"summary\":[{\"annotations\":false,\"text\":\"summary\",\"type\":\"summary_text\"}],\"content\":[{\"text\":\"private\",\"type\":\"reasoning_text\"}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
-    .{ .item = "{\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
+    .{ .item = "{\"summary\":[{\"annotations\":false,\"text\":\"summary\",\"type\":\"summary_text\"}],\"content\":[{\"text\":\"private\",\"type\":\"reasoning_text\"}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true, .omits_reasoning_text = true },
+    .{ .item = "{\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true, .omits_reasoning_text = true },
     .{ .item = "{\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"text\":null}", .supported = false },
     .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":null}}", .supported = false, .operation = .compaction },
@@ -1527,10 +1599,10 @@ fn importTestingItem(tmp: *std.testing.TmpDir, item: []const u8, operation: outp
 const long_type_item = "{\"type\":\"" ++ @as([max_evidence_bytes + 1]u8, @splat('m')) ++ "\",\"id\":\"m\"}";
 
 /// Shapes the replay tables leave out, each judged by both entry points.
-const agreement_cases = [_]struct { item: []const u8, compatible: bool, operation: output_format.ModelOperationKind = .assistant_response }{
+const agreement_cases = [_]struct { item: []const u8, compatible: bool, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false }{
     // Another kind leaves `content` open, even duplicated.
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"content\":1,\"content\":2}", .compatible = true },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", .compatible = true },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", .compatible = true, .omits_reasoning_text = true },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":\"direct\"}", .compatible = false },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{}}", .compatible = false },
     .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":7}}", .compatible = false },
@@ -1556,11 +1628,11 @@ const agreement_cases = [_]struct { item: []const u8, compatible: bool, operatio
 };
 
 test "import accepts exactly the items replay accepts and names the same broken rule" {
-    const Case = struct { item: []const u8, operation: output_format.ModelOperationKind, compatible: ?bool, failure: ?anyerror = null };
+    const Case = struct { item: []const u8, operation: output_format.ModelOperationKind, compatible: ?bool, failure: ?anyerror = null, omits_reasoning_text: bool = false };
     var cases: [replay_cases.len + replay_failure_cases.len + agreement_cases.len]Case = undefined;
-    for (replay_cases, 0..) |case, i| cases[i] = .{ .item = case.item, .operation = case.operation, .compatible = case.supported };
+    for (replay_cases, 0..) |case, i| cases[i] = .{ .item = case.item, .operation = case.operation, .compatible = case.supported, .omits_reasoning_text = case.omits_reasoning_text };
     for (replay_failure_cases, 0..) |case, i| cases[replay_cases.len + i] = .{ .item = case.item, .operation = case.operation, .compatible = null, .failure = case.failure };
-    for (agreement_cases, 0..) |case, i| cases[replay_cases.len + replay_failure_cases.len + i] = .{ .item = case.item, .operation = case.operation, .compatible = case.compatible };
+    for (agreement_cases, 0..) |case, i| cases[replay_cases.len + replay_failure_cases.len + i] = .{ .item = case.item, .operation = case.operation, .compatible = case.compatible, .omits_reasoning_text = case.omits_reasoning_text };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     for (cases) |case| {
@@ -1579,7 +1651,7 @@ test "import accepts exactly the items replay accepts and names the same broken 
         switch (verdict) {
             .compatible => |compatible| {
                 try std.testing.expectEqual(@as(?anyerror, null), imported);
-                try std.testing.expectEqual(std.mem.indexOf(u8, case.item, "reasoning_text") != null, compatible.reasoning_text);
+                try std.testing.expectEqual(case.omits_reasoning_text, compatible.omit_reasoning_text);
             },
             .incompatible => |reason| try std.testing.expectEqual(@as(?anyerror, reason), imported),
         }
@@ -1680,7 +1752,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
         else
             "\"caller\":{\"type\":\"program\"},\"name\":\"bash\",\"id\":\"f\",\"call_id\":\"c\",\"type\":\"function_call\"}");
         var source = CountingSource{ .file = file, .length = try file.length(std.testing.io) };
-        var cursor: ReplayValidationCursor = .{};
+        var item_check: OutputItemCheck = .{};
         var turns: usize = 0;
         while (true) {
             turns += 1;
@@ -1688,7 +1760,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
             const before = source.read_bytes;
             var bytes: usize = 7;
             var items: usize = 2;
-            const finished = try cursor.advance(&source, &bytes, &items);
+            const finished = try item_check.advance(&source, &bytes, &items);
             try std.testing.expect(source.read_bytes - before <= 7);
             try std.testing.expectEqual(@as(u64, 7 - bytes), source.read_bytes - before);
             try std.testing.expect(items <= 2);
@@ -1718,31 +1790,31 @@ test "incremental call authentication binds all four decoded fields with fixed s
     var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
     for ([_][]const u8{ "item", "bash", "call", "a\x00🚀" }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
-    var cursor: ReplayValidationCursor = .{};
+    var item_check: OutputItemCheck = .{};
     var turns: usize = 0;
     while (true) {
         var bytes: usize = 1;
         var items: usize = 1;
         turns += 1;
-        if (try cursor.advance(source, &bytes, &items)) |verdict| {
+        if (try item_check.advance(source, &bytes, &items)) |verdict| {
             try expectCompatible(verdict);
             break;
         }
     }
     try std.testing.expect(turns >= source.bytes.len);
-    try cursor.authenticate(expected);
+    try item_check.authenticate(expected);
     for (0..4) |i| {
         var corrupt = expected;
         corrupt[i].digest[0] ^= 1;
-        try std.testing.expectError(error.CorruptStore, cursor.authenticate(corrupt));
+        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
         corrupt = expected;
         corrupt[i].length += 1;
-        try std.testing.expectError(error.CorruptStore, cursor.authenticate(corrupt));
+        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
     }
-    try std.testing.expect(@sizeOf(@TypeOf(cursor.decoded_fields)) == 160);
+    try std.testing.expect(@sizeOf(@TypeOf(item_check.decoded_fields)) == 160);
 }
 
-test "skipped plain runs decode and locate strings exactly as the scanner reads them" {
+test "long strings decode and locate exactly across read windows" {
     const Source = struct {
         bytes: []const u8,
         pub fn contentLength(source: @This()) u64 {
@@ -1788,20 +1860,20 @@ test "skipped plain runs decode and locate strings exactly as the scanner reads 
     var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
     for ([_][]const u8{ decoded.written(), "bash", decoded.written(), decoded.written() }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
-    for ([_]usize{ 1, 7, 63, 64, 65, 4096 }) |allowance| {
-        var cursor: ReplayValidationCursor = .{};
+    for ([_]usize{ 1, 7, protocol.content_window_bytes - 1, protocol.content_window_bytes, protocol.content_window_bytes + 1 }) |allowance| {
+        var item_check: OutputItemCheck = .{};
         while (true) {
             var bytes = allowance;
             var items: usize = 1;
-            if (try cursor.advance(Source{ .bytes = item }, &bytes, &items)) |verdict| {
+            if (try item_check.advance(Source{ .bytes = item }, &bytes, &items)) |verdict| {
                 try expectCompatible(verdict);
                 break;
             }
         }
-        try cursor.authenticate(expected);
+        try item_check.authenticate(expected);
         // Each located value is exactly the encoded text after its key.
         for ([_]usize{ 0, 2, 3 }) |field| {
-            const span = cursor.encoded_spans[field];
+            const span = item_check.encoded_spans[field];
             const start = std.mem.indexOfScalarPos(u8, item, @intCast(span.after_key), '"').? + 1;
             try std.testing.expectEqualStrings(text, item[start..@intCast(span.end)]);
         }
@@ -1989,8 +2061,14 @@ const AnswerSelection = struct {
     }
 };
 
-/// Tests' item grammar storage, off their stacks like the Host's.
-var testing_check: ReplayValidationCursor = undefined;
+/// Tests' item grammar storage, off their stacks like the Host's. Tests run
+/// one at a time and each use finishes before the next starts.
+var testing_item_check: OutputItemCheck = undefined;
+
+pub fn testingItemCheck() *OutputItemCheck {
+    comptime std.debug.assert(@import("builtin").is_test);
+    return &testing_item_check;
+}
 
 /// One response's validation, from its first event to its last.
 const Response = struct {
@@ -2005,7 +2083,7 @@ const Response = struct {
     answer: AnswerSelection,
     evidence: Evidence = .{},
     /// The item grammar's fixed storage, reused for every item.
-    check: *ReplayValidationCursor,
+    item_check: *OutputItemCheck,
 };
 
 fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u64) !void {
@@ -2109,10 +2187,10 @@ pub fn validate(
     event_data: *EventData,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
-    /// The item grammar's storage, about 66 KB. A caller keeps it off the
-    /// stack: a frame that holds it makes all of its pages resident, while
-    /// one item touches only a few.
-    check: *ReplayValidationCursor,
+    /// The item grammar's storage, larger than most frames. A caller keeps
+    /// it off the stack: a frame that holds it makes all of its pages
+    /// resident, while one item touches only a few.
+    item_check: *OutputItemCheck,
     faults: Faults,
 ) !Validated {
     if (faults.metadata) metadata.fail_writes = true;
@@ -2121,7 +2199,7 @@ pub fn validate(
     var data: ?Range = null;
     var raw_start: u64 = 0;
     var done_marker = false;
-    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .check = check, .answer = .{ .digest = protocol.contentDigest("") } };
+    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .item_check = item_check, .answer = .{ .digest = protocol.contentDigest("") } };
     if (source_length >= 3 and try rangeEquals(&capture, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
@@ -2262,7 +2340,7 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var data_used: std.atomic.Value(u64) = .init(0);
     var event_data = try EventData.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, &testing_check, .{});
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingItemCheck(), .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
@@ -2459,13 +2537,13 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         var rejection: Rejection = .{};
         if (shortfall == 0) {
-            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{});
+            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{});
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{}));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{}));
             try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -2759,7 +2837,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
         var data = try EventData.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
         var rejection: Rejection = .{};
-        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, &testing_check, .{});
+        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{});
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
