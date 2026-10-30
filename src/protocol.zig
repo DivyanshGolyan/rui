@@ -155,30 +155,36 @@ pub const ConfigureCommand = struct {
     }
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/configure/v1");
-        hashField(&hash, self.session.slice());
-        hashOptional(&hash, &self.configuration.workspace);
-        hashOptional(&hash, &self.configuration.provider);
-        hashOptional(&hash, &self.configuration.model);
-        hashContent(&hash, &self.configuration.instructions);
-        hash.update(&.{@backingInt(self.configuration.tools.state)});
-        if (self.configuration.tools.state == .value) {
-            hash.update(&.{self.configuration.tools.count});
-            for (self.configuration.tools.values[0..self.configuration.tools.count]) |tool| {
-                hashField(&hash, @tagName(tool));
-            }
-        }
-        hashOptional(&hash, &self.configuration.permission_mode);
-        hashContent(&hash, &self.configuration.output_schema);
-        hashOptional(&hash, &self.configuration.compaction_trigger);
-        hashOptional(&hash, &self.configuration.output_reservation);
-        hashOptional(&hash, &self.configuration.reasoning_effort);
-        hashOptional(&hash, &self.configuration.label);
-        hash.update(&.{@intFromBool(self.require_model)});
-        return hash.finalResult();
+        return configureDigest(self.session.slice(), &self.configuration, self.require_model);
     }
 };
+
+/// The digest of a Configure command with these parts; a creating Message
+/// binds its initial configuration through the same digest.
+fn configureDigest(session: []const u8, configuration: *const Configuration, require_model: bool) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "rui/core/configure/v1");
+    hashField(&hash, session);
+    hashOptional(&hash, &configuration.workspace);
+    hashOptional(&hash, &configuration.provider);
+    hashOptional(&hash, &configuration.model);
+    hashContent(&hash, &configuration.instructions);
+    hash.update(&.{@backingInt(configuration.tools.state)});
+    if (configuration.tools.state == .value) {
+        hash.update(&.{configuration.tools.count});
+        for (configuration.tools.values[0..configuration.tools.count]) |tool| {
+            hashField(&hash, @tagName(tool));
+        }
+    }
+    hashOptional(&hash, &configuration.permission_mode);
+    hashContent(&hash, &configuration.output_schema);
+    hashOptional(&hash, &configuration.compaction_trigger);
+    hashOptional(&hash, &configuration.output_reservation);
+    hashOptional(&hash, &configuration.reasoning_effort);
+    hashOptional(&hash, &configuration.label);
+    hash.update(&.{@intFromBool(require_model)});
+    return hash.finalResult();
+}
 
 pub const MessageCommand = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -211,11 +217,10 @@ pub const MessageCommand = struct {
         hash.update(&.{@intFromBool(self.sender_handle != null)});
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
         hashContent(&hash, &self.text);
-        if (self.configuration) |configuration| {
+        if (self.configuration) |*configuration| {
             // The creation's own digest covers its capability condition.
-            const creation = ConfigureCommand{ .configuration = configuration, .require_model = self.require_model };
             hashField(&hash, "initial-configuration");
-            hash.update(&creation.semanticDigest());
+            hash.update(&configureDigest("", configuration, self.require_model));
         }
         return hash.finalResult();
     }

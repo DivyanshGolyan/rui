@@ -212,7 +212,7 @@ const Intake = struct {
 
         fn ensureReply(self: *Exchange) !*Reply {
             if (self.reply) |reply| return reply;
-            const reply = try self.host.allocator.create(Reply);
+            const reply = try createUnfilled(self.host.allocator, Reply);
             reply.* = .{ .io = self.host.io, .allocator = self.host.allocator };
             if (self.state == .header or self.route == .host_info)
                 reply.absolute_deadline = @as(i128, self.accepted_at_ns) + 10 * std.time.ns_per_s;
@@ -322,7 +322,7 @@ const Intake = struct {
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
-                    const ingress = try self.host.allocator.create(protocol.Ingress);
+                    const ingress = try createUnfilled(self.host.allocator, protocol.Ingress);
                     ingress.init(self.host.allocator, .{
                         .io = self.host.io,
                         .content_length = self.header.content_length,
@@ -1287,7 +1287,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
         .inspect_session => |*request_value| {
             if (request_value.failed_response != null) {
-                const capture = host.store.captureFailedResponse(request_value.*, host.lease.store_dir, .{
+                const capture = host.store.captureFailedResponse(request_value, host.lease.store_dir, .{
                     .scratch_path = host.lease.paths.scratch.slice(),
                     .scratch_budget = host.retention.sharedBudget(),
                     .request_number = request_number,
@@ -1339,7 +1339,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return fd.json(200, protocol.max_response_bytes, renderSessionsNotModified, .{since});
                 }
             }
-            const page = host.store.captureSessionList(request_value.*, .{
+            const page = host.store.captureSessionList(request_value, .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
                 .request_number = request_number,
@@ -1358,25 +1358,29 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.setReport(page);
         },
         .conversation_page => |*command| {
-            const page = host.store.publicConversationPage(command.*) catch |err| switch (err) {
+            const page = try createUnfilled(host.allocator, store_module.PublicConversationPage);
+            defer host.allocator.destroy(page);
+            host.store.publicConversationPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "conversation page", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_conversation_page_response_bytes, renderConversationPage, .{&page});
+            try fd.json(200, protocol.max_conversation_page_response_bytes, renderConversationPage, .{page});
         },
         .conversation_content => |*command| try prepareConversationContent(host, fd, command),
         .proposal_page => |*command| {
-            const page = host.store.proposalPage(command.*) catch |err| switch (err) {
+            const page = try createUnfilled(host.allocator, store_module.ProposalPage);
+            defer host.allocator.destroy(page);
+            host.store.proposalPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal page", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_proposal_page_response_bytes, renderProposalPage, .{&page});
+            try fd.json(200, protocol.max_proposal_page_response_bytes, renderProposalPage, .{page});
         },
         .proposal_field => |*command| {
             const location = host.store.openProposalField(command.*) catch |err| switch (err) {
@@ -1389,14 +1393,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try deliverPublicContent(host, fd, location, 0, true);
         },
         .activity_page => |*command| {
-            const page = host.store.activityPage(command.*) catch |err| switch (err) {
+            const page = try createUnfilled(host.allocator, protocol.ActivityFacts);
+            defer host.allocator.destroy(page);
+            host.store.activityPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity page", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{&page});
+            try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command.*) catch |err| switch (err) {
@@ -1409,6 +1415,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try deliverPublicContent(host, fd, location, 0, true);
         },
     }
+}
+
+/// One `T` on the heap whose bytes stay unwritten until its initializer or
+/// producer fills them. `Allocator.create` would first write 0xAA over every
+/// byte in ReleaseSafe. Freed with `allocator.destroy`.
+fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMemory}!*T {
+    const bytes = allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse return error.OutOfMemory;
+    return @ptrCast(@alignCast(bytes));
 }
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
