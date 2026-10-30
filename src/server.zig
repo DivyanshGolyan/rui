@@ -1268,11 +1268,11 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            const reader = host.store.openContent(reference) catch |err| {
+            const location = host.store.openContent(reference) catch |err| {
                 fenceDispatch(host, "result content read", err);
                 return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
             };
-            try fd.setContent(reader, 0, true, false);
+            try fd.setContent(location, 0, true, false);
         },
         .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
@@ -1382,14 +1382,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             deliverResponse(host.io, fd, 200, response.slice());
         },
         .proposal_field => |command| {
-            const reader = host.store.openProposalField(command) catch |err| switch (err) {
+            const location = host.store.openProposalField(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try deliverPublicContent(host, fd, reader, 0, true);
+            try deliverPublicContent(host, fd, location, 0, true);
         },
         .activity_page => |command| {
             const page = host.store.activityPage(command) catch |err| switch (err) {
@@ -1402,14 +1402,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try prepareActivityPage(host.io, fd, &page);
         },
         .activity_content => |command| {
-            const reader = host.store.openActivityContent(command) catch |err| switch (err) {
+            const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try deliverPublicContent(host, fd, reader, 0, true);
+            try deliverPublicContent(host, fd, location, 0, true);
         },
     }
 }
@@ -1433,18 +1433,18 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 }
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: protocol.ConversationContent) !void {
-    const reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
+    const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
             return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
-    return deliverPublicContent(host, fd, reader, command.start, command.stream);
+    return deliverPublicContent(host, fd, location, command.start, command.stream);
 }
 
-fn deliverPublicContent(host: *Host, fd: *Reply, reader: store_module.ContentReader, start: u64, stream: bool) !void {
-    fd.setContent(reader, start, stream, true) catch |err| {
+fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
+    fd.setContent(location, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
         fd.deinit();
         return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
@@ -1464,11 +1464,11 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
             return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
-    const reader = host.store.openContent(resolved) catch |err| {
+    const location = host.store.openContent(resolved) catch |err| {
         fenceDispatch(host, phase, err);
         return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
     };
-    fd.setContent(reader, 0, true, false) catch {};
+    fd.setContent(location, 0, true, false) catch {};
 }
 
 fn nextRequestNumber(host: *Host) !u64 {
@@ -1960,7 +1960,7 @@ const Reply = struct {
         none,
         json: []u8,
         report: store_module.SessionReport,
-        content: struct { reader: store_module.ContentReader, public: bool },
+        content: struct { reader: store_module.ContentReader = undefined, public: bool },
     } = .none,
     absolute_deadline: ?i128 = null,
     inactivity_deadline: i128 = 0,
@@ -2028,15 +2028,17 @@ const Reply = struct {
 
     /// Moves one canonical reader; public reads verify their first window and
     /// empty/one-window EOF before any successful header can leave the Host.
-    fn setContent(self: *Reply, reader: store_module.ContentReader, start: u64, stream: bool, public: bool) !void {
+    /// Opens the reader in this Reply. The location came from a Store open.
+    fn setContent(self: *Reply, location: store_module.ContentLocation, start: u64, stream: bool, public: bool) !void {
         std.debug.assert(self.body == .none);
-        self.body = .{ .content = .{ .reader = reader, .public = public } };
+        self.body = .{ .content = .{ .public = public } };
+        self.body.content.reader.open(location);
         self.offset = start;
-        const length = if (stream) reader.reference.length - start else @min(reader.reference.length - start, protocol.content_window_bytes);
+        const length = if (stream) location.reference.length - start else @min(location.reference.length - start, protocol.content_window_bytes);
         self.end = start + length;
         if (public) {
             try self.fill();
-            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, reader.reference.length, self.end });
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, location.reference.length, self.end });
             self.header_length = header.len;
             self.renew();
         } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);

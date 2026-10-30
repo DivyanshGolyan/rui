@@ -596,7 +596,9 @@ pub const HistoricalView = struct {
     // one at a time, independent of item size or count.
     const OutputCheck = struct {
         entry: HistoricalEntry = undefined,
-        reader: ?ContentReader = null,
+        /// Open exactly while `reading`.
+        reader: ContentReader = undefined,
+        reading: bool = false,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
         item_check: provider_output.OutputItemCheck = .{},
         /// The last item the grammar finished, kept until the next one starts.
@@ -610,7 +612,7 @@ pub const HistoricalView = struct {
     pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
-        if (self.output_check.reader == null) items_left.* -= 1;
+        if (!self.output_check.reading) items_left.* -= 1;
         return self.store.readHistoricalEntry(self, after_position, bytes_left, items_left) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
@@ -683,13 +685,13 @@ pub const HistoricalView = struct {
 
     /// Whether no output item is being read, so the view may move.
     pub fn itemCheckIdle(self: *const HistoricalView) bool {
-        return self.output_check.reader == null and self.output_check.item_check.scanner == null;
+        return !self.output_check.reading and self.output_check.item_check.scanner == null;
     }
 
     /// Bytes the grammar has read of the output item being read; null when
     /// none is.
     pub fn itemCheckBytes(self: *const HistoricalView) ?u64 {
-        if (self.output_check.reader == null) return null;
+        if (!self.output_check.reading) return null;
         return self.output_check.item_check.position;
     }
 
@@ -730,20 +732,23 @@ pub const HistoricalView = struct {
         return self.store.readHistoricalToolResult(self);
     }
 
-    pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
+    /// Opens `out` where it lives. `out` is valid only when this returns
+    /// without error.
+    pub fn openContent(self: *HistoricalView, reference: HistoricalContent, out: *HistoricalReader) !void {
         std.debug.assert(reference.belongsTo(self));
         const identity: ContentReference = .{ .length = reference.length, .digest = reference.digest };
-        const reader: ContentReader = if (reference.raw)
-            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .representation = .raw }
+        const location: ContentLocation = if (reference.raw)
+            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .raw = true }
         else
             try self.store.openProjection(reference.content_id, identity);
+        out.* = .{ .view = self, .reference = reference, .verified = reference.verified };
+        out.reader.open(location);
         self.readers += 1;
-        return .{ .view = self, .reference = reference, .reader = reader, .verified = reference.verified };
     }
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
-        if (self.output_check.reader) |*reader| reader.close();
+        if (self.output_check.reading) self.output_check.reader.close();
         self.active = false;
     }
 
@@ -789,7 +794,7 @@ pub const HistoricalView = struct {
 };
 
 pub const HistoricalReader = struct {
-    reader: ContentReader,
+    reader: ContentReader = undefined,
     view: *HistoricalView,
     reference: HistoricalContent,
     active: bool = true,
@@ -1144,6 +1149,15 @@ const SessionReportCapture = struct {
     }
 };
 
+/// Where one canonical content value is, resolved under the Store lock.
+/// Read only by `ContentReader.open`.
+pub const ContentLocation = struct {
+    store: *Store,
+    content_id: i64,
+    reference: ContentReference,
+    raw: bool,
+};
+
 /// Raw values allow ranged reads; derived values are read sequentially from
 /// zero. Readers retain copied bytes and identities, never SQLite handles.
 pub const ContentReader = struct {
@@ -1160,6 +1174,13 @@ pub const ContentReader = struct {
     prefetch_start: u64 = 0,
     prefetch_length: usize = 0,
 
+    /// Builds the reader where it lives. Needs no Store access and writes
+    /// only header fields; the projection window stays unwritten.
+    pub fn open(self: *ContentReader, location: ContentLocation) void {
+        self.* = .{ .content_id = location.content_id, .representation = .raw, .store = location.store, .reference = location.reference };
+        if (!location.raw) self.representation = .{ .projection = .{} };
+    }
+
     // Allocate outside Store access. Read-ahead is optional: allocation failure
     // keeps the original bounded read path, not a canonical/Host fault. Small
     // values keep the inline decode window. Encoded projections can exceed
@@ -1167,7 +1188,7 @@ pub const ContentReader = struct {
     fn prepareRead(self: *ContentReader) void {
         const extent = switch (self.representation) {
             .raw => self.reference.length,
-            .projection => |cursor| @max(self.reference.length, cursor.encoded_end),
+            .projection => |*cursor| @max(self.reference.length, cursor.encoded_end),
         };
         if (self.prefetch == null and extent > 1024 * 1024)
             self.prefetch = self.allocator.alloc(u8, content_prefetch_bytes) catch null;
@@ -3051,18 +3072,18 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentReader {
+    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.public_content, self.openPublicConversationContentLocked(request));
     }
 
-    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
+    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const content = try self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal);
         if (request.start > content.metadata.length) return error.RangeOutOfBounds;
-        return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .representation = if (try self.contentIsRaw(content.id, content.metadata.length)) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .raw = try self.contentIsRaw(content.id, content.metadata.length) };
     }
 
     // Accepted assistant messages require entries even when a damaged entry
@@ -3163,16 +3184,18 @@ pub const Store = struct {
 
     const ContentSource = struct {
         store: *Store,
-        reader: ContentReader,
+        reader: ContentReader = undefined,
         position: u64 = 0,
         end: u64,
         window: [4096]u8 = undefined,
         used: usize = 0,
         count: usize = 0,
 
-        fn init(storage: *Store, id: i64, private: bool) !ContentSource {
+        fn init(source: *ContentSource, storage: *Store, id: i64, private: bool) !void {
             const metadata = try storage.readContentMetadata(id);
-            return .{ .store = storage, .reader = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private), .end = metadata.length };
+            const location = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private);
+            source.* = .{ .store = storage, .end = metadata.length };
+            source.reader.open(location);
         }
 
         pub fn peek(source: *@This()) !?u8 {
@@ -3527,14 +3550,14 @@ pub const Store = struct {
         return result;
     }
 
-    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openActivityContentLocked(request));
     }
 
-    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
         self.validateActivitySequence(request.session.slice()) catch |err| return self.fence(err);
         // Only Tool Results have nonzero ordinals. Byte readers need their
         // canonical identity, not a second scan of the original arguments.
@@ -3553,7 +3576,7 @@ pub const Store = struct {
         };
         const content = self.readPublicContentMetadata(id) catch |err| return self.fence(err);
         const raw = self.contentIsRaw(id, content.length) catch |err| return self.fence(err);
-        return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .raw = raw };
     }
 
     pub fn proposalPage(self: *Store, request: protocol.ProposalPage) !ProposalPage {
@@ -3656,21 +3679,22 @@ pub const Store = struct {
             field.* = .{ .length = metadata.length, .digest = metadata.digest };
         }
         if (authenticate) {
-            var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
+            var source: ContentSource = undefined;
+            try source.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
             defer source.reader.close();
             @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
     }
 
-    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentReader {
+    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openProposalFieldLocked(request));
     }
 
-    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentReader {
+    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
         const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return self.fence(err),
@@ -3678,7 +3702,7 @@ pub const Store = struct {
         const index = @backingInt(request.field);
         const field = identity.metadata.fields[index];
         const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fence(err);
-        return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .raw = raw };
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -4907,7 +4931,8 @@ pub const Store = struct {
     fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
-        var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        var reader: ContentReader = undefined;
+        reader.open(.{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .raw = raw });
         defer reader.close();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
@@ -5912,7 +5937,7 @@ pub const Store = struct {
     }
 
     fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
-        if (view.output_check.reader) |*reader| reader.prepareRead();
+        if (view.output_check.reading) view.output_check.reader.prepareRead();
         const access = try self.enter(.none);
         defer access.release();
         return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left)) };
@@ -6001,7 +6026,7 @@ pub const Store = struct {
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
         std.debug.assert(view.outputs_validated);
-        if (view.output_check.reader != null) return try self.checkHistoricalOutput(view, bytes_left, items_left);
+        if (view.output_check.reading) return try self.checkHistoricalOutput(view, bytes_left, items_left);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
             view.entries_end = 0;
@@ -6042,25 +6067,24 @@ pub const Store = struct {
     fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: HistoricalEntry) !void {
         const content = entry.content.?;
         const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
-        view.output_check = .{
-            .entry = entry,
-            .reader = if (content.raw)
-                .{ .store = self, .reference = identity, .content_id = content.content_id, .representation = .raw }
-            else
-                try self.openProjectionLocked(content.content_id, identity),
-        };
+        const location: ContentLocation = if (content.raw)
+            .{ .store = self, .reference = identity, .content_id = content.content_id, .raw = true }
+        else
+            try self.openProjectionLocked(content.content_id, identity);
+        view.output_check = .{ .entry = entry, .reading = true };
+        view.output_check.reader.open(location);
         // The next step reads it, after preparing the read outside Store access.
     }
 
     fn readReplayVerdict(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
-        if (view.output_check.reader) |*reader| reader.prepareRead();
+        if (view.output_check.reading) view.output_check.reader.prepareRead();
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.historical_entry, self.readReplayVerdictLocked(view, entry, bytes_left, items_left));
     }
 
     fn readReplayVerdictLocked(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
-        if (view.output_check.reader == null) {
+        if (!view.output_check.reading) {
             items_left.* -= 1;
             try self.startHistoricalOutput(view, entry.*);
             return error.HistoricalPending;
@@ -6081,14 +6105,14 @@ pub const Store = struct {
             check: *HistoricalView.OutputCheck,
 
             pub fn contentLength(source: @This()) u64 {
-                return source.check.reader.?.reference.length;
+                return source.check.reader.reference.length;
             }
 
             pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
-                try source.storage.readOwnedContentLocked(&source.check.reader.?, offset, destination);
+                try source.storage.readOwnedContentLocked(&source.check.reader, offset, destination);
                 source.check.hash.update(destination);
                 if (offset + destination.len == source.contentLength() and
-                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.?.reference.digest)) return error.CorruptStore;
+                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.reference.digest)) return error.CorruptStore;
                 return destination.len;
             }
         };
@@ -6108,8 +6132,8 @@ pub const Store = struct {
         const identity = entry.content.?.item_identity.?;
         try check.item_check.authenticateIdentity(identity.kind, identity.id_digest);
         if (identity.kind == .function_call) try check.item_check.authenticate(identity.call_fields orelse return error.CorruptStore);
-        check.reader.?.close();
-        check.reader = null;
+        check.reader.close();
+        check.reading = false;
         check.judged = .{ .position = entry.position, .verdict = verdict };
         entry.content.?.verified = true;
         return entry;
@@ -7137,31 +7161,30 @@ pub const Store = struct {
         return content_id;
     }
 
-    pub fn openContent(self: *Store, reference: ContentReference) !ContentReader {
+    pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
         return self.openContentIdentity(reference, false);
     }
 
-    fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentReader {
+    fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openContentIdentityLocked(reference, private));
     }
 
-    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openProjectionLocked(content_id, reference));
     }
 
-    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentLocation {
         if (try self.contentIsRaw(content_id, reference.length)) return error.CorruptStore;
-        return .{ .store = self, .reference = reference, .content_id = content_id, .representation = .{ .projection = .{} } };
+        return .{ .store = self, .reference = reference, .content_id = content_id, .raw = false };
     }
 
-    fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
+    fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
         const id = try self.resolveContentReference(reference, private);
-        const raw = try self.contentIsRaw(id, reference.length);
-        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .reference = reference, .content_id = id, .raw = try self.contentIsRaw(id, reference.length) };
     }
 
     fn contentIsRaw(self: *Store, content_id: i64, length: u64) !bool {
@@ -9226,7 +9249,8 @@ fn settleTwoActionsForTesting(
 }
 
 fn expectContent(storage: *Store, reference: ContentReference, expected: []const u8) !void {
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
     var actual: [128]u8 = undefined;
     const count = try reader.read(0, &actual);
@@ -10384,11 +10408,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         results += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), results);
-    var result_reader = try storage.openPublicConversationContent(.{
+    var result_reader: ContentReader = undefined;
+    result_reader.open(try storage.openPublicConversationContent(.{
         .session = public_request.session,
         .position = settled_page.items[0].position,
         .ordinal = 2,
-    });
+    }));
     result_reader.close();
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
@@ -11321,7 +11346,8 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5",
         );
         const metadata = try storage.readContentMetadata(@intCast(content_id));
-        var reader = try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest }));
         defer reader.close();
         var result: [192]u8 = undefined;
         const count = try reader.read(0, &result);
@@ -11696,8 +11722,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
         _ = ordinal;
         const result = (try view.nextToolResult()).?;
-        var call_id = try view.openContent(result.call_id);
-        var output = try view.openContent(result.output);
+        var call_id: HistoricalReader = undefined;
+        try view.openContent(result.call_id, &call_id);
+        var output: HistoricalReader = undefined;
+        try view.openContent(result.output, &output);
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);
@@ -12096,7 +12124,8 @@ test "compaction pressure uses provider usage appended input and complete call r
             try std.testing.expectEqual(HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
             for ([_][]const u8{ "call-a", "call-b" }) |expected| {
                 const result = (try view.nextToolResult()).?;
-                var reader = try view.openContent(result.call_id);
+                var reader: HistoricalReader = undefined;
+                try view.openContent(result.call_id, &reader);
                 defer reader.close();
                 var bytes: [64]u8 = undefined;
                 const count = try reader.read(0, &bytes);
@@ -12384,7 +12413,7 @@ test "historical preparation yields covered group populations and cancels propos
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
         var after: u64 = 0;
-        while (view.output_check.reader == null) {
+        while (!view.output_check.reading) {
             bytes = 7;
             items = 1;
             try testingHistoricalStep(&view, &after, &bytes, &items);
@@ -12446,12 +12475,12 @@ test "large historical readers and yielded group authentication leave checkpoint
         defer view.close();
         while (!try view.validateOutputsStep()) {}
         var after: u64 = 0;
-        while (view.output_check.reader == null) {
+        while (!view.output_check.reading) {
             var bytes: usize = 4096;
             var items: usize = 1;
             try testingHistoricalStep(&view, &after, &bytes, &items);
         }
-        view.output_check.reader.?.allocator = std.testing.allocator;
+        view.output_check.reader.allocator = std.testing.allocator;
         var bytes: usize = 4096;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
@@ -12463,7 +12492,8 @@ test "large historical readers and yielded group authentication leave checkpoint
     defer view.close();
     const entry = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, entry.kind);
-    var reader = try view.openContent(entry.content.?);
+    var reader: HistoricalReader = undefined;
+    try view.openContent(entry.content.?, &reader);
     defer reader.close();
     reader.reader.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14331,7 +14361,8 @@ test "configuration answers replay without reverting newer settings" {
     try std.testing.expectEqualSlices(u8, &empty_digest, &observation.instructions.digest);
     try std.testing.expect(observation.output_schema == null);
 
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var content_window: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try reader.read(0, &content_window));
@@ -14368,7 +14399,8 @@ test "content reader owns the bounded result-delivery window" {
         &text,
     );
     const reference = (try storage.observeCommand("window-message")).message.?.content;
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
 
     var window: [ContentReader.content_window_bytes]u8 = undefined;
@@ -14404,10 +14436,9 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     }
     _ = try storage.importBytesContent(first, false, false);
     _ = try storage.importBytesContent(second, false, false);
-    var readers = [_]ContentReader{
-        try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(first) }),
-        try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }),
-    };
+    var readers: [2]ContentReader = undefined;
+    readers[0].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(first) }));
+    readers[1].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }));
     defer for (&readers) |*reader| reader.close();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     readers[0].allocator = failing.allocator();
@@ -14451,7 +14482,8 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     }
     // Copied bytes belong only to their original reader. A newly resolved
     // raw reader must see the changed row, not another reader's old window.
-    var fresh = try storage.openContent(readers[0].reference);
+    var fresh: ContentReader = undefined;
+    fresh.open(try storage.openContent(readers[0].reference));
     defer fresh.close();
     fresh.allocator = std.testing.allocator;
     try std.testing.expectEqual(@as(usize, 1), try readers[0].read(length - 1, buffer[0..1]));
@@ -14496,11 +14528,10 @@ test "large projected readers retain distinct copied sources across ranges and c
         try bindU64(update, 2, ordinal);
         try expectDone(update);
     }
-    var readers = [_]ContentReader{
-        try storage.openPublicConversationContent(request),
-        try storage.openActivityContent(.{ .session = request.session, .position = request.position }),
-        try storage.openContentIdentity(.{ .length = split, .digest = protocol.contentDigest(expected[0..split]) }, true),
-    };
+    var readers: [3]ContentReader = undefined;
+    readers[0].open(try storage.openPublicConversationContent(request));
+    readers[1].open(try storage.openActivityContent(.{ .session = request.session, .position = request.position }));
+    readers[2].open(try storage.openContentIdentity(.{ .length = split, .digest = protocol.contentDigest(expected[0..split]) }, true));
     defer for (&readers) |*reader| reader.close();
     for (&readers) |*reader| reader.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14542,7 +14573,8 @@ test "large projected readers never borrow another reader's prefetched integrity
     defer std.testing.allocator.free(expected);
     @memset(expected, 'x');
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
-    var held = try storage.openPublicConversationContent(request);
+    var held: ContentReader = undefined;
+    held.open(try storage.openPublicConversationContent(request));
     defer held.close();
     held.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14551,7 +14583,8 @@ test "large projected readers never borrow another reader's prefetched integrity
         "WHERE content_id=(SELECT source_content_id FROM answer_text_projection LIMIT 1)");
     try std.testing.expectEqual(buffer.len, try held.read(buffer.len, &buffer));
     try std.testing.expectEqualSlices(u8, expected[buffer.len..][0..buffer.len], &buffer);
-    var fresh = try storage.openPublicConversationContent(request);
+    var fresh: ContentReader = undefined;
+    fresh.open(try storage.openPublicConversationContent(request));
     defer fresh.close();
     fresh.allocator = std.testing.allocator;
     try std.testing.expectEqual(buffer.len, try fresh.read(0, &buffer));
@@ -14575,13 +14608,15 @@ test "retained raw and projected readers allow checkpoints between committed win
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
-        var reader = if (projected) blk: {
+        const location = if (projected) blk: {
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
             break :blk try storage.openPublicConversationContent(request);
         } else blk: {
             _ = try storage.importBytesContent(text, false, false);
             break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });
         };
+        var reader: ContentReader = undefined;
+        reader.open(location);
         defer reader.close();
         var window: [4096]u8 = undefined;
         try std.testing.expectEqual(window.len, try reader.read(0, &window));
@@ -14959,7 +14994,8 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqual(first_reply.accepted.admission_id, accepted_observation.admission_id);
     try std.testing.expect(accepted_observation.state == .queued);
 
-    var reader = try storage.openContent(observed.message.?.content);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observed.message.?.content));
     var actual: [first_text.len]u8 = undefined;
     var offset: usize = 0;
     while (offset < actual.len) {
@@ -15337,7 +15373,8 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try stale.key.set("stale-handle");
     try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, true, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
-    var reader = try storage.openActivityContent(.{ .session = session, .position = own.items[0].position });
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openActivityContent(.{ .session = session, .position = own.items[0].position }));
     reader.close();
 
     // The model's historical view carries the recorded sender, not text.
@@ -15992,7 +16029,8 @@ test "external content import follows sealed descriptor custody" {
     const created_session_0 = created_session_0_reply.accepted.session;
 
     const observation = try storage.inspectSession(created_session_0.slice());
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var bytes: [captured.len]u8 = undefined;
     try std.testing.expectEqual(captured.len, try reader.read(0, &bytes));
@@ -16153,7 +16191,8 @@ test "multiwindow content import and deduplication preserve all bytes" {
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
     const observation = try storage.inspectSession(created_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), observation.revision);
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var offset: usize = 0;
@@ -16184,7 +16223,8 @@ test "large raw content opens without materializing its payload" {
     };
     const created_session_0_reply = storage.configure(&command, true, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
     var first: [17]u8 = undefined;
     try std.testing.expectEqual(first.len, try reader.read(0, &first));
@@ -16247,7 +16287,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
         .before_ordinal = 1,
     }));
     try std.testing.expect(!storage.isFenced());
-    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 });
+    var unicode_reader: ContentReader = undefined;
+    unicode_reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 }));
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -16285,7 +16326,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expect(fresh.items[0].position > first.end);
     try std.testing.expect(fresh.items[0].kind == .user);
     var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
-    var reader = try storage.openPublicConversationContent(read);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(read));
     var tail: [2]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
     try std.testing.expectEqualStrings("xx", &tail);
@@ -16395,8 +16437,9 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     request.end = valid.end;
     if (route == .cursor) request.before_position = valid.items[0].position;
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |reader_value| blk: {
-            var reader = reader_value;
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
+            var reader: ContentReader = undefined;
+            reader.open(location);
             reader.close();
             break :blk {};
         } else |err| err
@@ -16450,7 +16493,8 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     const item = valid.items[if (target_sibling) 0 else 1];
     try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
-        var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
@@ -16477,8 +16521,9 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         request.before_ordinal = item.ordinal;
     }
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |reader_value| blk: {
-            var reader = reader_value;
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
+            var reader: ContentReader = undefined;
+            reader.open(location);
             reader.close();
             break :blk {};
         } else |err| err
@@ -16563,7 +16608,8 @@ test "public completed Action sibling corruption fences first Conversation read"
             }
             const result: anyerror!void = if (route == .content)
                 if (storage.openPublicConversationContent(.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -16667,7 +16713,8 @@ test "public tool-result cursor crosses a completed group boundary" {
     try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
     try std.testing.expect(older.items[0].kind == .tool_result);
     try std.testing.expect(older.items[1].kind == .user);
-    var reader = try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 });
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
     defer reader.close();
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
@@ -16803,14 +16850,16 @@ test "public assistant message provenance binds the exact accepted item" {
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
                 .page => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
-                .bytes => if (storage.openPublicConversationContent(request)) |reader| blk: {
-                    var owned = reader;
+                .bytes => if (storage.openPublicConversationContent(request)) |location| blk: {
+                    var owned: ContentReader = undefined;
+                    owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
                 .activity => if (storage.activityPage(.{ .session = request.session })) |_| {} else |err| err,
-                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |reader| blk: {
-                    var owned = reader;
+                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |location| blk: {
+                    var owned: ContentReader = undefined;
+                    owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
@@ -16892,7 +16941,8 @@ test "public projected content sequential work excludes repeated prefixes" {
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
     storage.testing_content_work = .{};
     var window: [protocol.content_window_bytes]u8 = undefined;
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     var offset: u64 = 0;
     while (offset < expected.len) : (offset += window.len) {
         try std.testing.expectEqual(window.len, try reader.readRange(offset, &window));
@@ -16905,7 +16955,8 @@ test "public projected content sequential work excludes repeated prefixes" {
     storage.testing_content_work = .{};
     offset = 0;
     while (offset < expected.len) : (offset += window.len) {
-        var ranged = try storage.openPublicConversationContent(request);
+        var ranged: ContentReader = undefined;
+        ranged.open(try storage.openPublicConversationContent(request));
         defer ranged.close();
         try std.testing.expectEqual(window.len, try ranged.readRange(offset, &window));
         try std.testing.expectEqualStrings(expected[@intCast(offset)..][0..window.len], &window);
@@ -16931,7 +16982,8 @@ test "public projected content equal-length repoint fences at complete-stream EO
         // Metadata/provenance stay valid, but the complete public identity differs.
         try exec(storage.database, "UPDATE answer_text_projection SET encoded_start=(SELECT encoded_start FROM answer_text_projection WHERE part_ordinal=1) WHERE part_ordinal=0");
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-        var reader = try storage.openPublicConversationContent(request);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(request));
         defer reader.close();
         var bytes: [4096]u8 = undefined;
         // An earlier range is not authenticated by an eventual EOF comparison.
@@ -16977,7 +17029,8 @@ test "public projected content EOF rejects nonempty trailing parts" {
                 try expectDone(insert);
                 try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             }
-            var reader = try storage.openPublicConversationContent(request);
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openPublicConversationContent(request));
             defer reader.close();
             var bytes: [1]u8 = undefined;
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
@@ -17000,7 +17053,8 @@ test "public projected content trailing empty parts retain final byte and repeat
         .{ .encoded = "", .decoded = "" },
         .{ .encoded = "", .decoded = "" },
     });
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     defer reader.close();
     var bytes: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try reader.readRange(7, &bytes));
@@ -17024,7 +17078,8 @@ test "public projected content ranges own positioning across windows and scalar 
         .{ .encoded = "", .decoded = "" },
         .{ .encoded = "tail", .decoded = "tail" },
     });
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     const reference = reader.reference;
     try std.testing.expectEqual(@as(u64, expected.len), reference.length);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
@@ -17069,7 +17124,8 @@ test "public projected content empty identity and repeated EOF" {
             try expectDone(statement);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         }
-        var reader = try storage.openContent(.{ .length = 0, .digest = digest });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(.{ .length = 0, .digest = digest }));
         defer reader.close();
         var bytes: [1]u8 = undefined;
         if (corrupt) {
@@ -17114,7 +17170,8 @@ test "public projected content range positioning preserves decoding and backing 
             try std.testing.expect(storage.isFenced());
             continue;
         }
-        var reader = try storage.openPublicConversationContent(request);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(request));
         defer reader.close();
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(error.InvalidJsonEscape, reader.readRange(1, &bytes));
@@ -17291,7 +17348,8 @@ test "one committed selection freezes its settings and input prefix" {
     const instruction = (try view.nextEntry(second_input.position)).?;
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
-    var first_reader = try view.openContent(first_input.content.?);
+    var first_reader: HistoricalReader = undefined;
+    try view.openContent(first_input.content.?, &first_reader);
     defer if (first_reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
@@ -17446,7 +17504,8 @@ test "continued accepted output keeps model immutable and public projection read
     const public_page = try storage.publicConversationPage(public_request);
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].kind == .assistant);
-    var public_reader = try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position });
+    var public_reader: ContentReader = undefined;
+    public_reader.open(try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position }));
     try std.testing.expect(public_reader.representation == .projection);
     {
         const backing = try prepare(storage.database, "SELECT exposed.private,source.private FROM answer_text_projection projection " ++
@@ -17614,12 +17673,14 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
             .conversation => if (storage.publicConversationPage(.{ .session = session })) |_| {} else |err| err,
             .activity => if (storage.activityPage(.{ .session = session })) |_| {} else |err| err,
             .conversation_content => if (storage.openPublicConversationContent(.{ .session = session, .position = position })) |value| blk: {
-                var reader = value;
+                var reader: ContentReader = undefined;
+                reader.open(value);
                 reader.close();
                 break :blk {};
             } else |err| err,
             .activity_content => if (storage.openActivityContent(.{ .session = session, .position = position })) |value| blk: {
-                var reader = value;
+                var reader: ContentReader = undefined;
+                reader.open(value);
                 reader.close();
                 break :blk {};
             } else |err| err,
@@ -18632,7 +18693,8 @@ test "public proposal structural corruption fences independently on every route"
             if (route == .cursor) request.after = item.position;
             const result: anyerror!void = if (route == .content)
                 if (storage.openProposalField(.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -18699,7 +18761,8 @@ test "public activity admission corruption fences page and content independently
             request.position = item.position - 1;
             const result: anyerror!void = if (content_route)
                 if (storage.openActivityContent(.{ .session = request.session, .position = item.position })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -18992,7 +19055,8 @@ test "tool label observation trusts admission but exact inspection authenticates
             .proposal => blk: {
                 const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
                 if (storage.openProposalField(.{ .session = request.session, .position = position, .field = .arguments })) |value| {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| break :blk err;
@@ -19248,7 +19312,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
         for ([_][]const u8{ "original", "{\"type\":\"reasoning\",\"id\":\"reasoning-0\"}", "{\"type\":\"compaction\",\"id\":\"compaction-1\",\"encrypted_content\":\"opaque\"}", "{\"type\":\"message\",\"id\":\"message-2\",\"content\":[]}", "later" }, 0..) |expected, index| {
             const entry = (try cursor.next(&view)).?;
             if (index == 2) try std.testing.expectEqual(anchor, entry.position);
-            var reader = try view.openContent(entry.content.?);
+            var reader: HistoricalReader = undefined;
+            try view.openContent(entry.content.?, &reader);
             defer reader.close();
             var bytes: [256]u8 = undefined;
             const count = try reader.read(0, &bytes);
@@ -19730,7 +19795,8 @@ test "compaction selected newest base corruption fences rather than using an old
             const anchor = (try view.coverage()).anchor.?;
             const selected = (try view.nextEntry(anchor - 1)).?;
             try std.testing.expectEqual(anchor, selected.position);
-            var reader = try view.openContent(selected.content.?);
+            var reader: HistoricalReader = undefined;
+            try view.openContent(selected.content.?, &reader);
             defer reader.close();
             var bytes: [4096]u8 = undefined;
             try std.testing.expectError(error.CorruptStore, reader.read(0, &bytes));

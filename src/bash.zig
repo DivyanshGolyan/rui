@@ -885,14 +885,14 @@ pub const Preparation = struct {
     /// Decoded stdin staged between parser steps.
     input_window: [copy_window_bytes]u8 = undefined,
 
-    /// Builds the preparation in place, taking the arguments reader, and
-    /// creates both output captures. On failure nothing is live except the
-    /// returned cleanup.
+    /// Builds the preparation in place, opens its arguments reader in place
+    /// and creates both output captures. On failure nothing is live except
+    /// the returned cleanup.
     pub fn start(
         self: *Preparation,
         scratch: Scratch,
         allocator: std.mem.Allocator,
-        arguments: store.ContentReader,
+        arguments: store.ContentLocation,
         input: *const store.BashExecutionInput,
         store_selector: []const u8,
         bash_path: []const u8,
@@ -910,8 +910,9 @@ pub const Preparation = struct {
             .timeout_ms = input.timeout_ms,
             .action_id = action_id,
             .faults = faults,
-            .source = .{ .reader = arguments, .length = input.arguments.length },
+            .source = .{ .length = input.arguments.length },
         };
+        self.source.reader.open(arguments);
         if (faults.preparation) return self.fail(error.BashPreparationFailed);
         for ([_]struct { *?OwnedFile, named_scratch.NumericName }{
             .{ &self.cleanup.stdout_capture, .@"bash-stdout" },
@@ -1644,7 +1645,7 @@ test "output publication closes producer aliases before making output evictable"
 }
 
 const ContentSource = struct {
-    reader: store.ContentReader,
+    reader: store.ContentReader = undefined,
     length: u64,
     position: u64 = 0,
     buffer_start: u64 = 0,

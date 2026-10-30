@@ -1063,6 +1063,9 @@ pub const Preparation = struct {
     item: RequestItem = .settings,
     pieces: Pieces = .{},
     emission: Emission = .none,
+    /// The content the emission reads; open exactly while
+    /// `emission.readsContent()`.
+    reader: store.HistoricalReader = undefined,
     input_comma: bool = false,
     continuation_unavailable: bool = false,
     history_position: u64 = 0,
@@ -1125,41 +1128,25 @@ pub const Preparation = struct {
     };
 
     const JsonEmission = struct {
+        /// Null when the bytes come from the preparation's reader.
         bytes: ?[]const u8 = null,
-        reader: ?store.HistoricalReader = null,
         cursor: request_encoding.JsonCursor = .{},
-
-        fn close(self: *JsonEmission) void {
-            if (self.reader) |*reader| reader.close();
-            self.reader = null;
-        }
-    };
-
-    const RawEmission = struct {
-        reader: store.HistoricalReader,
-        cursor: request_encoding.RawCursor = .{},
-    };
-
-    const ReplayEmission = struct {
-        reader: store.HistoricalReader,
-        cursor: request_encoding.ReplayCursor = .{},
     };
 
     const Emission = union(enum) {
         none,
         fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
-        raw: RawEmission,
-        replay: ReplayEmission,
+        raw: request_encoding.RawCursor,
+        replay: request_encoding.ReplayCursor,
         history_memo,
 
-        /// The content reader the emission holds open, if any.
-        fn reader(self: *Emission) ?*store.HistoricalReader {
+        /// Whether the emission reads the preparation's content reader.
+        fn readsContent(self: *const Emission) bool {
             return switch (self.*) {
-                .none, .fixed, .history_memo => null,
-                .json => |*json| if (json.reader) |*value| value else null,
-                .raw => |*raw| &raw.reader,
-                .replay => |*replay| &replay.reader,
+                .none, .fixed, .history_memo => false,
+                .json => |*json| json.bytes == null,
+                .raw, .replay => true,
             };
         }
     };
@@ -1491,12 +1478,18 @@ pub const Preparation = struct {
             .syntax => |bytes| self.emission = .{ .fixed = .{ .bytes = bytes } },
             .escaped => |bytes| self.emission = .{ .json = .{ .bytes = bytes } },
             .nested => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
-            .escaped_content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
-            .verbatim_content => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
-            .replay => |replayed| self.emission = .{ .replay = .{
-                .reader = try self.view.openContent(replayed.content),
-                .cursor = .{ .omit_content = replayed.omit_reasoning_text },
-            } },
+            .escaped_content => |content| {
+                try self.view.openContent(content, &self.reader);
+                self.emission = .{ .json = .{} };
+            },
+            .verbatim_content => |content| {
+                try self.view.openContent(content, &self.reader);
+                self.emission = .{ .raw = .{} };
+            },
+            .replay => |replayed| {
+                try self.view.openContent(replayed.content, &self.reader);
+                self.emission = .{ .replay = .{ .omit_content = replayed.omit_reasoning_text } };
+            },
             .history_memo => self.emission = .{ .history_memo = {} },
         }
     }
@@ -1509,17 +1502,17 @@ pub const Preparation = struct {
             },
             .json => |*json| {
                 if (!try self.advanceJson(json, bytes_left)) return false;
-                json.close();
+                if (json.bytes == null) self.reader.close();
             },
-            .raw => |*raw| {
-                const source = HistoricalSource{ .reader = &raw.reader };
-                if (!try raw.cursor.advance(source, &self.writer, bytes_left)) return false;
-                raw.reader.close();
+            .raw => |*cursor| {
+                const source = HistoricalSource{ .reader = &self.reader };
+                if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
+                self.reader.close();
             },
-            .replay => |*replay| {
-                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
-                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
-                replay.reader.close();
+            .replay => |*cursor| {
+                const source = HistoricalSource{ .reader = &self.reader, .ranged = true };
+                if (try cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
+                self.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
         }
@@ -1534,7 +1527,7 @@ pub const Preparation = struct {
             const source = request_encoding.MemorySource{ .bytes = bytes };
             return json.cursor.advance(source, &self.writer, bytes_left);
         }
-        const source = HistoricalSource{ .reader = &json.reader.? };
+        const source = HistoricalSource{ .reader = &self.reader };
         return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
@@ -1601,15 +1594,15 @@ pub const Preparation = struct {
             if (!self.view.ownsSettings(frozen)) return error.PreparationForeignContent;
         }
         var expected_readers: usize = 0;
-        if (self.emission.reader()) |reader| {
+        if (self.emission.readsContent()) {
             expected_readers = 1;
-            if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
+            if (!self.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
         }
         if (self.view.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
     }
 
     fn closeEmission(self: *Preparation) void {
-        if (self.emission.reader()) |reader| reader.close();
+        if (self.emission.readsContent()) self.reader.close();
         self.emission = .{ .none = {} };
     }
 };
@@ -2393,7 +2386,8 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     const observed = try setup.storage.observeCommand("scratch-report");
     try std.testing.expectEqual(.accepted, observed.status);
     try std.testing.expectEqual(.queued, observed.message.?.queue.?.state);
-    var reader = try setup.storage.openContent(observed.message.?.content);
+    var reader: store.ContentReader = undefined;
+    reader.open(try setup.storage.openContent(observed.message.?.content));
     defer reader.close();
     var actual: [text.len + 1]u8 = undefined;
     const count = try reader.read(0, &actual);
@@ -2840,7 +2834,8 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     // The reader lives in a nested scope so it closes before preparation
     // cancellation on both success and error paths.
     {
-        var extra = try preparation.view.openContent(preparation.settings.?.baseline_instructions);
+        var extra: store.HistoricalReader = undefined;
+        try preparation.view.openContent(preparation.settings.?.baseline_instructions, &extra);
         defer extra.close();
         try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
     }

@@ -2375,7 +2375,7 @@ test "cleanup publication follows complete execution retirement" {
         .encoded = "{\\\"description\\\":\\\"Print test marker\\\",\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
         .decoded = arguments,
     }});
-    const reader = try storage.openPublicConversationContent(content);
+    const arguments_location = try storage.openPublicConversationContent(content);
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
@@ -2403,7 +2403,7 @@ test "cleanup publication follows complete execution retirement" {
     const work = try pages.Mapped(struct { preparation: bash.Preparation, prepared: bash.Prepared }).map();
     defer work.unmap();
     const preparation = &work.value.preparation;
-    if (preparation.start(scratch, std.testing.allocator, reader, &input, root, default_bash_path, 11, .{})) |initial| {
+    if (preparation.start(scratch, std.testing.allocator, arguments_location, &input, root, default_bash_path, 11, .{})) |initial| {
         var failure = initial;
         try failure.cleanup.cleanup(scratch);
         return failure.cause;
