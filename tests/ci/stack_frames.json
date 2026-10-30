@@ -18,7 +18,6 @@
   ],
   "exceptions": [
     {"function": "posix.openat", "frame_bytes": 16384, "cause": "std toPosixPath [4095:0]u8 path buffers"},
-    {"function": "preferences.save", "frame_bytes": 12288, "cause": "client-only writer (rui defaults, rui auth login) in a module the Host reads at startup: a [4096]u8 path and a [1024]u8 encoding buffer inlined from saveWithSync"},
     {"function": "Io.Threaded.dirRenamePosix", "frame_bytes": 12288, "cause": "std old and new path buffers [4096]u8"},
     {"function": "EVP_read_pw_string_min", "frame_bytes": 12288, "cause": "OpenSSL password prompt buffer; reached through SSL_CTX_new"}
   ]
