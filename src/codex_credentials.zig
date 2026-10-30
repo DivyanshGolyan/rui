@@ -74,8 +74,9 @@ pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratc
 
 /// `expected_generation == null` is an explicit login. It may replace an
 /// existing login and advances its generation. A non-null value is a refresh
-/// compare-and-swap and must preserve the account binding. The admitted
-/// generation is written into `record`.
+/// compare-and-swap and must preserve the account binding. `record` carries
+/// the admitted generation once it is published; a failed install leaves
+/// `record` as it was.
 pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scratch: *Scratch) !void {
     // Refuse an incomplete record before touching the owner directory;
     // admission checks it again with the current record.
@@ -92,7 +93,11 @@ pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scr
         else => return err,
     };
     defer if (current != null) std.crypto.secureZero(u8, std.mem.asBytes(&scratch.current));
-    record.generation = try policy.admitReplacement(current, record, expected_generation);
+    const admitted = try policy.admitReplacement(current, record, expected_generation);
+    // The encoder reads the generation from the record it publishes.
+    const previous = record.generation;
+    record.generation = admitted;
+    errdefer record.generation = previous;
     try owner.publish(record, &scratch.file);
 }
 
@@ -529,6 +534,8 @@ test "private file, lock, directory, and abandoned temp are validated" {
     try private.symLink(io, "auth", ".auth.tmp", .{});
     try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
     try std.testing.expectEqual(@as(u64, 1), (try testLoad(path, &scratch)).generation);
+    // The caller's record does not claim a generation that was never published.
+    try std.testing.expectEqual(@as(u64, 1), record.generation);
     try private.deleteFile(io, ".auth.tmp");
     try private.setPermissions(io, .fromMode(0o755));
     try std.testing.expectError(error.InsecureCredentialDirectory, testLoad(path, &scratch));
