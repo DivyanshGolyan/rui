@@ -605,7 +605,8 @@ pub const HistoricalView = struct {
         judged: ?struct { position: u64, verdict: ReplayVerdict } = null,
     };
 
-    pub const EntryProgress = union(enum) { pending, ready: ?HistoricalEntry };
+    /// A ready entry lives in the view until its next step.
+    pub const EntryProgress = union(enum) { pending, ready: ?*const HistoricalEntry };
 
     /// Charge discovery/classification items and private authentication bytes
     /// to the same caller allowance. Pending exposes no storage-level state.
@@ -649,7 +650,7 @@ pub const HistoricalView = struct {
             var items: usize = 1024;
             switch (try self.nextEntryStep(after_position, &bytes, &items)) {
                 .pending => {},
-                .ready => |entry| return entry,
+                .ready => |entry| return if (entry) |value| value.* else null,
             }
         }
     }
@@ -6016,7 +6017,9 @@ pub const Store = struct {
         return false;
     }
 
-    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
+    /// The served entry lives in the view: in its read-ahead, its next tool
+    /// group or its output check.
+    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?*const HistoricalEntry {
         std.debug.assert(view.outputs_validated);
         if (view.output_check.reading) return try self.checkHistoricalOutput(view, bytes_left, items_left);
         var scan_tool_groups = !view.tool_group_initialized;
@@ -6026,7 +6029,7 @@ pub const Store = struct {
             view.next_tool_group = null;
             view.next_tool_group_source_id = null;
             scan_tool_groups = true;
-        } else if (view.next_tool_group) |group| {
+        } else if (view.next_tool_group) |*group| {
             if (group.position <= after_position) {
                 view.next_tool_group = null;
                 view.next_tool_group_source_id = null;
@@ -6037,8 +6040,8 @@ pub const Store = struct {
             view.tool_group_initialized = false;
             if (try self.readNextHistoricalToolGroup(view)) |group| {
                 view.tool_group_source_cursor = group.source_operation_id;
-                if (group.entry.position > after_position) {
-                    view.next_tool_group = group.entry;
+                if (group.position > after_position) {
+                    view.next_tool_group = .{ .position = group.position, .kind = .tool_results };
                     view.next_tool_group_source_id = group.source_operation_id;
                 } else return error.HistoricalPending;
             }
@@ -6046,7 +6049,7 @@ pub const Store = struct {
         }
         view.tool_group_scan_after = after_position;
         const ordinary = try self.nextOrdinaryHistoricalEntry(view, after_position) orelse return self.activateHistoricalToolGroup(view);
-        if (view.next_tool_group) |group| {
+        if (view.next_tool_group) |*group| {
             if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
         }
         // A call's certified fields bind its Tool Results, so its bytes are
@@ -6056,14 +6059,14 @@ pub const Store = struct {
         return error.HistoricalPending;
     }
 
-    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: HistoricalEntry) !void {
+    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: *const HistoricalEntry) !void {
         const content = entry.content.?;
         const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
         const location: ContentLocation = if (content.raw)
             .{ .store = self, .reference = identity, .content_id = content.content_id, .raw = true }
         else
             try self.openProjectionLocked(content.content_id, identity);
-        view.output_check = .{ .entry = entry, .reading = true };
+        view.output_check = .{ .entry = entry.*, .reading = true };
         view.output_check.reader.open(location);
         // The next step reads it, after preparing the read outside Store access.
     }
@@ -6078,11 +6081,11 @@ pub const Store = struct {
     fn readReplayVerdictLocked(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
         if (!view.output_check.reading) {
             items_left.* -= 1;
-            try self.startHistoricalOutput(view, entry.*);
+            try self.startHistoricalOutput(view, entry);
             return error.HistoricalPending;
         }
         std.debug.assert(view.output_check.entry.position == entry.position);
-        entry.* = try self.checkHistoricalOutput(view, bytes_left, items_left);
+        entry.* = (try self.checkHistoricalOutput(view, bytes_left, items_left)).*;
         return view.output_check.judged.?.verdict;
     }
 
@@ -6090,7 +6093,8 @@ pub const Store = struct {
     /// authenticate its bytes, type, ID and a call's certified fields, and
     /// judge it under today's rules. Corrupt bytes fence; an incompatible
     /// verdict is the caller's to act on.
-    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !HistoricalEntry {
+    /// Returns the checked entry, marked verified, in the output check.
+    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !*const HistoricalEntry {
         const check = &view.output_check;
         const Source = struct {
             storage: *Store,
@@ -6120,7 +6124,7 @@ pub const Store = struct {
             else => return err,
         };
         const verdict = judged orelse return error.HistoricalPending;
-        var entry = check.entry;
+        const entry = &check.entry;
         const identity = entry.content.?.item_identity.?;
         try check.item_check.authenticateIdentity(identity.kind, identity.id_digest);
         if (identity.kind == .function_call) try check.item_check.authenticate(identity.call_fields orelse return error.CorruptStore);
@@ -6133,9 +6137,9 @@ pub const Store = struct {
 
     /// The next host input or output item after `after_position`, served from
     /// the view's read-ahead and refilled by one ranged query.
-    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
         while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
-            if (view.entries[view.entries_next].position > after_position) return view.entries[view.entries_next];
+            if (view.entries[view.entries_next].position > after_position) return &view.entries[view.entries_next];
         }
         view.entries_next = 0;
         view.entries_end = 0;
@@ -6174,7 +6178,7 @@ pub const Store = struct {
             c.SQLITE_DONE => break,
             else => return error.HistoricalEntryReadFailed,
         };
-        return if (view.entries_end == 0) null else view.entries[0];
+        return if (view.entries_end == 0) null else &view.entries[0];
     }
 
     fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !HistoricalEntry {
@@ -6230,9 +6234,9 @@ pub const Store = struct {
         };
     }
 
-    fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalEntry {
+    fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?*const HistoricalEntry {
         _ = self;
-        const entry = view.next_tool_group orelse return null;
+        const entry = if (view.next_tool_group) |*value| value else return null;
         view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
         view.active_tool_group_after_ordinal = null;
         view.active_tool_group_count = 0;
@@ -6240,8 +6244,9 @@ pub const Store = struct {
         return entry;
     }
 
+    /// A Tool Results group: its entry is only a position.
     const HistoricalToolGroup = struct {
-        entry: HistoricalEntry,
+        position: u64,
         source_operation_id: u64,
     };
 
@@ -6265,7 +6270,7 @@ pub const Store = struct {
                 try bindU64(extra, 2, scan.calls);
                 if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or c.sqlite3_step(extra) != c.SQLITE_DONE)
                     return error.CorruptStore;
-                const group = HistoricalToolGroup{ .entry = .{ .position = scan.position, .kind = .tool_results }, .source_operation_id = scan.source };
+                const group = HistoricalToolGroup{ .position = scan.position, .source_operation_id = scan.source };
                 view.next_tool_group_count = scan.calls;
                 scan.source = 0;
                 return group;
@@ -12586,7 +12591,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                         // The view never reaches its end, so no request seals.
                         if (!bytes_fault or served != null) return error.MissingCorruptionFailure;
                         try std.testing.expectEqual(HistoricalEntryKind.user, entry.?.kind);
-                        served = entry;
+                        served = entry.?.*;
                     },
                 }
             }

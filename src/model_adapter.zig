@@ -1125,10 +1125,11 @@ pub const Preparation = struct {
         complete,
     };
 
-    const Next = union(enum) {
+    const Next = enum {
         /// No item yet: the stage moved on or waits for allowance.
         pending,
-        item: RequestItem,
+        /// `item` holds the next item.
+        item,
         end,
     };
 
@@ -1261,11 +1262,8 @@ pub const Preparation = struct {
             }
             switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
                 .pending => {},
-                .item => |item| {
-                    self.item = item;
-                    switch (self.settings.provider) {
-                        .codex => codexPieces(&self.item, &self.settings, &self.input_comma, &self.pieces),
-                    }
+                .item => switch (self.settings.provider) {
+                    .codex => codexPieces(&self.item, &self.settings, &self.input_comma, &self.pieces),
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1273,9 +1271,10 @@ pub const Preparation = struct {
         return self.flushAndYield();
     }
 
-    /// The request's next item, read from the view. History decisions live
-    /// here: which output a compaction base covers, where the history memo
-    /// resumes, and whether a compaction trigger ends the input.
+    /// Move to the request's next item, read from the view into `item`.
+    /// History decisions live here: which output a compaction base covers,
+    /// where the history memo resumes, and whether a compaction trigger ends
+    /// the input.
     fn nextItem(self: *Preparation, bytes_left: *usize, items_left: *usize) !Next {
         switch (self.stage) {
             .settings => {
@@ -1289,26 +1288,20 @@ pub const Preparation = struct {
                 // The selected base must be readable before any request byte.
                 _ = try self.view.coverage();
                 self.stage = .instructions;
-                return .{ .item = .settings };
+                self.item = .settings;
+                return .item;
             },
             .instructions => {
                 self.stage = .history_start;
-                return .{ .item = .instructions };
+                self.item = .instructions;
+                return .item;
             },
             // The history span starts here. A memo of this Session's
             // previous span that this view contains replaces encoding that
             // prefix; anything else rebuilds it from the Store.
             .history_start => {
                 self.stage = .history;
-                const memos = self.memos orelse return .pending;
-                self.span = .{ .start = self.writer.offset };
-                const memo = memos.held(self.settings.session.slice()) orelse return .pending;
-                const key = try self.memoKey();
-                if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
-                try self.writer.flush();
-                const file = memos.open(self.writer.io, &memo) orelse return .pending;
-                self.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
-                return .{ .item = .history_memo };
+                return self.startSpan();
             },
             .history => {
                 items_left.* += 1; // The semantic cursor charges discovery or parser work.
@@ -1326,14 +1319,17 @@ pub const Preparation = struct {
                 const anchor = (try self.view.coverage()).anchor;
                 const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
-                    .user, .instruction => return .{ .item = .{ .message = entry } },
+                    .user, .instruction => {
+                        self.item = .{ .message = entry.* };
+                        return .item;
+                    },
                     .tool_results => self.stage = if (covered) .covered_tool_results else .tool_results,
                     .provider_output => {
                         if (covered) return .pending;
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
                             self.continuation_unavailable = true;
                         };
-                        self.replay_entry = entry;
+                        self.replay_entry = entry.*;
                         self.stage = .replay_verdict;
                     },
                 }
@@ -1349,10 +1345,13 @@ pub const Preparation = struct {
                 self.stage = .history;
                 switch (verdict) {
                     .incompatible => self.continuation_unavailable = true,
-                    .compatible => |compatible| if (!self.continuation_unavailable) return .{ .item = .{ .replayed_output = .{
-                        .content = self.replay_entry.content.?,
-                        .omit_reasoning_text = compatible.omit_reasoning_text,
-                    } } },
+                    .compatible => |compatible| if (!self.continuation_unavailable) {
+                        self.item = .{ .replayed_output = .{
+                            .content = self.replay_entry.content.?,
+                            .omit_reasoning_text = compatible.omit_reasoning_text,
+                        } };
+                        return .item;
+                    },
                 }
             },
             .tool_results => {
@@ -1360,27 +1359,48 @@ pub const Preparation = struct {
                     self.stage = .history;
                     return .pending;
                 };
-                return .{ .item = .{ .tool_result = result } };
+                self.item = .{ .tool_result = result };
+                return .item;
             },
             .covered_tool_results => {
                 if (try self.view.nextToolResult() == null) self.stage = .history;
             },
             .compaction_trigger => {
                 self.stage = .tools;
-                if (self.settings.operation == .compaction) return .{ .item = .compaction_trigger };
+                if (self.settings.operation == .compaction) {
+                    self.item = .compaction_trigger;
+                    return .item;
+                }
             },
             .tools => {
                 self.stage = .text_format;
-                return .{ .item = .tools };
+                self.item = .tools;
+                return .item;
             },
             .text_format => {
                 self.stage = .end;
-                return .{ .item = .text_format };
+                self.item = .text_format;
+                return .item;
             },
             .end => return .end,
             .history_store, .complete => unreachable,
         }
         return .pending;
+    }
+
+    /// Never inlined: it runs once per request, and its memo and key copies
+    /// stay out of the frame every history item uses.
+    noinline fn startSpan(self: *Preparation) !Next {
+        const memos = self.memos orelse return .pending;
+        self.span = .{ .start = self.writer.offset };
+        const memo = memos.held(self.settings.session.slice()) orelse return .pending;
+        const key = try self.memoKey();
+        if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
+        try self.writer.flush();
+        const file = memos.open(self.writer.io, &memo) orelse return .pending;
+        self.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
+        self.item = .history_memo;
+        return .item;
     }
 
     fn memoKey(self: *Preparation) !history_memo.Key {
@@ -1541,7 +1561,9 @@ pub const Preparation = struct {
         return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
-    fn seal(self: *Preparation) !void {
+    /// Never inlined: it runs once per request, and its memo bookkeeping stays
+    /// out of the frame every advance uses.
+    noinline fn seal(self: *Preparation) !void {
         if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.flush();
