@@ -168,20 +168,8 @@ pub const Work = struct {
     first_action: ?u64 = null,
 };
 
-/// Checked in order:
-///
-/// | condition                                                       | kind        | since                          |
-/// | --- | --- | --- |
-/// | active Turn selected by a stop                                  | stopping    | the stop                       |
-/// | active, Attempt in flight                                       | working     | the Attempt                    |
-/// | active, retry due later / already due                           | retrying / pending | scheduling / due second |
-/// | active, proposals, a Bash Action running                        | bash        | the oldest running Attempt     |
-/// | active, proposals, every unresolved Action awaits permission    | approval    | latest of resolution, group change |
-/// | active, otherwise                                               | pending     | latest of resolution, group change |
-/// | no active Turn, eligible queued input                           | pending     | latest of admission, outcome   |
-/// | no active Turn, a stop excluded input after the latest outcome  | stopped     | the stop                       |
-/// | latest Turn completed / cancelled / failed                      | finished / stopped / failed | the outcome |
-/// | no Turn                                                         | idle        | Session creation               |
+/// Applies the Session work table in ARCHITECTURE.md ("Work state and wait
+/// conditions"), checked in order.
 ///
 /// Inputs no writer produces return `error.CorruptStore`, and the reader
 /// fences as it does for other contradictions.
