@@ -914,8 +914,6 @@ fn decisionShown(self: *const Self) bool {
 const ConversationAction = enum {
     page_up,
     page_down,
-    /// Shift-Up, and Up past the draft's first line; terminals in the
-    /// alternate screen also send wheel scrolling as these arrows.
     scroll_up,
     scroll_down,
     /// The latest view, which is the pending Action if there is one.
@@ -937,7 +935,7 @@ const ConversationAction = enum {
 /// The conversation's one key table.
 const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .escape = .close,
-    // The Esc that needs no ESC expiry.
+    // A lone ESC acts only once it expires; Ctrl-G acts at once.
     .ctrl_g = .close,
     .ctrl_c = .detach,
     .ctrl_d = .detach,

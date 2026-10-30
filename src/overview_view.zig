@@ -141,10 +141,7 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 /// held start settings.
 pub const Action = enum { previous, next, first, last, clear, exit, stop };
 
-/// The one key table. The shell's line editor, the one a conversation uses,
-/// edits with every key it has a use for; each other key means what this
-/// says. Up and Down select past the draft's first and last line, Home, End
-/// and Ctrl-D on an empty draft.
+/// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
     .escape = .clear,
     .ctrl_g = .clear,
@@ -168,7 +165,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0 };
 
 /// What the composer made of one input, and its draft as that input left it.
-pub const Typed = struct { outcome: keymap.Outcome(Action), draft: Draft };
+pub const Composed = struct { outcome: keymap.Outcome(Action), draft: Draft };
 
 pub const Delta = enum {
     not_modified,
@@ -295,7 +292,7 @@ pub const StartResult = union(enum) {
 };
 
 pub const Event = union(enum) {
-    typed: Typed,
+    composed: Composed,
     /// The shell's clock, in Unix milliseconds.
     tick: u64,
     list: ListReply,
@@ -322,7 +319,6 @@ pub const Reads = struct {
     }
 };
 
-/// What the shell does next.
 pub const Effect = union(enum) {
     /// List every Session again through a `protocol_reply.SessionTraversal`
     /// from the last completed listing's token.
@@ -784,7 +780,7 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
-        .typed => |value| compose(state, value, &effects),
+        .composed => |value| compose(state, value, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1136,7 +1132,7 @@ fn codepointStart(bytes: []const u8, at: usize) usize {
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
 /// the prompt and Esc only cancels it.
-fn compose(state: *State, value: Typed, effects: *Effects) void {
+fn compose(state: *State, value: Composed, effects: *Effects) void {
     state.notice = null;
     const prompt = state.prompt;
     state.prompt = null;
@@ -2449,20 +2445,20 @@ fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
 
 /// A key the overview binds, pressed with `draft` in the composer.
 fn press(state: *State, draft: Draft, action: Action) !Effects {
-    return step(state, .{ .typed = .{ .outcome = .{ .action = action }, .draft = draft } });
+    return step(state, .{ .composed = .{ .outcome = .{ .action = action }, .draft = draft } });
 }
 
 /// Types `text` as the whole draft, its caret at the end, as the shell's
 /// line editor reports an edit, and returns that draft.
 fn typeText(state: *State, text: []const u8) !Draft {
     const draft: Draft = .{ .bytes = text, .cursor = text.len };
-    try expectEffects(&.{}, try step(state, .{ .typed = .{ .outcome = .redraw, .draft = draft } }));
+    try expectEffects(&.{}, try step(state, .{ .composed = .{ .outcome = .redraw, .draft = draft } }));
     return draft;
 }
 
 /// The line editor's Enter on `draft`.
 fn submit(state: *State, draft: Draft) !Effects {
-    return step(state, .{ .typed = .{ .outcome = .submit, .draft = draft } });
+    return step(state, .{ .composed = .{ .outcome = .submit, .draft = draft } });
 }
 
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
@@ -2833,7 +2829,7 @@ test "a cancelled stop prompt sends nothing" {
     try expectSelected(&state, "r4t9vw");
     // So does input that left the draft as it was.
     try expectEffects(&.{}, try press(&state, .{}, .stop));
-    try expectEffects(&.{}, try step(&state, .{ .typed = .{ .outcome = .none, .draft = .{} } }));
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .outcome = .none, .draft = .{} } }));
     try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     // A row that finished after the prompt opened has nothing left to stop.
     try expectEffects(&.{}, try press(&state, .{}, .stop));
@@ -3072,7 +3068,7 @@ test "a line the editor rejects says why once; text it could not take clears" {
         var state = try opened(&mixed);
         defer state.deinit();
         draft = try typeText(&state, "first");
-        const effects = try step(&state, .{ .typed = .{ .outcome = case[0], .draft = draft } });
+        const effects = try step(&state, .{ .composed = .{ .outcome = case[0], .draft = draft } });
         try expectEffects(if (case[2]) &.{.clear_draft} else &.{}, effects);
         try expectNotice(&state, case[1]);
         // The next edit clears the notice.

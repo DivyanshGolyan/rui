@@ -459,8 +459,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     return next;
 }
 
-/// The composer's text and caret as they stand.
-fn typed(self: *const Self) view.Draft {
+fn composerDraft(self: *const Self) view.Draft {
     return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor };
 }
 
@@ -669,10 +668,10 @@ fn askBackground(self: *Self) !?Next {
 /// retry.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     const outcome: keymap.Outcome(view.Action) = if (self.state.starting())
-        if (TerminalEditor.peek(view.keys, decoded)) |action| .{ .action = action } else .none
+        if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none
     else
         self.composer.apply(view.keys, decoded);
-    return self.event(.{ .typed = .{ .outcome = outcome, .draft = self.typed() } });
+    return self.event(.{ .composed = .{ .outcome = outcome, .draft = self.composerDraft() } });
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
@@ -680,7 +679,7 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
 /// next frame.
 fn draw(self: *Self, frame: u64) !?Next {
     const size = self.terminal.geometry();
-    var screen = try view.render(self.init.gpa, &self.state, self.typed(), size.col, size.row, self.caps, frame);
+    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), size.col, size.row, self.caps, frame);
     errdefer screen.deinit();
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);

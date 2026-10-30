@@ -27,7 +27,7 @@ pasting: bool = false,
 /// What an input did before any screen's table: an edit, or, as `action`,
 /// a `Key` the editor had no use for. `apply` gives that key the screen's
 /// meaning.
-const Fed = keymap.Outcome(Key);
+pub const KeyOutcome = keymap.Outcome(Key);
 
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
@@ -274,7 +274,7 @@ pub fn apply(self: *Editor, comptime keys: anytype, decoded: Input.Decoded) keym
 /// The frozen composer's route: a typed `Key` means what `keys` says,
 /// whatever the draft holds, and nothing else does anything. No edit
 /// happens, so the draft a pending start shows stays to retry.
-pub fn peek(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(keys).Action {
+pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(keys).Action {
     const value = switch (decoded) {
         .event => |value| value,
         else => return null,
@@ -286,7 +286,7 @@ pub fn peek(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(keys).Actio
     };
 }
 
-fn take(self: *Editor, decoded: Input.Decoded) Fed {
+fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
     const value = switch (decoded) {
         .none, .report => return .none,
         .invalid => |invalid| {
@@ -319,8 +319,8 @@ fn take(self: *Editor, decoded: Input.Decoded) Fed {
 /// One byte through `input` and every event it completes, for tests of a
 /// lone editor clear of input deadlines: each key it has no use for comes
 /// back as itself. Returns the last outcome that is not `.none`.
-pub fn feed(self: *Editor, input: *Input, byte: u8) Fed {
-    var last: Fed = .none;
+pub fn feed(self: *Editor, input: *Input, byte: u8) KeyOutcome {
+    var last: KeyOutcome = .none;
     var decoded = input.feed(byte, 0);
     while (decoded != .none) : (decoded = input.next()) {
         const outcome = self.take(decoded);
@@ -376,7 +376,7 @@ fn named(value: vaxis.Key) ?Key {
 /// makes, or null when the draft gives it none and the screen's table
 /// decides. It reads the draft's shape only, so a rejected line changes no
 /// key's meaning; there the edit does nothing, as every edit does.
-fn edit(self: *Editor, key_name: Key) ?Fed {
+fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
     return switch (key_name) {
         .up => self.vertical(false),
         .down => self.vertical(true),
@@ -387,15 +387,14 @@ fn edit(self: *Editor, key_name: Key) ?Fed {
     };
 }
 
-fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Fed {
-    const Code = vaxis.Key;
+fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
     if (pasted_input) {
         if (!self.pasting) {
             self.reject(.invalid);
             return .none;
         }
         if (value.matchExact('j', .{ .ctrl = true })) return self.insert('\n', true);
-        if (value.matchExact(Code.tab, .{})) return self.insert('\t', true);
+        if (value.matchExact(vaxis.Key.tab, .{})) return self.insert('\t', true);
         if (value.text) |text| return self.insertText(text, true);
         self.reject(.invalid);
         return .none;
@@ -404,24 +403,24 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Fed {
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
     if (named(value)) |key_name| return self.edit(key_name) orelse .{ .action = key_name };
-    if (value.matchExact(Code.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return if (self.rejected) |why| .{ .refused = why } else .submit;
+    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return if (self.rejected) |why| .{ .refused = why } else .submit;
     if (self.rejected != null) return .none;
-    if (value.matchExact(Code.tab, .{})) return self.insert('\t', false);
+    if (value.matchExact(vaxis.Key.tab, .{})) return self.insert('\t', false);
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(Code.enter, .{ .shift = true }) or value.matchExact(Code.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
-    if (value.matchExact(Code.left, .{})) return self.move(self.previous(self.cursor));
-    if (value.matchExact(Code.right, .{})) return self.move(self.next(self.cursor));
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
+    if (value.matchExact(vaxis.Key.left, .{})) return self.move(self.previous(self.cursor));
+    if (value.matchExact(vaxis.Key.right, .{})) return self.move(self.next(self.cursor));
     if (value.matchExact('a', .{ .ctrl = true })) return self.move(self.lineStart());
     if (value.matchExact('e', .{ .ctrl = true })) return self.move(self.lineEnd());
-    if (value.matchExact(Code.delete, .{})) return self.deleteNext();
-    if (value.matchExact(Code.backspace, .{})) return self.deletePrevious();
+    if (value.matchExact(vaxis.Key.delete, .{})) return self.deleteNext();
+    if (value.matchExact(vaxis.Key.backspace, .{})) return self.deletePrevious();
     if (value.matchExact('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
     if (value.matchExact('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
     if (value.matchExact('w', .{ .ctrl = true })) return self.backwardWord(true);
-    if (value.matchExact(Code.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return self.backwardWord(false);
-    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(Code.left, .{ .alt = true })) return self.moveWord(false);
-    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(Code.right, .{ .alt = true })) return self.moveWord(true);
+    if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return self.backwardWord(false);
+    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return self.moveWord(false);
+    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return self.moveWord(true);
     // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
     // on a character, a control or a named key such as Enter, is dropped
     // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
@@ -430,7 +429,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Fed {
     if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .{ .refused = .unbound };
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
     // those are not text, so an unbound one rejects the input.
-    const control = value.codepoint < 0x20 and value.codepoint != Code.enter and value.codepoint != Code.tab and value.codepoint != Code.escape;
+    const control = value.codepoint < 0x20 and value.codepoint != vaxis.Key.enter and value.codepoint != vaxis.Key.tab and value.codepoint != vaxis.Key.escape;
     if (value.mods.ctrl or control) {
         self.reject(.invalid);
         return .none;
@@ -451,11 +450,11 @@ test "modified kitty text cannot become an ordinary permission choice" {
             const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d}{s}u", .{ modifier, text });
             var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
             var stream: Input = .{};
-            var event: Fed = .none;
+            var event: KeyOutcome = .none;
             for (input) |byte| event = editor.feed(&stream, byte);
-            try std.testing.expectEqual(Fed{ .refused = .unbound }, event);
+            try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, event);
             try std.testing.expectEqual(@as(usize, 0), editor.length);
-            try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+            try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         }
     }
     // A malformed key fails closed even where its damaged number would name
@@ -466,7 +465,7 @@ test "modified kitty text cannot become an ordinary permission choice" {
         var stream: Input = .{};
         _ = editor.feed(&stream, 'a');
         for (malformed) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
-        try std.testing.expectEqual(Fed{ .refused = .invalid }, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
     }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
         var sequence: [32]u8 = undefined;
@@ -474,7 +473,7 @@ test "modified kitty text cannot become an ordinary permission choice" {
         var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
         var stream: Input = .{};
         for (input) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         try std.testing.expectEqualStrings("a", storage[0..editor.length]);
     }
 }
@@ -491,10 +490,10 @@ test "marked paste rejects encoded controls without releasing paste custody" {
         for ("\x1b[200~left") |byte| _ = editor.feed(&stream, byte);
         for (sequence) |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqual(Pending.incomplete, stream.pending());
-        try std.testing.expectEqual(Fed.none, editor.feed(&stream, '\n'));
+        try std.testing.expectEqual(KeyOutcome.none, editor.feed(&stream, '\n'));
         for ("right\x7f\x1b[201~") |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqual(Pending.none, stream.pending());
-        try std.testing.expectEqual(Fed{ .refused = .invalid }, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
     }
 }
 
@@ -504,9 +503,9 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         var editor: Editor = .{ .buffer = &storage };
         var stream: Input = .{};
         for ("kept\x01") |byte| _ = editor.feed(&stream, byte);
-        var event: Fed = .none;
+        var event: KeyOutcome = .none;
         for (scalar) |byte| event = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed{ .refused = .edit_rejected }, event);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .edit_rejected }, event);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
         try std.testing.expectEqual(@as(usize, 0), editor.cursor);
         // Roll back a whole paste, including accepted text before a newline,
@@ -515,18 +514,18 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         for (scalar) |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqual(Pending.incomplete, stream.pending());
         for ("discarded\x1b[201~") |byte| event = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed{ .refused = .edit_rejected }, event);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .edit_rejected }, event);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
         try std.testing.expectEqual(@as(usize, 0), editor.cursor);
         try std.testing.expectEqual(Pending.none, stream.pending());
         for ("é🧑‍🌾") |byte| _ = editor.feed(&stream, byte);
         try std.testing.expectEqualStrings("é🧑‍🌾kept", storage[0..editor.length]);
-        try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     }
 }
 
-fn insertText(self: *Editor, text: []const u8, pasted_input: bool) Fed {
-    var event: Fed = .none;
+fn insertText(self: *Editor, text: []const u8, pasted_input: bool) KeyOutcome {
+    var event: KeyOutcome = .none;
     for (text) |byte| {
         const next_event = self.insert(byte, pasted_input);
         if (next_event == .refused) return next_event;
@@ -535,7 +534,7 @@ fn insertText(self: *Editor, text: []const u8, pasted_input: bool) Fed {
     return event;
 }
 
-fn insert(self: *Editor, byte: u8, pasted_input: bool) Fed {
+fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
     if (self.rejected != null) return .none;
     if (self.partial_length == 0) {
         self.partial_need = std.unicode.utf8ByteSequenceLength(byte) catch {
@@ -641,13 +640,13 @@ fn decodeScalar(self: *const Editor, offset: *usize) c_int {
     return @intCast(point);
 }
 
-fn move(self: *Editor, position: usize) Fed {
+fn move(self: *Editor, position: usize) KeyOutcome {
     if (self.rejected != null or self.cursor == position) return .none;
     self.cursor = position;
     return .redraw;
 }
 
-fn erase(self: *Editor, from: usize, to: usize) Fed {
+fn erase(self: *Editor, from: usize, to: usize) KeyOutcome {
     if (self.rejected != null or from == to) return .none;
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
@@ -657,15 +656,15 @@ fn erase(self: *Editor, from: usize, to: usize) Fed {
     return .redraw;
 }
 
-fn deleteTo(self: *Editor, position: usize) Fed {
+fn deleteTo(self: *Editor, position: usize) KeyOutcome {
     return self.erase(@min(self.cursor, position), @max(self.cursor, position));
 }
 
-fn deletePrevious(self: *Editor) Fed {
+fn deletePrevious(self: *Editor) KeyOutcome {
     return self.erase(self.previous(self.cursor), self.cursor);
 }
 
-fn deleteNext(self: *Editor) Fed {
+fn deleteNext(self: *Editor) KeyOutcome {
     return self.erase(self.cursor, self.next(self.cursor));
 }
 
@@ -678,7 +677,7 @@ fn lineEnd(self: *const Editor) usize {
 }
 
 /// Null when no draft line lies in that direction.
-fn vertical(self: *Editor, down: bool) ?Fed {
+fn vertical(self: *Editor, down: bool) ?KeyOutcome {
     const start = self.lineStart();
     const destination = if (down)
         if (self.lineEnd() < self.length) self.lineEnd() + 1 else return null
@@ -710,7 +709,7 @@ fn word(self: *const Editor, start: usize) bool {
     return point_value == '_' or (category >= 1 and category <= 5) or (category >= 9 and category <= 11);
 }
 
-fn backwardWord(self: *Editor, whitespace: bool) Fed {
+fn backwardWord(self: *Editor, whitespace: bool) KeyOutcome {
     var offset: usize = 0;
     var cluster_start: usize = 0;
     var previous_scalar: ?c_int = null;
@@ -742,7 +741,7 @@ fn backwardWord(self: *Editor, whitespace: bool) Fed {
     return self.erase(if (whitespace) nonspace_start else word_start, self.cursor);
 }
 
-fn moveWord(self: *Editor, forward: bool) Fed {
+fn moveWord(self: *Editor, forward: bool) KeyOutcome {
     var offset: usize = 0;
     var cluster_start: usize = 0;
     var prior: ?c_int = null;
@@ -794,7 +793,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
             try std.testing.expect(dropped);
             try std.testing.expectEqualStrings("o", storage[0..editor.length]);
             for ("k") |byte| _ = editor.feed(&stream, byte);
-            try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+            try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
             try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
         }
     }
@@ -803,7 +802,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     var stream: Input = .{};
     for ("a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
 }
 
 test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
@@ -834,9 +833,9 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
         for ("ok") |byte| _ = editor.feed(&stream, byte);
         for (malformed) |byte| {
             const event = editor.feed(&stream, byte);
-            try std.testing.expect(event != .submit and !std.meta.eql(event, Fed{ .refused = .unbound }));
+            try std.testing.expect(event != .submit and !std.meta.eql(event, KeyOutcome{ .refused = .unbound }));
         }
-        try std.testing.expectEqual(Fed{ .refused = .invalid }, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
     }
 }
 
@@ -846,9 +845,9 @@ test "a dropped chord reports itself as it arrives" {
     var stream: Input = .{};
     _ = editor.feed(&stream, 'o');
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Fed{ .refused = .unbound }, editor.feed(&stream, '.'));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, '.'));
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Fed{ .refused = .unbound }, editor.feed(&stream, 'x'));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, 'x'));
     // ESC ESC waits for what follows; alone, it expires as one Esc.
     _ = editor.feed(&stream, 0x1b);
     _ = editor.feed(&stream, 0x1b);
@@ -859,14 +858,14 @@ test "a dropped chord reports itself as it arrives" {
 test "an ESC prefix decodes its key as typed alone, and ESC ESC keeps what follows whole" {
     const cases = .{
         // Alt-Backspace where Backspace sends ^H, like ESC DEL.
-        .{ "first second\x1b\x08Z", "first Z", Fed.none },
+        .{ "first second\x1b\x08Z", "first Z", KeyOutcome.none },
         // Option as Meta on a multibyte key is one dropped chord.
-        .{ "o\x1b\xc3\xa9k", "ok", Fed{ .refused = .unbound } },
+        .{ "o\x1b\xc3\xa9k", "ok", KeyOutcome{ .refused = .unbound } },
         // Esc just before a marked paste: Esc, then the whole paste.
-        .{ "\x1b\x1b[200~first\nsecond\x1b[201~", "first\nsecond", Fed{ .action = .escape } },
+        .{ "\x1b\x1b[200~first\nsecond\x1b[201~", "first\nsecond", KeyOutcome{ .action = .escape } },
         // Esc just before an arrow, or Meta-Up as ESC ESC [A: no "[A".
-        .{ "o\x1b\x1b[A", "o", Fed{ .action = .escape } },
-        .{ "o\x1b\x1b\x1b.", "o", Fed{ .refused = .unbound } },
+        .{ "o\x1b\x1b[A", "o", KeyOutcome{ .action = .escape } },
+        .{ "o\x1b\x1b\x1b.", "o", KeyOutcome{ .refused = .unbound } },
     };
     inline for (cases) |case| {
         var storage: [32]u8 = undefined;
@@ -875,12 +874,12 @@ test "an ESC prefix decodes its key as typed alone, and ESC ESC keeps what follo
         var seen = false;
         for (case[0]) |byte| {
             const event = editor.feed(&stream, byte);
-            try std.testing.expect(event != .submit and !std.meta.eql(event, Fed{ .refused = .invalid }));
+            try std.testing.expect(event != .submit and !std.meta.eql(event, KeyOutcome{ .refused = .invalid }));
             if (std.meta.eql(event, case[2])) seen = true;
         }
         try std.testing.expect(seen or case[2] == .none);
         try std.testing.expectEqual(Input.Pending.none, stream.pending());
-        try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         try std.testing.expectEqualStrings(case[1], storage[0..editor.length]);
     }
 }
@@ -891,7 +890,7 @@ test "meta-backspace deletes a word without swallowing the next character" {
     var stream: Input = .{};
     for ("first second\x1b\x7fZ\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed.submit, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("first Z", editor.buffer[0..editor.length]);
 }
@@ -902,7 +901,7 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     var stream: Input = .{};
     for ("A中e\u{301}🧑‍🌾\x7f\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed.submit, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("A中e\u{301}", storage[0..editor.length]);
 
@@ -916,18 +915,18 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     editor = .{ .buffer = &storage };
     for ("\x1b[200~line1\nline2\x1b[201~\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(Fed.submit, event);
+        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("line1\nline2", storage[0..editor.length]);
     for ([_][]const u8{ "left\tright", "left\x1b[9uright" }) |input| {
         editor = .{ .buffer = &storage };
         for (input) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\n'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
         try std.testing.expectEqualStrings("left\tright", storage[0..editor.length]);
     }
     editor = .{ .buffer = &storage };
     for ("left\x1b[27uright") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
     try std.testing.expectEqualStrings("leftright", storage[0..editor.length]);
 }
 
@@ -938,14 +937,14 @@ test "exact UTF-8 bound and sticky rejection after backspace" {
     for (0..65534) |_| _ = editor.feed(&stream, 'a');
     for ("é\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed.submit, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqual(@as(usize, 65536), editor.length);
     editor = .{ .buffer = &storage };
     for (0..65535) |_| _ = editor.feed(&stream, 'a');
     for ("é\x7f\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed{ .refused = .overflow }, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, event);
     }
     try std.testing.expectEqual(@as(usize, 65535), editor.length);
 }
@@ -956,13 +955,13 @@ test "unknown CSI retains following text; malformed input and marked choice reje
     var stream: Input = .{};
     for ("\x1b[123;4~Z\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed.submit, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome.submit, event);
     }
     try std.testing.expectEqualStrings("Z", storage[0..editor.length]);
     editor = .{ .buffer = &storage };
     for ("\xc3(\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Fed{ .refused = .invalid }, event);
+        if (byte == '\n') try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
     for ([_][]const u8{
         "invalid\x00x", "invalid\x14x", "invalid\x1cx",
@@ -970,18 +969,18 @@ test "unknown CSI retains following text; malformed input and marked choice reje
     }) |input| for ([_]bool{ true, false }) |allow_paste| {
         editor = .{ .buffer = &storage, .allow_paste = allow_paste };
         for (input) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed{ .refused = .invalid }, editor.feed(&stream, '\n'));
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\n'));
     };
     editor = .{ .buffer = &storage, .allow_paste = false };
     for ("\x1b[200~a\x1b[201~\n") |byte| {
         const event = editor.feed(&stream, byte);
-        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(Fed{ .refused = .invalid }, event);
+        if (byte == '\n' and !stream.paste) try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
     // Alt-a never becomes the choice "a": it is dropped, and the frontend
     // resets the choice on the report.
     editor = .{ .buffer = &storage, .allow_paste = false };
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Fed{ .refused = .unbound }, editor.feed(&stream, 'a'));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, 'a'));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
@@ -992,7 +991,7 @@ test "inserting a joiner before an emoji leaves the caret at a cluster boundary"
     for ("🧑🌾\x1b[D\u{200d}") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("🧑‍🌾", storage[0..editor.length]);
     try std.testing.expectEqual(editor.length, editor.cursor);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
@@ -1003,10 +1002,10 @@ test "deleting a separator does not leave the caret inside a joined grapheme" {
     for ("\x1b[200~🧑\u{200d}\n🌾\x1b[201~\x01") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("🧑\u{200d}\n🌾", storage[0..editor.length]);
     try std.testing.expectEqual("🧑\u{200d}\n".len, editor.cursor);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
     try std.testing.expectEqualStrings("🧑‍🌾", storage[0..editor.length]);
     try std.testing.expectEqual(editor.length, editor.cursor);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
@@ -1015,26 +1014,26 @@ test "arrows beyond the draft's lines are the screen's keys, not caret moves" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     // Wheel scrolling arrives as arrow keys in the alternate screen.
-    var event: Fed = .none;
+    var event: KeyOutcome = .none;
     for ("\x1b[A") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .up }, event);
+    try std.testing.expectEqual(KeyOutcome{ .action = .up }, event);
     for ("\x1b[200~one\ntwo\x1b[201~") |byte| _ = editor.feed(&stream, byte);
     for ("\x1b[A") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.redraw, event);
+    try std.testing.expectEqual(KeyOutcome.redraw, event);
     try std.testing.expectEqual(@as(usize, 3), editor.cursor);
     for ("\x1b[A") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .up }, event);
+    try std.testing.expectEqual(KeyOutcome{ .action = .up }, event);
     for ("\x1b[B") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.redraw, event);
+    try std.testing.expectEqual(KeyOutcome.redraw, event);
     for ("\x1b[B") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .down }, event);
+    try std.testing.expectEqual(KeyOutcome{ .action = .down }, event);
     for ([_][]const u8{ "\x1b[5~", "\x1b[5;2~" }) |sequence| {
         for (sequence) |byte| event = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Fed{ .action = .page_up }, event);
+        try std.testing.expectEqual(KeyOutcome{ .action = .page_up }, event);
     }
     for ("\x1b[6;2~") |byte| event = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .page_down }, event);
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+    try std.testing.expectEqual(KeyOutcome{ .action = .page_down }, event);
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("one\ntwo", storage[0..editor.length]);
 }
 
@@ -1042,15 +1041,15 @@ test "Ctrl-D exits only on an empty draft and otherwise deletes forward" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
-    try std.testing.expectEqual(Fed{ .action = .ctrl_d }, editor.feed(&stream, 4));
+    try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_d }, editor.feed(&stream, 4));
     for ("ab\x01") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 4));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 4));
     try std.testing.expectEqualStrings("b", storage[0..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 5));
-    try std.testing.expectEqual(Fed.none, editor.feed(&stream, 4));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 5));
+    try std.testing.expectEqual(KeyOutcome.none, editor.feed(&stream, 4));
     try std.testing.expectEqualStrings("b", storage[0..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
-    try std.testing.expectEqual(Fed{ .action = .ctrl_d }, editor.feed(&stream, 4));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_d }, editor.feed(&stream, 4));
 }
 
 test "a key no table binds neither edits nor rejects the line" {
@@ -1064,15 +1063,15 @@ test "a key no table binds neither edits nor rejects the line" {
             var decoded = stream.feed(byte, 0);
             while (decoded != .none) : (decoded = stream.next()) try std.testing.expectEqual(keymap.Outcome(void).none, editor.apply(nothing, decoded));
         }
-        try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
     }
     // A rejected line changes no key's meaning: Ctrl-X still passes.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("ok\x00") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .ctrl_x }, editor.feed(&stream, 0x18));
-    try std.testing.expectEqual(Fed{ .refused = .invalid }, editor.feed(&stream, '\r'));
+    try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_x }, editor.feed(&stream, 0x18));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, editor.feed(&stream, '\r'));
 }
 
 test "flag and variation selector are each deleted as one grapheme" {
@@ -1080,9 +1079,9 @@ test "flag and variation selector are each deleted as one grapheme" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("⌚\u{fe0f}🇺🇸") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
     try std.testing.expectEqualStrings("⌚\u{fe0f}", storage[0..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.feed(&stream, 0x7f));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, 0x7f));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
@@ -1091,16 +1090,16 @@ test "incomplete escape cannot swallow Enter or Ctrl-C" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("ok\x1b[") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
     editor = .{ .buffer = &storage };
     for ("\x1b[") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .ctrl_c }, editor.feed(&stream, 3));
+    try std.testing.expectEqual(KeyOutcome{ .action = .ctrl_c }, editor.feed(&stream, 3));
     editor = .{ .buffer = &storage };
     // ESC with a following key is an Alt chord: unbound, it is dropped.
     for ("ok\x1b") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .refused = .unbound }, editor.feed(&stream, 'Z'));
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, 'Z'));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\n'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
 }
 
@@ -1109,15 +1108,15 @@ test "word movement skips separators and stops at word edges" {
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("one two/三") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed.redraw, editor.moveWord(false));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.moveWord(false));
     try std.testing.expectEqualStrings("三", storage[editor.cursor..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.moveWord(false));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.moveWord(false));
     try std.testing.expectEqualStrings("two/三", storage[editor.cursor..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.moveWord(false));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.moveWord(false));
     try std.testing.expectEqualStrings("one two/三", storage[editor.cursor..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.moveWord(true));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.moveWord(true));
     try std.testing.expectEqualStrings(" two/三", storage[editor.cursor..editor.length]);
-    try std.testing.expectEqual(Fed.redraw, editor.moveWord(true));
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.moveWord(true));
     try std.testing.expectEqualStrings("/三", storage[editor.cursor..editor.length]);
 }
 
@@ -1132,20 +1131,20 @@ test "Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter do
             for ("onetwo\x1b[D\x1b[D\x1b[D") |byte| _ = editor.feed(&stream, byte);
             for (alt_enter) |byte| {
                 const event = editor.feed(&stream, byte);
-                try std.testing.expect(event != .submit and !std.meta.eql(event, Fed{ .refused = .unbound }));
+                try std.testing.expect(event != .submit and !std.meta.eql(event, KeyOutcome{ .refused = .unbound }));
             }
             try std.testing.expectEqual(Input.Pending.none, stream.pending());
             try std.testing.expectEqualStrings("one\ntwo", storage[0..editor.length]);
             try std.testing.expectEqual(@as(usize, 4), editor.cursor);
-            try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+            try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         }
     }
     // A bare Esc that expires before Enter is Esc, then Enter: it sends.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("ok\x1b") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Fed{ .action = .escape }, editor.apply(keymap.every, try stream.expire()));
-    try std.testing.expectEqual(Fed.submit, editor.feed(&stream, '\r'));
+    try std.testing.expectEqual(KeyOutcome{ .action = .escape }, editor.apply(keymap.every, try stream.expire()));
+    try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
 }
 

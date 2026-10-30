@@ -10,7 +10,7 @@ const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 const vaxis = @import("vaxis");
 /// Each key the editor has no use for comes back as itself.
-const Fed = keymap.Outcome(keymap.Key);
+const KeyOutcome = Editor.KeyOutcome;
 
 const Unavailable = enum {
     // Prefixing an unmodified/Ctrl key with ESC changes it to an Alt chord.
@@ -33,7 +33,7 @@ const Case = struct {
     caret: usize = 5,
     after: []const u8 = "one two!",
     cursor: usize = 5,
-    event: Fed,
+    event: KeyOutcome,
     wires: [4]Wire,
 };
 
@@ -107,7 +107,7 @@ const Outcome = struct {
     text: [128]u8 = undefined,
     length: usize,
     cursor: usize,
-    event: Fed,
+    event: KeyOutcome,
     submits: usize,
     rejected: bool,
     closes: usize = 0,
@@ -120,7 +120,7 @@ fn feed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcome) voi
             const event = editor.apply(keymap.every, decoded);
             if (event != .none) outcome.event = event;
             if (event == .submit) outcome.submits += 1;
-            if (std.meta.eql(event, Fed{ .action = .escape })) outcome.closes += 1;
+            if (std.meta.eql(event, KeyOutcome{ .action = .escape })) outcome.closes += 1;
         }
     }
 }
@@ -130,7 +130,7 @@ fn inlineFeed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcom
         const event = editor.feed(input, byte);
         if (event != .none) outcome.event = event;
         if (event == .submit) outcome.submits += 1;
-        if (std.meta.eql(event, Fed{ .action = .escape })) outcome.closes += 1;
+        if (std.meta.eql(event, KeyOutcome{ .action = .escape })) outcome.closes += 1;
     }
 }
 
@@ -145,7 +145,7 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
     // A read ending at any byte boundary must not commit an incomplete chord.
     // Clock expiry itself is tested separately at the owning deadline seam.
     if (split != 0 and split < wire.len) {
-        try std.testing.expectEqual(Fed.none, result.event);
+        try std.testing.expectEqual(KeyOutcome.none, result.event);
         try std.testing.expectEqualStrings(case.before, storage[0..editor.length]);
         try std.testing.expectEqual(case.caret, editor.cursor);
     }
@@ -161,7 +161,7 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
     result.cursor = editor.cursor;
     result.rejected = editor.rejected != null;
     @memcpy(result.text[0..result.length], storage[0..editor.length]);
-    if (case.event != .submit and !std.meta.eql(case.event, Fed{ .action = .ctrl_c }) and !std.meta.eql(case.event, Fed{ .action = .ctrl_d })) {
+    if (case.event != .submit and !std.meta.eql(case.event, KeyOutcome{ .action = .ctrl_c }) and !std.meta.eql(case.event, KeyOutcome{ .action = .ctrl_d })) {
         // Observable caret/retained-suffix oracle: a later typed edit and Enter
         // must submit the exact independently specified draft, once.
         var expected: [128]u8 = undefined;
@@ -170,7 +170,7 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
         @memcpy(expected[case.cursor + 1 ..][0 .. case.after.len - case.cursor], case.after[case.cursor..]);
         var suffix: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         deliver(&editor, &input, "Z\r", &suffix);
-        try std.testing.expectEqual(Fed.submit, suffix.event);
+        try std.testing.expectEqual(KeyOutcome.submit, suffix.event);
         try std.testing.expectEqual(@as(usize, 1), suffix.submits);
         try std.testing.expectEqualStrings(expected[0 .. case.after.len + 1], storage[0..editor.length]);
     }
@@ -275,7 +275,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         try std.testing.expectEqual(Input.Pending.none, input.pending());
         try std.testing.expect(!input.paste);
         feed(&editor, &input, "\r", &outcome);
-        try std.testing.expectEqual(Fed.submit, outcome.event);
+        try std.testing.expectEqual(KeyOutcome.submit, outcome.event);
         try std.testing.expectEqual(@as(usize, 1), outcome.submits);
     }
     // Encoded Enter/Ctrl-R are never keyboard gestures inside marked paste.
@@ -290,7 +290,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         try std.testing.expectEqual(Input.Pending.incomplete, input.pending());
         try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
         feed(&editor, &input, "\x1b[201~\r", &outcome);
-        try std.testing.expectEqual(Fed{ .refused = .invalid }, outcome.event);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, outcome.event);
         try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
     }
@@ -312,7 +312,7 @@ test "TD2 Ghostty modified control chords cannot turn retained choice text into 
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
             feed(&editor, &input, "\r", &outcome);
-            try std.testing.expectEqual(Fed{ .refused = .invalid }, outcome.event);
+            try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, outcome.event);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
         };
@@ -424,7 +424,7 @@ test "TD2 explicit Kitty Ctrl press then release acts once through both editor e
                 var released: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
                 deliver(&editor, &input, release[0..split], &released);
                 deliver(&editor, &input, release[split..], &released);
-                try std.testing.expectEqual(Fed.none, released.event);
+                try std.testing.expectEqual(KeyOutcome.none, released.event);
                 try std.testing.expectEqual(@as(usize, 0), released.submits);
                 try std.testing.expectEqualStrings(case.after, storage[0..editor.length]);
                 try std.testing.expectEqual(case.cursor, editor.cursor);
@@ -527,7 +527,7 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
-        try std.testing.expectEqual(@as(Fed, if (offset < 0) .redraw else .submit), outcome.event);
+        try std.testing.expectEqual(@as(KeyOutcome, if (offset < 0) .redraw else .submit), outcome.event);
         try std.testing.expectEqual(Input.Pending.none, input.pending());
     };
 }

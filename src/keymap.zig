@@ -11,14 +11,11 @@ pub const Key = enum {
     /// Esc and Alt-Esc in every encoding, and a lone ESC once it expires.
     escape,
     ctrl_c,
-    /// The screen's only on an empty draft; with text, Ctrl-D deletes forward.
     ctrl_d,
     ctrl_g,
     ctrl_o,
     ctrl_r,
     ctrl_x,
-    /// The screen's only with no draft line in that direction; otherwise
-    /// they move the caret.
     up,
     down,
     shift_up,
@@ -26,7 +23,6 @@ pub const Key = enum {
     /// With or without Shift.
     page_up,
     page_down,
-    /// The screen's only on an empty draft; otherwise they move the caret.
     home,
     end,
     ctrl_end,
