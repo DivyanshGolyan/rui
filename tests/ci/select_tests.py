@@ -16,7 +16,7 @@ from strict_paths import strict
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
-            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig")
+            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -50,6 +50,8 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/overview_view.zig",), ("test-logic",), ("test-logic",),
+     "Overview decisions and screen over values; its shell's owner selects native checks"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
     (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
      "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
