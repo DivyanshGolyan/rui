@@ -569,6 +569,11 @@ def keyed_frame(master, keys, accept, timeout=15):
     return found[0]
 
 
+def overview_title(frame):
+    """The overview's title row: रुई rui, or rui alone without Unicode."""
+    return "rui" in frame.split("\n", 1)[0].split()[:2]
+
+
 def overview_frame(master, accept, keys=b"", timeout=15):
     """The first overview frame after `keys` that `accept`s, with its
     composer taking input."""
@@ -1154,8 +1159,8 @@ def overview_cases():
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # An empty Store shows the composer and a hint.
-        empty = overview_frame(master, lambda frame: "No Sessions yet. Describe a task below to start one." in frame)
-        assert "describe a task for a new Session" in empty and not records.exists(), empty
+        empty = overview_frame(master, lambda frame: "No Sessions yet. Type a task below." in frame)
+        assert "Type a task to start a Session" in empty and not records.exists(), empty
         held = overview_frame(master, lambda frame: "--permission-mode ask" in frame,
             keys=b'/configure --permission-mode ask --label "lane four"\n')
         assert "start settings:" in held, held
@@ -1176,7 +1181,7 @@ def overview_cases():
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
-        assert "Your conversations" in listed, listed
+        assert "Yours" in listed, listed
         # Enter opens the selected Session; Esc returns.
         os.write(master, b"\n")
         read_terminal(master, "Flaky test fixed.", composer=True)
@@ -1226,7 +1231,7 @@ def overview_cases():
         record, = set(records.glob("*.json")) - before
         held = fixture.observe(store, record.stem)["target"]
         overview_frame(master, lambda frame: re.search(r"[●*] Hold for a stop", frame), keys=b"\x1b")
-        overview_frame(master, lambda frame: f"ctrl+x again to stop {held}" in frame, keys=b"\x18")
+        overview_frame(master, lambda frame: f"Stop {held}? ctrl+x yes" in frame, keys=b"\x18")
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
@@ -2881,7 +2886,7 @@ def store_selection_cases(state, workspace, valid_store):
                 settlement_timeout = response_deadline - time.monotonic()
                 assert settlement_timeout > 0, "saved-Store deferral did not settle within 5 seconds"
             if not case.startswith("saved"):
-                greeting = overview_frame(master, lambda frame: frame.startswith(" rui "))
+                greeting = overview_frame(master, overview_title)
                 assert "Session:" not in greeting and "request:" not in greeting, greeting
                 notice = leave_overview(master)
                 assert overview_store(notice) == str(explicit.resolve()), (case, notice)
@@ -5769,7 +5774,7 @@ def main(selected="all"):
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n", timeout=10)
+            welcome = overview_frame(master, overview_title, keys=b"d\n", timeout=10)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
@@ -5801,7 +5806,7 @@ def main(selected="all"):
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credential"] == "renewal_due"
-            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n")
+            welcome = overview_frame(master, overview_title, keys=b"d\n")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
             assert expiring.wait(timeout=5) == 0
@@ -5833,7 +5838,7 @@ def main(selected="all"):
                     assert "No locally ready provider" in provider_prompt(master, ready_read)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
-                    welcome = overview_frame(master, lambda frame: frame.startswith(" rui "), keys=b"d\n")
+                    welcome = overview_frame(master, overview_title, keys=b"d\n")
                     assert all(noise not in welcome for noise in ("Diagnostics:", "request:", "Session:")), welcome
                     assert overview_store(leave_overview(master)) == str(after.resolve())
                     assert not (changing_home / ".config/rui/requests").exists(), "the overview captured a request"
@@ -5881,7 +5886,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
-            welcome = overview_frame(master, lambda frame: frame.startswith(" rui "))
+            welcome = overview_frame(master, overview_title)
             assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
             assert all(noise not in welcome for noise in ("request:", "New Session intent:", "Workspace:", "Provider:", "Permission:")), welcome
             leave_overview(master)
@@ -5907,8 +5912,8 @@ def main(selected="all"):
             blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # The composer's capture fails before any send: the draft stays.
-            overview_frame(master, lambda frame: frame.startswith(" rui "))
-            refused = overview_frame(master, lambda frame: "Could not start a Session: NotDir" in frame, keys=b"never captured\n")
+            overview_frame(master, overview_title)
+            refused = overview_frame(master, lambda frame: "Could not start the Session. (NotDir)" in frame, keys=b"never captured\n")
             assert "never captured" in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can

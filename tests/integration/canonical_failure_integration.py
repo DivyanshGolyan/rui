@@ -441,12 +441,12 @@ def interactive_cases(state, binding=False, null_code=False):
                 if line is None:
                     # Bare rui opens the overview; its composer starts the Session.
                     requested = len(endpoint.requests)
-                    human.overview_frame(master, lambda screen: screen.startswith(" rui "))
+                    human.overview_frame(master, human.overview_title)
                     os.write(master, b"fresh overview bytes\n")
                     if binding:
                         # An unconfirmed start stays recoverable: the overview
-                        # names it and Ctrl-D still leaves.
-                        human.read_terminal(master, "! Unconfirmed: rui request recover ")
+                        # says so and Ctrl-D still leaves.
+                        human.read_terminal(master, "! Not sure the Session started. Details when you leave.")
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
@@ -557,7 +557,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 if line is None:
                     # Once the terminal is restored, the start's recovery again.
                     started = json.loads(proxy.exchanges[0][0])["key"]
-                    assert f"use rui request recover {started}. Do not start it again." in errors, errors
+                    assert f"Check with: rui request recover {started}" in errors, errors
                 if not binding:
                     assert "CanonicalStoreFailure" in errors, errors
                 elif route == "/v1/configure":

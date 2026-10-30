@@ -106,6 +106,7 @@ Fixture policy, chosen by the latest user text:
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.
+- `invalid output`: a stream that is not JSON, so the Turn fails.
 - Anything else: an echo.
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.

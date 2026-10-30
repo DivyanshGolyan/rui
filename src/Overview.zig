@@ -45,9 +45,6 @@ pub const Options = struct {
     open: ?view.Reference = null,
 };
 
-/// An accepted start: the Session it made and its request's handle.
-pub const Started = struct { session: view.Reference, handle: protocol.Bounded(protocol.max_key_bytes) };
-
 /// What the CLI lends a conversation: its scratch files and slash commands.
 pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
@@ -179,6 +176,9 @@ const Job = union(enum) {
 /// requests the core's ledger allows can wait at once.
 const max_jobs = 3 + view.max_requests;
 
+/// The longest the first frame waits for the terminal's background.
+const background_wait_ms = 200;
+
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
 
 /// Wakes the loop from a signal handler: SIGINT and SIGTERM stop it, and
@@ -241,12 +241,16 @@ frame: std.ArrayList(u8) = .empty,
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
-/// The last accepted start, for guidance if its conversation fails.
-started: ?Started = null,
+/// The Session the last accepted start made, for guidance if its
+/// conversation fails.
+started: ?view.Reference = null,
 /// The screen holds no Session's state, so a conversation may use it as is.
 screen_fresh: bool = true,
 /// The screen is initialized, so `run` disposes of it.
 screen_ready: bool = false,
+/// The terminal has not yet answered the DA1 that follows the background
+/// question.
+asking: bool = false,
 
 /// Opens the overview and returns once the person leaves it, or a signal
 /// stops it. Every way out restores the terminal and then prints the
@@ -285,17 +289,16 @@ fn failed(self: *const Self, err: anyerror, session: ?view.Reference) anyerror {
 
 /// Prints guidance for a failure and returns it: how to fix TMPDIR, and the
 /// Session to resume when one was being opened.
-pub fn printFailure(err: anyerror, store: []const u8, session: ?view.Reference, started: ?Started) anyerror {
+pub fn printFailure(err: anyerror, store: []const u8, session: ?view.Reference, started: ?view.Reference) anyerror {
     // Four bytes per escaped selector byte, plus labels and hex syntax.
-    var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 384]u8 = undefined;
+    var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 384]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
     write: {
         if (err == error.InvalidTemporaryDirectory)
             notice.writeAll(if (session == null) "rui: Fix or unset TMPDIR before opening the overview.\n" else "rui: Fix or unset TMPDIR before resuming.\n") catch break :write;
         const reference = session orelse break :write;
-        if (started) |*start| if (std.mem.eql(u8, &start.session, &reference)) {
-            // Admission only: the Message may not have run yet.
-            notice.print("\nrui: Session start accepted.\nMessage request: {s} (rui request inspect {s})\n", .{ start.handle.slice(), start.handle.slice() }) catch break :write;
+        if (started) |start| if (std.mem.eql(u8, &start, &reference)) {
+            notice.print("\nrui: Started {s}.\n", .{&reference}) catch break :write;
         };
         notice.writeAll("\nResume: rui session resume --store ") catch break :write;
         TerminalText.writeShellWord(&notice, store) catch break :write;
@@ -315,7 +318,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .hooks = hooks,
         .ops = ops,
         .state = undefined,
-        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR") }),
+        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .terminal = undefined,
         .interrupted = interrupted,
     };
@@ -365,7 +368,9 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
-    var next: ?Next = if (self.options.open) |reference| try self.event(.{ .open = reference }) else null;
+    if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
+    // After the open: keys typed during the wait act on the overview.
+    var next = try self.askBackground();
     while (true) {
         if (next) |value| if (self.proceed(value)) |ending| return ending;
         if (self.interrupted.stopped.load(.acquire)) return .overview;
@@ -376,7 +381,7 @@ fn loop(self: *Self) !Ending {
 /// One pass: a due tick, the next job and a frame, then one wait for input,
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
-    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
     try self.dispatch();
     // Frames count on the monotonic clock, so a wall-clock step cannot
@@ -400,7 +405,7 @@ fn turn(self: *Self) !?Next {
         drain(self.done[0]);
         if (try self.complete()) |next| return next;
     }
-    if (fds[0].revents != 0 or timeout == 0) return self.readInput(0);
+    if (fds[0].revents != 0 or timeout == 0) return self.readInput(0, 4096);
     return null;
 }
 
@@ -525,7 +530,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             if (try self.event(.{ .first_line = result })) |next| return next;
         },
         .start => {
-            if (self.reply.outcome == .accepted) self.started = .{ .session = self.reply.session, .handle = self.reply.handle };
+            if (self.reply.outcome == .accepted) self.started = self.reply.session;
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
@@ -566,20 +571,35 @@ fn startInput(self: *const Self, settings: *const view.StartSettings, text: []co
     } };
 }
 
-/// Reads what the terminal holds, waiting `wait` milliseconds for the
-/// first byte, and steps each key. A lone Esc becomes a key once the stream
-/// says it expired.
-fn readInput(self: *Self, wait: i32) !?Next {
-    for (0..4096) |count| {
+/// Reads up to `bytes` of what the terminal holds, waiting `wait`
+/// milliseconds for the first byte, and steps each key. A lone Esc becomes a
+/// key once the stream says it expired.
+fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
+    for (0..bytes) |count| {
         const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                if (try self.input.expire()) if (try self.event(.{ .key = .escape })) |next| return next;
+                if (try self.input.expire()) {
+                    if (try self.look()) |next| return next;
+                    if (try self.event(.{ .key = .escape })) |next| return next;
+                }
                 continue;
             },
             else => return err,
         }) orelse return null;
         var decoded = self.input.feed(read.byte, read.at);
         while (decoded != .none) : (decoded = self.input.next()) switch (decoded) {
+            .event => |value| switch (value.event) {
+                // An answer applies whenever it comes; a late one repaints.
+                .color_report => |report| if (report.kind == .bg) {
+                    self.caps.background = report.value;
+                },
+                .cap_da1 => self.asking = false,
+                .key_press => {
+                    if (try self.look()) |next| return next;
+                    if (try self.compose(decoded)) |next| return next;
+                },
+                else => if (try self.compose(decoded)) |next| return next,
+            },
             .report => |report| switch (report) {
                 .width => |method| {
                     self.terminal.screen.setWidth(method);
@@ -589,6 +609,43 @@ fn readInput(self: *Self, wait: i32) !?Next {
             },
             else => if (try self.compose(decoded)) |next| return next,
         };
+    }
+    return null;
+}
+
+/// Tells the core the person pressed a key now, before the key itself.
+fn look(self: *Self) !?Next {
+    return self.event(.{ .looked = self.realMs() });
+}
+
+/// The wall clock in Unix milliseconds, as the core's times are.
+fn realMs(self: *const Self) u64 {
+    return @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+}
+
+/// Asks the terminal for its background, then waits up to
+/// `background_wait_ms` so the first frame has its skin. Every terminal
+/// answers the DA1 that follows the question, so its answer ends the wait
+/// early on one that does not answer OSC 11.
+fn askBackground(self: *Self) !?Next {
+    if (self.caps.depth == .none) return null;
+    const ask = "\x1b]11;?\x1b\\\x1b[c";
+    {
+        self.terminal.pump = .{ .context = self, .step = pump };
+        defer self.terminal.pump = null;
+        self.pumped = null;
+        self.terminal.write(ask) catch |err| return self.pumped orelse err;
+    }
+    self.asking = true;
+    // The wait ends here; a late answer still applies when it comes.
+    defer self.asking = false;
+    const deadline = std.Io.Clock.awake.now(self.init.io).toMilliseconds() + background_wait_ms;
+    while (self.asking and self.caps.background == null) {
+        const left = deadline - std.Io.Clock.awake.now(self.init.io).toMilliseconds();
+        if (left <= 0) break;
+        // A byte at a time, so keys typed after the answer wait for the
+        // first frame.
+        if (try self.readInput(@intCast(left), 1)) |next| return next;
     }
     return null;
 }
@@ -691,7 +748,7 @@ fn budget(self: *const Self, now_ms: u64, awake_ms: u64, pulses: bool) i32 {
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    self.pumped = try self.readInput(16);
+    self.pumped = try self.readInput(16, 4096);
     if (self.pumped != null) return error.InteractiveInterrupted;
 }
 
@@ -1003,7 +1060,7 @@ const Rig = struct {
 
     fn press(rig: *Rig, bytes: []const u8) !?Ending {
         if (std.c.write(rig.keys[1], bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
-        const next = try rig.overview.readInput(0) orelse return null;
+        const next = try rig.overview.readInput(0, 4096) orelse return null;
         return rig.overview.proceed(next);
     }
 
@@ -1063,7 +1120,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("lane four", start.label.?.slice());
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
-    try std.testing.expectEqualStrings("start-handle", overview.started.?.handle.slice());
+    try std.testing.expectEqualStrings("n3w5es", &overview.started.?);
 
     // Ctrl-X twice stops the selected Session.
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
@@ -1095,8 +1152,13 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = "k7m2qx".* }, fake_operations, &cancellation);
     defer rig.close();
-    // Ctrl-D waits in the terminal until the overview is back.
-    if (std.c.write(rig.keys[1], "\x04", 1) != 1) return error.TestUnexpectedResult;
+    // The overview asks for the background whatever the test's environment
+    // says about colour. The terminal answers the question's DA1 first,
+    // without a background; Ctrl-D waits behind it until the overview has
+    // drawn.
+    rig.overview.caps.depth = .indexed;
+    const keys = "\x1b[?1;2;4c\x04";
+    if (std.c.write(rig.keys[1], keys, keys.len) != keys.len) return error.TestUnexpectedResult;
     try std.testing.expect(try rig.overview.loop() == .overview);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
@@ -1104,10 +1166,16 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     rig.overview.worker.join() catch {};
     try std.testing.expectEqual(@as(usize, 1), Seen.now.hosts);
     var buffer: [64 * 1024]u8 = undefined;
-    const frame = rig.drawn(&buffer);
+    const written = rig.drawn(&buffer);
+    const question = "\x1b]11;?\x1b\\\x1b[c";
+    try std.testing.expect(std.mem.startsWith(u8, written, question));
+    const frame = written[question.len..];
     try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
-    // The terminal already shows an unchanged screen.
+    // The terminal already shows an unchanged screen. The Host read may
+    // have answered after that frame, so draw what it changed first.
+    try std.testing.expect(try rig.overview.draw(0) == null);
+    _ = rig.drawn(&buffer);
     try std.testing.expect(try rig.overview.draw(0) == null);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }
@@ -1138,7 +1206,9 @@ test "each frame rewrites a pulsing mark alone, until its pulse ends" {
     try std.testing.expect(try overview.event(.{ .tick = changed + view.pulse_window_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.pulses);
-    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "m●\x1b[0m") != null);
+    // In colour the pen carries to the next changed span, so the mark
+    // ends in that span's SGR rather than a reset.
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "m●") != null);
     try std.testing.expect(try overview.draw(5) == null and !overview.shown.?.pulses);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }
@@ -1337,8 +1407,8 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
-    const guidance = "rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n";
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
+    const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try view.writeDeparture(&rig.overview.state, &departure.writer);
@@ -1350,7 +1420,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
     // A stop still running as the overview ends is named the same way.
     const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer running.close();
@@ -1401,7 +1471,7 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expect(try rig.press("hello\n") == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 test "a conversation that fails to open still names the unconfirmed start on departure" {
@@ -1428,7 +1498,7 @@ test "a conversation that fails to open still names the unconfirmed start on dep
     try std.testing.expect(ending.conversation.frontend == null);
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, ending, error.AccessDenied, &buffer);
-    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n" ++
+    try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n" ++
         "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
 }
 
@@ -1440,7 +1510,7 @@ test "leaving while a start is queued or running says what became of it" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect((try rig.press("race start\n\x03")).? == .overview);
-        try std.testing.expectEqualStrings("rui: The new Session was not started (cancelled); start it again from the overview.\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: The new Session did not start.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
     }
     // The start ran as the overview ended: the Host accepted it.
@@ -1449,7 +1519,7 @@ test "leaving while a start is queued or running says what became of it" {
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try rig.overview.dispatch();
-        try std.testing.expectEqualStrings("rui: Session start accepted: n3w5es.\nMessage request: start-handle (rui request inspect start-handle)\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: Started n3w5es.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
     }
 }
@@ -1470,9 +1540,9 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 test "leaving with a stop still queued says it was not sent" {
@@ -1484,7 +1554,7 @@ test "leaving with a stop still queued says it was not sent" {
     // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
     try std.testing.expect((try rig.press("\x1b[H\x18\x18\x03")).? == .overview);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not sent; stop it again from the overview.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: k7m2qx was not stopped.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
@@ -1561,7 +1631,7 @@ test "a draft past the editor's capacity starts nothing" {
     defer rig.close();
     const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~\r";
     try expectStarted(rig, pasted, null);
-    try std.testing.expectEqualStrings("! The composer holds at most 64 KiB.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! That's too long to send.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "next\r", "next");
 }
 
@@ -1587,7 +1657,7 @@ test "a start holds its draft until the answer; the editor takes nothing meanwhi
     try std.testing.expect(try rig.overview.draw(0) == null);
     var buffer: [64 * 1024]u8 = undefined;
     const frame = rig.drawn(&buffer);
-    try std.testing.expect(std.mem.indexOf(u8, frame, "describe a task for a new Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Type a task to start a Session") != null);
     try std.testing.expect(std.mem.indexOf(u8, frame, "hello") == null);
     try expectStarted(rig, "next\r", "next");
 }
