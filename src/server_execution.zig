@@ -2135,10 +2135,9 @@ test "authentication handoff borrows the sole credential lease and releases it o
     try record.id_token.set("aaa.bbb.ccc");
     try record.access_token.set("aaa.bbb.ccc");
     try record.refresh_token.set("test-refresh");
-    try credentials.install(path, &record, null);
-
     var worker = AuthWorker{ .io = io, .authentication = .{ .path = path } };
-    try credentials.leaseInto(path, &worker.credential);
+    try credentials.install(path, &record, null, &worker.work.credentials);
+    try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
     worker.state = .ready;
     defer if (worker.state == .ready or worker.state == .in_use) worker.credential.release();
     const borrowed = worker.take().?.ready;
@@ -2151,7 +2150,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
     try std.testing.expect(worker.state == .requested);
     // The released lock can be acquired again for the next generation.
     var next: credentials.Lease = undefined;
-    try credentials.leaseInto(path, &next);
+    try credentials.leaseInto(path, &next, &worker.work.credentials);
     next.release();
 
     // Exercise the production model owner after cancellation, both before
@@ -2200,7 +2199,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
         try std.testing.expect(host.custody.reserve() == null);
         if (ready) {
-            try credentials.leaseInto(path, &worker.credential);
+            try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
             worker.state = .ready;
         } else {
             worker.failure = error.AuthenticationFailed;

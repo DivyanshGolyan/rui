@@ -23,20 +23,46 @@ pub fn nowSeconds(io: std.Io) i64 {
     return @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
 }
 
+/// Storage for reading and checking one credential: the file, the record a
+/// status check or login reads, and the token claims. Its owner keeps it off
+/// the stack: the Host's AuthWorker for every acquisition, or a CLI command.
+pub const Work = struct {
+    credentials: credentials.Scratch = undefined,
+    claims: policy.ClaimScratch = undefined,
+};
+
+/// Storage for one `rui auth login`: the snapshot and installation it reads
+/// and writes through, and the record it builds. The command maps it for the
+/// call, as a refresh maps its own, instead of holding it on its stack.
+pub const Login = struct {
+    work: Work = undefined,
+    record: credentials.Record = undefined,
+
+    pub fn map() !*Login {
+        return mapRoom(Login);
+    }
+
+    pub fn unmap(self: *Login) void {
+        unmapRoom(self);
+    }
+};
+
 /// Reads a snapshot without a refresh lock and applies the runtime's routing
 /// and expiry checks to it.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
-    var record: credentials.Record = undefined;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (!try credentials.readSnapshotInto(path, &record)) return .missing;
-    return policy.localStatus(&record, now_seconds);
+    const work = try mapRoom(Work);
+    defer unmapRoom(work);
+    const record = &work.credentials.current;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    if (!try credentials.readSnapshotInto(path, record, &work.credentials)) return .missing;
+    return policy.localStatus(record, now_seconds, &work.claims);
 }
 
 /// Selects on the lease it holds; a due refresh releases it, exchanges, and
 /// leases the replacement.
-pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *credentials.Lease) !void {
-    try credentials.leaseInto(path, destination);
-    const selection = policy.select(&destination.record, fixture, nowSeconds(io)) catch |err| {
+pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, work: *Work, destination: *credentials.Lease) !void {
+    try credentials.leaseInto(path, destination, &work.credentials);
+    const selection = policy.select(&destination.record, fixture, nowSeconds(io), &work.claims) catch |err| {
         destination.release();
         return err;
     };
@@ -44,10 +70,10 @@ pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *cr
         const generation = destination.record.generation;
         destination.release();
         _ = try exchangeAt(io, path, fixture, generation);
-        try credentials.leaseInto(path, destination);
+        try credentials.leaseInto(path, destination, &work.credentials);
     }
     errdefer destination.release();
-    try policy.launchCheck(&destination.record, fixture, nowSeconds(io));
+    try policy.launchCheck(&destination.record, fixture, nowSeconds(io), &work.claims);
 }
 
 /// After a model 401, refreshes once if the committed credential generation
@@ -57,23 +83,46 @@ pub fn forceRefresh(io: std.Io, path: []const u8, fixture: bool, expected_genera
     return exchangeAt(io, path, fixture, expected_generation);
 }
 
+/// Storage for one refresh: the records it claims and builds, the request,
+/// the response and what parsing it needs.
+const Refresh = struct {
+    credentials: credentials.Scratch = undefined,
+    replacement: credentials.Record = undefined,
+    wire: wire.Scratch = undefined,
+    response: Response = undefined,
+    body: [32 * 1024]u8 = undefined,
+};
+
+/// A refresh or a login runs a few times an hour at most, so its storage
+/// lives in pages mapped for the call, as h2.exchange's client does, and
+/// leaves nothing resident or on a stack once the call returns. Fresh pages
+/// are zero and become resident only where written.
+fn mapRoom(comptime T: type) !*T {
+    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse
+        return error.OutOfMemory;
+    return @ptrCast(@alignCast(bytes));
+}
+
+fn unmapRoom(room: anytype) void {
+    std.heap.page_allocator.rawFree(std.mem.asBytes(room), .of(@TypeOf(room.*)), @returnAddress());
+}
+
 /// One refresh claim at `expected_generation` under the exclusive credential
 /// lock. The synthetic fixture credential cannot reach the real issuer, so
 /// its exchange republishes the same tokens; generation, claim and
 /// replacement admission still follow the production owner.
 fn exchangeAt(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
-    const Context = struct { io: std.Io, fixture: bool };
-    return credentials.exchangeRefresh(path, expected_generation, Context{ .io = io, .fixture = fixture }, struct {
-        fn exchange(context: Context, current: *const credentials.Record) !credentials.Record {
-            try policy.validateSelected(current, context.fixture);
-            var replacement: credentials.Record = undefined;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
+    const room = try mapRoom(Refresh);
+    defer unmapRoom(room);
+    const Context = struct { io: std.Io, fixture: bool, room: *Refresh };
+    return credentials.exchangeRefresh(path, expected_generation, &room.credentials, &room.replacement, Context{ .io = io, .fixture = fixture, .room = room }, struct {
+        fn exchange(context: Context, current: *const credentials.Record, replacement: *credentials.Record) !void {
+            try policy.validateSelected(current, context.fixture, &context.room.wire.claims);
             if (context.fixture) {
-                replacement = current.*;
+                replacement.* = current.*;
                 replacement.state = .ready;
                 replacement.refreshed_at = nowSeconds(context.io);
-            } else try refresh(context.io, current, &replacement);
-            return replacement;
+            } else try refresh(context.io, current, replacement, context.room);
         }
     }.exchange);
 }
@@ -101,19 +150,23 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try record.id_token.set(fixture_id_token);
     try record.access_token.set(fixture_access_token);
     try record.refresh_token.set("synthetic-refresh");
-    try credentials.install(path, &record, null);
-    try std.testing.expectEqual(@as(u64, 1), (try credentials.load(path)).generation);
+    var scratch: credentials.Scratch = undefined;
+    const committed = &scratch.current;
+    try credentials.install(path, &record, null, &scratch);
+    try credentials.loadInto(path, committed, &scratch);
+    try std.testing.expectEqual(@as(u64, 1), committed.generation);
 
     // Unchanged generation: one exchange advances it and leaves it ready.
     try std.testing.expect(try forceRefresh(io, path, true, 1));
-    const refreshed = try credentials.load(path);
-    try std.testing.expectEqual(@as(u64, 2), refreshed.generation);
-    try std.testing.expectEqual(policy.State.ready, refreshed.state);
-    try std.testing.expectEqualStrings(fixture_account_id, refreshed.account_id.slice());
+    try credentials.loadInto(path, committed, &scratch);
+    try std.testing.expectEqual(@as(u64, 2), committed.generation);
+    try std.testing.expectEqual(policy.State.ready, committed.state);
+    try std.testing.expectEqualStrings(fixture_account_id, committed.account_id.slice());
     // A second Host holding the same stale lease sees the advanced
     // generation and performs no exchange.
     try std.testing.expect(!try forceRefresh(io, path, true, 1));
-    try std.testing.expectEqual(@as(u64, 2), (try credentials.load(path)).generation);
+    try credentials.loadInto(path, committed, &scratch);
+    try std.testing.expectEqual(@as(u64, 2), committed.generation);
 
     // A pending record requires login and is not exchanged again.
     record.generation = 2;
@@ -344,15 +397,14 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
 }
 
 /// Exchanges the claimed record's refresh token and builds its replacement.
-fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credentials.Record) !void {
-    var body: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &body);
-    var answer: Response = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-    const request = wire.refreshRequest(current, &body) catch return error.RefreshRequestNotSent;
-    const status = post(io, request, &answer, null) catch |err| {
+fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credentials.Record, room: *Refresh) !void {
+    defer std.crypto.secureZero(u8, &room.body);
+    const answer = &room.response;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(answer));
+    const request = wire.refreshRequest(current, &room.body) catch return error.RefreshRequestNotSent;
+    const status = post(io, request, answer, null) catch |err| {
         if (answer.request_not_sent) return error.RefreshRequestNotSent;
         return err;
     };
-    try wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement);
+    try wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement, &room.wire);
 }

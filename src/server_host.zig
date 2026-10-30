@@ -343,6 +343,10 @@ pub const AuthWorker = struct {
     // Only .ready/.in_use own this final storage. The execution thread borrows
     // it through launch; the worker never publishes a value copy of the lease.
     credential: model_adapter.Credential = undefined,
+    /// The file and claims each acquisition reads through. The worker lives
+    /// in the execution Workspace, so only the pages an acquisition writes
+    /// become resident; a refresh maps its own storage for the call.
+    work: model_adapter.CredentialWork = undefined,
     failure: ?anyerror = null,
     /// Set with .requested for a forced refresh at this rejected generation.
     refresh_generation: ?u64 = null,
@@ -434,7 +438,7 @@ pub const AuthWorker = struct {
                     continue;
                 }
             else refreshed: {
-                model_adapter.acquireCredentialInto(self.io, self.authentication, &self.credential) catch |err| {
+                model_adapter.acquireCredentialInto(self.io, self.authentication, &self.work, &self.credential) catch |err| {
                     self.publishFailure(err);
                     continue;
                 };

@@ -627,12 +627,14 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try credentialPath(init, &path_buffer, true);
     if (loginInterrupted()) return error.LoginInterrupted;
+    const room = try codex_auth.Login.map();
+    defer room.unmap();
     // Preflight needs only a safe snapshot, not the refresh owner's lock or
     // generation. Installation rereads under its exclusive lock after winning.
     {
-        var snapshot: codex_credentials.Record = undefined;
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&snapshot));
-        _ = try codex_credentials.readSnapshotInto(path, &snapshot);
+        const snapshot = &room.work.credentials.current;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(snapshot));
+        _ = try codex_credentials.readSnapshotInto(path, snapshot, &room.work.credentials);
     }
     if (loginInterrupted()) return error.LoginInterrupted;
     var tokens = if (interactive)
@@ -652,13 +654,13 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
             }
         }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
-    var record: codex_credentials.Record = undefined;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    try codex_auth.loginRecord(&tokens, codex_auth.nowSeconds(init.io), &record);
+    const record = &room.record;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    try codex_auth.loginRecord(&tokens, codex_auth.nowSeconds(init.io), record, &room.work.claims);
     // Publication and SIGINT claim the same gate. Once publication wins,
     // cancellation cannot be reported as if installation were rolled back.
     if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
-    try codex_credentials.install(path, &record, null);
+    try codex_credentials.install(path, record, null, &room.work.credentials);
     const home = init.environ_map.get("HOME") orelse "";
     // The preference attempt must run even if the terminal receipt cannot be
     // written. Installation and future defaults have independent outcomes.
@@ -818,7 +820,8 @@ test "login owner preserves interruption, publication and independent defaults" 
             try record.id_token.set("prior-id");
             try record.access_token.set("prior-access");
             try record.refresh_token.set("prior-refresh");
-            try codex_credentials.install(path, &record, null);
+            var scratch: codex_credentials.Scratch = undefined;
+            try codex_credentials.install(path, &record, null, &scratch);
             prior_auth = try directory.readFile(io, "codex.json", &prior_bytes);
             const file = try directory.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
             defer file.close(io);
@@ -899,14 +902,19 @@ test "login owner preserves interruption, publication and independent defaults" 
                 var bytes: [4096]u8 = undefined;
                 defer std.crypto.secureZero(u8, &bytes);
                 try std.testing.expectEqualStrings(prior_auth, try directory.readFile(io, "codex.json", &bytes));
-            } else try std.testing.expectError(error.FileNotFound, codex_credentials.load(path));
+            } else {
+                var scratch: codex_credentials.Scratch = undefined;
+                try std.testing.expectError(error.FileNotFound, codex_credentials.loadInto(path, &scratch.current, &scratch));
+            }
         } else {
             if (case == .receipt_failure) {
                 if (outcome) |_| return error.ReceiptFailureNotReported else |err| try std.testing.expect(err != error.LoginInterrupted);
             } else try outcome;
             try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
-            var record = try codex_credentials.load(path);
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+            var scratch: codex_credentials.Scratch = undefined;
+            const record = &scratch.current;
+            try codex_credentials.loadInto(path, record, &scratch);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(record));
             try std.testing.expectEqualStrings(codex_auth.fixture_account_id, record.account_id.slice());
             try std.testing.expectEqualStrings("new-synthetic-refresh", record.refresh_token.slice());
             try std.testing.expectEqual(@as(u64, if (existing) 2 else 1), record.generation);

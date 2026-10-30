@@ -366,6 +366,8 @@ test "provider interpretation retries clean close but not incomplete framing or 
 
 pub const Authentication = struct { path: []const u8, fixture: bool = false };
 pub const Credential = codex_credentials.Lease;
+/// What an acquisition reads and checks through; its owner keeps it off the stack.
+pub const CredentialWork = codex_auth.Work;
 
 /// Codex continuation is qualified only for the same requested model binding.
 /// The caller supplies producing-request evidence, never the served model.
@@ -378,8 +380,8 @@ test "Codex continuation requires identical requested binding" {
     try std.testing.expectError(error.ContinuationUnavailable, validateRequestedBinding("model-a", "model-b"));
 }
 
-pub fn acquireCredentialInto(io: std.Io, authentication: Authentication, destination: *Credential) !void {
-    return codex_auth.acquireInto(io, authentication.path, authentication.fixture, destination);
+pub fn acquireCredentialInto(io: std.Io, authentication: Authentication, work: *CredentialWork, destination: *Credential) !void {
+    return codex_auth.acquireInto(io, authentication.path, authentication.fixture, work, destination);
 }
 
 /// After a model 401 on a lease of `rejected_generation`: false when another
