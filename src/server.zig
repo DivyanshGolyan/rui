@@ -1,6 +1,7 @@
 const std = @import("std");
 const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
+const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
@@ -802,22 +803,7 @@ pub fn serve(
     // Only the lease winner warns, before readiness. Preferences are advice
     // for future Sessions: unreadable/missing defaults must not stop this Host
     // from serving existing work, and an unsupported saved pin stays intact.
-    if (home) |absolute_home| {
-        const saved = @import("preferences.zig").load(absolute_home) catch null;
-        if (saved) |values| {
-            if (values.model.len != 0 and !model_capability.supportsModel(values.model.slice())) {
-                var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
-                var out = std.Io.Writer.fixed(&bytes);
-                try out.writeAll("rui: saved new-Session default model \"");
-                var text: TerminalText = .{ .mode = .line };
-                try text.feed(&out, values.model.slice());
-                try text.finish(&out);
-                try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
-                    "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
-                _ = stderr.writeHeld(out.buffered());
-            }
-        }
-    }
+    if (home) |absolute_home| try warnUnsupportedSavedModel(absolute_home);
     var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
         diagnostic_open_error = err;
@@ -842,21 +828,7 @@ pub fn serve(
         .{ .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
-            var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
-            var output = std.Io.Writer.fixed(&message);
-            const reason = if (found_schema_version == store_module.schema_version)
-                "unsupported or missing Store wire metadata"
-            else
-                "unsupported Store format";
-            try output.print("rui: {s} at ", .{reason});
-            var path_text: TerminalText = .{ .mode = .line };
-            try path_text.feed(&output, lease.paths.store.slice());
-            try path_text.finish(&output);
-            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
-                found_schema_version, store_module.schema_version, protocol.wire_version,
-            });
-            const text = output.buffered();
-            _ = rui_write_readiness(2, text.ptr, text.len);
+            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
             if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
         }
         return err;
@@ -883,14 +855,14 @@ pub fn serve(
     defer bash_environment.deinit();
     // Zero bytes are an empty custody record and retention entry, so fresh
     // pages need no initializing pass and an unused one never becomes resident.
-    const custody_records = try server_host.mapZeroed(execution.CustodyRecord, active_capacity);
-    defer server_host.unmapZeroed(custody_records);
+    const custody_records = try pages.mapZeroed(execution.CustodyRecord, active_capacity);
+    defer pages.unmapZeroed(custody_records);
     const retention_capacity = @min(
         default_retention_entry_capacity,
         limits.retention_entry_capacity orelse default_retention_entry_capacity,
     );
-    const retention_entries = try server_host.mapZeroed(output_retention.Entry, retention_capacity);
-    defer server_host.unmapZeroed(retention_entries);
+    const retention_entries = try pages.mapZeroed(output_retention.Entry, retention_capacity);
+    defer pages.unmapZeroed(retention_entries);
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -955,28 +927,7 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
-        lease.paths.store.slice(),
-        lease.paths.socket.slice(),
-        active_capacity,
-        intake_capacity,
-        descriptor_requirement.total,
-        descriptor_limit_text,
-        @sizeOf(execution.CustodyRecord),
-        @sizeOf(ExecutionSlot),
-        @sizeOf(model_adapter.Preparation),
-        scratch_limit_bytes,
-        @sizeOf(output_retention.Entry),
-        retention_entries.len,
-        if (provider_endpoint != null) "enabled" else "unavailable",
-    });
-    if (provider_endpoint != null) {
-        try ready.appendFmt(" nghttp2={s} openssl={s}", .{ provider.nghttp2_version, provider.openssl_version });
-    }
-    try ready.append("\n");
-    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
-        return error.HostReadinessOutputUnavailable;
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, provider_endpoint != null);
     stderr.release();
     readiness_owned = false;
     if (diagnostic_open_error) |err|
@@ -989,6 +940,77 @@ pub fn serve(
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
+}
+
+// serve's frame stays resident for the Host's life, so each startup-only
+// buffer lives in a noinline function of its own.
+
+/// Warns, before readiness, about a saved default model this release cannot
+/// serve. Preferences are advice for future Sessions: unreadable or missing
+/// defaults never stop the Host, and the saved pin stays intact.
+noinline fn warnUnsupportedSavedModel(home: []const u8) !void {
+    const values = @import("preferences.zig").load(home) catch return;
+    if (values.model.len == 0 or model_capability.supportsModel(values.model.slice())) return;
+    var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try out.writeAll("rui: saved new-Session default model \"");
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(&out, values.model.slice());
+    try text.finish(&out);
+    try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
+        "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
+    _ = stderr.writeHeld(out.buffered());
+}
+
+noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
+    var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&message);
+    const reason = if (found_schema_version == store_module.schema_version)
+        "unsupported or missing Store wire metadata"
+    else
+        "unsupported Store format";
+    try output.print("rui: {s} at ", .{reason});
+    var path_text: TerminalText = .{ .mode = .line };
+    try path_text.feed(&output, store_path);
+    try path_text.finish(&output);
+    try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
+        found_schema_version, store_module.schema_version, protocol.wire_version,
+    });
+    const text = output.buffered();
+    _ = rui_write_readiness(2, text.ptr, text.len);
+}
+
+noinline fn writeReadiness(
+    paths: *const platform.Paths,
+    active_capacity: usize,
+    intake_capacity: usize,
+    descriptor_requirement: usize,
+    descriptor_limit_text: []const u8,
+    retention_capacity: usize,
+    provider_enabled: bool,
+) !void {
+    var ready: protocol.ResponseBuffer = .{};
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+        paths.store.slice(),
+        paths.socket.slice(),
+        active_capacity,
+        intake_capacity,
+        descriptor_requirement,
+        descriptor_limit_text,
+        @sizeOf(execution.CustodyRecord),
+        @sizeOf(ExecutionSlot),
+        @sizeOf(model_adapter.Preparation),
+        scratch_limit_bytes,
+        @sizeOf(output_retention.Entry),
+        retention_capacity,
+        if (provider_enabled) "enabled" else "unavailable",
+    });
+    if (provider_enabled) {
+        try ready.appendFmt(" nghttp2={s} openssl={s}", .{ provider.nghttp2_version, provider.openssl_version });
+    }
+    try ready.append("\n");
+    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
+        return error.HostReadinessOutputUnavailable;
 }
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {
@@ -1267,11 +1289,11 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            const reader = host.store.openContent(reference) catch |err| {
+            const location = host.store.openContent(reference) catch |err| {
                 fenceDispatch(host, "result content read", err);
                 return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
             };
-            try fd.setContent(reader, 0, true, false);
+            try fd.setContent(location, 0, true, false);
         },
         .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
@@ -1381,14 +1403,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             deliverResponse(host.io, fd, 200, response.slice());
         },
         .proposal_field => |command| {
-            const reader = host.store.openProposalField(command) catch |err| switch (err) {
+            const location = host.store.openProposalField(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try deliverPublicContent(host, fd, reader, 0, true);
+            try deliverPublicContent(host, fd, location, 0, true);
         },
         .activity_page => |command| {
             const page = host.store.activityPage(command) catch |err| switch (err) {
@@ -1401,14 +1423,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try prepareActivityPage(host.io, fd, &page);
         },
         .activity_content => |command| {
-            const reader = host.store.openActivityContent(command) catch |err| switch (err) {
+            const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
                     return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try deliverPublicContent(host, fd, reader, 0, true);
+            try deliverPublicContent(host, fd, location, 0, true);
         },
     }
 }
@@ -1432,18 +1454,18 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 }
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: protocol.ConversationContent) !void {
-    const reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
+    const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, .conversation_unavailable, @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
             return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
-    return deliverPublicContent(host, fd, reader, command.start, command.stream);
+    return deliverPublicContent(host, fd, location, command.start, command.stream);
 }
 
-fn deliverPublicContent(host: *Host, fd: *Reply, reader: store_module.ContentReader, start: u64, stream: bool) !void {
-    fd.setContent(reader, start, stream, true) catch |err| {
+fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
+    fd.setContent(location, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
         fd.deinit();
         return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
@@ -1463,11 +1485,11 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
             return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
-    const reader = host.store.openContent(resolved) catch |err| {
+    const location = host.store.openContent(resolved) catch |err| {
         fenceDispatch(host, phase, err);
         return respondStatic(host.io, fd, 500, .invocation_error, "canonical_store_failure");
     };
-    fd.setContent(reader, 0, true, false) catch {};
+    fd.setContent(location, 0, true, false) catch {};
 }
 
 fn nextRequestNumber(host: *Host) !u64 {
@@ -1959,7 +1981,7 @@ const Reply = struct {
         none,
         json: []u8,
         report: store_module.SessionReport,
-        content: struct { reader: store_module.ContentReader, public: bool },
+        content: struct { reader: store_module.ContentReader = undefined, public: bool },
     } = .none,
     absolute_deadline: ?i128 = null,
     inactivity_deadline: i128 = 0,
@@ -2027,15 +2049,17 @@ const Reply = struct {
 
     /// Moves one canonical reader; public reads verify their first window and
     /// empty/one-window EOF before any successful header can leave the Host.
-    fn setContent(self: *Reply, reader: store_module.ContentReader, start: u64, stream: bool, public: bool) !void {
+    /// Opens the reader in this Reply. The location came from a Store open.
+    fn setContent(self: *Reply, location: store_module.ContentLocation, start: u64, stream: bool, public: bool) !void {
         std.debug.assert(self.body == .none);
-        self.body = .{ .content = .{ .reader = reader, .public = public } };
+        self.body = .{ .content = .{ .public = public } };
+        self.body.content.reader.open(location);
         self.offset = start;
-        const length = if (stream) reader.reference.length - start else @min(reader.reference.length - start, protocol.content_window_bytes);
+        const length = if (stream) location.reference.length - start else @min(location.reference.length - start, protocol.content_window_bytes);
         self.end = start + length;
         if (public) {
             try self.fill();
-            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, reader.reference.length, self.end });
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, location.reference.length, self.end });
             self.header_length = header.len;
             self.renew();
         } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);

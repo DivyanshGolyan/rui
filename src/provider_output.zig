@@ -55,7 +55,9 @@ pub const EventData = struct {
     length: u64 = 0,
     charged: u64 = 0,
 
-    pub fn init(io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !EventData {
+    /// Fills `self` with an empty unlinked scratch file. On error `self`
+    /// owns nothing and `retained` holds any name left to reclaim.
+    pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
         retained.* = null;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -68,7 +70,7 @@ pub const EventData = struct {
             retained.* = .init(io, file, null, name, budget, 0, .native);
             return err;
         };
-        return .{ .window = .{ .io = io, .file = file }, .budget = budget };
+        self.* = .{ .window = .{ .io = io, .file = file }, .budget = budget };
     }
 
     fn append(self: *EventData, bytes: []const u8) !void {
@@ -563,7 +565,8 @@ fn malformedEnvelope(err: anyerror) !bool {
 
 /// Only a valid provider error envelope grants context-overflow authority.
 /// Syntax failures are negative evidence, never permission to drop context.
-pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
+/// Never inlined: its 4 KB envelope window stays in this frame.
+pub noinline fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
     if (http_status < 400 or http_status >= 600) return false;
     var envelope: Window = .{ .io = io, .file = file };
     const fields = readFields(&envelope, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedEnvelope(err);
@@ -573,7 +576,8 @@ pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: 
 
 /// Only an exact code in a valid HTTP 429 error envelope establishes a quota
 /// refusal. Reset metadata is optional and cannot make that refusal retryable.
-pub fn httpQuota(io: std.Io, file: std.Io.File, length: u64, http_status: u16) !?transport_policy.Quota {
+/// Never inlined: its 4 KB envelope window stays in this frame.
+pub noinline fn httpQuota(io: std.Io, file: std.Io.File, length: u64, http_status: u16) !?transport_policy.Quota {
     if (http_status != 429) return null;
     var envelope: Window = .{ .io = io, .file = file };
     return quotaEnvelope(&envelope, .{ .start = 0, .length = length }) catch |err| {
@@ -2337,7 +2341,8 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     // These existing cases vary metadata's ceiling independently of payload.
     // Shared overlap and disposal are exercised with one budget below.
     var data_used: std.atomic.Value(u64) = .init(0);
-    var event_data = try EventData.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
+    var event_data: EventData = undefined;
+    try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
     const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingItemCheck(), .{});
     const metadata_bytes = used.load(.acquire);
@@ -2531,7 +2536,8 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root, "metadata", budget, false, &retained);
-        var data = try EventData.init(std.testing.io, root, "response-9-1.tmp", budget, false, &retained);
+        var data: EventData = undefined;
+        try data.init(std.testing.io, root, "response-9-1.tmp", budget, false, &retained);
         try std.testing.expectEqual(baseline + 2, (try descriptors.observe(std.testing.io)).open_descriptors);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         var rejection: Rejection = .{};
@@ -2552,7 +2558,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         data.deinit();
         try std.testing.expectEqual(baseline, (try descriptors.observe(std.testing.io)).open_descriptors);
         try std.testing.expectEqual(@as(u64, raw.len), used.load(.acquire));
-        try std.testing.expectError(error.InjectedEventDataUnlinkFailure, EventData.init(std.testing.io, root, "response-9-1.tmp", budget, true, &retained));
+        try std.testing.expectError(error.InjectedEventDataUnlinkFailure, data.init(std.testing.io, root, "response-9-1.tmp", budget, true, &retained));
         try std.testing.expect(named_scratch.isOwned("response-9-1.tmp"));
         try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(root));
         try std.testing.expectEqual(baseline + 1, (try descriptors.observe(std.testing.io)).open_descriptors);
@@ -2833,7 +2839,8 @@ test "provider reasoning strings preserve raw items across evidence and file win
         const budget = protocol.ScratchBudget{ .used = &used, .limit = sse.len + 64 * 1024 };
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, path, "metadata", budget, false, &retained);
         defer metadata.deinit();
-        var data = try EventData.init(std.testing.io, path, "data", budget, false, &retained);
+        var data: EventData = undefined;
+        try data.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
         var rejection: Rejection = .{};
         const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{});
@@ -3236,7 +3243,8 @@ test "a decoded event is parsed from the bytes just written, never read back" {
     const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
-    var data = try EventData.init(std.testing.io, path, "event-data", .{ .used = &used, .limit = 64 * 1024 }, false, &retained);
+    var data: EventData = undefined;
+    try data.init(std.testing.io, path, "event-data", .{ .used = &used, .limit = 64 * 1024 }, false, &retained);
     defer data.deinit();
     // Reads through a write-only handle fail, so any read back is an error.
     const unreadable = try tmp.dir.createFile(std.testing.io, "unreadable", .{});

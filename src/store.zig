@@ -602,21 +602,24 @@ pub const HistoricalView = struct {
     // one at a time, independent of item size or count.
     const OutputCheck = struct {
         entry: HistoricalEntry = undefined,
-        reader: ?ContentReader = null,
+        /// Open exactly while `reading`.
+        reader: ContentReader = undefined,
+        reading: bool = false,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
         item_check: provider_output.OutputItemCheck = .{},
         /// The last item the grammar finished, kept until the next one starts.
         judged: ?struct { position: u64, verdict: ReplayVerdict } = null,
     };
 
-    pub const EntryProgress = union(enum) { pending, ready: ?HistoricalEntry };
+    /// A ready entry lives in the view until its next step.
+    pub const EntryProgress = union(enum) { pending, ready: ?*const HistoricalEntry };
 
     /// Charge discovery/classification items and private authentication bytes
     /// to the same caller allowance. Pending exposes no storage-level state.
     pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
-        if (self.output_check.reader == null) items_left.* -= 1;
+        if (!self.output_check.reading) items_left.* -= 1;
         return self.store.readHistoricalEntry(self, after_position, bytes_left, items_left) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
@@ -630,9 +633,10 @@ pub const HistoricalView = struct {
         return self.store.checkAttempt(self.binding);
     }
 
-    pub fn settings(self: *HistoricalView) !HistoricalSettings {
+    /// Fills `out`; on error its bytes mean nothing.
+    pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
-        return self.store.readHistoricalSettings(self);
+        return self.store.readHistoricalSettings(self, out);
     }
 
     /// Validate at most one producing Operation and its output items,
@@ -652,7 +656,7 @@ pub const HistoricalView = struct {
             var items: usize = 1024;
             switch (try self.nextEntryStep(after_position, &bytes, &items)) {
                 .pending => {},
-                .ready => |entry| return entry,
+                .ready => |entry| return if (entry) |value| value.* else null,
             }
         }
     }
@@ -689,13 +693,13 @@ pub const HistoricalView = struct {
 
     /// Whether no output item is being read, so the view may move.
     pub fn itemCheckIdle(self: *const HistoricalView) bool {
-        return self.output_check.reader == null and self.output_check.item_check.scanner == null;
+        return !self.output_check.reading and self.output_check.item_check.scanner == null;
     }
 
     /// Bytes the grammar has read of the output item being read; null when
     /// none is.
     pub fn itemCheckBytes(self: *const HistoricalView) ?u64 {
-        if (self.output_check.reader == null) return null;
+        if (!self.output_check.reading) return null;
         return self.output_check.item_check.position;
     }
 
@@ -736,20 +740,23 @@ pub const HistoricalView = struct {
         return self.store.readHistoricalToolResult(self);
     }
 
-    pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
+    /// Opens `out` where it lives. `out` is valid only when this returns
+    /// without error.
+    pub fn openContent(self: *HistoricalView, reference: HistoricalContent, out: *HistoricalReader) !void {
         std.debug.assert(reference.belongsTo(self));
         const identity: ContentReference = .{ .length = reference.length, .digest = reference.digest };
-        const reader: ContentReader = if (reference.raw)
-            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .representation = .raw }
+        const location: ContentLocation = if (reference.raw)
+            .{ .store = self.store, .reference = identity, .content_id = reference.content_id, .raw = true }
         else
             try self.store.openProjection(reference.content_id, identity);
+        out.* = .{ .view = self, .reference = reference, .verified = reference.verified };
+        out.reader.open(location);
         self.readers += 1;
-        return .{ .view = self, .reference = reference, .reader = reader, .verified = reference.verified };
     }
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
-        if (self.output_check.reader) |*reader| reader.close();
+        if (self.output_check.reading) self.output_check.reader.close();
         self.active = false;
     }
 
@@ -785,7 +792,7 @@ pub const HistoricalView = struct {
     }
 
     /// Test/slow-check aid: frozen settings references belong to this view.
-    pub fn ownsSettings(self: *HistoricalView, frozen: HistoricalSettings) bool {
+    pub fn ownsSettings(self: *HistoricalView, frozen: *const HistoricalSettings) bool {
         if (!self.ownsContent(frozen.baseline_instructions)) return false;
         if (frozen.output_schema) |schema| {
             if (!self.ownsContent(schema)) return false;
@@ -795,7 +802,7 @@ pub const HistoricalView = struct {
 };
 
 pub const HistoricalReader = struct {
-    reader: ContentReader,
+    reader: ContentReader = undefined,
     view: *HistoricalView,
     reference: HistoricalContent,
     active: bool = true,
@@ -945,7 +952,7 @@ const SessionReportCapture = struct {
     charged: u64 = 0,
     ordinary_failure: bool = false,
 
-    fn init(io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !SessionReportCapture {
+    fn init(self: *SessionReportCapture, io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !void {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
@@ -958,7 +965,7 @@ const SessionReportCapture = struct {
         errdefer writer.close(io);
         if (fail_unlink) return error.ReportScratchCleanupFailed;
         scratch.deleteFile(io, name) catch return error.ReportScratchCleanupFailed;
-        return .{
+        self.* = .{
             .io = io,
             .writer = writer,
             .budget = budget,
@@ -1150,6 +1157,15 @@ const SessionReportCapture = struct {
     }
 };
 
+/// Where one canonical content value is, resolved under the Store lock.
+/// Read only by `ContentReader.open`.
+pub const ContentLocation = struct {
+    store: *Store,
+    content_id: i64,
+    reference: ContentReference,
+    raw: bool,
+};
+
 /// Raw values allow ranged reads; derived values are read sequentially from
 /// zero. Readers retain copied bytes and identities, never SQLite handles.
 pub const ContentReader = struct {
@@ -1166,6 +1182,13 @@ pub const ContentReader = struct {
     prefetch_start: u64 = 0,
     prefetch_length: usize = 0,
 
+    /// Builds the reader where it lives. Needs no Store access and writes
+    /// only header fields; the projection window stays unwritten.
+    pub fn open(self: *ContentReader, location: ContentLocation) void {
+        self.* = .{ .content_id = location.content_id, .representation = .raw, .store = location.store, .reference = location.reference };
+        if (!location.raw) self.representation = .{ .projection = .{} };
+    }
+
     // Allocate outside Store access. Read-ahead is optional: allocation failure
     // keeps the original bounded read path, not a canonical/Host fault. Small
     // values keep the inline decode window. Encoded projections can exceed
@@ -1173,7 +1196,7 @@ pub const ContentReader = struct {
     fn prepareRead(self: *ContentReader) void {
         const extent = switch (self.representation) {
             .raw => self.reference.length,
-            .projection => |cursor| @max(self.reference.length, cursor.encoded_end),
+            .projection => |*cursor| @max(self.reference.length, cursor.encoded_end),
         };
         if (self.prefetch == null and extent > 1024 * 1024)
             self.prefetch = self.allocator.alloc(u8, content_prefetch_bytes) catch null;
@@ -1813,8 +1836,10 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
     }
 
-    /// Opens in place: the Host holds exactly one Store, never a copy.
-    pub fn openWithOptions(
+    /// Opens in place: the Host holds exactly one Store, never a copy. It
+    /// runs once per process; noinline keeps its path buffers off the
+    /// caller's frame, which lives as long as the Host.
+    pub noinline fn openWithOptions(
         self: *Store,
         io: std.Io,
         database_path: []const u8,
@@ -3060,18 +3085,18 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentReader {
+    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.public_content, self.openPublicConversationContentLocked(request));
     }
 
-    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
+    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const content = try self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal);
         if (request.start > content.metadata.length) return error.RangeOutOfBounds;
-        return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .representation = if (try self.contentIsRaw(content.id, content.metadata.length)) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .raw = try self.contentIsRaw(content.id, content.metadata.length) };
     }
 
     // Accepted assistant messages require entries even when a damaged entry
@@ -3172,16 +3197,18 @@ pub const Store = struct {
 
     const ContentSource = struct {
         store: *Store,
-        reader: ContentReader,
+        reader: ContentReader = undefined,
         position: u64 = 0,
         end: u64,
         window: [4096]u8 = undefined,
         used: usize = 0,
         count: usize = 0,
 
-        fn init(storage: *Store, id: i64, private: bool) !ContentSource {
+        fn init(source: *ContentSource, storage: *Store, id: i64, private: bool) !void {
             const metadata = try storage.readContentMetadata(id);
-            return .{ .store = storage, .reader = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private), .end = metadata.length };
+            const location = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private);
+            source.* = .{ .store = storage, .end = metadata.length };
+            source.reader.open(location);
         }
 
         pub fn peek(source: *@This()) !?u8 {
@@ -3536,14 +3563,14 @@ pub const Store = struct {
         return result;
     }
 
-    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openActivityContentLocked(request));
     }
 
-    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
         self.validateActivitySequence(request.session.slice()) catch |err| return self.fence(err);
         // Only Tool Results have nonzero ordinals. Byte readers need their
         // canonical identity, not a second scan of the original arguments.
@@ -3562,7 +3589,7 @@ pub const Store = struct {
         };
         const content = self.readPublicContentMetadata(id) catch |err| return self.fence(err);
         const raw = self.contentIsRaw(id, content.length) catch |err| return self.fence(err);
-        return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .raw = raw };
     }
 
     pub fn proposalPage(self: *Store, request: protocol.ProposalPage) !ProposalPage {
@@ -3665,21 +3692,22 @@ pub const Store = struct {
             field.* = .{ .length = metadata.length, .digest = metadata.digest };
         }
         if (authenticate) {
-            var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
+            var source: ContentSource = undefined;
+            try source.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
             defer source.reader.close();
             @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
     }
 
-    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentReader {
+    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openProposalFieldLocked(request));
     }
 
-    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentReader {
+    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
         const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return self.fence(err),
@@ -3687,7 +3715,7 @@ pub const Store = struct {
         const index = @backingInt(request.field);
         const field = identity.metadata.fields[index];
         const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fence(err);
-        return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .raw = raw };
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -3699,7 +3727,8 @@ pub const Store = struct {
             defer access.release();
             break :binding try access.finish(Ordinary.content, self.failedResponseBindingLocked(request.session.slice(), selection));
         };
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         try @import("failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
         return capture.seal();
@@ -3728,7 +3757,8 @@ pub const Store = struct {
         session_ref: []const u8,
         options: SessionReportOptions,
     ) !SessionReport {
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);
@@ -3742,7 +3772,8 @@ pub const Store = struct {
     /// The caller releases its scratch charge by deinitializing the report.
     pub fn captureSessionList(self: *Store, request: protocol.ListSessions, options: SessionListOptions) !SessionReport {
         try request.validate();
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);
@@ -4913,7 +4944,8 @@ pub const Store = struct {
     fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
-        var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        var reader: ContentReader = undefined;
+        reader.open(.{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .raw = raw });
         defer reader.close();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
@@ -5160,13 +5192,14 @@ pub const Store = struct {
         } } };
     }
 
-    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+    /// `out` is valid only when this returns without error.
+    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.action_attempt, self.readBashExecutionInputLocked(binding));
+        return access.finish(Ordinary.action_attempt, self.readBashExecutionInputLocked(binding, out));
     }
 
-    fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+    fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const statement = try self.cached(
             "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
@@ -5182,23 +5215,14 @@ pub const Store = struct {
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
         if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try readText(statement, 0, &workspace);
+        try readText(statement, 0, &out.workspace);
         const content_id = c.sqlite3_column_int64(statement, 1);
         const timeout_ms = c.sqlite3_column_int64(statement, 2);
         if (content_id <= 0 or timeout_ms <= 0) return error.CorruptStore;
-        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try readText(statement, 4, &session);
-        var sender_handle: protocol.Bounded(32) = .{};
-        try readText(statement, 5, &sender_handle);
-        const arguments = try self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id");
-        return .{
-            .session = session,
-            .sender_handle = sender_handle,
-            .workspace = workspace,
-            .arguments = arguments,
-            .timeout_ms = @intCast(timeout_ms),
-        };
+        try readText(statement, 4, &out.session);
+        try readText(statement, 5, &out.sender_handle);
+        out.arguments = try self.actionContentLocked(out.session.slice(), binding.action_id, "arguments_content_id");
+        out.timeout_ms = @intCast(timeout_ms);
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
@@ -5851,9 +5875,11 @@ pub const Store = struct {
         }
     }
 
-    pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
+    /// Opens the view in `out`, where it stays until it closes: a view
+    /// borrows its own buffers, so it never moves.
+    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
         try self.checkAttempt(binding);
-        return .{ .store = self, .binding = binding };
+        out.* = .{ .store = self, .binding = binding };
     }
 
     fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
@@ -5903,13 +5929,13 @@ pub const Store = struct {
         return error.StaleAttemptBinding;
     }
 
-    fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
+    fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
         const access = try self.enter(.none);
         defer access.release();
-        return access.finish(Ordinary.none, self.readHistoricalSettingsLocked(view));
+        return access.finish(Ordinary.none, self.readHistoricalSettingsLocked(view, out));
     }
 
-    fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView) !HistoricalSettings {
+    fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
         const statement = try self.cached(
             "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
@@ -5918,47 +5944,36 @@ pub const Store = struct {
         defer resetCached(statement);
         try bindU64(statement, 1, view.binding.operation_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-        var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        try readText(statement, 0, &model);
+        try readText(statement, 0, &out.model);
         const instructions_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
         const output_schema_id = try readNullablePositiveI64(statement, 2);
         const tools = c.sqlite3_column_int(statement, 3);
         if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
-        const instructions = try self.historicalContent(view, instructions_id);
-        const output_schema = if (output_schema_id) |content_id| try self.historicalContent(view, content_id) else null;
-        var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try readText(statement, 5, &session_ref);
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try readText(statement, 6, &workspace);
+        out.tools_mask = @intCast(tools);
+        out.baseline_instructions = try self.historicalContent(view, instructions_id);
+        out.output_schema = if (output_schema_id) |content_id| try self.historicalContent(view, content_id) else null;
+        try readText(statement, 5, &out.session);
+        try readText(statement, 6, &out.workspace);
+        out.store = self.selector;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("rui/session-affinity/v1");
         var length: [8]u8 = undefined;
         std.mem.writeInt(u64, &length, self.selector.len, .big);
         hash.update(&length);
         hash.update(self.selector.slice());
-        std.mem.writeInt(u64, &length, session_ref.len, .big);
+        std.mem.writeInt(u64, &length, out.session.len, .big);
         hash.update(&length);
-        hash.update(session_ref.slice());
-        const digest = hash.finalResult();
-        return .{
-            .operation = try self.readModelOperationKind(view.binding.operation_id),
-            .compaction_trigger = try readNullableTokens(statement, 7, false),
-            .output_reservation = try readNullableTokens(statement, 8, true) orelse return error.CorruptStore,
-            .reasoning_effort = try readNullableEffort(statement, 9),
-            .model = model,
-            .provider = try readProvider(statement, 4),
-            .workspace = workspace,
-            .store = self.selector,
-            .session = session_ref,
-            .session_affinity = digest[0..16].*,
-            .baseline_instructions = instructions,
-            .output_schema = output_schema,
-            .tools_mask = @intCast(tools),
-        };
+        hash.update(out.session.slice());
+        out.operation = try self.readModelOperationKind(view.binding.operation_id);
+        out.compaction_trigger = try readNullableTokens(statement, 7, false);
+        out.output_reservation = try readNullableTokens(statement, 8, true) orelse return error.CorruptStore;
+        out.reasoning_effort = try readNullableEffort(statement, 9);
+        out.provider = try readProvider(statement, 4);
+        out.session_affinity = hash.finalResult()[0..16].*;
     }
 
     fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
-        if (view.output_check.reader) |*reader| reader.prepareRead();
+        if (view.output_check.reading) view.output_check.reader.prepareRead();
         const access = try self.enter(.none);
         defer access.release();
         return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left)) };
@@ -6045,9 +6060,11 @@ pub const Store = struct {
         return false;
     }
 
-    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
+    /// The served entry lives in the view: in its read-ahead, its next tool
+    /// group or its output check.
+    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?*const HistoricalEntry {
         std.debug.assert(view.outputs_validated);
-        if (view.output_check.reader != null) return try self.checkHistoricalOutput(view, bytes_left, items_left);
+        if (view.output_check.reading) return try self.checkHistoricalOutput(view, bytes_left, items_left);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
             view.entries_end = 0;
@@ -6055,7 +6072,7 @@ pub const Store = struct {
             view.next_tool_group = null;
             view.next_tool_group_source_id = null;
             scan_tool_groups = true;
-        } else if (view.next_tool_group) |group| {
+        } else if (view.next_tool_group) |*group| {
             if (group.position <= after_position) {
                 view.next_tool_group = null;
                 view.next_tool_group_source_id = null;
@@ -6066,8 +6083,8 @@ pub const Store = struct {
             view.tool_group_initialized = false;
             if (try self.readNextHistoricalToolGroup(view)) |group| {
                 view.tool_group_source_cursor = group.source_operation_id;
-                if (group.entry.position > after_position) {
-                    view.next_tool_group = group.entry;
+                if (group.position > after_position) {
+                    view.next_tool_group = .{ .position = group.position, .kind = .tool_results };
                     view.next_tool_group_source_id = group.source_operation_id;
                 } else return error.HistoricalPending;
             }
@@ -6075,7 +6092,7 @@ pub const Store = struct {
         }
         view.tool_group_scan_after = after_position;
         const ordinary = try self.nextOrdinaryHistoricalEntry(view, after_position) orelse return self.activateHistoricalToolGroup(view);
-        if (view.next_tool_group) |group| {
+        if (view.next_tool_group) |*group| {
             if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
         }
         // A call's certified fields bind its Tool Results, so its bytes are
@@ -6085,34 +6102,33 @@ pub const Store = struct {
         return error.HistoricalPending;
     }
 
-    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: HistoricalEntry) !void {
+    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: *const HistoricalEntry) !void {
         const content = entry.content.?;
         const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
-        view.output_check = .{
-            .entry = entry,
-            .reader = if (content.raw)
-                .{ .store = self, .reference = identity, .content_id = content.content_id, .representation = .raw }
-            else
-                try self.openProjectionLocked(content.content_id, identity),
-        };
+        const location: ContentLocation = if (content.raw)
+            .{ .store = self, .reference = identity, .content_id = content.content_id, .raw = true }
+        else
+            try self.openProjectionLocked(content.content_id, identity);
+        view.output_check = .{ .entry = entry.*, .reading = true };
+        view.output_check.reader.open(location);
         // The next step reads it, after preparing the read outside Store access.
     }
 
     fn readReplayVerdict(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
-        if (view.output_check.reader) |*reader| reader.prepareRead();
+        if (view.output_check.reading) view.output_check.reader.prepareRead();
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.historical_entry, self.readReplayVerdictLocked(view, entry, bytes_left, items_left));
     }
 
     fn readReplayVerdictLocked(self: *Store, view: *HistoricalView, entry: *HistoricalEntry, bytes_left: *usize, items_left: *usize) !ReplayVerdict {
-        if (view.output_check.reader == null) {
+        if (!view.output_check.reading) {
             items_left.* -= 1;
-            try self.startHistoricalOutput(view, entry.*);
+            try self.startHistoricalOutput(view, entry);
             return error.HistoricalPending;
         }
         std.debug.assert(view.output_check.entry.position == entry.position);
-        entry.* = try self.checkHistoricalOutput(view, bytes_left, items_left);
+        entry.* = (try self.checkHistoricalOutput(view, bytes_left, items_left)).*;
         return view.output_check.judged.?.verdict;
     }
 
@@ -6120,21 +6136,22 @@ pub const Store = struct {
     /// authenticate its bytes, type, ID and a call's certified fields, and
     /// judge it under today's rules. Corrupt bytes fence; an incompatible
     /// verdict is the caller's to act on.
-    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !HistoricalEntry {
+    /// Returns the checked entry, marked verified, in the output check.
+    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !*const HistoricalEntry {
         const check = &view.output_check;
         const Source = struct {
             storage: *Store,
             check: *HistoricalView.OutputCheck,
 
             pub fn contentLength(source: @This()) u64 {
-                return source.check.reader.?.reference.length;
+                return source.check.reader.reference.length;
             }
 
             pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
-                try source.storage.readOwnedContentLocked(&source.check.reader.?, offset, destination);
+                try source.storage.readOwnedContentLocked(&source.check.reader, offset, destination);
                 source.check.hash.update(destination);
                 if (offset + destination.len == source.contentLength() and
-                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.?.reference.digest)) return error.CorruptStore;
+                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.reference.digest)) return error.CorruptStore;
                 return destination.len;
             }
         };
@@ -6150,12 +6167,12 @@ pub const Store = struct {
             else => return err,
         };
         const verdict = judged orelse return error.HistoricalPending;
-        var entry = check.entry;
+        const entry = &check.entry;
         const identity = entry.content.?.item_identity.?;
         try check.item_check.authenticateIdentity(identity.kind, identity.id_digest);
         if (identity.kind == .function_call) try check.item_check.authenticate(identity.call_fields orelse return error.CorruptStore);
-        check.reader.?.close();
-        check.reader = null;
+        check.reader.close();
+        check.reading = false;
         check.judged = .{ .position = entry.position, .verdict = verdict };
         entry.content.?.verified = true;
         return entry;
@@ -6163,9 +6180,9 @@ pub const Store = struct {
 
     /// The next host input or output item after `after_position`, served from
     /// the view's read-ahead and refilled by one ranged query.
-    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+    fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
         while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
-            if (view.entries[view.entries_next].position > after_position) return view.entries[view.entries_next];
+            if (view.entries[view.entries_next].position > after_position) return &view.entries[view.entries_next];
         }
         view.entries_next = 0;
         view.entries_end = 0;
@@ -6204,7 +6221,7 @@ pub const Store = struct {
             c.SQLITE_DONE => break,
             else => return error.HistoricalEntryReadFailed,
         };
-        return if (view.entries_end == 0) null else view.entries[0];
+        return if (view.entries_end == 0) null else &view.entries[0];
     }
 
     fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !HistoricalEntry {
@@ -6260,9 +6277,9 @@ pub const Store = struct {
         };
     }
 
-    fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalEntry {
+    fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?*const HistoricalEntry {
         _ = self;
-        const entry = view.next_tool_group orelse return null;
+        const entry = if (view.next_tool_group) |*value| value else return null;
         view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
         view.active_tool_group_after_ordinal = null;
         view.active_tool_group_count = 0;
@@ -6270,8 +6287,9 @@ pub const Store = struct {
         return entry;
     }
 
+    /// A Tool Results group: its entry is only a position.
     const HistoricalToolGroup = struct {
-        entry: HistoricalEntry,
+        position: u64,
         source_operation_id: u64,
     };
 
@@ -6295,7 +6313,7 @@ pub const Store = struct {
                 try bindU64(extra, 2, scan.calls);
                 if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or c.sqlite3_step(extra) != c.SQLITE_DONE)
                     return error.CorruptStore;
-                const group = HistoricalToolGroup{ .entry = .{ .position = scan.position, .kind = .tool_results }, .source_operation_id = scan.source };
+                const group = HistoricalToolGroup{ .position = scan.position, .source_operation_id = scan.source };
                 view.next_tool_group_count = scan.calls;
                 scan.source = 0;
                 return group;
@@ -7184,31 +7202,30 @@ pub const Store = struct {
         return content_id;
     }
 
-    pub fn openContent(self: *Store, reference: ContentReference) !ContentReader {
+    pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
         return self.openContentIdentity(reference, false);
     }
 
-    fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentReader {
+    fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openContentIdentityLocked(reference, private));
     }
 
-    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+    fn openProjection(self: *Store, content_id: i64, reference: ContentReference) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.none, self.openProjectionLocked(content_id, reference));
     }
 
-    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentReader {
+    fn openProjectionLocked(self: *Store, content_id: i64, reference: ContentReference) !ContentLocation {
         if (try self.contentIsRaw(content_id, reference.length)) return error.CorruptStore;
-        return .{ .store = self, .reference = reference, .content_id = content_id, .representation = .{ .projection = .{} } };
+        return .{ .store = self, .reference = reference, .content_id = content_id, .raw = false };
     }
 
-    fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
+    fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
         const id = try self.resolveContentReference(reference, private);
-        const raw = try self.contentIsRaw(id, reference.length);
-        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (raw) .raw else .{ .projection = .{} } };
+        return .{ .store = self, .reference = reference, .content_id = id, .raw = try self.contentIsRaw(id, reference.length) };
     }
 
     fn contentIsRaw(self: *Store, content_id: i64, length: u64) !bool {
@@ -8739,6 +8756,13 @@ fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool
     return @intCast(value);
 }
 
+/// Tests read a view's settings by value; the Host fills them in place.
+fn testSettings(view: *HistoricalView) !HistoricalSettings {
+    var settings: HistoricalSettings = undefined;
+    try view.settings(&settings);
+    return settings;
+}
+
 fn testingStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -9275,7 +9299,8 @@ fn settleTwoActionsForTesting(
 }
 
 fn expectContent(storage: *Store, reference: ContentReference, expected: []const u8) !void {
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
     var actual: [128]u8 = undefined;
     const count = try reader.read(0, &actual);
@@ -10433,11 +10458,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         results += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), results);
-    var result_reader = try storage.openPublicConversationContent(.{
+    var result_reader: ContentReader = undefined;
+    result_reader.open(try storage.openPublicConversationContent(.{
         .session = public_request.session,
         .position = settled_page.items[0].position,
         .ordinal = 2,
-    });
+    }));
     result_reader.close();
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
@@ -11027,7 +11053,9 @@ test "Full reports every closed Action resolution without fencing" {
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    try std.testing.expectEqual(@as(u64, 1234), (try storage.readBashExecutionInput(action_binding)).timeout_ms);
+    var input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(action_binding, &input);
+    try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
     try std.testing.expectEqual(
         ActionSettlement.effect,
         try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
@@ -11156,7 +11184,8 @@ test "canonical report and Action read failures fence later commands" {
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try queryU64(storage.database, "SELECT min(action_id) FROM action_operation"))) |_| {} else |err| err,
                 .execution => blk: {
                     const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                    break :blk if (storage.readBashExecutionInput(action.permit.binding)) |_| {} else |err| err;
+                    var input: BashExecutionInput = undefined;
+                    break :blk storage.readBashExecutionInput(action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
@@ -11229,8 +11258,9 @@ test "canonical step faults fence rather than reading as ordinary misses" {
             },
             .view, .purpose, .handoff, .failure => blk: {
                 try failAtStepForTesting(storage.database, "model_operation");
+                var view: HistoricalView = undefined;
                 break :blk switch (route) {
-                    .view => if (storage.openHistoricalView(binding)) |_| {} else |err| err,
+                    .view => storage.openHistoricalView(binding, &view),
                     .purpose => if (storage.modelOperationKind(binding)) |_| {} else |err| err,
                     .handoff => storage.withDispatchHandoff(binding, {}, struct {
                         fn run(_: void) !void {
@@ -11367,7 +11397,8 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5",
         );
         const metadata = try storage.readContentMetadata(@intCast(content_id));
-        var reader = try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest }));
         defer reader.close();
         var result: [192]u8 = undefined;
         const count = try reader.read(0, &result);
@@ -11718,7 +11749,8 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
-    var view = try storage.openHistoricalView(continuation);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(continuation, &view);
     defer view.close();
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
@@ -11742,8 +11774,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
         _ = ordinal;
         const result = (try view.nextToolResult()).?;
-        var call_id = try view.openContent(result.call_id);
-        var output = try view.openContent(result.output);
+        var call_id: HistoricalReader = undefined;
+        try view.openContent(result.call_id, &call_id);
+        var output: HistoricalReader = undefined;
+        try view.openContent(result.output, &output);
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);
@@ -12164,7 +12198,8 @@ test "terminal call-result import and read failures preserve canonical authority
     try exec(read_store.database, "PRAGMA foreign_keys=OFF");
     try exec(read_store.database, "UPDATE model_tool_call SET rejection_content_id=9223372036854775807");
     try exec(read_store.database, "PRAGMA foreign_keys=ON");
-    var view = try read_store.openHistoricalView(continuation);
+    var view: HistoricalView = undefined;
+    try read_store.openHistoricalView(continuation, &view);
     defer view.close();
     var position: u64 = 0;
     while (true) {
@@ -12243,7 +12278,8 @@ test "compaction pressure uses provider usage appended input and complete call r
         const purpose: ModelOperationKind = if (scenario == 1) .assistant_response else .compaction;
         try std.testing.expectEqual(purpose, try storage.modelOperationKind(next));
         {
-            var view = try storage.openHistoricalView(next);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(next, &view);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             try std.testing.expect((try view.coverage()).anchor == null);
@@ -12252,7 +12288,8 @@ test "compaction pressure uses provider usage appended input and complete call r
             try std.testing.expectEqual(HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
             for ([_][]const u8{ "call-a", "call-b" }) |expected| {
                 const result = (try view.nextToolResult()).?;
-                var reader = try view.openContent(result.call_id);
+                var reader: HistoricalReader = undefined;
+                try view.openContent(result.call_id, &reader);
                 defer reader.close();
                 var bytes: [64]u8 = undefined;
                 const count = try reader.read(0, &bytes);
@@ -12266,7 +12303,8 @@ test "compaction pressure uses provider usage appended input and complete call r
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession(session.slice())).pending_messages);
             try settleCompactionForTesting(&storage, &tmp, next, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view = try storage.openHistoricalView(successor);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(successor, &view);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             const anchor = (try view.coverage()).anchor.?;
@@ -12349,7 +12387,8 @@ test "missing canonical call outcome rows fence history and inspection" {
         try exec(storage.database, "PRAGMA foreign_keys=ON");
 
         if (corruption == .action) {
-            var view = try storage.openHistoricalView(continuation);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(continuation, &view);
             defer view.close();
             var position: u64 = 0;
             while (true) {
@@ -12391,7 +12430,8 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
     };
     try settleCallsForTesting(&storage, &tmp, source, "eof-coverage-metadata", &calls);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view = try storage.openHistoricalView(continuation);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(continuation, &view);
     defer view.close();
     var position: u64 = 0;
     while (true) {
@@ -12466,7 +12506,8 @@ test "complete historical tool-result traversal scales with groups and calls" {
             var counter: Counter = .{};
             c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
             defer c.sqlite3_progress_handler(storage.database, 0, null, null);
-            var view = try storage.openHistoricalView(binding);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(binding, &view);
             defer view.close();
             var position: u64 = 0;
             var groups_seen: usize = 0;
@@ -12534,13 +12575,14 @@ test "historical preparation yields covered group populations and cancels propos
     // An after-position covering every group must not drain discovery in one
     // call. Closing in the middle of private validation releases its reader.
     {
-        var view = try storage.openHistoricalView(binding);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(binding, &view);
         while (!try view.validateOutputsStep()) {}
         var bytes: usize = 7;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
         var after: u64 = 0;
-        while (view.output_check.reader == null) {
+        while (!view.output_check.reading) {
             bytes = 7;
             items = 1;
             try testingHistoricalStep(&view, &after, &bytes, &items);
@@ -12555,7 +12597,8 @@ test "historical preparation yields covered group populations and cancels propos
         try std.testing.expectEqual(closes + 1, storage.testing_content_work.closes.load(.monotonic));
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
-    var view = try storage.openHistoricalView(binding);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
     defer view.close();
     while (!try view.validateOutputsStep()) {}
     var charged: u64 = 0;
@@ -12598,16 +12641,17 @@ test "large historical readers and yielded group authentication leave checkpoint
     }});
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
-        var view = try storage.openHistoricalView(continuation);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(continuation, &view);
         defer view.close();
         while (!try view.validateOutputsStep()) {}
         var after: u64 = 0;
-        while (view.output_check.reader == null) {
+        while (!view.output_check.reading) {
             var bytes: usize = 4096;
             var items: usize = 1;
             try testingHistoricalStep(&view, &after, &bytes, &items);
         }
-        view.output_check.reader.?.allocator = std.testing.allocator;
+        view.output_check.reader.allocator = std.testing.allocator;
         var bytes: usize = 4096;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
@@ -12615,11 +12659,13 @@ test "large historical readers and yielded group authentication leave checkpoint
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         // Closing a pending view also frees its reader-owned copied window.
     }
-    var view = try storage.openHistoricalView(continuation);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(continuation, &view);
     defer view.close();
     const entry = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, entry.kind);
-    var reader = try view.openContent(entry.content.?);
+    var reader: HistoricalReader = undefined;
+    try view.openContent(entry.content.?, &reader);
     defer reader.close();
     reader.reader.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -12673,7 +12719,8 @@ test "historical preparation rejects missing extra and reordered sibling classif
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
             try exec(storage.database, fault.sql);
             try exec(storage.database, "PRAGMA foreign_keys=ON");
-            var view = try storage.openHistoricalView(next);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(next, &view);
             defer view.close();
             while (!(view.validateOutputsStep() catch |err| {
                 try std.testing.expectEqual(error.CorruptStore, err);
@@ -12700,7 +12747,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                         // The view never reaches its end, so no request seals.
                         if (!bytes_fault or served != null) return error.MissingCorruptionFailure;
                         try std.testing.expectEqual(HistoricalEntryKind.user, entry.?.kind);
-                        served = entry;
+                        served = entry.?.*;
                     },
                 }
             }
@@ -12773,7 +12820,8 @@ test "historical accepted assistant output completeness and provenance fence rea
         var retained: ?named_scratch.Owner = null;
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
-        var event_data = try provider_output.EventData.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
+        var event_data: provider_output.EventData = undefined;
+        try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
         var rejection: @import("provider_output.zig").Rejection = .{};
         const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, provider_output.testingItemCheck(), .{});
@@ -12832,8 +12880,9 @@ test "historical accepted assistant output completeness and provenance fence rea
         try exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
-        defer if (preparation.active) preparation.cancel();
+        try storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        defer if (preparation.state.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(7, 2);
             switch (progress) {
@@ -12890,8 +12939,9 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: @import("model_adapter.zig").Preparation = undefined;
-        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
-        defer if (preparation.active) preparation.cancel();
+        try storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        defer if (preparation.state.active) preparation.cancel();
         while (true) {
             var progress = preparation.advance(1, 1);
             switch (progress) {
@@ -12944,7 +12994,8 @@ test "historical accepted output selection work excludes failed Operation popula
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
             try expectDone(insert);
-            var view = try storage.openHistoricalView(current);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
             c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
@@ -13299,7 +13350,8 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
     try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
-    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding));
+    var view: HistoricalView = undefined;
+    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding, &view));
 
     const cancelled = (try storage.observeCommand("message-a")).message.?.queue.?;
     const cancellation = switch (cancelled.state) {
@@ -13448,7 +13500,8 @@ test "exact model interruption continues only with applicable pending input" {
     var interrupt = try completeModelInterruption("interrupt", session.slice(), binding);
     const accepted = storage.interruptModel(&interrupt, .{});
     try std.testing.expect(accepted == .accepted);
-    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding));
+    var view: HistoricalView = undefined;
+    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding, &view));
     const successor = (try storage.admitNextModelAttempt(.{})).?;
     try std.testing.expectEqual(binding.turn_id, successor.permit.binding.turn_id);
     try std.testing.expect(successor.permit.binding.operation_id != binding.operation_id);
@@ -14199,8 +14252,9 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", created_session_0.slice());
-    var view = try storage.openHistoricalView(binding);
-    try std.testing.expectError(error.CorruptStore, view.settings());
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
+    try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", created_session_0.slice());
     try storage.close();
@@ -14487,7 +14541,8 @@ test "configuration answers replay without reverting newer settings" {
     try std.testing.expectEqualSlices(u8, &empty_digest, &observation.instructions.digest);
     try std.testing.expect(observation.output_schema == null);
 
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var content_window: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try reader.read(0, &content_window));
@@ -14524,7 +14579,8 @@ test "content reader owns the bounded result-delivery window" {
         &text,
     );
     const reference = (try storage.observeCommand("window-message")).message.?.content;
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
 
     var window: [ContentReader.content_window_bytes]u8 = undefined;
@@ -14560,10 +14616,9 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     }
     _ = try storage.importBytesContent(first, false, false);
     _ = try storage.importBytesContent(second, false, false);
-    var readers = [_]ContentReader{
-        try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(first) }),
-        try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }),
-    };
+    var readers: [2]ContentReader = undefined;
+    readers[0].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(first) }));
+    readers[1].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }));
     defer for (&readers) |*reader| reader.close();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     readers[0].allocator = failing.allocator();
@@ -14607,7 +14662,8 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     }
     // Copied bytes belong only to their original reader. A newly resolved
     // raw reader must see the changed row, not another reader's old window.
-    var fresh = try storage.openContent(readers[0].reference);
+    var fresh: ContentReader = undefined;
+    fresh.open(try storage.openContent(readers[0].reference));
     defer fresh.close();
     fresh.allocator = std.testing.allocator;
     try std.testing.expectEqual(@as(usize, 1), try readers[0].read(length - 1, buffer[0..1]));
@@ -14652,11 +14708,10 @@ test "large projected readers retain distinct copied sources across ranges and c
         try bindU64(update, 2, ordinal);
         try expectDone(update);
     }
-    var readers = [_]ContentReader{
-        try storage.openPublicConversationContent(request),
-        try storage.openActivityContent(.{ .session = request.session, .position = request.position }),
-        try storage.openContentIdentity(.{ .length = split, .digest = protocol.contentDigest(expected[0..split]) }, true),
-    };
+    var readers: [3]ContentReader = undefined;
+    readers[0].open(try storage.openPublicConversationContent(request));
+    readers[1].open(try storage.openActivityContent(.{ .session = request.session, .position = request.position }));
+    readers[2].open(try storage.openContentIdentity(.{ .length = split, .digest = protocol.contentDigest(expected[0..split]) }, true));
     defer for (&readers) |*reader| reader.close();
     for (&readers) |*reader| reader.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14698,7 +14753,8 @@ test "large projected readers never borrow another reader's prefetched integrity
     defer std.testing.allocator.free(expected);
     @memset(expected, 'x');
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
-    var held = try storage.openPublicConversationContent(request);
+    var held: ContentReader = undefined;
+    held.open(try storage.openPublicConversationContent(request));
     defer held.close();
     held.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14707,7 +14763,8 @@ test "large projected readers never borrow another reader's prefetched integrity
         "WHERE content_id=(SELECT source_content_id FROM answer_text_projection LIMIT 1)");
     try std.testing.expectEqual(buffer.len, try held.read(buffer.len, &buffer));
     try std.testing.expectEqualSlices(u8, expected[buffer.len..][0..buffer.len], &buffer);
-    var fresh = try storage.openPublicConversationContent(request);
+    var fresh: ContentReader = undefined;
+    fresh.open(try storage.openPublicConversationContent(request));
     defer fresh.close();
     fresh.allocator = std.testing.allocator;
     try std.testing.expectEqual(buffer.len, try fresh.read(0, &buffer));
@@ -14731,13 +14788,15 @@ test "retained raw and projected readers allow checkpoints between committed win
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
-        var reader = if (projected) blk: {
+        const location = if (projected) blk: {
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
             break :blk try storage.openPublicConversationContent(request);
         } else blk: {
             _ = try storage.importBytesContent(text, false, false);
             break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });
         };
+        var reader: ContentReader = undefined;
+        reader.open(location);
         defer reader.close();
         var window: [4096]u8 = undefined;
         try std.testing.expectEqual(window.len, try reader.read(0, &window));
@@ -14778,39 +14837,43 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
             .encoded = encoded[1 .. encoded.len - 1],
             .decoded = descriptor,
         }});
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try workspace.set(storage.selector.slice());
+        var input: BashExecutionInput = .{
+            .session = request.session,
+            .sender_handle = .{},
+            .workspace = .{},
+            .arguments = .{ .length = descriptor.len, .digest = undefined },
+            .timeout_ms = 1000,
+        };
+        try input.workspace.set(storage.selector.slice());
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
-        var preparation = switch (bash.startPreparation(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, "/bin/bash", 1000, 11, .{})) {
-            .preparing => |value| value,
-            .failed => |initial| {
-                var failure = initial;
-                try failure.cleanup.cleanup(scratch);
-                return failure.cause;
-            },
-        };
+        var preparation: bash.Preparation = undefined;
+        if (preparation.start(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), &input, storage.selector.slice(), "/bin/bash", 11, .{})) |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup(scratch);
+            return failure.cause;
+        }
         var owned = true;
         defer if (owned) {
             var cleanup = preparation.cancel();
             cleanup.cleanup(scratch) catch unreachable;
         };
-        try std.testing.expect(preparation.advance() == .pending);
+        var prepared: bash.Prepared = undefined;
+        try std.testing.expect(preparation.advance(&prepared) == .pending);
         _ = try configureTestSession(&storage, "bash-checkpoint");
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         while (true) {
-            switch (preparation.advance()) {
+            var progress = preparation.advance(&prepared);
+            switch (progress) {
                 .pending => {},
-                .prepared => |value| {
+                .prepared => {
                     owned = false;
-                    var prepared = value;
                     defer prepared.cleanup() catch unreachable;
                     try std.testing.expectEqualStrings(command, prepared.command.?);
                     break;
                 },
-                .failed => |initial| {
+                .failed => |*failure| {
                     owned = false;
-                    var failure = initial;
                     try failure.cleanup.cleanup(scratch);
                     return failure.cause;
                 },
@@ -15111,7 +15174,8 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqual(first_reply.accepted.admission_id, accepted_observation.admission_id);
     try std.testing.expect(accepted_observation.state == .queued);
 
-    var reader = try storage.openContent(observed.message.?.content);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observed.message.?.content));
     var actual: [first_text.len]u8 = undefined;
     var offset: usize = 0;
     while (offset < actual.len) {
@@ -15373,7 +15437,9 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    const handle = (try storage.readBashExecutionInput(action)).sender_handle;
+    var input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(action, &input);
+    const handle = input.sender_handle;
     var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
     try own_ref.set(sender);
     const sender_end = (try storage.activityPage(.{ .session = own_ref })).end;
@@ -15487,12 +15553,14 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try stale.key.set("stale-handle");
     try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, true, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
-    var reader = try storage.openActivityContent(.{ .session = session, .position = own.items[0].position });
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openActivityContent(.{ .session = session, .position = own.items[0].position }));
     reader.close();
 
     // The model's historical view carries the recorded sender, not text.
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
-    var view = try storage.openHistoricalView(try admitted.permit.consume());
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(try admitted.permit.consume(), &view);
     defer view.close();
     const entry = (try view.nextEntry(0)).?;
     try std.testing.expect(entry.kind == .user);
@@ -16142,7 +16210,8 @@ test "external content import follows sealed descriptor custody" {
     const created_session_0 = created_session_0_reply.accepted.session;
 
     const observation = try storage.inspectSession(created_session_0.slice());
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var bytes: [captured.len]u8 = undefined;
     try std.testing.expectEqual(captured.len, try reader.read(0, &bytes));
@@ -16303,7 +16372,8 @@ test "multiwindow content import and deduplication preserve all bytes" {
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
     const observation = try storage.inspectSession(created_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), observation.revision);
-    var reader = try storage.openContent(observation.instructions);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(observation.instructions));
     defer reader.close();
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var offset: usize = 0;
@@ -16334,7 +16404,8 @@ test "large raw content opens without materializing its payload" {
     };
     const created_session_0_reply = storage.configure(&command, true, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
-    var reader = try storage.openContent(reference);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
     defer reader.close();
     var first: [17]u8 = undefined;
     try std.testing.expectEqual(first.len, try reader.read(0, &first));
@@ -16397,7 +16468,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
         .before_ordinal = 1,
     }));
     try std.testing.expect(!storage.isFenced());
-    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 });
+    var unicode_reader: ContentReader = undefined;
+    unicode_reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 }));
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -16435,7 +16507,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expect(fresh.items[0].position > first.end);
     try std.testing.expect(fresh.items[0].kind == .user);
     var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
-    var reader = try storage.openPublicConversationContent(read);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(read));
     var tail: [2]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
     try std.testing.expectEqualStrings("xx", &tail);
@@ -16545,8 +16618,9 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     request.end = valid.end;
     if (route == .cursor) request.before_position = valid.items[0].position;
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |reader_value| blk: {
-            var reader = reader_value;
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
+            var reader: ContentReader = undefined;
+            reader.open(location);
             reader.close();
             break :blk {};
         } else |err| err
@@ -16600,7 +16674,8 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     const item = valid.items[if (target_sibling) 0 else 1];
     try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
-        var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
@@ -16627,8 +16702,9 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         request.before_ordinal = item.ordinal;
     }
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |reader_value| blk: {
-            var reader = reader_value;
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
+            var reader: ContentReader = undefined;
+            reader.open(location);
             reader.close();
             break :blk {};
         } else |err| err
@@ -16713,7 +16789,8 @@ test "public completed Action sibling corruption fences first Conversation read"
             }
             const result: anyerror!void = if (route == .content)
                 if (storage.openPublicConversationContent(.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -16817,7 +16894,8 @@ test "public tool-result cursor crosses a completed group boundary" {
     try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
     try std.testing.expect(older.items[0].kind == .tool_result);
     try std.testing.expect(older.items[1].kind == .user);
-    var reader = try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 });
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
     defer reader.close();
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
@@ -16953,14 +17031,16 @@ test "public assistant message provenance binds the exact accepted item" {
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
                 .page => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
-                .bytes => if (storage.openPublicConversationContent(request)) |reader| blk: {
-                    var owned = reader;
+                .bytes => if (storage.openPublicConversationContent(request)) |location| blk: {
+                    var owned: ContentReader = undefined;
+                    owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
                 .activity => if (storage.activityPage(.{ .session = request.session })) |_| {} else |err| err,
-                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |reader| blk: {
-                    var owned = reader;
+                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |location| blk: {
+                    var owned: ContentReader = undefined;
+                    owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
@@ -17042,7 +17122,8 @@ test "public projected content sequential work excludes repeated prefixes" {
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
     storage.testing_content_work = .{};
     var window: [protocol.content_window_bytes]u8 = undefined;
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     var offset: u64 = 0;
     while (offset < expected.len) : (offset += window.len) {
         try std.testing.expectEqual(window.len, try reader.readRange(offset, &window));
@@ -17055,7 +17136,8 @@ test "public projected content sequential work excludes repeated prefixes" {
     storage.testing_content_work = .{};
     offset = 0;
     while (offset < expected.len) : (offset += window.len) {
-        var ranged = try storage.openPublicConversationContent(request);
+        var ranged: ContentReader = undefined;
+        ranged.open(try storage.openPublicConversationContent(request));
         defer ranged.close();
         try std.testing.expectEqual(window.len, try ranged.readRange(offset, &window));
         try std.testing.expectEqualStrings(expected[@intCast(offset)..][0..window.len], &window);
@@ -17081,7 +17163,8 @@ test "public projected content equal-length repoint fences at complete-stream EO
         // Metadata/provenance stay valid, but the complete public identity differs.
         try exec(storage.database, "UPDATE answer_text_projection SET encoded_start=(SELECT encoded_start FROM answer_text_projection WHERE part_ordinal=1) WHERE part_ordinal=0");
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-        var reader = try storage.openPublicConversationContent(request);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(request));
         defer reader.close();
         var bytes: [4096]u8 = undefined;
         // An earlier range is not authenticated by an eventual EOF comparison.
@@ -17127,7 +17210,8 @@ test "public projected content EOF rejects nonempty trailing parts" {
                 try expectDone(insert);
                 try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             }
-            var reader = try storage.openPublicConversationContent(request);
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openPublicConversationContent(request));
             defer reader.close();
             var bytes: [1]u8 = undefined;
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
@@ -17150,7 +17234,8 @@ test "public projected content trailing empty parts retain final byte and repeat
         .{ .encoded = "", .decoded = "" },
         .{ .encoded = "", .decoded = "" },
     });
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     defer reader.close();
     var bytes: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try reader.readRange(7, &bytes));
@@ -17174,7 +17259,8 @@ test "public projected content ranges own positioning across windows and scalar 
         .{ .encoded = "", .decoded = "" },
         .{ .encoded = "tail", .decoded = "tail" },
     });
-    var reader = try storage.openPublicConversationContent(request);
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openPublicConversationContent(request));
     const reference = reader.reference;
     try std.testing.expectEqual(@as(u64, expected.len), reference.length);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
@@ -17219,7 +17305,8 @@ test "public projected content empty identity and repeated EOF" {
             try expectDone(statement);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         }
-        var reader = try storage.openContent(.{ .length = 0, .digest = digest });
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(.{ .length = 0, .digest = digest }));
         defer reader.close();
         var bytes: [1]u8 = undefined;
         if (corrupt) {
@@ -17264,7 +17351,8 @@ test "public projected content range positioning preserves decoding and backing 
             try std.testing.expect(storage.isFenced());
             continue;
         }
-        var reader = try storage.openPublicConversationContent(request);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openPublicConversationContent(request));
         defer reader.close();
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(error.InvalidJsonEscape, reader.readRange(1, &bytes));
@@ -17430,9 +17518,11 @@ test "one committed selection freezes its settings and input prefix" {
     );
     try expectBindingPreserved(&storage, created_session_0.slice(), "during-work");
 
-    var view = try storage.openHistoricalView(binding);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
     defer if (view.active) view.close();
-    const settings = try view.settings();
+    var settings: HistoricalSettings = undefined;
+    try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     try std.testing.expectEqual(@as(u8, 1), settings.tools_mask);
@@ -17441,13 +17531,15 @@ test "one committed selection freezes its settings and input prefix" {
     const instruction = (try view.nextEntry(second_input.position)).?;
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
-    var first_reader = try view.openContent(first_input.content.?);
+    var first_reader: HistoricalReader = undefined;
+    try view.openContent(first_input.content.?, &first_reader);
     defer if (first_reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
     try std.testing.expectEqualStrings("first", &actual);
 
-    var foreign_view = try storage.openHistoricalView(binding);
+    var foreign_view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &foreign_view);
     try std.testing.expect(first_input.content.?.belongsTo(&view));
     try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view));
     foreign_view.close();
@@ -17485,9 +17577,11 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(storage.configure(&tools_update, true, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
-    var later_view = try storage.openHistoricalView(later.permit.binding);
+    var later_view: HistoricalView = undefined;
+    try storage.openHistoricalView(later.permit.binding, &later_view);
     defer later_view.close();
-    const later_settings = try later_view.settings();
+    var later_settings: HistoricalSettings = undefined;
+    try later_view.settings(&later_settings);
     try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
     try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
     try std.testing.expectEqual(@as(u8, 0), later_settings.tools_mask);
@@ -17596,7 +17690,8 @@ test "continued accepted output keeps model immutable and public projection read
     const public_page = try storage.publicConversationPage(public_request);
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].kind == .assistant);
-    var public_reader = try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position });
+    var public_reader: ContentReader = undefined;
+    public_reader.open(try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position }));
     try std.testing.expect(public_reader.representation == .projection);
     {
         const backing = try prepare(storage.database, "SELECT exposed.private,source.private FROM answer_text_projection projection " ++
@@ -17764,12 +17859,14 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
             .conversation => if (storage.publicConversationPage(.{ .session = session })) |_| {} else |err| err,
             .activity => if (storage.activityPage(.{ .session = session })) |_| {} else |err| err,
             .conversation_content => if (storage.openPublicConversationContent(.{ .session = session, .position = position })) |value| blk: {
-                var reader = value;
+                var reader: ContentReader = undefined;
+                reader.open(value);
                 reader.close();
                 break :blk {};
             } else |err| err,
             .activity_content => if (storage.openActivityContent(.{ .session = session, .position = position })) |value| blk: {
-                var reader = value;
+                var reader: ContentReader = undefined;
+                reader.open(value);
                 reader.close();
                 break :blk {};
             } else |err| err,
@@ -18156,9 +18253,10 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     try execSessionSql(storage.database, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", created_session_0.slice());
     try exec(storage.database, "PRAGMA foreign_keys=ON");
-    var view = try storage.openHistoricalView(binding);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
     defer view.close();
-    try std.testing.expectError(error.CorruptStore, view.settings());
+    try std.testing.expectError(error.CorruptStore, testSettings(&view));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(
         error.StoreFenced,
@@ -18782,7 +18880,8 @@ test "public proposal structural corruption fences independently on every route"
             if (route == .cursor) request.after = item.position;
             const result: anyerror!void = if (route == .content)
                 if (storage.openProposalField(.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -18849,7 +18948,8 @@ test "public activity admission corruption fences page and content independently
             request.position = item.position - 1;
             const result: anyerror!void = if (content_route)
                 if (storage.openActivityContent(.{ .session = request.session, .position = item.position })) |value| blk: {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| err
@@ -19136,12 +19236,14 @@ test "tool label observation trusts admission but exact inspection authenticates
             .arguments => if (storage.actionArguments(session.slice(), action)) |_| {} else |err| err,
             .execution => blk: {
                 const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                break :blk if (storage.readBashExecutionInput(admitted.permit.binding)) |_| {} else |err| err;
+                var input: BashExecutionInput = undefined;
+                break :blk storage.readBashExecutionInput(admitted.permit.binding, &input);
             },
             .proposal => blk: {
                 const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
                 if (storage.openProposalField(.{ .session = request.session, .position = position, .field = .arguments })) |value| {
-                    var reader = value;
+                    var reader: ContentReader = undefined;
+                    reader.open(value);
                     reader.close();
                     break :blk {};
                 } else |err| break :blk err;
@@ -19185,7 +19287,8 @@ test "completed tool labels trust admission while model replay authenticates pay
     try std.testing.expectEqual(@as(usize, 2), results);
     try submitTestMessage(&storage, &tmp, "replay-next", "replay-next", session.slice(), "continue");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view = try storage.openHistoricalView(next);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(next, &view);
     defer view.close();
     // Discovery trusts the labels; the first call's bytes are read, and
     // fence, before that call is served.
@@ -19276,9 +19379,10 @@ test "compaction overflow admits a new Operation without losing applied input" {
     try std.testing.expect(next.permit.binding.operation_id != original.operation_id);
     try std.testing.expectEqual(original.turn_id, next.permit.binding.turn_id);
     try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next.permit.binding));
-    var view = try storage.openHistoricalView(next.permit.binding);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(next.permit.binding, &view);
     defer view.close();
-    try std.testing.expectEqual(ModelOperationKind.compaction, (try view.settings()).operation);
+    try std.testing.expectEqual(ModelOperationKind.compaction, (try testSettings(&view)).operation);
     try std.testing.expect((try view.coverage()).anchor == null);
     const input = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
@@ -19390,14 +19494,16 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try std.testing.expectEqual(compact.turn_id, successor.turn_id);
     try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
     {
-        var view = try storage.openHistoricalView(successor);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(successor, &view);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
         const anchor = (try view.coverage()).anchor.?;
         for ([_][]const u8{ "original", "{\"type\":\"reasoning\",\"id\":\"reasoning-0\"}", "{\"type\":\"compaction\",\"id\":\"compaction-1\",\"encrypted_content\":\"opaque\"}", "{\"type\":\"message\",\"id\":\"message-2\",\"content\":[]}", "later" }, 0..) |expected, index| {
             const entry = (try cursor.next(&view)).?;
             if (index == 2) try std.testing.expectEqual(anchor, entry.position);
-            var reader = try view.openContent(entry.content.?);
+            var reader: HistoricalReader = undefined;
+            try view.openContent(entry.content.?, &reader);
             defer reader.close();
             var bytes: [256]u8 = undefined;
             const count = try reader.read(0, &bytes);
@@ -19412,7 +19518,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try settleCompactionForTesting(&storage, &tmp, second_base, &.{.compaction});
     const exhausted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
-        var view = try storage.openHistoricalView(exhausted);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(exhausted, &view);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
         const anchor = (try view.coverage()).anchor.?;
@@ -19470,9 +19577,11 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
         try std.testing.expectEqual(first.operation_id, retry.operation_id);
         {
-            var view = try storage.openHistoricalView(retry);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(retry, &view);
             defer view.close();
-            const frozen = try view.settings();
+            var frozen: HistoricalSettings = undefined;
+            try view.settings(&frozen);
             try std.testing.expectEqual(expected, frozen.compaction_trigger);
             try std.testing.expectEqual(@as(u64, 0), frozen.output_reservation);
         }
@@ -19626,9 +19735,11 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
     try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "pending");
     const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view = try storage.openHistoricalView(compact);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(compact, &view);
     defer view.close();
-    const frozen = try view.settings();
+    var frozen: HistoricalSettings = undefined;
+    try view.settings(&frozen);
     try std.testing.expectEqual(ModelOperationKind.compaction, frozen.operation);
     try std.testing.expectEqual(@as(u64, 1), frozen.compaction_trigger);
     try std.testing.expectEqual(@as(u64, 1), frozen.output_reservation);
@@ -19643,13 +19754,15 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", "later instruction");
     defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.configure(&patch, true, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 1), (try view.settings()).compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 1), (try testSettings(&view)).compaction_trigger);
     try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "arrival");
     try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var later = try storage.openHistoricalView(successor);
+    var later: HistoricalView = undefined;
+    try storage.openHistoricalView(successor, &later);
     defer later.close();
-    const settings = try later.settings();
+    var settings: HistoricalSettings = undefined;
+    try later.settings(&settings);
     try std.testing.expectEqual(ModelOperationKind.assistant_response, settings.operation);
     try std.testing.expectEqual(@as(u64, 999), settings.compaction_trigger);
     try std.testing.expectEqual(@as(u64, 8), settings.output_reservation);
@@ -19753,9 +19866,10 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, retry.operation_id);
     {
-        var view = try storage.openHistoricalView(retry);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(retry, &view);
         defer view.close();
-        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try view.settings()).reasoning_effort);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try testSettings(&view)).reasoning_effort);
     }
 
     // Unsupported and outside-grammar values reject without a revision.
@@ -19795,9 +19909,10 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var reopened: Store = undefined;
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
-    var view = try reopened.openHistoricalView(second);
+    var view: HistoricalView = undefined;
+    try reopened.openHistoricalView(second, &view);
     defer view.close();
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try view.settings()).reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try testSettings(&view)).reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSession(session.slice())).reasoning_effort);
 }
 
@@ -19818,7 +19933,8 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
     try storage.settleModelAttemptFailure(assistant, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
     const candidate = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
-        var view = try storage.openHistoricalView(candidate);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(candidate, &view);
         defer view.close();
         var cursor: TestingHistoryCursor = .{};
         const anchor = (try view.coverage()).anchor.?;
@@ -19835,7 +19951,8 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
     try testingStore(&storage, &tmp, std.testing.io);
     try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "new turn");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var view = try storage.openHistoricalView(next);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(next, &view);
     defer view.close();
     var cursor: TestingHistoryCursor = .{};
     const anchor = (try view.coverage()).anchor.?;
@@ -19871,7 +19988,8 @@ test "compaction selected newest base corruption fences rather than using an old
             .tail => try exec(storage.database, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=2"),
             .payload => try exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4)"),
         }
-        var view = try storage.openHistoricalView(next);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(next, &view);
         defer view.close();
         if (corruption != .payload) {
             try std.testing.expectError(error.CorruptStore, view.coverage());
@@ -19879,7 +19997,8 @@ test "compaction selected newest base corruption fences rather than using an old
             const anchor = (try view.coverage()).anchor.?;
             const selected = (try view.nextEntry(anchor - 1)).?;
             try std.testing.expectEqual(anchor, selected.position);
-            var reader = try view.openContent(selected.content.?);
+            var reader: HistoricalReader = undefined;
+            try view.openContent(selected.content.?, &reader);
             defer reader.close();
             var bytes: [4096]u8 = undefined;
             try std.testing.expectError(error.CorruptStore, reader.read(0, &bytes));
@@ -19947,7 +20066,8 @@ test "historical accepted output completeness and provenance fence both read pat
                 try bindU64(mutation, 1, corrupt_id);
                 try expectDone(mutation);
                 try exec(storage.database, "PRAGMA foreign_keys=ON");
-                var view = try storage.openHistoricalView(next);
+                var view: HistoricalView = undefined;
+                try storage.openHistoricalView(next, &view);
                 defer view.close();
                 if (context_read) {
                     try std.testing.expectError(error.CorruptStore, view.coverage());
@@ -19955,7 +20075,7 @@ test "historical accepted output completeness and provenance fence both read pat
                     try std.testing.expectError(error.CorruptStore, view.nextEntry(0));
                 }
                 try std.testing.expect(storage.isFenced());
-                try std.testing.expectError(error.StoreFenced, view.settings());
+                try std.testing.expectError(error.StoreFenced, testSettings(&view));
             }
         }
     }
@@ -20114,7 +20234,8 @@ test "historical context selection work excludes nonmatching Operation populatio
             try bindU64(insert, 2, current.operation_id);
             try expectDone(insert);
 
-            var view = try storage.openHistoricalView(current);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
             c.sqlite3_progress_handler(storage.database, 1, progress, &measured);

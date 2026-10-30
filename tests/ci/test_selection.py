@@ -33,13 +33,26 @@ class SelectionTest(unittest.TestCase):
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-logic"])
+        self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
         self.assertFalse(result["native_required"])
+
+    def test_host_frame_inputs_select_the_linux_frame_gate(self):
+        for path in ("src/request_encoding.zig", "src/h2/Engine.zig", "src/bash_platform.c", "build.zig",
+                     "tests/ci/stack_frames.json", "tests/ci/stack_frames.py"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertIn("stack-frames", result["targets"])
+                self.assertNotIn("stack-frames", result["native_targets"])
+        # check runs the gate itself; renderer owners never reach a Host stack.
+        store = select(["src/store.zig"], "review", AVAILABLE)["targets"]
+        self.assertIn("check", store)
+        self.assertNotIn("stack-frames", store)
+        self.assertNotIn("stack-frames", select(["src/SessionFrontend.zig"], "review", AVAILABLE)["targets"])
 
     def test_logic_root_selects_its_executable_root(self):
         for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
             result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["test-logic"])
+            self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
         consumers = {
@@ -64,9 +77,9 @@ class SelectionTest(unittest.TestCase):
 
     def test_http2_client_selects_its_own_tests(self):
         result = select(["src/h2/Engine.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-h2"])
+        self.assertEqual(result["targets"], ["stack-frames", "test-h2"])
         result = select(["src/h2/policy.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-h2", "test-logic"])
+        self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-logic"])
 
     def test_portable_roots_keep_their_native_owner_checks(self):
         for path in ("src/SessionInput.zig", "src/tools.zig"):
@@ -131,7 +144,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_strict_path_beside_frontend_keeps_check(self):
         # execution_turn.zig is strict but alone selects only its logic root.
-        self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["test-logic"])
+        self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["stack-frames", "test-logic"])
         for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
                             "tests/integration/bash_integration.py", "src/store_recovery.zig"):
             for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
@@ -162,7 +175,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertNotIn("check", result["targets"] + result["native_targets"])
         # AnswerRenderer never selected check; its ordinary union stays as before.
         self.assertEqual(select(["src/AnswerRenderer.zig", "src/request_encoding.zig"], "review",
-                                AVAILABLE)["targets"], ["test-logic"])
+                                AVAILABLE)["targets"], ["stack-frames", "test-logic"])
 
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
@@ -275,17 +288,17 @@ class SelectionTest(unittest.TestCase):
     def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
             result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], ["bash-integration", "bash-lifecycle-integration",
-                                                  "bash-owner-integration", "bash-recovery-integration",
-                                                  "test", "test-logic"], path)
+            native = ["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
+                      "bash-recovery-integration", "test", "test-logic"]
+            self.assertEqual(result["native_targets"], native, path)
+            self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)
 
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], ["codex-credential-integration", "codex-h2-integration",
-                                                  "codex-integration", "test", "test-logic"])
+            native = ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test", "test-logic"]
+            self.assertEqual(result["native_targets"], native)
+            self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
@@ -450,8 +463,10 @@ class SelectionTest(unittest.TestCase):
         for path, expected in cases.items():
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
-                for family in ("targets", "native_targets"):
-                    self.assertEqual(result[family], expected)
+                self.assertEqual(result["native_targets"], expected)
+                # check runs stack-frames itself; Linux selects it beside narrower owners.
+                frames = [] if "check" in expected else ["stack-frames"]
+                self.assertEqual(result["targets"], sorted(expected + frames))
                 combined = select([path, "src/server.zig"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertIn("test-logic", combined[family])
@@ -559,6 +574,7 @@ class SelectionTest(unittest.TestCase):
             }
             self.assertTrue(set(NATIVE) | resources <= targets)
             self.assertEqual("login-signal-integration" in targets, platform == "linux")
+            self.assertEqual("stack-frames" in targets, platform == "linux")
             self.assertEqual({row["targets"][0] for row in rows if row["resource"]}, resources)
             self.assertTrue(all(len(row["targets"]) == 1 for row in rows if row["resource"] or platform == "linux"))
         self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
@@ -663,7 +679,7 @@ class SelectionTest(unittest.TestCase):
             selected = subprocess.check_output([
                 sys.executable, str(Path('tests/ci/select_tests.py').resolve()),
                 '--base', result.stdout, '--phase', 'review'], cwd=directory, text=True)
-            self.assertEqual(json.loads(selected)['targets'], ['test-logic'])
+            self.assertEqual(json.loads(selected)['targets'], ['stack-frames', 'test-logic'])
             # A dispatched qualification keeps its explicit base even when main already
             # contains part of the stack, so a landed strict constituent stays selected.
             with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', REF_NAME='wip/ci-1'):

@@ -49,6 +49,13 @@ pub fn Bounded(comptime capacity: usize) type {
         pub fn slice(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
         }
+
+        /// Zeroes the bytes `set` wrote and leaves the rest untouched, so
+        /// pages a value never reached stay out of Private_Dirty.
+        pub fn wipe(self: *@This()) void {
+            std.crypto.secureZero(u8, self.bytes[0..self.len]);
+            self.len = 0;
+        }
     };
 }
 
@@ -73,6 +80,13 @@ pub fn Required(comptime capacity: usize) type {
 
 pub const State = enum { ready, refresh_pending };
 
+/// Room to decode one compact token's claims: its payload and the JSON parse
+/// arena. Its owner keeps it off the stack. Each parse wipes what it wrote.
+pub const ClaimScratch = struct {
+    decoded: [max_token_bytes]u8 = undefined,
+    arena: [16 * 1024]u8 = undefined,
+};
+
 /// A complete credential value. It owns every returned slice; no pathname or
 /// file buffer is borrowed. Callers should overwrite it after the final header
 /// consumer releases its borrow. Decisions borrow records rather than copy
@@ -88,6 +102,14 @@ pub const Record = struct {
     expires_at: i64,
     refreshed_at: i64,
     state: State = .ready,
+
+    /// Zeroes the account and token bytes the record holds.
+    pub fn wipe(self: *Record) void {
+        self.account_id.wipe();
+        self.id_token.wipe();
+        self.access_token.wipe();
+        self.refresh_token.wipe();
+    }
 };
 
 pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
@@ -103,21 +125,22 @@ pub fn refreshDue(record: *const Record, now_seconds: i64, margin_seconds: i64) 
 
 /// The record's decoded claims must agree with its stored routing binding
 /// and expiry. A fixture selection accepts only the synthetic credential.
-pub fn validateSelected(record: *const Record, fixture: bool) !void {
+pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScratch) !void {
     if (fixture and
         (!std.mem.eql(u8, record.access_token.slice(), fixture_access_token) or
             !isFixtureId(record.id_token.slice()) or
             !std.mem.eql(u8, record.account_id.slice(), fixture_account_id)))
         return error.FixtureRequiresSyntheticCredential;
-    const account = try parseAccount(record.id_token.slice());
+    var account: Account = undefined;
+    try parseAccount(record.id_token.slice(), scratch, &account);
     if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
         account.fedramp != record.fedramp) return error.AccountMismatch;
-    if (try expiryOf(record) != record.expires_at) return error.InvalidCredentialExpiry;
+    if (try expiryOf(record, scratch) != record.expires_at) return error.InvalidCredentialExpiry;
 }
 
 /// The expiry a record's access token carries; an opaque token has none (0).
-pub fn expiryOf(record: *const Record) !i64 {
-    return (try parseExpiry(record.access_token.slice())) orelse 0;
+pub fn expiryOf(record: *const Record, scratch: *ClaimScratch) !i64 {
+    return (try parseExpiry(record.access_token.slice(), scratch)) orelse 0;
 }
 
 /// A pending record means an earlier claimant may have consumed the refresh
@@ -129,15 +152,15 @@ pub fn requireReady(record: *const Record) !void {
 pub const Selection = enum { use, refresh };
 
 /// Chooses how a Host acquisition proceeds from the record it loaded.
-pub fn select(record: *const Record, fixture: bool, now_seconds: i64) !Selection {
+pub fn select(record: *const Record, fixture: bool, now_seconds: i64, scratch: *ClaimScratch) !Selection {
     try requireReady(record);
-    try validateSelected(record, fixture);
+    try validateSelected(record, fixture, scratch);
     return if (refreshDue(record, now_seconds, launch_refresh_margin_seconds)) .refresh else .use;
 }
 
 /// The final check on the leased record before a model launch.
-pub fn launchCheck(record: *const Record, fixture: bool, now_seconds: i64) !void {
-    try validateSelected(record, fixture);
+pub fn launchCheck(record: *const Record, fixture: bool, now_seconds: i64, scratch: *ClaimScratch) !void {
+    try validateSelected(record, fixture, scratch);
     if (record.expires_at != 0 and record.expires_at <= now_seconds) return error.ExpiredCredential;
 }
 
@@ -154,9 +177,9 @@ pub const LocalStatus = enum {
 
 /// Ready and renewal-due are locally usable, not remotely accepted. Applies
 /// the runtime's routing and expiry checks to a read-only snapshot.
-pub fn localStatus(record: *const Record, now_seconds: i64) !LocalStatus {
+pub fn localStatus(record: *const Record, now_seconds: i64, scratch: *ClaimScratch) !LocalStatus {
     if (record.state == .refresh_pending) return .refresh_required;
-    try validateSelected(record, false);
+    try validateSelected(record, false, scratch);
     return if (refreshDue(record, now_seconds, 0)) .renewal_due else .configured;
 }
 
@@ -288,14 +311,45 @@ pub fn safeAscii(bytes: []const u8) bool {
 }
 
 fn validBase64Url(bytes: []const u8) bool {
-    const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(bytes) catch return false;
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const size = decoder.calcSizeForSlice(bytes) catch return false;
     if (size > max_token_bytes) return false;
-    var decoded: [max_token_bytes]u8 = undefined;
-    std.base64.url_safe_no_pad.Decoder.decode(decoded[0..size], bytes) catch return false;
+    // Whole 4-character groups decode independently, so decoding the text
+    // in chunks of whole groups accepts exactly what one decode would.
+    var decoded: [768]u8 = undefined;
+    defer std.crypto.secureZero(u8, &decoded);
+    var rest = bytes;
+    while (rest.len > 0) {
+        const chunk = rest[0..@min(rest.len, decoded.len / 3 * 4)];
+        decoder.decode(decoded[0 .. decoder.calcSizeForSlice(chunk) catch return false], chunk) catch return false;
+        rest = rest[chunk.len..];
+    }
     return true;
 }
 
-fn tokenPayload(token: []const u8, destination: []u8) ![]const u8 {
+test "chunked base64url validation agrees with one decode at every length" {
+    var text: [2100]u8 = undefined;
+    var whole: [2100]u8 = undefined;
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (&text, 0..) |*c, i| c.* = alphabet[(i * 37 + 11) % alphabet.len];
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    for (0..text.len) |len| {
+        // The last character decides whether the unused trailing bits are zero.
+        for ([_]u8{ 'A', 'B', '_', '=' }) |last| {
+            var sample = text;
+            if (len > 0) sample[len - 1] = last;
+            const one = if (decoder.calcSizeForSlice(sample[0..len])) |size|
+                (if (decoder.decode(whole[0..size], sample[0..len])) |_| true else |_| false)
+            else |_|
+                false;
+            try std.testing.expectEqual(one, validBase64Url(sample[0..len]));
+        }
+    }
+}
+
+/// Decodes the payload into a prefix of `destination` and returns it. On
+/// failure nothing decoded remains there.
+fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
     var parts = std.mem.splitScalar(u8, token, '.');
     const header = parts.next() orelse return error.InvalidCompactToken;
     const payload = parts.next() orelse return error.InvalidCompactToken;
@@ -309,22 +363,23 @@ fn tokenPayload(token: []const u8, destination: []u8) ![]const u8 {
     const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload) catch
         return error.InvalidTokenPayload;
     if (size > destination.len) return error.TokenPayloadTooLong;
-    std.base64.url_safe_no_pad.Decoder.decode(destination[0..size], payload) catch
+    const decoded = destination[0..size];
+    std.base64.url_safe_no_pad.Decoder.decode(decoded, payload) catch {
+        std.crypto.secureZero(u8, decoded);
         return error.InvalidTokenPayload;
-    return destination[0..size];
+    };
+    return decoded;
 }
 
 pub const Account = struct { id: Required(max_account_id_bytes), fedramp: bool };
 
 /// Decoded routing claims from the TLS peer's ID token, not a verified JWT.
-pub fn parseAccount(id_token: []const u8) !Account {
-    var decoded: [max_token_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &decoded);
-    const payload = try tokenPayload(id_token, &decoded);
+pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
+    const payload = try tokenPayload(id_token, &scratch.decoded);
+    defer std.crypto.secureZero(u8, payload);
 
-    var arena_bytes: [16 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena_bytes);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    defer std.crypto.secureZero(u8, &scratch.arena);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
     const parsed = std.json.parseFromSlice(Claims, fixed.allocator(), payload, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenClaims;
@@ -332,27 +387,24 @@ pub fn parseAccount(id_token: []const u8) !Account {
         namespace.chatgpt_account_id orelse parsed.value.chatgpt_account_id
     else
         parsed.value.chatgpt_account_id;
-    const account = claim orelse return error.MissingAccountClaim;
-    if (!safeAscii(account)) return error.InvalidAccountClaim;
-    var result: Account = .{ .id = .{}, .fedramp = if (parsed.value.@"https://api.openai.com/auth") |namespace|
+    const id = claim orelse return error.MissingAccountClaim;
+    if (!safeAscii(id)) return error.InvalidAccountClaim;
+    account.* = .{ .id = .{}, .fedramp = if (parsed.value.@"https://api.openai.com/auth") |namespace|
         namespace.chatgpt_account_is_fedramp orelse false
     else
         false };
-    try result.id.set(account);
-    return result;
+    try account.id.set(id);
 }
 
 /// A compact access token may carry an expiry. The issuer also returns opaque
 /// access tokens; their lifetime is tracked from the last successful exchange.
-pub fn parseExpiry(access_token: []const u8) !?i64 {
+pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
     if (!safeAscii(access_token)) return error.InvalidAccessToken;
     if (std.mem.indexOfScalar(u8, access_token, '.') == null) return null;
-    var decoded: [max_token_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &decoded);
-    const payload = try tokenPayload(access_token, &decoded);
-    var arena_bytes: [16 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena_bytes);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    const payload = try tokenPayload(access_token, &scratch.decoded);
+    defer std.crypto.secureZero(u8, payload);
+    defer std.crypto.secureZero(u8, &scratch.arena);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
     const parsed = std.json.parseFromSlice(struct { exp: ?i64 = null }, fixed.allocator(), payload, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenClaims;
@@ -441,14 +493,19 @@ test "extracts both pinned account claim spellings and rejects malformed compact
     const nested = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.c2ln";
     const top = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzIifQ.c2ln";
     const federal = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIiwiY2hhdGdwdF9hY2NvdW50X2lzX2ZlZHJhbXAiOnRydWV9fQ.c2ln";
-    try std.testing.expectEqualStrings("acct_1", (try parseAccount(nested)).id.slice());
-    try std.testing.expectEqualStrings("acct_2", (try parseAccount(top)).id.slice());
-    try std.testing.expect(!(try parseAccount(nested)).fedramp);
-    try std.testing.expect((try parseAccount(federal)).fedramp);
-    try std.testing.expectError(error.InvalidCompactToken, parseAccount("a..c"));
-    try std.testing.expectEqual(@as(?i64, fixture_expires_at), try parseExpiry(fixture_access_token));
-    try std.testing.expectEqual(@as(?i64, null), try parseExpiry("opaque-access"));
-    try std.testing.expectError(error.InvalidCompactToken, parseExpiry("a..c"));
+    var claims: ClaimScratch = undefined;
+    var account: Account = undefined;
+    try parseAccount(nested, &claims, &account);
+    try std.testing.expectEqualStrings("acct_1", account.id.slice());
+    try std.testing.expect(!account.fedramp);
+    try parseAccount(top, &claims, &account);
+    try std.testing.expectEqualStrings("acct_2", account.id.slice());
+    try parseAccount(federal, &claims, &account);
+    try std.testing.expect(account.fedramp);
+    try std.testing.expectError(error.InvalidCompactToken, parseAccount("a..c", &claims, &account));
+    try std.testing.expectEqual(@as(?i64, fixture_expires_at), try parseExpiry(fixture_access_token, &claims));
+    try std.testing.expectEqual(@as(?i64, null), try parseExpiry("opaque-access", &claims));
+    try std.testing.expectError(error.InvalidCompactToken, parseExpiry("a..c", &claims));
 }
 
 test "refresh is due at the expiry margin or eight days after an opaque exchange" {
@@ -470,68 +527,71 @@ test "refresh is due at the expiry margin or eight days after an opaque exchange
 }
 
 test "selection refreshes inside the launch margin and rejects unusable records" {
+    var claims: ClaimScratch = undefined;
     var record: Record = undefined;
     try fixtureRecord(&record);
-    try std.testing.expectEqual(Selection.use, try select(&record, true, fixture_expires_at - 301));
-    try std.testing.expectEqual(Selection.refresh, try select(&record, true, fixture_expires_at - 300));
-    try std.testing.expectEqual(Selection.use, try select(&record, false, 0));
+    try std.testing.expectEqual(Selection.use, try select(&record, true, fixture_expires_at - 301, &claims));
+    try std.testing.expectEqual(Selection.refresh, try select(&record, true, fixture_expires_at - 300, &claims));
+    try std.testing.expectEqual(Selection.use, try select(&record, false, 0, &claims));
 
     // A refresh left pending by a crashed claimant requires login.
     record.state = .refresh_pending;
-    try std.testing.expectError(error.RefreshRequiresLogin, select(&record, false, 0));
+    try std.testing.expectError(error.RefreshRequiresLogin, select(&record, false, 0, &claims));
     record.state = .ready;
     // Stored routing must match the ID token in both FedRAMP directions.
     record.fedramp = true;
-    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0));
+    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
     record.fedramp = false;
     try record.id_token.set(fixture_fedramp_id_token);
-    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0));
+    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
     record.fedramp = true;
-    try std.testing.expectEqual(Selection.use, try select(&record, true, 0));
+    try std.testing.expectEqual(Selection.use, try select(&record, true, 0, &claims));
     // A fixture launch accepts only the synthetic tokens, even for its account.
     try fixtureRecord(&record);
     try record.id_token.set("e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50Iiwic3ViIjoieCJ9.c2ln");
-    try std.testing.expectEqual(Selection.use, try select(&record, false, 0));
-    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0));
+    try std.testing.expectEqual(Selection.use, try select(&record, false, 0, &claims));
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0, &claims));
     try fixtureRecord(&record);
     try record.access_token.set("e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2lo");
-    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0));
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0, &claims));
     try fixtureRecord(&record);
     try record.account_id.set("foreign-account");
-    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0));
-    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0));
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, select(&record, true, 0, &claims));
+    try std.testing.expectError(error.AccountMismatch, select(&record, false, 0, &claims));
     // Stored expiry must match the access token's encoded expiry.
     try fixtureRecord(&record);
     record.expires_at = 1234;
-    try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0));
+    try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0, &claims));
 }
 
 test "launch rejects a leased token that expired after selection" {
+    var claims: ClaimScratch = undefined;
     var record: Record = undefined;
     try fixtureRecord(&record);
-    try launchCheck(&record, true, fixture_expires_at - 1);
-    try std.testing.expectError(error.ExpiredCredential, launchCheck(&record, true, fixture_expires_at));
+    try launchCheck(&record, true, fixture_expires_at - 1, &claims);
+    try std.testing.expectError(error.ExpiredCredential, launchCheck(&record, true, fixture_expires_at, &claims));
     // Opaque tokens have no launch expiry; their refresh clock governs.
     try record.access_token.set("opaque-access");
     record.expires_at = 0;
-    try launchCheck(&record, false, std.math.maxInt(i32));
-    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, launchCheck(&record, true, 0));
+    try launchCheck(&record, false, std.math.maxInt(i32), &claims);
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, launchCheck(&record, true, 0, &claims));
 }
 
 test "local status reports renewal only at expiry, without the launch margin" {
+    var claims: ClaimScratch = undefined;
     var record: Record = undefined;
     try fixtureRecord(&record);
-    try std.testing.expectEqual(LocalStatus.configured, try localStatus(&record, fixture_expires_at - 1));
-    try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(&record, fixture_expires_at));
+    try std.testing.expectEqual(LocalStatus.configured, try localStatus(&record, fixture_expires_at - 1, &claims));
+    try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(&record, fixture_expires_at, &claims));
     // Inside the launch margin, the runtime refreshes but local status is configured.
-    try std.testing.expectEqual(Selection.refresh, try select(&record, false, fixture_expires_at - 1));
-    try std.testing.expect((try localStatus(&record, fixture_expires_at)).usable());
+    try std.testing.expectEqual(Selection.refresh, try select(&record, false, fixture_expires_at - 1, &claims));
+    try std.testing.expect((try localStatus(&record, fixture_expires_at, &claims)).usable());
     try std.testing.expect(!LocalStatus.missing.usable() and !LocalStatus.refresh_required.usable());
     record.state = .refresh_pending;
-    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(&record, 0));
+    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(&record, 0, &claims));
     record.state = .ready;
     record.fedramp = true;
-    try std.testing.expectError(error.AccountMismatch, localStatus(&record, 0));
+    try std.testing.expectError(error.AccountMismatch, localStatus(&record, 0, &claims));
 }
 
 test "a refresh claim marks the current generation pending once" {

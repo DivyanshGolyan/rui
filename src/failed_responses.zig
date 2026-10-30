@@ -10,6 +10,7 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 
 pub const directory = "diagnostics/failed-responses";
@@ -19,6 +20,24 @@ pub const max_records = 256;
 /// Reserved disk room for one metadata file; the encoder cannot exceed it.
 const max_metadata_bytes = 8192;
 const copy_window_bytes = 64 * 1024;
+
+/// One export's scratch. Exports are rare and need over 100 KiB, so each
+/// maps fresh pages for the call and unmaps them at return.
+const ExportScratch = struct {
+    listing: Listing,
+    metadata: [max_metadata_bytes]u8,
+    /// Backs the metadata parse.
+    parse_arena: [max_metadata_bytes * 4]u8,
+    window: [copy_window_bytes]u8,
+};
+
+/// One retention's scratch, mapped for the call like `ExportScratch`.
+const RetainScratch = struct {
+    listing: Listing,
+    records: [max_records + 1]Record,
+    window: [copy_window_bytes]u8,
+    encoded: [max_metadata_bytes]u8,
+};
 
 pub const Limits = struct {
     capture_bytes: u64 = capture_cap_bytes,
@@ -86,9 +105,12 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
         else => return err,
     };
     defer dir.close(io);
+    const mapped = try pages.Mapped(ExportScratch).map();
+    defer mapped.unmap();
+    const scratch = mapped.value;
     var selected: ?Name = null;
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
+    const listing = scratch.listing.start(dir);
+    while (try listing.next(io)) |entry| {
         const name = parse(entry.name) orelse continue;
         if (name.part != .metadata or name.binding.operation_id != binding.operation_id or name.binding.attempt_ordinal != binding.attempt_ordinal) continue;
         if (selected != null) return error.AmbiguousFailedResponse;
@@ -97,8 +119,8 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     const record = selected orelse return error.FailedResponseNotFound;
     var name_buffer: NameBuffer = undefined;
     const metadata_name = nameFor(&name_buffer, record.sequence, binding, .metadata);
-    var metadata_bytes: [max_metadata_bytes]u8 = undefined;
-    const metadata_length = try readWindow(io, dir, metadata_name, 0, &metadata_bytes, null, max_metadata_bytes);
+    const metadata_bytes = &scratch.metadata;
+    const metadata_length = try readWindow(io, dir, metadata_name, 0, metadata_bytes, null, max_metadata_bytes);
     const Header = struct {
         operation: []const u8,
         attempt: []const u8,
@@ -108,8 +130,7 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
         retained_bytes: []const u8,
         retained_sha256: ?[]const u8,
     };
-    var arena_buffer: [max_metadata_bytes * 4]u8 = undefined;
-    var arena = std.heap.FixedBufferAllocator.init(&arena_buffer);
+    var arena = std.heap.FixedBufferAllocator.init(&scratch.parse_arena);
     const metadata = std.json.parseFromSlice(Header, arena.allocator(), metadata_bytes[0..metadata_length], .{ .ignore_unknown_fields = true }) catch return error.InvalidFailedResponseRecord;
     defer metadata.deinit();
     const header = metadata.value;
@@ -127,11 +148,11 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     if (hex.len != 64) return error.InvalidFailedResponseRecord;
     _ = std.fmt.hexToBytes(&expected, hex) catch return error.InvalidFailedResponseRecord;
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    var window: [copy_window_bytes]u8 = undefined;
+    const window = &scratch.window;
     var offset: u64 = 0;
     // Even an empty retained body must exist and be a regular file.
     while (true) {
-        const count = try readWindow(io, dir, body_name, offset, &window, length, capture_cap_bytes);
+        const count = try readWindow(io, dir, body_name, offset, window, length, capture_cap_bytes);
         hash.update(window[0..count]);
         try sink.append(window[0..count]);
         offset += count;
@@ -141,6 +162,20 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     hash.final(&digest);
     if (!std.mem.eql(u8, &expected, &digest)) return error.InvalidFailedResponseRecord;
 }
+
+/// A directory listing that lives in its scratch. `Dir.iterate` returns its
+/// 2 KiB buffer by value as an undefined literal, which ReleaseSafe fills on
+/// the stack before copying it; `Dir.Reader` borrows a buffer instead.
+const Listing = struct {
+    reader: std.Io.Dir.Reader,
+    buffer: [std.Io.Dir.Iterator.reader_buffer_len]u8 align(@alignOf(usize)),
+
+    /// Starts listing `dir` from its first entry.
+    fn start(self: *Listing, dir: std.Io.Dir) *std.Io.Dir.Reader {
+        self.reader = .init(dir, &self.buffer);
+        return &self.reader;
+    }
+};
 
 fn readWindow(io: std.Io, dir: std.Io.Dir, name: []const u8, offset: u64, bytes: []u8, expected_length: ?u64, cap: u64) !usize {
     const fd = std.posix.openat(dir.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
@@ -163,19 +198,21 @@ pub fn retain(io: std.Io, dir: std.Io.Dir, limits: Limits, source: Source, failu
     std.debug.assert(limits.records != 0 and limits.records <= max_records);
     std.debug.assert(limits.capture_bytes + max_metadata_bytes <= limits.total_bytes);
     const kept = @min(source.length, limits.capture_bytes);
-    const sequence = try prune(io, dir, limits, kept + max_metadata_bytes);
+    const mapped = try pages.Mapped(RetainScratch).map();
+    defer mapped.unmap();
+    const scratch = mapped.value;
+    const sequence = try prune(io, dir, limits, kept + max_metadata_bytes, scratch);
     var body_name: NameBuffer = undefined;
     const body = nameFor(&body_name, sequence, failure.binding, .body);
     var digest: [32]u8 = undefined;
-    const omission: ?anyerror = if (copyBody(io, dir, sequence, failure.binding, source.file, kept, &digest)) null else |err| err;
+    const omission: ?anyerror = if (copyBody(io, dir, sequence, failure.binding, source.file, kept, &digest, &scratch.window)) null else |err| err;
     const status: Status = if (omission != null)
         .omitted
     else if (source.transfer == .complete and kept == source.length)
         .complete
     else
         .partial;
-    var encoded: [max_metadata_bytes]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&encoded);
+    var writer: std.Io.Writer = .fixed(&scratch.encoded);
     encodeMetadata(&writer, .{
         .failure = failure,
         .source = source,
@@ -245,12 +282,13 @@ fn evictionCount(records: []const Record, limits: Limits, incoming: u64) usize {
 /// Returns the next sequence after deleting interrupted writes and evicting
 /// enough records for `incoming` bytes. A failed deletion never counts as
 /// reclaimed space: it fails this retention instead.
-fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64) !u64 {
+fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64, scratch: *RetainScratch) !u64 {
+    const records = &scratch.records;
     while (true) {
         var stale_buffer: NameBuffer = undefined;
         var stale: ?[]const u8 = null;
-        var iterator = dir.iterate();
-        while (try iterator.next(io)) |entry| {
+        const listing = scratch.listing.start(dir);
+        while (try listing.next(io)) |entry| {
             const name = parse(entry.name) orelse continue;
             if (name.part != .body_tmp and name.part != .metadata_tmp) continue;
             @memcpy(stale_buffer[0..entry.name.len], entry.name);
@@ -259,11 +297,10 @@ fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64) !u64 {
         }
         try dir.deleteFile(io, stale orelse break);
     }
-    var records: [max_records + 1]Record = undefined;
     var count: usize = 0;
     var next: u64 = 1;
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
+    const listing = scratch.listing.start(dir);
+    while (try listing.next(io)) |entry| {
         const name = parse(entry.name) orelse continue;
         const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
         if (stat.kind != .file) return error.InvalidFailedResponseRecord;
@@ -278,7 +315,8 @@ fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64) !u64 {
         record.bytes +|= stat.size;
         next = @max(next, std.math.add(u64, name.sequence, 1) catch return error.FailedResponseSequenceExhausted);
     }
-    std.mem.sortUnstable(Record, records[0..count], {}, struct {
+    // Heap sort keeps no range stack of its own.
+    std.sort.heap(Record, records[0..count], {}, struct {
         fn lessThan(_: void, left: Record, right: Record) bool {
             return left.sequence < right.sequence;
         }
@@ -304,12 +342,13 @@ fn copyBody(
     source: std.Io.File,
     kept: u64,
     digest: *[32]u8,
+    window: []u8,
 ) !void {
     var temporary: NameBuffer = undefined;
     const temporary_name = nameFor(&temporary, sequence, binding, .body_tmp);
     const file = try dir.createFile(io, temporary_name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    copy(io, source, file, kept, &hash) catch |err| {
+    copy(io, source, file, kept, &hash, window) catch |err| {
         file.close(io);
         // A remaining temporary file stops the next prune before any growth.
         dir.deleteFile(io, temporary_name) catch {};
@@ -324,8 +363,7 @@ fn copyBody(
     };
 }
 
-fn copy(io: std.Io, source: std.Io.File, destination: std.Io.File, length: u64, hash: *std.crypto.hash.sha2.Sha256) !void {
-    var window: [copy_window_bytes]u8 = undefined;
+fn copy(io: std.Io, source: std.Io.File, destination: std.Io.File, length: u64, hash: *std.crypto.hash.sha2.Sha256, window: []u8) !void {
     var offset: u64 = 0;
     while (offset < length) {
         const size: usize = @intCast(@min(window.len, length - offset));

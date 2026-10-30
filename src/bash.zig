@@ -3,6 +3,7 @@ const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
+const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 const BashLifecycle = @import("BashLifecycle.zig");
 const deadline = @import("deadline.zig");
@@ -24,10 +25,16 @@ pub const fault_gate_name = "bash-fault-gate";
 pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !std.process.Environ.Map {
     var result = std.process.Environ.Map.init(allocator);
     errdefer result.deinit();
-    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const executable = executable_buffer[0..try std.process.executablePath(io, &executable_buffer)];
-    var path_buffer: [std.fs.max_path_bytes + system_path.len + 1]u8 = undefined;
-    try result.put("PATH", try searchPath(&path_buffer, std.fs.path.dirname(executable)));
+    // Built once at Host startup, so its 8 KiB of path buffers live in pages
+    // mapped for the call.
+    const mapped = try pages.Mapped(struct {
+        executable: [std.fs.max_path_bytes]u8,
+        path: [std.fs.max_path_bytes + system_path.len + 1]u8,
+    }).map();
+    defer mapped.unmap();
+    const buffers = mapped.value;
+    const executable = buffers.executable[0..try std.process.executablePath(io, &buffers.executable)];
+    try result.put("PATH", try searchPath(&buffers.path, std.fs.path.dirname(executable)));
     if (home) |value| if (std.fs.path.isAbsolute(value)) try result.put("HOME", value);
     return result;
 }
@@ -341,17 +348,6 @@ pub const PreparationFailure = struct {
     cleanup: PreparedCleanup,
 };
 
-pub const PreparationStart = union(enum) {
-    preparing: Preparation,
-    failed: PreparationFailure,
-};
-
-pub const PreparationProgress = union(enum) {
-    pending,
-    prepared: Prepared,
-    failed: PreparationFailure,
-};
-
 fn cleanupOwnedFiles(
     scratch: Scratch,
     slots: []const *?OwnedFile,
@@ -532,18 +528,17 @@ pub const Execution = struct {
         self.output_reservation = null;
     }
 
-    pub fn outcome(self: *Execution, scratch: Scratch, include_paths: bool) !Outcome {
+    pub fn outcome(self: *Execution, scratch: Scratch, include_paths: bool, out: *Outcome) !void {
         self.stdout_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
         self.stderr_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
         if (self.faults.seal) self.lifecycle.recordSealFailure();
         const code: store.ActionResolutionCode = switch (self.lifecycle.resolution()) {
             inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
         };
-        var result: Outcome = .{ .code = code };
-        var writer = std.Io.Writer.fixed(&result.content);
-        try self.formatResult(scratch, &writer, code, include_paths);
-        result.content_len = writer.buffered().len;
-        return result;
+        out.* = .{ .code = code };
+        var writer = std.Io.Writer.fixed(&out.content);
+        try self.formatResult(scratch, &writer, code, include_paths, &out.tail);
+        out.content_len = writer.buffered().len;
     }
 
     pub fn reclaim(self: *Execution, scratch: Scratch, retention: *output_retention.Queue) !void {
@@ -783,6 +778,7 @@ pub const Execution = struct {
         writer: *std.Io.Writer,
         code: store.ActionResolutionCode,
         include_paths: bool,
+        tail: *[excerpt_bytes]u8,
     ) !void {
         try writer.print("Bash {s}. ", .{@tagName(code)});
         switch (self.lifecycle.process.gone) {
@@ -810,7 +806,6 @@ pub const Execution = struct {
         // unreaped leader) therefore needs no qualification here and stays a
         // lifecycle fact only. Other signal failures remain visible.
         if (self.lifecycle.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
-        var tail: [excerpt_bytes]u8 = undefined;
         const stdout_length = try self.stdout_capture.file.?.length(scratch.io);
         const stderr_length = try self.stderr_capture.file.?.length(scratch.io);
         const stderr_base: usize = @intCast(@min(stderr_length, excerpt_bytes / 2));
@@ -871,6 +866,8 @@ pub const Outcome = struct {
     code: store.ActionResolutionCode,
     content: [excerpt_bytes + 4096]u8 = undefined,
     content_len: usize = 0,
+    /// The output tails the result quotes, read before they are encoded.
+    tail: [excerpt_bytes]u8 = undefined,
 
     pub fn text(self: *const Outcome) []const u8 {
         return self.content[0..self.content_len];
@@ -892,24 +889,69 @@ pub const Preparation = struct {
     parser: tools.BashParser = .{},
     cleanup: PreparedCleanup = .{},
     command: std.ArrayList(u8) = .empty,
+    /// Decoded stdin staged between parser steps.
+    input_window: [copy_window_bytes]u8 = undefined,
 
-    pub fn advance(self: *Preparation) PreparationProgress {
+    /// Builds the preparation in place, opens its arguments reader in place
+    /// and creates both output captures. On failure nothing is live except
+    /// the returned cleanup.
+    pub fn start(
+        self: *Preparation,
+        scratch: Scratch,
+        allocator: std.mem.Allocator,
+        arguments: store.ContentLocation,
+        input: *const store.BashExecutionInput,
+        store_selector: []const u8,
+        bash_path: []const u8,
+        action_id: u64,
+        faults: Faults,
+    ) ?PreparationFailure {
+        self.* = .{
+            .scratch = scratch,
+            .allocator = allocator,
+            .session = input.session,
+            .sender_handle = input.sender_handle,
+            .store_selector = store_selector,
+            .workspace = input.workspace,
+            .bash_path = bash_path,
+            .timeout_ms = input.timeout_ms,
+            .action_id = action_id,
+            .faults = faults,
+            .source = .{ .length = input.arguments.length },
+        };
+        self.source.reader.open(arguments);
+        if (faults.preparation) return self.fail(error.BashPreparationFailed);
+        for ([_]struct { *?OwnedFile, named_scratch.NumericName }{
+            .{ &self.cleanup.stdout_capture, .@"bash-stdout" },
+            .{ &self.cleanup.stderr_capture, .@"bash-stderr" },
+        }) |capture| {
+            capture[0].* = createOwnedFile(scratch, capture[1], action_id, attempt.action_attempt_ordinal, cleanupFault(faults)) catch |err| return self.fail(err);
+        }
+        if (faults.preparation_after_captures) return self.fail(error.BashPreparationFailed);
+        return null;
+    }
+
+    pub const Progress = union(enum) { pending, prepared, failed: PreparationFailure };
+
+    /// On `.prepared`, `out` holds the launch inputs and this preparation is
+    /// spent.
+    pub fn advance(self: *Preparation, out: *Prepared) Progress {
         var writer = PreparationWriter{ .owner = self };
         var input = PreparationInputWriter{ .owner = self };
         const progress = self.parser.advance(&self.source, &writer, &input, self.source.buffer.len) catch |err| {
-            return self.fail(if (tools.isBashDescriptorError(err)) error.InvalidCanonicalBashDescriptor else err);
+            return .{ .failed = self.fail(if (tools.isBashDescriptorError(err)) error.InvalidCanonicalBashDescriptor else err) };
         };
-        input.flush() catch |err| return self.fail(err);
+        input.flush() catch |err| return .{ .failed = self.fail(err) };
         switch (progress) {
             .pending => return .pending,
-            .invalid => return self.fail(error.InvalidCanonicalBashDescriptor),
+            .invalid => return .{ .failed = self.fail(error.InvalidCanonicalBashDescriptor) },
             .complete => {},
         }
-        if (self.parser.result.stdin_present) self.ensureInput() catch |err| return self.fail(err);
-        const command = self.command.toOwnedSliceSentinel(self.allocator, 0) catch |err| return self.fail(err);
+        if (self.parser.result.stdin_present) self.ensureInput() catch |err| return .{ .failed = self.fail(err) };
+        const command = self.command.toOwnedSliceSentinel(self.allocator, 0) catch |err| return .{ .failed = self.fail(err) };
         self.source.reader.close();
         const cleanup = self.takeCleanup();
-        return .{ .prepared = .{
+        out.* = .{
             .scratch = self.scratch,
             .allocator = self.allocator,
             .session = self.session,
@@ -923,7 +965,8 @@ pub const Preparation = struct {
             .stdin_capture = cleanup.stdin_capture,
             .stdout_capture = cleanup.stdout_capture,
             .stderr_capture = cleanup.stderr_capture,
-        } };
+        };
+        return .prepared;
     }
 
     pub fn cancel(self: *Preparation) PreparedCleanup {
@@ -931,9 +974,9 @@ pub const Preparation = struct {
         return self.takeCleanup();
     }
 
-    fn fail(self: *Preparation, cause: anyerror) PreparationProgress {
+    fn fail(self: *Preparation, cause: anyerror) PreparationFailure {
         self.source.reader.close();
-        return .{ .failed = .{ .cause = cause, .cleanup = self.takeCleanup() } };
+        return .{ .cause = cause, .cleanup = self.takeCleanup() };
     }
 
     fn takeCleanup(self: *Preparation) PreparedCleanup {
@@ -969,15 +1012,15 @@ const PreparationWriter = struct {
 
 const PreparationInputWriter = struct {
     owner: *Preparation,
-    buffer: [copy_window_bytes]u8 = undefined,
     used: usize = 0,
 
     pub fn writeAll(self: *PreparationInputWriter, bytes: []const u8) !void {
         try self.owner.ensureInput();
         const length = self.owner.cleanup.stdin_capture.?.charged + self.used;
         if (bytes.len > tools.bash_max_stdin_bytes - length) return error.BashStdinTooLong;
-        if (bytes.len > self.buffer.len - self.used) try self.flush();
-        @memcpy(self.buffer[self.used..][0..bytes.len], bytes);
+        const window = &self.owner.input_window;
+        if (bytes.len > window.len - self.used) try self.flush();
+        @memcpy(window[self.used..][0..bytes.len], bytes);
         self.used += bytes.len;
     }
 
@@ -989,58 +1032,10 @@ const PreparationInputWriter = struct {
         input.charged += self.used;
         // Positional writes leave the independent read-only fd at offset zero.
         // A failed write retains its whole reservation until reclamation.
-        try input.file.?.writePositionalAll(self.owner.scratch.io, self.buffer[0..self.used], offset);
+        try input.file.?.writePositionalAll(self.owner.scratch.io, self.owner.input_window[0..self.used], offset);
         self.used = 0;
     }
 };
-
-/// Creates both output captures, then decodes the command in memory.
-pub fn startPreparation(
-    scratch: Scratch,
-    allocator: std.mem.Allocator,
-    reader: store.ContentReader,
-    arguments_length: u64,
-    session: protocol.Bounded(protocol.max_session_bytes),
-    store_selector: []const u8,
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
-    bash_path: []const u8,
-    timeout_ms: u64,
-    action_id: u64,
-    faults: Faults,
-) PreparationStart {
-    var cleanup = PreparedCleanup{};
-    var owned_reader = reader;
-    if (faults.preparation) {
-        owned_reader.close();
-        return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
-    }
-    for ([_]struct { *?OwnedFile, named_scratch.NumericName }{
-        .{ &cleanup.stdout_capture, .@"bash-stdout" },
-        .{ &cleanup.stderr_capture, .@"bash-stderr" },
-    }) |capture| {
-        capture[0].* = createOwnedFile(scratch, capture[1], action_id, attempt.action_attempt_ordinal, cleanupFault(faults)) catch |err| {
-            owned_reader.close();
-            return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-        };
-    }
-    if (faults.preparation_after_captures) {
-        owned_reader.close();
-        return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
-    }
-    return .{ .preparing = .{
-        .scratch = scratch,
-        .allocator = allocator,
-        .session = session,
-        .store_selector = store_selector,
-        .workspace = workspace,
-        .bash_path = bash_path,
-        .timeout_ms = timeout_ms,
-        .action_id = action_id,
-        .faults = faults,
-        .source = .{ .reader = owned_reader, .length = arguments_length },
-        .cleanup = cleanup,
-    } };
-}
 
 fn cleanupFault(faults: Faults) CleanupFault {
     return if (!faults.cleanup)
@@ -1297,12 +1292,14 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     // Group-signal EPERM after confirmed retirement had no live targets: the
     // result stays the plain outcome. Empty streams have no sections.
     gone.lifecycle.recordSignal(.group_permission_denied);
-    const quiet = try gone.outcome(scratch, false);
+    var quiet: Outcome = undefined;
+    try gone.outcome(scratch, false, &quiet);
     // The fixture keeps a writer open, so incomplete capture is genuine.
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", quiet.text());
     // Any other signaling failure stays visible next to it.
     gone.lifecycle.recordSignal(.failed);
-    const warned = try gone.outcome(scratch, false);
+    var warned: Outcome = undefined;
+    try gone.outcome(scratch, false, &warned);
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\nProcess-group signaling reported a failure.\n", warned.text());
 }
 
@@ -1422,7 +1419,7 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
-fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8) !Outcome {
+fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8, out: *Outcome) !void {
     const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
@@ -1446,9 +1443,8 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
-    const result = try execution.outcome(scratch, false);
+    try execution.outcome(scratch, false, out);
     try execution.reclaim(scratch, retention);
-    return result;
 }
 
 /// Lists, as `leaked-N` lines, the /dev/null descriptors this process would
@@ -1506,7 +1502,8 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
         // fds 0-2 are the tool's own; any later /dev/null was inherited.
         .{ "echo begin; for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", succeeded, expected_descriptors },
     }, 1..) |case, ordinal| {
-        const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
+        var result: Outcome = undefined;
+        try launchForTest(root, budget, &retention, ordinal, case[0], &result);
         const text = result.text();
         if (std.mem.indexOf(u8, text, case[1]) == null or std.mem.indexOf(u8, text, case[2]) == null) {
             std.debug.print("expected {s} and {s}; got:\n{s}\n", .{ case[1], case[2], text });
@@ -1655,7 +1652,7 @@ test "output publication closes producer aliases before making output evictable"
 }
 
 const ContentSource = struct {
-    reader: store.ContentReader,
+    reader: store.ContentReader = undefined,
     length: u64,
     position: u64 = 0,
     buffer_start: u64 = 0,
@@ -1775,7 +1772,8 @@ test "results show only nonempty stream sections and mark truncation" {
         .{ "printf o; printf e >&2", "Bash succeeded. Exit code: 0.\nstdout tail:\no\nstderr tail:\ne" },
         .{ "printf z; head -c 10001 /dev/zero | tr '\\0' a", "Bash succeeded. Exit code: 0.\nstdout tail:\n" ++ a ++ "\n[earlier output omitted]\n\nFull output was not retained.\n" },
     }, 100..) |case, ordinal| {
-        const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
+        var result: Outcome = undefined;
+        try launchForTest(root, budget, &retention, ordinal, case[0], &result);
         try std.testing.expectEqualStrings(case[1], result.text());
     }
 }

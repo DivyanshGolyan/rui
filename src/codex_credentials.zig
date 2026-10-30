@@ -11,6 +11,14 @@ pub const max_file_bytes = policy.max_file_bytes;
 pub const State = policy.State;
 pub const Record = policy.Record;
 
+/// Room for one credential operation: the file it reads or encodes, and the
+/// current record an install or refresh reads under the lock. Its owner
+/// keeps it off the stack. Each operation wipes what it wrote.
+pub const Scratch = struct {
+    file: [max_file_bytes + 1]u8 = undefined,
+    current: Record = undefined,
+};
+
 /// Holds the stable cross-process lock through the model launch decision.
 /// The caller owns the returned record and must release this lease on every path.
 pub const Lease = struct {
@@ -18,58 +26,47 @@ pub const Lease = struct {
     lock: std.Io.File,
     record: Record,
 
+    /// Wipes only the secret bytes the lease read: its storage spans about
+    /// 50 KiB, and a whole-record wipe would keep every page of it resident.
     pub fn release(self: *Lease) void {
-        std.crypto.secureZero(u8, std.mem.asBytes(&self.record));
+        self.record.wipe();
         self.lock.close(io);
         self.owner.close();
-        self.* = undefined;
     }
 };
 
-pub fn lease(path: []const u8) !Lease {
-    var result: Lease = undefined;
-    try leaseInto(path, &result);
-    return result;
-}
-
 /// Initialize the lease in its final owner storage; on failure no lock or
 /// token-bearing record remains with the caller.
-pub fn leaseInto(path: []const u8, destination: *Lease) !void {
+pub fn leaseInto(path: []const u8, destination: *Lease, scratch: *Scratch) !void {
     destination.owner = try Owner.open(path);
     errdefer destination.owner.close();
     destination.lock = try destination.owner.acquireLock(.shared);
     errdefer destination.lock.close(io);
-    try destination.owner.readRecordInto(&destination.record);
+    try destination.owner.readRecordInto(&destination.record, &scratch.file);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&destination.record));
     try destination.owner.syncDirectory();
     try policy.requireReady(&destination.record);
 }
 
-pub fn load(path: []const u8) !Record {
-    var result: Record = undefined;
-    try loadInto(path, &result);
-    return result;
-}
-
-pub fn loadInto(path: []const u8, destination: *Record) !void {
+pub fn loadInto(path: []const u8, destination: *Record, scratch: *Scratch) !void {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.shared);
     defer lock.close(io);
-    try owner.readRecordInto(destination);
+    try owner.readRecordInto(destination, &scratch.file);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
     try owner.syncDirectory();
 }
 
 /// Read an atomic snapshot without creating a lock or refreshing. On success
 /// the caller owns destination and must wipe it after its final consumer.
-pub fn readSnapshotInto(path: []const u8, destination: *Record) !bool {
+pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratch) !bool {
     var owner = Owner.open(path) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     defer owner.close();
-    owner.readRecordInto(destination) catch |err| switch (err) {
+    owner.readRecordInto(destination, &scratch.file) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -78,8 +75,10 @@ pub fn readSnapshotInto(path: []const u8, destination: *Record) !bool {
 
 /// `expected_generation == null` is an explicit login. It may replace an
 /// existing login and advances its generation. A non-null value is a refresh
-/// compare-and-swap and must preserve the account binding.
-pub fn install(path: []const u8, record: *const Record, expected_generation: ?u64) !void {
+/// compare-and-swap and must preserve the account binding. `record` carries
+/// the admitted generation once it is published; a failed install leaves
+/// `record` as it was.
+pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scratch: *Scratch) !void {
     // Refuse an incomplete record before touching the owner directory;
     // admission checks it again with the current record.
     try policy.validateReplacement(record);
@@ -88,40 +87,46 @@ pub fn install(path: []const u8, record: *const Record, expected_generation: ?u6
     const lock = try owner.acquireLock(.exclusive);
     defer lock.close(io);
 
-    var current = owner.readRecord() catch |err| switch (err) {
+    const current: ?*const Record = if (owner.readRecordInto(&scratch.current, &scratch.file)) |_|
+        &scratch.current
+    else |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
-    defer if (current) |*old| std.crypto.secureZero(u8, std.mem.asBytes(old));
-    var replacement = record.*;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-    replacement.generation = try policy.admitReplacement(if (current) |*old| old else null, &replacement, expected_generation);
-    try owner.publish(&replacement);
+    defer if (current != null) std.crypto.secureZero(u8, std.mem.asBytes(&scratch.current));
+    const admitted = try policy.admitReplacement(current, record, expected_generation);
+    // The encoder reads the generation from the record it publishes.
+    const previous = record.generation;
+    record.generation = admitted;
+    errdefer record.generation = previous;
+    try owner.publish(record, &scratch.file);
 }
 
 /// Keep the stable lock from the durable intent through the exchange and save.
 /// Other Hosts wait for the live claimant; after a crash they see the pending
 /// record and require login instead of repeating a possibly consumed token.
-/// The exchange owns its network effects and returns a complete replacement.
-pub fn exchangeRefresh(path: []const u8, expected_generation: u64, context: anytype, exchange: anytype) !bool {
+/// The exchange owns its network effects and fills `replacement` with a
+/// complete replacement.
+pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scratch, replacement: *Record, context: anytype, exchange: anytype) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.exclusive);
     defer lock.close(io);
-    var record = try owner.readRecord();
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (try policy.claimRefresh(&record, expected_generation) == .superseded) return false;
-    try owner.publish(&record);
-    var replacement = exchange(context, &record) catch |err| {
+    const record = &scratch.current;
+    try owner.readRecordInto(record, &scratch.file);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    if (try policy.claimRefresh(record, expected_generation) == .superseded) return false;
+    try owner.publish(record, &scratch.file);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
+    exchange(context, record, replacement) catch |err| {
         if (err == error.RefreshRequestNotSent) {
             record.state = .ready;
-            try owner.publish(&record);
+            try owner.publish(record, &scratch.file);
         }
         return err;
     };
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-    replacement.generation = try policy.admitReplacement(&record, &replacement, expected_generation);
-    try owner.publish(&replacement);
+    replacement.generation = try policy.admitReplacement(record, replacement, expected_generation);
+    try owner.publish(replacement, &scratch.file);
     return true;
 }
 
@@ -186,13 +191,7 @@ const Owner = struct {
         return file;
     }
 
-    fn readRecord(self: *Owner) !Record {
-        var result: Record = undefined;
-        try self.readRecordInto(&result);
-        return result;
-    }
-
-    fn readRecordInto(self: *Owner, destination: *Record) !void {
+    fn readRecordInto(self: *Owner, destination: *Record, buffer: *[max_file_bytes + 1]u8) !void {
         // Reject a private FIFO after opening it without waiting for a writer.
         const file: std.Io.File = .{ .handle = try std.posix.openat(self.parent.handle, self.finalName(), .{
             .ACCMODE = .RDONLY,
@@ -204,20 +203,21 @@ const Owner = struct {
         try validatePrivateFile(file);
         const stat = try file.stat(io);
         if (stat.size > max_file_bytes) return error.CredentialFileTooLarge;
-        var bytes: [max_file_bytes + 1]u8 = undefined;
-        defer std.crypto.secureZero(u8, &bytes);
-        const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
+        // The read writes at most this prefix; the rest stays untouched.
+        const bytes = buffer[0..@intCast(stat.size + 1)];
+        defer std.crypto.secureZero(u8, bytes);
+        const count = try file.readPositionalAll(io, bytes, 0);
         if (count != stat.size) return error.CredentialFileChanged;
         try policy.parseInto(bytes[0..count], destination);
     }
 
-    fn publish(self: *Owner, record: *const Record) !void {
-        return self.publishWithFault(record, null);
+    fn publish(self: *Owner, record: *const Record, buffer: *[max_file_bytes + 1]u8) !void {
+        return self.publishWithFault(record, null, buffer);
     }
 
     const PublishFault = enum { write, file_sync, rename, directory_sync };
 
-    fn publishWithFault(self: *Owner, record: *const Record, fault: ?PublishFault) !void {
+    fn publishWithFault(self: *Owner, record: *const Record, fault: ?PublishFault, buffer: *[max_file_bytes + 1]u8) !void {
         if (self.parent.openFile(io, self.finalName(), .{
             .allow_directory = false,
             .follow_symlinks = false,
@@ -254,9 +254,12 @@ const Owner = struct {
             if (file_open) file.close(io);
             if (!published) self.parent.deleteFile(io, temp_name) catch {};
         }
-        var bytes: [max_file_bytes]u8 = undefined;
-        defer std.crypto.secureZero(u8, &bytes);
-        const encoded = try policy.encode(record, &bytes);
+        const bytes = buffer[0..max_file_bytes];
+        const encoded = policy.encode(record, bytes) catch |err| {
+            std.crypto.secureZero(u8, bytes);
+            return err;
+        };
+        defer std.crypto.secureZero(u8, bytes[0..encoded.len]);
         if (fault == .write) {
             try file.writeStreamingAll(io, encoded[0..@min(4, encoded.len)]);
             return error.InjectedCredentialWriteFailure;
@@ -326,6 +329,12 @@ fn testRecord(account: []const u8, generation: u64) !Record {
     return result;
 }
 
+/// Reads the committed record into `scratch.current`, as `loadInto` fills a caller's record.
+fn testLoad(path: []const u8, scratch: *Scratch) !*const Record {
+    try loadInto(path, &scratch.current, scratch);
+    return &scratch.current;
+}
+
 fn testPath(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u8 {
     var private = try tmp.dir.createDirPathOpen(io, "private", .{
         .permissions = .fromMode(0o700),
@@ -338,6 +347,7 @@ fn testPath(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u
 }
 
 test "installed local credential status completes under the exclusive mutation lock" {
+    var scratch: Scratch = undefined;
     const auth = @import("codex_auth.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -348,7 +358,7 @@ test "installed local credential status completes under the exclusive mutation l
     try record.id_token.set(auth.fixture_id_token);
     try record.access_token.set(auth.fixture_access_token);
     record.expires_at = 4_102_444_800;
-    try install(path, &record, null);
+    try install(path, &record, null, &scratch);
     var private = try tmp.dir.openDir(io, "private", .{});
     defer private.close(io);
     var before_buffer: [4096]u8 = undefined;
@@ -389,6 +399,8 @@ test "installed local credential status completes under the exclusive mutation l
 }
 
 test "a rejected refresh replacement leaves the claim pending until login" {
+    var built: Record = undefined;
+    var scratch: Scratch = undefined;
     // Both routing directions and the admission rules are value-tested in
     // codex_credential_policy.zig. This proves the shell publishes the pending
     // claim before the exchange and nothing after a rejected replacement.
@@ -397,56 +409,59 @@ test "a rejected refresh replacement leaves the claim pending until login" {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
     var original = try testRecord("acct", 0);
-    try install(path, &original, null);
-    try std.testing.expectError(error.AccountMismatch, exchangeRefresh(path, 1, {}, struct {
-        fn change(_: void, current: *const Record) !Record {
-            var replacement = current.*;
+    try install(path, &original, null, &scratch);
+    try std.testing.expectError(error.AccountMismatch, exchangeRefresh(path, 1, &scratch, &built, {}, struct {
+        fn change(_: void, current: *const Record, replacement: *Record) !void {
+            replacement.* = current.*;
             replacement.fedramp = !current.fedramp;
             replacement.state = .ready;
-            return replacement;
         }
     }.change));
-    const pending = try load(path);
+    const pending = try testLoad(path, &scratch);
     try std.testing.expectEqual(State.refresh_pending, pending.state);
     try std.testing.expectEqual(@as(u64, 1), pending.generation);
     try std.testing.expect(!pending.fedramp);
-    try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
+    var selected: Lease = undefined;
+    try std.testing.expectError(error.RefreshRequiresLogin, leaseInto(path, &selected, &scratch));
     var changed = original;
     changed.fedramp = true;
-    try install(path, &changed, null);
-    var selected = try lease(path);
+    try install(path, &changed, null, &scratch);
+    try leaseInto(path, &selected, &scratch);
     defer selected.release();
     try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
     try std.testing.expect(selected.record.fedramp);
 }
 
 test "only a refresh proven not sent restores ready and permits a later exchange" {
+    var built: Record = undefined;
+    var scratch: Scratch = undefined;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
     var original = try testRecord("acct", 0);
-    try install(path, &original, null);
-    try std.testing.expectError(error.RefreshRequestNotSent, exchangeRefresh(path, 1, {}, struct {
-        fn fail(_: void, _: *const Record) !Record {
+    try install(path, &original, null, &scratch);
+    try std.testing.expectError(error.RefreshRequestNotSent, exchangeRefresh(path, 1, &scratch, &built, {}, struct {
+        fn fail(_: void, _: *const Record, _: *Record) !void {
             return error.RefreshRequestNotSent;
         }
     }.fail));
-    const recovered = try load(path);
+    const recovered = try testLoad(path, &scratch);
     try std.testing.expectEqual(State.ready, recovered.state);
-    var ready = try lease(path);
+    var ready: Lease = undefined;
+    try leaseInto(path, &ready, &scratch);
     try std.testing.expectEqual(@as(u64, 1), ready.record.generation);
     try std.testing.expectEqualStrings(original.refresh_token.slice(), ready.record.refresh_token.slice());
     ready.release();
-    try std.testing.expect(try exchangeRefresh(path, 1, {}, struct {
-        fn succeed(_: void, current: *const Record) !Record {
-            var replacement = current.*;
+    try std.testing.expect(try exchangeRefresh(path, 1, &scratch, &built, {}, struct {
+        fn succeed(_: void, current: *const Record, replacement: *Record) !void {
+            replacement.* = current.*;
             replacement.state = .ready;
             try replacement.refresh_token.set("rotated");
-            return replacement;
         }
     }.succeed));
-    var rotated = try lease(path);
+    var rotated: Lease = undefined;
+    try leaseInto(path, &rotated, &scratch);
     defer rotated.release();
     try std.testing.expectEqual(@as(u64, 2), rotated.record.generation);
     try std.testing.expectEqualStrings("rotated", rotated.record.refresh_token.slice());
@@ -454,80 +469,109 @@ test "only a refresh proven not sent restores ready and permits a later exchange
 
 test "sent or uncertain refresh failures retain pending and refuse another exchange" {
     inline for (.{ error.TransportFailed, error.ResponseTooLong, error.RefreshTokenReused, error.InvalidTokenResponse }) |failure| {
+        var scratch: Scratch = undefined;
+        var built: Record = undefined;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try testPath(&tmp, "auth", &path_buffer);
         var original = try testRecord("acct", 0);
-        try install(path, &original, null);
+        try install(path, &original, null, &scratch);
         const Exchange = struct {
-            fn fail(_: void, _: *const Record) !Record {
+            fn fail(_: void, _: *const Record, _: *Record) !void {
                 return failure;
             }
         };
-        try std.testing.expectError(failure, exchangeRefresh(path, 1, {}, Exchange.fail));
-        try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
-        try std.testing.expectError(error.RefreshRequiresLogin, exchangeRefresh(path, 1, {}, Exchange.fail));
-        const pending = try load(path);
+        try std.testing.expectError(failure, exchangeRefresh(path, 1, &scratch, &built, {}, Exchange.fail));
+        var pending_lease: Lease = undefined;
+        try std.testing.expectError(error.RefreshRequiresLogin, leaseInto(path, &pending_lease, &scratch));
+        try std.testing.expectError(error.RefreshRequiresLogin, exchangeRefresh(path, 1, &scratch, &built, {}, Exchange.fail));
+        const pending = try testLoad(path, &scratch);
         try std.testing.expectEqual(State.refresh_pending, pending.state);
         try std.testing.expectEqual(@as(u64, 1), pending.generation);
     }
 }
 
 test "unsafe paths and credential aliases fail closed" {
+    var scratch: Scratch = undefined;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
     var record = try testRecord("acct", 0);
-    try std.testing.expectError(error.PathMustBeAbsolute, install("relative", &record, null));
+    try std.testing.expectError(error.PathMustBeAbsolute, install("relative", &record, null, &scratch));
     // An incomplete record is refused before the owner path is examined.
     record.state = .refresh_pending;
-    try std.testing.expectError(error.InstallMustBeReady, install("relative", &record, null));
+    try std.testing.expectError(error.InstallMustBeReady, install("relative", &record, null, &scratch));
     record.state = .ready;
     var private = try tmp.dir.openDir(io, "private", .{});
     defer private.close(io);
     try private.symLink(io, "missing", "auth", .{});
-    try std.testing.expectError(error.SymLinkLoop, install(path, &record, null));
+    try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
 }
 
-test "private file, lock, directory, and abandoned temp are validated" {
+test "releasing a lease wipes its secrets and writes nothing past them" {
+    var scratch: Scratch = undefined;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
     var record = try testRecord("acct", 0);
-    try install(path, &record, null);
+    try install(path, &record, null, &scratch);
+    var lease: Lease = undefined;
+    try leaseInto(path, &lease, &scratch);
+    const token = &lease.record.refresh_token;
+    const read = token.len;
+    try std.testing.expectEqualStrings("private-refresh", token.slice());
+    // Stands for pages the lease never wrote; releasing must not touch them.
+    @memset(token.bytes[read..], 0x5a);
+    lease.release();
+    try std.testing.expect(std.mem.allEqual(u8, token.bytes[0..read], 0));
+    try std.testing.expect(std.mem.allEqual(u8, token.bytes[read..], 0x5a));
+    try std.testing.expect(std.mem.allEqual(u8, lease.record.access_token.bytes[0.."aaa.bbb.ccc".len], 0));
+}
+
+test "private file, lock, directory, and abandoned temp are validated" {
+    var scratch: Scratch = undefined;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    var record = try testRecord("acct", 0);
+    try install(path, &record, null, &scratch);
     for ([_][]const u8{ "private/auth", "private/.auth.lock" }) |name|
         try std.testing.expectEqual(@as(u16, 0o600), (try tmp.dir.statFile(io, name, .{})).permissions.toMode() & 0o777);
     var private = try tmp.dir.openDir(io, "private", .{ .iterate = true });
     defer private.close(io);
     const file = try private.openFile(io, "auth", .{ .mode = .read_write });
     try file.setPermissions(io, .fromMode(0o644));
-    try std.testing.expectError(error.InsecureCredentialFile, load(path));
+    try std.testing.expectError(error.InsecureCredentialFile, testLoad(path, &scratch));
     try file.setPermissions(io, .fromMode(0o600));
     file.close(io);
     const lock = try private.openFile(io, ".auth.lock", .{ .mode = .read_write });
     try lock.setPermissions(io, .fromMode(0o644));
-    try std.testing.expectError(error.InsecureCredentialFile, load(path));
+    try std.testing.expectError(error.InsecureCredentialFile, testLoad(path, &scratch));
     try lock.setPermissions(io, .fromMode(0o600));
     lock.close(io);
     try private.symLink(io, "auth", ".auth.tmp", .{});
-    try std.testing.expectError(error.SymLinkLoop, install(path, &record, null));
-    try std.testing.expectEqual(@as(u64, 1), (try load(path)).generation);
+    try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
+    try std.testing.expectEqual(@as(u64, 1), (try testLoad(path, &scratch)).generation);
+    // The caller's record does not claim a generation that was never published.
+    try std.testing.expectEqual(@as(u64, 1), record.generation);
     try private.deleteFile(io, ".auth.tmp");
     try private.setPermissions(io, .fromMode(0o755));
-    try std.testing.expectError(error.InsecureCredentialDirectory, load(path));
+    try std.testing.expectError(error.InsecureCredentialDirectory, testLoad(path, &scratch));
     try private.setPermissions(io, .fromMode(0o700));
 }
 
 test "each replacement failure leaves only a complete old or new credential" {
+    var scratch: Scratch = undefined;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
     var original = try testRecord("old", 0);
-    try install(path, &original, null);
+    try install(path, &original, null, &scratch);
     var replacement = try testRecord("new", 2);
     inline for (.{
         .{ Owner.PublishFault.write, error.InjectedCredentialWriteFailure },
@@ -537,10 +581,11 @@ test "each replacement failure leaves only a complete old or new credential" {
     }) |case| {
         var owner = try Owner.open(path);
         const lock = try owner.acquireLock(.exclusive);
-        try std.testing.expectError(case[1], owner.publishWithFault(&replacement, case[0]));
+        try std.testing.expectError(case[1], owner.publishWithFault(&replacement, case[0], &scratch.file));
         lock.close(io);
         owner.close();
-        var observed = try load(path);
+        var observed: Record = undefined;
+        try loadInto(path, &observed, &scratch);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&observed));
         try std.testing.expectEqualStrings(if (case[0] == .directory_sync) "new" else "old", observed.account_id.slice());
         if (case[0] == .directory_sync) break;

@@ -24,6 +24,13 @@ pub const Request = struct {
     body: []const u8,
 };
 
+/// Room to parse one issuer response: the JSON arena and the claims of the
+/// tokens it carries. Its owner keeps it off the stack.
+pub const Scratch = struct {
+    json: [wire_arena_bytes]u8 = undefined,
+    claims: policy.ClaimScratch = undefined,
+};
+
 /// Owns all credential bytes. Callers must keep this value out of diagnostics.
 pub const Tokens = struct {
     id_token: Required(token_limit) = .{},
@@ -33,22 +40,23 @@ pub const Tokens = struct {
 
 /// Builds the record a device login installs. The generation is assigned at
 /// admission. On error the record is zeroed.
-pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Record) !void {
+pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Record, claims: *policy.ClaimScratch) !void {
     record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = refreshed_at };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try record.id_token.set(tokens.id_token.slice());
     try record.access_token.set(tokens.access_token.slice());
     try record.refresh_token.set(tokens.refresh_token.slice());
-    try deriveClaims(record);
+    try deriveClaims(record, claims);
 }
 
 /// A record's account, FedRAMP routing and expiry are those of its own
 /// tokens, read as `policy.validateSelected` reads them.
-fn deriveClaims(record: *policy.Record) !void {
-    const account = try policy.parseAccount(record.id_token.slice());
+fn deriveClaims(record: *policy.Record, claims: *policy.ClaimScratch) !void {
+    var account: policy.Account = undefined;
+    try policy.parseAccount(record.id_token.slice(), claims, &account);
     try record.account_id.set(account.id.slice());
     record.fedramp = account.fedramp;
-    record.expires_at = try policy.expiryOf(record);
+    record.expires_at = try policy.expiryOf(record, claims);
 }
 
 pub const device_start: Request = .{
@@ -75,13 +83,12 @@ pub const DeviceStart = struct {
 
 /// Interprets the device-code start response. A code whose poll body cannot
 /// be built is rejected before it can be shown.
-pub fn parseDeviceStart(status: u16, body: []const u8, destination: *DeviceStart) !void {
+pub fn parseDeviceStart(status: u16, body: []const u8, arena: *[wire_arena_bytes]u8, destination: *DeviceStart) !void {
     if (status == 404) return error.DeviceAuthenticationUnavailable;
     if (status < 200 or status >= 300) return error.LoginStartRejected;
     const Device = struct { device_auth_id: []const u8, user_code: ?[]const u8 = null, usercode: ?[]const u8 = null, interval: []const u8 };
-    var arena: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    defer std.crypto.secureZero(u8, arena);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(Device, fixed.allocator(), body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceResponse;
     const user_code = parsed.value.user_code orelse parsed.value.usercode orelse return error.InvalidDeviceResponse;
     if (!policy.safeAscii(parsed.value.device_auth_id) or !policy.safeAscii(user_code) or
@@ -117,30 +124,28 @@ pub fn classifyPoll(status: u16, body: []const u8) !Poll {
 }
 
 /// Builds the authorization-code exchange from a device grant body.
-pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8) !Request {
+pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8, arena: *[wire_arena_bytes]u8) !Request {
     const Grant = struct { authorization_code: []const u8, code_challenge: []const u8, code_verifier: []const u8 };
-    var arena: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    defer std.crypto.secureZero(u8, arena);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const grant = std.json.parseFromSlice(Grant, fixed.allocator(), grant_body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceGrant;
     return .{ .url = token_url, .content_type = form_content, .body = try formEncode(buffer, grant.value.authorization_code, grant.value.code_verifier) };
 }
 
-/// Parses a complete authorization-code exchange response.
-pub fn parseTokenResponse(status: u16, json: []const u8) !Tokens {
+/// Parses a complete authorization-code exchange response into
+/// `destination`, which is zeroed if a field fails.
+pub fn parseTokenResponse(status: u16, json: []const u8, arena: *[wire_arena_bytes]u8, destination: *Tokens) !void {
     if (status < 200 or status >= 300) return error.TokenExchangeRejected;
-    var wire: OwnedWire = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
-    try parseWire(json, &wire);
-    var result: Tokens = .{};
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&result));
-    if (!wire.has_id) return error.MissingIdToken;
-    if (!wire.has_access) return error.MissingAccessToken;
-    if (!wire.has_refresh) return error.MissingRefreshToken;
-    result.id_token = wire.id;
-    result.access_token = wire.access;
-    result.refresh_token = wire.refresh;
-    return result;
+    defer std.crypto.secureZero(u8, arena);
+    const wire = try parseWire(json, arena);
+    destination.* = .{};
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
+    const id = wire.id_token orelse return error.MissingIdToken;
+    const access = wire.access_token orelse return error.MissingAccessToken;
+    const refresh = wire.refresh_token orelse return error.MissingRefreshToken;
+    try destination.id_token.set(id);
+    try destination.access_token.set(access);
+    try destination.refresh_token.set(refresh);
 }
 
 pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
@@ -155,32 +160,32 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
 /// Omitted rotating fields are kept; routing and expiry follow the resulting
 /// tokens. The generation is assigned at admission. On error the replacement
 /// is zeroed.
-pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record) !void {
+pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *Scratch) !void {
     replacement.* = current.*;
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
-    if (status < 200 or status >= 300) return refreshRejection(json);
-    var wire: OwnedWire = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
-    try parseWire(json, &wire);
-    if (wire.has_id) {
-        const account = try policy.parseAccount(wire.id.slice());
-        if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice()) or
-            account.fedramp != (try policy.parseAccount(current.id_token.slice())).fedramp)
-            return error.AccountChanged;
-        try replacement.id_token.set(wire.id.slice());
+    if (status < 200 or status >= 300) return refreshRejection(json, &scratch.json);
+    defer std.crypto.secureZero(u8, &scratch.json);
+    const wire = try parseWire(json, &scratch.json);
+    if (wire.id_token) |id| {
+        var account: policy.Account = undefined;
+        try policy.parseAccount(id, &scratch.claims, &account);
+        if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice())) return error.AccountChanged;
+        const fedramp = account.fedramp;
+        try policy.parseAccount(current.id_token.slice(), &scratch.claims, &account);
+        if (account.fedramp != fedramp) return error.AccountChanged;
+        try replacement.id_token.set(id);
     }
-    if (wire.has_access) try replacement.access_token.set(wire.access.slice());
-    if (wire.has_refresh) try replacement.refresh_token.set(wire.refresh.slice());
-    try deriveClaims(replacement);
+    if (wire.access_token) |access| try replacement.access_token.set(access);
+    if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh);
+    try deriveClaims(replacement, &scratch.claims);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
 }
 
-fn refreshRejection(json: []const u8) error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated } {
+fn refreshRejection(json: []const u8, arena: *[wire_arena_bytes]u8) error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated } {
     if (json.len > response_limit) return error.RefreshRejected;
-    var arena: [48 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    defer std.crypto.secureZero(u8, arena);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), json, .{}) catch return error.RefreshRejected;
     if (parsed.value != .object) return error.RefreshRejected;
     var code: ?[]const u8 = null;
@@ -203,42 +208,31 @@ fn refreshRejection(json: []const u8) error{ RefreshRejected, RefreshTokenExpire
     return error.RefreshRejected;
 }
 
+/// Parse room for one issuer response.
+pub const wire_arena_bytes = 48 * 1024;
+
+/// The token fields of one exchange response. Each present value is
+/// nonempty, at most `token_limit` bytes, and borrows the response or the
+/// parse arena.
 const TokenWire = struct {
     id_token: ?[]const u8 = null,
     access_token: ?[]const u8 = null,
     refresh_token: ?[]const u8 = null,
 };
 
-const OwnedWire = struct {
-    id: Required(token_limit) = .{},
-    access: Required(token_limit) = .{},
-    refresh: Required(token_limit) = .{},
-    has_id: bool = false,
-    has_access: bool = false,
-    has_refresh: bool = false,
-};
-
-fn parseWire(json: []const u8, result: *OwnedWire) !void {
+fn parseWire(json: []const u8, arena: *[wire_arena_bytes]u8) !TokenWire {
     if (json.len > response_limit) return error.ResponseTooLong;
-    var arena_bytes: [48 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena_bytes);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(TokenWire, fixed.allocator(), json, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenResponse;
-    result.* = .{};
-    if (parsed.value.id_token) |value| {
-        try result.id.set(value);
-        result.has_id = true;
+    inline for (.{ "id_token", "access_token", "refresh_token" }) |name| {
+        if (@field(parsed.value, name)) |value| {
+            if (value.len == 0) return error.EmptyCredentialValue;
+            if (value.len > token_limit) return error.CredentialValueTooLong;
+        }
     }
-    if (parsed.value.access_token) |value| {
-        try result.access.set(value);
-        result.has_access = true;
-    }
-    if (parsed.value.refresh_token) |value| {
-        try result.refresh.set(value);
-        result.has_refresh = true;
-    }
+    return parsed.value;
 }
 
 fn formEncode(buffer: []u8, code: []const u8, verifier: []const u8) ![]const u8 {
@@ -269,22 +263,25 @@ fn writeJsonStringContent(writer: *std.Io.Writer, value: []const u8) !void {
 }
 
 fn claimedRecord(id_token: []const u8, access_token: []const u8, record: *policy.Record) !void {
+    var claims: policy.ClaimScratch = undefined;
+    var account: policy.Account = undefined;
+    try policy.parseAccount(id_token, &claims, &account);
     record.* = .{ .generation = 3, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 1, .refreshed_at = 1, .state = .refresh_pending };
     try record.id_token.set(id_token);
-    record.account_id = .{};
-    try record.account_id.set((try policy.parseAccount(id_token)).id.slice());
-    record.fedramp = (try policy.parseAccount(id_token)).fedramp;
+    try record.account_id.set(account.id.slice());
+    record.fedramp = account.fedramp;
     try record.access_token.set(access_token);
     try record.refresh_token.set("refresh-old");
 }
 
 test "refresh preserves omitted fields and refuses account replacement" {
+    var scratch: Scratch = undefined;
     const old_id = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEifQ.c2ln";
     const old_access = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
     var current: policy.Record = undefined;
     try claimedRecord(old_id, old_access, &current);
     var updated: policy.Record = undefined;
-    try parseRefreshResponse(&current, 200, "{\"refresh_token\":\"refresh-new\"}", 77, &updated);
+    try parseRefreshResponse(&current, 200, "{\"refresh_token\":\"refresh-new\"}", 77, &updated, &scratch);
     try std.testing.expectEqualStrings(old_access, updated.access_token.slice());
     try std.testing.expectEqualStrings("refresh-new", updated.refresh_token.slice());
     try std.testing.expectEqualStrings(old_id, updated.id_token.slice());
@@ -296,7 +293,7 @@ test "refresh preserves omitted fields and refuses account replacement" {
     // Rotated tokens for the same account replace the old ones.
     const same_account = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEiLCJzdWIiOiJ4In0.c2ln";
     var json: [512]u8 = undefined;
-    try parseRefreshResponse(&current, 200, try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-new\"}}", .{same_account}), 78, &updated);
+    try parseRefreshResponse(&current, 200, try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-new\"}}", .{same_account}), 78, &updated, &scratch);
     try std.testing.expectEqualStrings(same_account, updated.id_token.slice());
     try std.testing.expectEqualStrings("opaque-new", updated.access_token.slice());
     try std.testing.expectEqualStrings("refresh-old", updated.refresh_token.slice());
@@ -304,16 +301,17 @@ test "refresh preserves omitted fields and refuses account replacement" {
     // A foreign account or rejected status leaves no partial replacement.
     const foreign = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzIifQ.c2ln";
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"refresh_token\":\"refresh-new\"}}", .{foreign});
-    try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 79, &updated));
+    try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 79, &updated, &scratch));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&updated), 0));
     for ([_]u16{ 199, 300, 401, 500 }) |status| {
-        try parseRefreshResponse(&current, 200, "{}", 79, &updated);
-        try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, status, "{}", 79, &updated));
+        try parseRefreshResponse(&current, 200, "{}", 79, &updated, &scratch);
+        try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, status, "{}", 79, &updated, &scratch));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&updated), 0));
     }
 }
 
 test "refresh rejection bodies preserve distinct safe failure codes" {
+    var scratch: Scratch = undefined;
     var current: policy.Record = undefined;
     try claimedRecord(policy.fixture_id_token, policy.fixture_access_token, &current);
     var replacement: policy.Record = undefined;
@@ -327,23 +325,24 @@ test "refresh rejection bodies preserve distinct safe failure codes" {
             "{\"error\":{\"code\":\"" ++ case[0] ++ "\",\"message\":\"private echoed credential\"}}",
             "{\"code\":\"" ++ case[0] ++ "\"}",
         }) |body| {
-            try std.testing.expectError(case[1], parseRefreshResponse(&current, 401, body, 77, &replacement));
+            try std.testing.expectError(case[1], parseRefreshResponse(&current, 401, body, 77, &replacement, &scratch));
             try std.testing.expectEqualStrings(case[2], policy.failureCode(case[1]));
             try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
         }
     }
-    try std.testing.expectError(error.RefreshTokenExpired, parseRefreshResponse(&current, 400, "{\"error\":\"REFRESH_TOKEN_EXPIRED\"}", 77, &replacement));
+    try std.testing.expectError(error.RefreshTokenExpired, parseRefreshResponse(&current, 400, "{\"error\":\"REFRESH_TOKEN_EXPIRED\"}", 77, &replacement, &scratch));
     for ([_][]const u8{
         "not json",                                                   "{}",                                                  "{\"error\":\"invalid_grant\"}",
         "{\"error\":\"unknown\",\"code\":\"refresh_token_expired\"}", "{\"error\":{\"message\":\"refresh_token_expired\"}}", "{\"error\":{\"code\":12}}",
         "{\"code\":\"refresh_token_expired suffix\"}",
     }) |body| {
-        try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, 401, body, 77, &replacement));
+        try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, 401, body, 77, &replacement, &scratch));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
     }
 }
 
 test "refresh keeps the account's routing claim in both directions" {
+    var scratch: Scratch = undefined;
     var current: policy.Record = undefined;
     var updated: policy.Record = undefined;
     var json: [512]u8 = undefined;
@@ -353,18 +352,19 @@ test "refresh keeps the account's routing claim in both directions" {
     }) |case| {
         try claimedRecord(case[0], "opaque-access", &current);
         const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\"}}", .{case[1]});
-        try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 77, &updated));
+        try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 77, &updated, &scratch));
     }
     // An unchanged routing claim is carried into the replacement.
-    try parseRefreshResponse(&current, 200, "{\"access_token\":\"opaque-new\"}", 77, &updated);
+    try parseRefreshResponse(&current, 200, "{\"access_token\":\"opaque-new\"}", 77, &updated, &scratch);
     try std.testing.expect(updated.fedramp);
     // Routing is read from the resulting ID token, not copied from the record.
     current.fedramp = false;
-    try parseRefreshResponse(&current, 200, "{}", 77, &updated);
+    try parseRefreshResponse(&current, 200, "{}", 77, &updated, &scratch);
     try std.testing.expect(updated.fedramp);
 }
 
 test "a login record takes its account, routing and expiry from its tokens" {
+    var scratch: Scratch = undefined;
     var tokens: Tokens = .{};
     var record: policy.Record = undefined;
     for ([_]struct { id: []const u8, access: []const u8, fedramp: bool, expires_at: i64 }{
@@ -376,7 +376,7 @@ test "a login record takes its account, routing and expiry from its tokens" {
         try tokens.id_token.set(case.id);
         try tokens.access_token.set(case.access);
         try tokens.refresh_token.set("refresh");
-        try loginRecord(&tokens, 77, &record);
+        try loginRecord(&tokens, 77, &record, &scratch.claims);
         try std.testing.expectEqual(case.fedramp, record.fedramp);
         try std.testing.expectEqual(case.expires_at, record.expires_at);
         try std.testing.expectEqual(@as(i64, 77), record.refreshed_at);
@@ -386,7 +386,7 @@ test "a login record takes its account, routing and expiry from its tokens" {
         try std.testing.expectEqualStrings(case.id, record.id_token.slice());
         try std.testing.expectEqualStrings(case.access, record.access_token.slice());
         try std.testing.expectEqualStrings("refresh", record.refresh_token.slice());
-        try policy.validateSelected(&record, false);
+        try policy.validateSelected(&record, false, &scratch.claims);
         try policy.validateReplacement(&record);
     }
     // The id token is read before the access token.
@@ -397,7 +397,7 @@ test "a login record takes its account, routing and expiry from its tokens" {
     }) |case| {
         try tokens.id_token.set(case.id);
         try tokens.access_token.set(case.access);
-        try std.testing.expectError(case.err, loginRecord(&tokens, 77, &record));
+        try std.testing.expectError(case.err, loginRecord(&tokens, 77, &record, &scratch.claims));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&record), 0));
     }
 }
@@ -419,24 +419,28 @@ test "refresh request escapes the refresh token as JSON" {
 }
 
 test "authorization exchange requires and owns all token fields" {
+    var scratch: Scratch = undefined;
     const id = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEifQ.c2ln";
     const access = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
     var json: [512]u8 = undefined;
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"{s}\",\"refresh_token\":\"refresh\"}}", .{ id, access });
-    const tokens = try parseTokenResponse(200, response);
+    var tokens: Tokens = undefined;
+    try parseTokenResponse(200, response, &scratch.json, &tokens);
     var record: policy.Record = undefined;
-    try loginRecord(&tokens, 1, &record);
+    try loginRecord(&tokens, 1, &record, &scratch.claims);
     try std.testing.expectEqualStrings("acct_1", record.account_id.slice());
-    try std.testing.expectError(error.TokenExchangeRejected, parseTokenResponse(400, response));
-    try std.testing.expectError(error.MissingRefreshToken, parseTokenResponse(200, "{\"id_token\":\"x\",\"access_token\":\"y\"}"));
+    try std.testing.expectError(error.TokenExchangeRejected, parseTokenResponse(400, response, &scratch.json, &tokens));
+    try std.testing.expectError(error.MissingRefreshToken, parseTokenResponse(200, "{\"id_token\":\"x\",\"access_token\":\"y\"}", &scratch.json, &tokens));
     const opaque_response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-access\",\"refresh_token\":\"refresh\"}}", .{id});
-    try std.testing.expectEqualStrings("opaque-access", (try parseTokenResponse(200, opaque_response)).access_token.slice());
-    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(200, "not json"));
+    try parseTokenResponse(200, opaque_response, &scratch.json, &tokens);
+    try std.testing.expectEqualStrings("opaque-access", tokens.access_token.slice());
+    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(200, "not json", &scratch.json, &tokens));
 }
 
 test "device start validates codes and builds the poll body" {
     var start: DeviceStart = undefined;
-    try parseDeviceStart(200, "{\"device_auth_id\":\"dev-1\",\"usercode\":\"ABCD-EFGH\",\"interval\":\"5\"}", &start);
+    var arena: [wire_arena_bytes]u8 = undefined;
+    try parseDeviceStart(200, "{\"device_auth_id\":\"dev-1\",\"usercode\":\"ABCD-EFGH\",\"interval\":\"5\"}", &arena, &start);
     try std.testing.expectEqualStrings("ABCD-EFGH", start.userCode());
     try std.testing.expectEqual(@as(u16, 5), start.interval_seconds);
     const poll = start.pollRequest();
@@ -444,15 +448,15 @@ test "device start validates codes and builds the poll body" {
     try std.testing.expectEqualStrings(json_content, poll.content_type);
     try std.testing.expectEqualStrings("{\"device_auth_id\":\"dev-1\",\"user_code\":\"ABCD-EFGH\"}", poll.body);
     try std.testing.expectEqualStrings("{\"client_id\":\"" ++ client_id ++ "\"}", device_start.body);
-    try std.testing.expectError(error.DeviceAuthenticationUnavailable, parseDeviceStart(404, "", &start));
-    try std.testing.expectError(error.LoginStartRejected, parseDeviceStart(500, "", &start));
+    try std.testing.expectError(error.DeviceAuthenticationUnavailable, parseDeviceStart(404, "", &arena, &start));
+    try std.testing.expectError(error.LoginStartRejected, parseDeviceStart(500, "", &arena, &start));
     for ([_][]const u8{
         "{\"device_auth_id\":\"dev-1\",\"interval\":\"5\"}",
         "{\"device_auth_id\":\"dev\\\"1\",\"user_code\":\"A\",\"interval\":\"5\"}",
         "{\"device_auth_id\":\"dev-1\",\"user_code\":\"A\",\"interval\":\"0\"}",
         "{\"device_auth_id\":\"dev-1\",\"user_code\":\"A\",\"interval\":\"901\"}",
         "{\"device_auth_id\":\"dev 1\",\"user_code\":\"A\",\"interval\":\"5\"}",
-    }) |body| try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, body, &start));
+    }) |body| try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, body, &arena, &start));
     // A code whose poll body cannot be built is rejected before it can be shown.
     var device_id: [600]u8 = undefined;
     @memset(&device_id, 'd');
@@ -460,9 +464,9 @@ test "device start validates codes and builds the poll body" {
     @memset(&code, 'U');
     var long: [2048]u8 = undefined;
     const overlong = try std.fmt.bufPrint(&long, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\",\"interval\":\"5\"}}", .{ &device_id, &code });
-    try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, overlong, &start));
+    try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, overlong, &arena, &start));
     const fits = try std.fmt.bufPrint(&long, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\",\"interval\":\"5\"}}", .{ device_id[0..500], &code });
-    try parseDeviceStart(200, fits, &start);
+    try parseDeviceStart(200, fits, &arena, &start);
     try std.testing.expectEqualSlices(u8, &code, start.userCode());
 }
 
@@ -479,7 +483,8 @@ test "device polling recognizes structured denial and expiration without retryin
 
 test "authorization exchange percent-encodes code and verifier independently" {
     var buffer: [512]u8 = undefined;
-    const request = try grantExchangeRequest("{\"authorization_code\":\"a+b &\",\"code_challenge\":\"x\",\"code_verifier\":\"v/=+\"}", &buffer);
+    var arena: [wire_arena_bytes]u8 = undefined;
+    const request = try grantExchangeRequest("{\"authorization_code\":\"a+b &\",\"code_challenge\":\"x\",\"code_verifier\":\"v/=+\"}", &buffer, &arena);
     try std.testing.expectEqualStrings(issuer ++ "/oauth/token", request.url);
     try std.testing.expectEqualStrings(form_content, request.content_type);
     try std.testing.expectEqualStrings(
@@ -487,7 +492,7 @@ test "authorization exchange percent-encodes code and verifier independently" {
             "&code=a%2Bb%20%26&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback&code_verifier=v%2F%3D%2B",
         request.body,
     );
-    try std.testing.expectError(error.InvalidDeviceGrant, grantExchangeRequest("{}", &buffer));
+    try std.testing.expectError(error.InvalidDeviceGrant, grantExchangeRequest("{}", &buffer, &arena));
 }
 
 fn raises(comptime function: anytype, comptime name: []const u8) bool {

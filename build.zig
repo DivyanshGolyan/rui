@@ -508,6 +508,19 @@ pub fn build(b: *std.Build) void {
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
+    // The gate reads x86-64 prologues; other targets have no frame reader.
+    const stack_frames_step = b.step(
+        "stack-frames",
+        "Fail when a Host thread reaches a ReleaseSafe stack frame over budget (x86-64 Linux only)",
+    );
+    if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) {
+        const stack_frames = b.addSystemCommand(&.{ "python3", "-B" });
+        stack_frames.addFileArg(b.path("tests/ci/stack_frames.py"));
+        stack_frames.addFileArg(ci.path(release_safe));
+        stack_frames.addFileArg(b.path("tests/ci/stack_frames.json"));
+        stack_frames_step.dependOn(&stack_frames.step);
+    }
+    check_step.dependOn(stack_frames_step);
 
     const full_check_step = b.step(
         "check-full",
