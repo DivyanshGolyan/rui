@@ -35,7 +35,7 @@ You can edit and paste multiline text at the prompt. There is no input history o
 
 The conversation uses the full terminal screen. When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
-Scroll with PgUp, PgDn, the arrow keys or the mouse wheel. Keep scrolling up to read older conversation. Esc returns to the latest messages, and from there to the overview.
+Scroll with PgUp, PgDn, the arrow keys or the mouse wheel. Keep scrolling up to read older conversation. Esc or Ctrl-G returns to the latest messages, and from there to the overview. Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 
 Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup. If that happens, run your terminal's reset command.
 
@@ -45,12 +45,14 @@ Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of e
 
 | Key in the overview | What it does |
 | --- | --- |
-| Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. |
+| Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
 | Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. On a blank composer, opens the selected Session. |
-| Esc | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. In a conversation's latest view, returns to the overview. |
+| Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
 | Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
-| Ctrl-D | Leaves, when the composer is empty. |
+| Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
 | Ctrl-C | Leaves. |
+
+While a start waits for its answer, its text stays in the composer and typing does not change it; if the start fails, Enter sends the text again. A key not in this table does nothing in the overview.
 
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave. A stop still waiting to be sent when you leave is reported as not sent. The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered. Sessions the stopped Session messaged keep running.
 
