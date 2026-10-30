@@ -559,10 +559,6 @@ pub const HistoricalView = struct {
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
-    output_source: u64 = 0,
-    output_expected: u64 = 0,
-    output_count: u64 = 0,
-    output_previous_position: u64 = 0,
     group_scan: GroupScan = .{},
     output_check: OutputCheck = .{},
     next_tool_group_count: u64 = 0,
@@ -633,8 +629,9 @@ pub const HistoricalView = struct {
         return self.store.readHistoricalSettings(self);
     }
 
-    /// Validate at most one producing Operation or output item, releasing
-    /// Store custody between steps. Returns true after the complete population.
+    /// Validate at most one producing Operation and its output items,
+    /// releasing Store custody between steps. Returns true after the
+    /// complete population.
     pub fn validateOutputsStep(self: *HistoricalView) !bool {
         std.debug.assert(self.active);
         return self.store.validateHistoricalOutputsStep(self);
@@ -5918,8 +5915,9 @@ pub const Store = struct {
         return @intCast(position);
     }
 
-    // Select the producing Operation before its items, so even a completely
-    // missing output is detected. No statement or lock survives this one step.
+    // Each step checks one producing Operation and its items in one
+    // statement. Its own item count detects even a completely missing output.
+    // No statement or lock survives this one step.
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
         if (view.outputs_validated) return true;
         if (view.output_frontier == null) {
@@ -5936,53 +5934,39 @@ pub const Store = struct {
             view.output_frontier = try readNullableTokens(boundary, 2, true) orelse return error.CorruptStore;
             return false;
         }
-        if (view.output_source == 0) {
-            const source = try self.cached("SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose " ++
-                "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
-                "AND source.admission_position<?4 AND " ++ resolutionIn("source.resolution_code", &turn_policy.accepted) ++ " " ++
-                "ORDER BY source.admission_position,source.operation_id LIMIT 1");
-            defer resetCached(source);
-            try bindU64(source, 1, view.binding.operation_id);
-            try bindU64(source, 2, view.output_frontier.?);
-            try bindU64(source, 3, view.output_cursor);
-            try bindU64(source, 4, view.output_boundary);
-            try bindU64(source, 5, view.output_cursor_id);
-            const result = c.sqlite3_step(source);
-            if (result == c.SQLITE_DONE) {
-                view.outputs_validated = true;
-                return true;
-            }
-            if (result != c.SQLITE_ROW) return error.CorruptStore;
-            view.output_source = try readNullableTokens(source, 0, false) orelse return error.CorruptStore;
-            view.output_cursor = try readNullableTokens(source, 1, false) orelse return error.CorruptStore;
-            view.output_cursor_id = view.output_source;
-            view.output_expected = try readNullableTokens(source, 2, true) orelse return error.CorruptStore;
-            if (c.sqlite3_column_int(source, 3) == 1 and view.output_expected == 0) return error.CorruptStore;
-            view.output_count = 0;
-            view.output_previous_position = 0;
-            return false;
-        }
-        const item = try self.cached("SELECT item.item_ordinal,item.session_position," ++
-            "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
-            "FROM model_operation source JOIN model_output_item item ON item.operation_id=source.operation_id " ++
-            "WHERE source.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
-        defer resetCached(item);
-        try bindU64(item, 1, view.output_source);
-        try bindU64(item, 2, view.output_count);
-        const result = c.sqlite3_step(item);
+        // The primary key makes ordinals unique, so the count, the first and
+        // last ordinal and one position offset prove ordinals 0..count-1 at
+        // consecutive positions, all after admission and below the boundary.
+        const source = try self.cached("SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
+            "(SELECT count(*)=source.output_item_count AND coalesce(min(item.item_ordinal)=0 AND max(item.item_ordinal)=count(*)-1 " ++
+            "AND min(item.session_position-item.item_ordinal)=max(item.session_position-item.item_ordinal) " ++
+            "AND min(item.session_position)>source.admission_position AND max(item.session_position)<?4 " ++
+            "AND min(item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal),1) " ++
+            "FROM model_output_item item WHERE item.operation_id=source.operation_id) " ++
+            "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
+            "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
+            "AND source.admission_position<?4 AND " ++ resolutionIn("source.resolution_code", &turn_policy.accepted) ++ " " ++
+            "ORDER BY source.admission_position,source.operation_id LIMIT 1");
+        defer resetCached(source);
+        try bindU64(source, 1, view.binding.operation_id);
+        // SQLite seeks the index only on this bound, never on the row value,
+        // so it carries the cursor; each step then starts at the next
+        // Operation instead of rescanning from the frontier.
+        try bindU64(source, 2, @max(view.output_frontier.?, view.output_cursor));
+        try bindU64(source, 3, view.output_cursor);
+        try bindU64(source, 4, view.output_boundary);
+        try bindU64(source, 5, view.output_cursor_id);
+        const result = c.sqlite3_step(source);
         if (result == c.SQLITE_DONE) {
-            if (view.output_count != view.output_expected) return error.CorruptStore;
-            view.output_source = 0;
-            return false;
+            view.outputs_validated = true;
+            return true;
         }
         if (result != c.SQLITE_ROW) return error.CorruptStore;
-        const position = try readNullableTokens(item, 1, false) orelse return error.CorruptStore;
-        if (view.output_count >= view.output_expected or c.sqlite3_column_int64(item, 0) != view.output_count or
-            c.sqlite3_column_int(item, 2) != 1 or position <= view.output_cursor or position >= view.output_boundary or
-            (view.output_count != 0 and position != view.output_previous_position + 1)) return error.CorruptStore;
-        view.output_count += 1;
-        view.output_previous_position = position;
+        view.output_cursor_id = try readNullableTokens(source, 0, false) orelse return error.CorruptStore;
+        view.output_cursor = try readNullableTokens(source, 1, false) orelse return error.CorruptStore;
+        const expected = try readNullableTokens(source, 2, true) orelse return error.CorruptStore;
+        if (c.sqlite3_column_int(source, 3) == 1 and expected == 0) return error.CorruptStore;
+        if (c.sqlite3_column_int(source, 4) != 1) return error.CorruptStore;
         return false;
     }
 
@@ -12500,6 +12484,8 @@ test "historical accepted assistant output completeness and provenance fence rea
         .{ .fault = "DELETE FROM model_output_item WHERE item_ordinal=1" },
         .{ .fault = "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1" },
         .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal IN (0,1); " ++
+            "UPDATE model_output_item SET session_position=session_position-99-2*item_ordinal WHERE item_ordinal IN (0,1)" },
         .{ .fault = "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1" },
         .{ .fault = "UPDATE model_output_item SET session_ref='f0re1g'" },
         .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
