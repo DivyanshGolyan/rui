@@ -471,28 +471,6 @@ pub const BashWork = union {
     prepared_cleanup: bash.PreparedCleanup,
 };
 
-/// Returns `count` items in fresh anonymous pages: every byte is zero and no
-/// page is resident until first written. Allocator.alloc promises neither,
-/// because ReleaseSafe fills new memory with 0xAA and an init loop writes
-/// every page, so callers whose empty state is all zero bytes use this.
-pub fn mapZeroed(comptime T: type, count: usize) ![]T {
-    if (count == 0) return &.{};
-    const bytes = try std.posix.mmap(
-        null,
-        try std.math.mul(usize, @sizeOf(T), count),
-        .{ .READ = true, .WRITE = true },
-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-        -1,
-        0,
-    );
-    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
-}
-
-pub fn unmapZeroed(items: anytype) void {
-    if (items.len == 0) return;
-    std.posix.munmap(@alignCast(std.mem.sliceAsBytes(items)));
-}
-
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     if (host.advance(.stopping) == .stopping) return;
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
