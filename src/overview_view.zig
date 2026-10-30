@@ -47,6 +47,8 @@ pub const fold_rows = 5;
 pub const max_requests = 8;
 /// The least time between two list requests.
 pub const list_interval_ms = 1000;
+/// How long each frame of an active mark's pulse shows.
+pub const pulse_interval_ms = 140;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
@@ -103,6 +105,10 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
     .failed = .{ .unicode = "×", .ascii = "x", .word = "failed" },
     .stopped = .{ .unicode = "■", .ascii = "#", .word = "stopped" },
 });
+
+/// An active mark's pulse, one per frame. Frame 0 is its static mark, so a
+/// screen that holds still is frame 0.
+pub const pulse_frames = [_][]const u8{ marks.get(.active).unicode, "·", "∙", "•" };
 /// Headline order: finished last, so a narrow screen cuts the least telling count.
 const headline_marks = [_]Mark{ .active, .waiting, .failed, .stopped, .finished };
 
@@ -1298,10 +1304,14 @@ pub const Span = struct {
 /// column. Every byte lives in the screen's arena.
 pub const Screen = struct {
     arena: std.heap.ArenaAllocator,
+    width: u16,
     lines: []const []const Span,
     /// Where the terminal's cursor shows: the composer's caret, unless the
     /// composer is locked.
     cursor: ?Cursor = null,
+    /// An active mark it drew changes with the frame: the shell draws the
+    /// next one in `pulse_interval_ms`.
+    pulses: bool = false,
 
     pub const Cursor = struct { row: u16, column: u16 };
 
@@ -1324,23 +1334,56 @@ pub const Screen = struct {
         }
     }
 
-    /// The screen as terminal bytes: one synchronized update that clears and
-    /// draws every line, then shows the cursor at the caret or hides it.
-    pub fn writeFrame(self: *const Screen, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    /// The terminal bytes that turn `shown`, the screen the terminal holds,
+    /// into this one: one synchronized update, then the cursor at the caret
+    /// or hidden. Without `shown`, or at another size, every line is cleared
+    /// and drawn. Otherwise a line laid out as before writes only the spans
+    /// that changed, and any other changed line is cleared and drawn. An
+    /// unchanged screen writes nothing.
+    pub fn writeFrame(self: *const Screen, shown: ?*const Screen, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const before = if (shown) |held| if (held.width == self.width and held.lines.len == self.lines.len) held else null else null;
+        if (before) |held| if (self.sameAs(held)) return;
         try writer.writeAll("\x1b[?2026h\x1b[?25l");
         for (self.lines, 1..) |spans, row| {
+            const old = if (before) |held| held.lines[row - 1] else null;
+            if (old) |was| if (sameSpans(spans, was, .layout)) {
+                for (spans, was) |span, prior| if (!sameSpan(span, prior, .text)) try writeSpan(writer, row, span);
+                continue;
+            };
             try writer.print("\x1b[{d};1H\x1b[2K", .{row});
-            for (spans) |span| {
-                try writer.print("\x1b[{d};{d}H\x1b[0", .{ row, span.column + 1 });
-                if (span.style.bold) try writer.writeAll(";1");
-                if (span.style.reverse) try writer.writeAll(";7");
-                const parameters = sgr.get(span.style.colour);
-                if (parameters.len != 0) try writer.print(";{s}", .{parameters});
-                try writer.print("m{s}\x1b[0m", .{span.text});
-            }
+            for (spans) |span| try writeSpan(writer, row, span);
         }
         if (self.cursor) |at| try writer.print("\x1b[{d};{d}H\x1b[?25h", .{ at.row + 1, at.column + 1 });
         try writer.writeAll("\x1b[?2026l");
+    }
+
+    fn sameAs(self: *const Screen, other: *const Screen) bool {
+        if (!std.meta.eql(self.cursor, other.cursor)) return false;
+        for (self.lines, other.lines) |a, b| if (!sameSpans(a, b, .text)) return false;
+        return true;
+    }
+
+    const Same = enum { layout, text };
+
+    /// Spans in the same cells, and with `.text` the same style and text too.
+    fn sameSpan(a: Span, b: Span, same: Same) bool {
+        if (a.column != b.column or a.cells != b.cells) return false;
+        return same == .layout or (std.meta.eql(a.style, b.style) and std.mem.eql(u8, a.text, b.text));
+    }
+
+    fn sameSpans(a: []const Span, b: []const Span, same: Same) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| if (!sameSpan(x, y, same)) return false;
+        return true;
+    }
+
+    fn writeSpan(writer: *std.Io.Writer, row: usize, span: Span) std.Io.Writer.Error!void {
+        try writer.print("\x1b[{d};{d}H\x1b[0", .{ row, span.column + 1 });
+        if (span.style.bold) try writer.writeAll(";1");
+        if (span.style.reverse) try writer.writeAll(";7");
+        const parameters = sgr.get(span.style.colour);
+        if (parameters.len != 0) try writer.print(";{s}", .{parameters});
+        try writer.print("m{s}\x1b[0m", .{span.text});
     }
 
     /// The style at `column` of line `row`, if a span covers it.
@@ -1354,13 +1397,11 @@ const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, e
 const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = "·", .rule = "─", .ellipsis = "…", .arrows = "↑↓", .newline = "↵" };
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = "-", .rule = "-", .ellipsis = ".", .arrows = "^v", .newline = "|" };
 
-/// Draws the overview. `frame` is the animation frame; O7 is the first to
-/// vary it.
+/// Draws the overview. `frame` picks each active mark's pulse.
 pub fn render(gpa: Allocator, state: *const State, width: u16, height: u16, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
-    _ = frame;
-    var screen: Screen = .{ .arena = .init(gpa), .lines = &.{} };
+    var screen: Screen = .{ .arena = .init(gpa), .width = width, .lines = &.{} };
     errdefer screen.deinit();
-    var painter: Painter = .{ .arena = screen.arena.allocator(), .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width };
+    var painter: Painter = .{ .arena = screen.arena.allocator(), .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
     const lines = try painter.arena.alloc([]const Span, height);
     @memset(lines, &.{});
     screen.lines = lines;
@@ -1388,6 +1429,7 @@ pub fn render(gpa: Allocator, state: *const State, width: u16, height: u16, caps
         const column = if (state.draft_len == 0 or spans.len == 0) 3 else spans[spans.len - 1].column + spans[spans.len - 1].cells;
         if (!state.starting()) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
     }
+    screen.pulses = painter.pulsed;
     return screen;
 }
 
@@ -1397,6 +1439,9 @@ const Painter = struct {
     caps: Caps,
     glyphs: Glyphs,
     width: u16,
+    frame: u64,
+    /// It drew a mark that changes with `frame`.
+    pulsed: bool = false,
     spans: [24]Span = undefined,
     count: usize = 0,
     column: usize = 0,
@@ -1834,7 +1879,12 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const faded = state.unreachable_since_ms != null;
     const tone = if (faded) Colour.quiet else rule.colour;
     const mark = marks.get(rule.mark);
-    _ = try painter.put(1, if (painter.caps.unicode) mark.unicode else mark.ascii, 1, .{ .colour = tone });
+    // Only Unicode in colour pulses. A faded row may have stopped, so it
+    // holds still.
+    const pulses = rule.mark == .active and !faded and painter.caps.unicode and painter.caps.colour;
+    painter.pulsed = painter.pulsed or pulses;
+    const glyph = if (pulses) pulse_frames[painter.frame % pulse_frames.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
+    _ = try painter.put(1, glyph, 1, .{ .colour = tone });
 
     const ended = rule.group == .finished or rule.group == .ended;
     const named = title(state, row);
@@ -2012,7 +2062,11 @@ fn expectSelected(state: *const State, expected: *const [6]u8) !void {
 }
 
 fn screenText(state: *const State, width: u16, height: u16, caps: Caps) ![]u8 {
-    var screen = try render(std.testing.allocator, state, width, height, caps, 0);
+    return frameText(state, width, height, caps, 0);
+}
+
+fn frameText(state: *const State, width: u16, height: u16, caps: Caps, frame: u64) ![]u8 {
+    var screen = try render(std.testing.allocator, state, width, height, caps, frame);
     defer screen.deinit();
     var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
     errdefer text.deinit();
@@ -2091,6 +2145,121 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         try std.testing.expectEqual(Style{ .colour = rule.colour }, unselected.styleAt(4, 1).?);
         if (unselected.styleAt(4, 39)) |style| try std.testing.expectEqual(Style{ .colour = rule.colour }, style);
     }
+}
+
+test "an active mark pulses frame by frame while every other mark, and ASCII or NO_COLOR, hold still" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    state.selected = null;
+    // Without colour the marks hold still, so this is every frame's text
+    // but for the active marks.
+    const still = try screenText(&state, 80, 24, .{ .colour = false });
+    defer std.testing.allocator.free(still);
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, still, "\n ● "));
+    for (pulse_frames, 0..) |glyph, frame| {
+        var buffer: [16]u8 = undefined;
+        const wanted = try std.mem.replaceOwned(u8, std.testing.allocator, still, "\n ● ", try std.fmt.bufPrint(&buffer, "\n {s} ", .{glyph}));
+        defer std.testing.allocator.free(wanted);
+        const text = try frameText(&state, 80, 24, .{}, frame + pulse_frames.len);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(wanted, text);
+        var screen = try render(std.testing.allocator, &state, 80, 24, .{}, frame);
+        defer screen.deinit();
+        try std.testing.expect(screen.pulses);
+        // The retrying row pulses in the rule's warning colour.
+        const retrying = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Audit permission paths").?], "\n");
+        try std.testing.expectEqual(Style{ .colour = .attention }, screen.styleAt(retrying, 1).?);
+    }
+    for ([_]Caps{ .{ .unicode = false }, .{ .colour = false }, .{ .unicode = false, .colour = false } }) |caps| {
+        const first = try screenText(&state, 80, 24, caps);
+        defer std.testing.allocator.free(first);
+        for (1..pulse_frames.len) |frame| {
+            const text = try frameText(&state, 80, 24, caps, frame);
+            defer std.testing.allocator.free(text);
+            try std.testing.expectEqualStrings(first, text);
+            var screen = try render(std.testing.allocator, &state, 80, 24, caps, frame);
+            defer screen.deinit();
+            try std.testing.expect(!screen.pulses);
+        }
+    }
+}
+
+test "the screen asks for frames only while an active mark shows" {
+    var rows: [31]Listed = undefined;
+    rows[0] = session("w0rk00", .{ .working = ago(40) }, .{ .label = "Write the notes" });
+    for (rows[1..], 1..) |*row, at| {
+        var ref: [6]u8 = "idle00".*;
+        _ = std.fmt.bufPrint(ref[4..], "{d:0>2}", .{at}) catch unreachable;
+        row.* = session(&ref, .{ .idle = ago(7200 + at) }, .{ .label = "Wait for a reply" });
+    }
+    var state = try opened(&rows);
+    defer state.deinit();
+    const Pulses = struct {
+        fn at(from: *const State, height: u16) !bool {
+            var screen = try render(std.testing.allocator, from, 80, height, .{}, 1);
+            defer screen.deinit();
+            return screen.pulses;
+        }
+    };
+    try std.testing.expect(try Pulses.at(&state, 24));
+    // Scrolled out of sight, the active row needs no frames.
+    _ = try press(&state, .end);
+    try std.testing.expect(!try Pulses.at(&state, 24));
+    try std.testing.expect(try Pulses.at(&state, 60));
+    // A faded row may have stopped, so it holds still until the Host answers.
+    state.unreachable_since_ms = state.now_ms;
+    try std.testing.expect(!try Pulses.at(&state, 60));
+    const faded = try frameText(&state, 80, 60, .{}, 1);
+    defer std.testing.allocator.free(faded);
+    try std.testing.expect(std.mem.indexOf(u8, faded, " ● Write the notes") != null);
+    // Once the last active row finishes, nothing pulses.
+    rows[0] = session("w0rk00", .{ .finished = ago(1) }, .{ .label = "Write the notes" });
+    _ = try refresh(&state, .full, testToken(2), &rows);
+    try std.testing.expect(!try Pulses.at(&state, 60));
+}
+
+fn frameBytes(screen: *const Screen, shown: ?*const Screen) ![]u8 {
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer bytes.deinit();
+    try screen.writeFrame(shown, &bytes.writer);
+    return bytes.toOwnedSlice();
+}
+
+test "a frame writes only what changed on the screen the terminal shows" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    state.selected = null;
+    var still = try render(std.testing.allocator, &state, 80, 24, .{}, 0);
+    defer still.deinit();
+    var pulsed = try render(std.testing.allocator, &state, 80, 24, .{}, 1);
+    defer pulsed.deinit();
+    var wider = try render(std.testing.allocator, &state, 81, 24, .{}, 1);
+    defer wider.deinit();
+    // Unknown contents, or another size, clear and draw every line.
+    for ([_]struct { *const Screen, ?*const Screen }{ .{ &still, null }, .{ &wider, &still } }) |case| {
+        const bytes = try frameBytes(case[0], case[1]);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectEqual(@as(usize, 24), std.mem.count(u8, bytes, "\x1b[2K"));
+    }
+    const unchanged = try frameBytes(&still, &still);
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings("", unchanged);
+    // The next pulse frame writes the six active marks and nothing else.
+    const pulse = try frameBytes(&pulsed, &still);
+    defer std.testing.allocator.free(pulse);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, pulse, "\x1b[2K"));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, pulse, "H\x1b[0"));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, pulse, "m·\x1b[0m"));
+    // A line laid out anew is cleared and drawn whole; the others stay.
+    try typeText(&state, "hi");
+    var typed = try render(std.testing.allocator, &state, 80, 24, .{}, 0);
+    defer typed.deinit();
+    const composed = try frameBytes(&typed, &still);
+    defer std.testing.allocator.free(composed);
+    // The composer and its hints changed; the list did not.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, composed, "\x1b[2K"));
+    try std.testing.expect(std.mem.indexOf(u8, composed, "\x1b[23;1H\x1b[2K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, composed, "\x1b[24;1H\x1b[2K") != null);
 }
 
 test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x stops it" {

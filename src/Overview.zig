@@ -222,8 +222,9 @@ reply: Reply = .{},
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 
-/// The last frame written, so an unchanged one is not written again.
-drawn: std.ArrayList(u8) = .empty,
+/// The screen the terminal shows, so a frame writes only what changed;
+/// null when the terminal's contents are unknown.
+shown: ?view.Screen = null,
 frame: std.ArrayList(u8) = .empty,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
@@ -335,7 +336,7 @@ fn destroy(self: *Self) void {
     std.debug.assert(self.worker.thread == null);
     if (self.scratch) |file| file.close(self.init.io);
     self.closePipes();
-    self.drawn.deinit(self.init.gpa);
+    self.forget();
     self.frame.deinit(self.init.gpa);
     self.state.deinit();
     self.init.gpa.destroy(self);
@@ -352,11 +353,12 @@ fn loop(self: *Self) !Ending {
         const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
         if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |ending| return ending;
         try self.dispatch();
-        try self.draw();
-        // The core says when it next needs a tick; until then only input,
-        // the worker or a signal wakes the loop.
-        const budget: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-        const timeout = switch (self.input.wait(std.Io.Clock.awake.now(self.init.io).nanoseconds, budget)) {
+        // Frames count on the monotonic clock, so a wall-clock step cannot
+        // stall or race the pulse; ticks keep the Host's wall clock.
+        const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
+        const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
+        const pulses = try self.draw(awake_ms / view.pulse_interval_ms);
+        const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, pulses))) {
             .expire => 0,
             .poll => |milliseconds| milliseconds,
         };
@@ -373,6 +375,16 @@ fn loop(self: *Self) !Ending {
         }
         if (fds[0].revents != 0 or timeout == 0) if (try self.readInput()) |ending| return ending;
     }
+}
+
+/// How long the loop may wait, in milliseconds, -1 for ever: until the
+/// core's next tick, and while the screen pulses, no later than its next
+/// frame. Until then only input, the worker or a signal wakes it.
+fn budget(self: *const Self, now_ms: u64, awake_ms: u64, pulses: bool) i32 {
+    const tick: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    if (!pulses) return tick;
+    const frame: i32 = @intCast(view.pulse_interval_ms - awake_ms % view.pulse_interval_ms);
+    return if (tick < 0) frame else @min(tick, frame);
 }
 
 fn drain(fd: c_int) void {
@@ -396,7 +408,7 @@ fn event(self: *Self, value: view.Event) !?Ending {
             self.opened = reference;
             if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
             // The conversation drew over the overview.
-            self.drawn.clearRetainingCapacity();
+            self.forget();
         },
         .exit => return .overview,
     };
@@ -567,22 +579,33 @@ fn keyOf(decoded: TerminalInput.Decoded) ?view.Key {
     return if (key.text) |text| .{ .text = text } else null;
 }
 
-/// Draws the core's screen, unless the terminal already shows it.
-fn draw(self: *Self) !void {
+/// Draws the core's screen at `frame`, writing only what the terminal does
+/// not already show. Returns whether the screen changes with the next frame.
+fn draw(self: *Self, frame: u64) !bool {
     const size = self.terminal.geometry();
-    var screen = try view.render(self.init.gpa, &self.state, size.col, size.row, self.caps, 0);
-    defer screen.deinit();
+    var screen = try view.render(self.init.gpa, &self.state, size.col, size.row, self.caps, frame);
+    errdefer screen.deinit();
+    const pulses = screen.pulses;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
-    screen.writeFrame(&bytes.writer) catch return error.OutOfMemory;
+    screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
     self.frame = bytes.toArrayList();
-    if (std.mem.eql(u8, self.frame.items, self.drawn.items)) return;
+    if (self.frame.items.len == 0) {
+        screen.deinit();
+        return pulses;
+    }
     self.terminal.pump = .{ .context = self, .step = waitForOutput };
     defer self.terminal.pump = null;
     // A failed write leaves the screen unknown: the next frame draws whole.
-    self.drawn.clearRetainingCapacity();
+    self.forget();
     try self.terminal.write(self.frame.items);
-    std.mem.swap(std.ArrayList(u8), &self.frame, &self.drawn);
+    self.shown = screen;
+    return pulses;
+}
+
+fn forget(self: *Self) void {
+    if (self.shown) |*held| held.deinit();
+    self.shown = null;
 }
 
 /// Waits for output credit; a signal ends the wait.
@@ -1010,8 +1033,51 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
     // The terminal already shows an unchanged screen.
-    try rig.overview.draw();
+    try std.testing.expect(!try rig.overview.draw(0));
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+}
+
+test "each frame rewrites a pulsing mark alone, until marks hold still" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.caps = .{};
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0));
+    try std.testing.expect(std.mem.count(u8, rig.drawn(&buffer), "\x1b[2K") == 24);
+    try std.testing.expect(try overview.draw(0));
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    try std.testing.expect(try overview.draw(2));
+    const pulse = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, pulse, "m∙\x1b[0m") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pulse, "H\x1b[0"));
+    try std.testing.expect(std.mem.indexOf(u8, pulse, "\x1b[2K") == null);
+    overview.caps.colour = false;
+    try std.testing.expect(!try overview.draw(3));
+    _ = rig.drawn(&buffer);
+    try std.testing.expect(!try overview.draw(4));
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+}
+
+test "the loop waits for the core's next tick, and while the screen pulses no later than its next frame" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const start = test_now_s * 1000;
+    // While a listing is in flight the core needs no tick.
+    try std.testing.expect(try overview.event(.{ .tick = start }) == null);
+    try std.testing.expectEqual(@as(i32, -1), overview.budget(start, 280, false));
+    try std.testing.expectEqual(@as(i32, 140), overview.budget(start, 280, true));
+    try std.testing.expectEqual(@as(i32, 1), overview.budget(start, 419, true));
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, false));
+    try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, true));
+    try std.testing.expectEqual(@as(i32, 10), overview.budget(start + 990, 40, true));
+    try std.testing.expectEqual(@as(i32, 0), overview.budget(start + 1000, 40, true));
 }
 
 test "a signal wakes the waiting loop and ends it" {
