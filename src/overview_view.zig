@@ -2262,11 +2262,18 @@ const Columns = struct {
     const title = 4;
     const age_cells = 4;
 
+    /// A Workspace column narrower than this names nothing, so it is left out.
+    const min_workspace = 8;
+
     fn of(width: usize) Columns {
         const end = width -| 1;
         const room = width -| 2;
         if (room < 40) return .{ .word = end, .workspace = 0, .end = end };
-        return .{ .word = end - @as(usize, if (room >= 100) 50 else 26), .workspace = if (room >= 100) 32 else 12, .end = end };
+        const status = end - @as(usize, if (room >= 100) 50 else 26);
+        // The Workspace never takes more cells than the title keeps: half
+        // of what lies between them, after the two-cell gap.
+        const workspace = @min(@as(usize, if (room >= 100) 32 else 12), (status -| 2 -| Columns.title -| 2) / 2);
+        return .{ .word = status, .workspace = if (workspace < min_workspace) 0 else workspace, .end = end };
     }
 };
 
@@ -3243,6 +3250,24 @@ test "Host facts give the health line, and a row from before a restart still say
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 1 } });
     try expectScreenLine(&state, 2, " Host up 20s   slots 1/2");
     try expectStyle(&state, 2, 15, .{});
+}
+
+test "a row from another Workspace keeps its title at every width" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(5) }, .{ .label = "Profile the queue", .workspace = "/srv/elsewhere/project" }),
+        session("d4e5f6", .{ .working = ago(5) }, .{ .label = "Trace the shutdown", .workspace = "/srv/elsewhere/project" }),
+    });
+    defer state.deinit();
+    for (40..120) |width| {
+        const text = try screenText(&state, @intCast(width), 24, .{});
+        defer std.testing.allocator.free(text);
+        // Each title shows at least its first word, and never fewer cells
+        // than the Workspace beside it.
+        try std.testing.expect(std.mem.indexOf(u8, text, "Profile") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Trace") != null);
+        const columns = Columns.of(width);
+        try std.testing.expect(columns.workspace == 0 or columns.word -| 2 -| Columns.title -| 2 -| columns.workspace >= columns.workspace);
+    }
 }
 
 test "a long first line keeps whole code points and ends in an ellipsis" {
