@@ -257,6 +257,9 @@ pub const Host = struct {
     provider_ca_file: ?[]const u8 = null,
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
+    /// Response import's output item grammar, in the execution Workspace's
+    /// fresh pages; set by the execution owner.
+    item_check: ?*model_adapter.Output.OutputItemCheck = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
     scratch_budget: ?provider.ScratchBudget = null,

@@ -329,6 +329,9 @@ const lifecycle_trace_interval_ms = 100;
 const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     bash_window: [bash.copy_window_bytes]u8,
+    /// Response import's output item grammar; only the pages one item uses
+    /// become resident.
+    item_check: model_adapter.Output.OutputItemCheck,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
 };
@@ -351,6 +354,8 @@ pub fn executionMain(host: *Host) void {
     else
         null;
     host.auth_worker = auth_worker;
+    host.item_check = &workspace[0].item_check;
+    defer host.item_check = null;
     defer if (auth_thread) |thread| {
         host.auth_worker = null;
         auth_worker.?.stop(thread);
@@ -1816,7 +1821,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, &event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, .{
+    }, host.item_check.?, .{
         .metadata = host.hooks.fails(.response_metadata),
     })) {
         .accepted => |value| value,
@@ -2237,6 +2242,7 @@ test "HTTP error capture retires before execution custody" {
             .lease = undefined,
             .store = undefined,
             .hooks = .{ .phase_trace = true },
+            .item_check = model_adapter.Output.testingItemCheck(),
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;

@@ -81,10 +81,11 @@ pub fn interpretOutput(
     event_data: *Output.EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
+    item_check: *Output.OutputItemCheck,
     faults: Output.Faults,
 ) OutputInterpretation {
     var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, faults) catch |err| return .{ .rejected = .{
+    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, item_check, faults) catch |err| return .{ .rejected = .{
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
@@ -217,7 +218,7 @@ test "provider interpretation preserves independently reported model evidence" {
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, .{});
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -281,7 +282,7 @@ test "provider interpretation closes failure variants without granting settlemen
         var data_used: std.atomic.Value(u64) = .init(0);
         var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, .{ .metadata = case.fault });
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -302,7 +303,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, .{});
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{});
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -910,8 +911,8 @@ const RequestItem = union(enum) {
     history_memo,
     /// A User Message or an instruction update.
     message: store.HistoricalEntry,
-    /// One accepted output item, replayed.
-    replayed_output: store.HistoricalContent,
+    /// One accepted output item, judged compatible and replayed.
+    replayed_output: Replayed,
     tool_result: store.HistoricalToolResult,
     compaction_trigger,
     tools,
@@ -932,10 +933,13 @@ const Piece = union(enum) {
     escaped_content: store.HistoricalContent,
     /// Canonical JSON, copied.
     verbatim_content: store.HistoricalContent,
-    /// Accepted output, validated and replayed.
-    replay: store.HistoricalContent,
+    /// Accepted output the grammar judged compatible, replayed.
+    replay: Replayed,
     history_memo,
 };
+
+/// A replayed output item. Private reasoning text is never replay input.
+const Replayed = struct { content: store.HistoricalContent, omit_reasoning_text: bool };
 
 /// One item's pieces, written in order.
 const Pieces = struct {
@@ -1016,9 +1020,9 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .escaped_content = entry.content.? });
             pieces.add(.{ .syntax = "\"}]}" });
         },
-        .replayed_output => |content| {
+        .replayed_output => |replayed| {
             separateInput(&pieces, input_comma);
-            pieces.add(.{ .replay = content });
+            pieces.add(.{ .replay = replayed });
         },
         .tool_result => |result| {
             separateInput(&pieces, input_comma);
@@ -1062,6 +1066,8 @@ pub const Preparation = struct {
     input_comma: bool = false,
     continuation_unavailable: bool = false,
     history_position: u64 = 0,
+    /// The served output entry the replay_verdict stage judges.
+    replay_entry: store.HistoricalEntry = undefined,
     active: bool = true,
     last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
     /// The Host's history memos, borrowed for the preparation's life. Null
@@ -1100,6 +1106,7 @@ pub const Preparation = struct {
         instructions,
         history_start,
         history,
+        replay_verdict,
         tool_results,
         covered_tool_results,
         compaction_trigger,
@@ -1135,8 +1142,6 @@ pub const Preparation = struct {
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
-        validation: Output.ReplayValidationCursor = .{},
-        validated: bool = false,
         cursor: request_encoding.ReplayCursor = .{},
     };
 
@@ -1171,16 +1176,29 @@ pub const Preparation = struct {
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        var owned_view = view;
-        errdefer owned_view.close();
+        // The view moves straight into place: a local copy would add the
+        // whole view to the caller's frame, all of it resident once probed.
+        // It moves only while no item is being read, since the grammar
+        // borrows its own nesting buffer.
+        std.debug.assert(view.itemCheckIdle());
+        self.* = .{
+            .view = view,
+            .route = route,
+            .writer = undefined,
+            .readonly = undefined,
+            .faults = faults,
+            .memos = memos,
+            .active = false,
+        };
+        errdefer self.view.close();
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.@"provider-request".format(
             &name_buffer,
-            view.binding.operation_id,
-            view.binding.attempt_ordinal,
+            self.view.binding.operation_id,
+            self.view.binding.attempt_ordinal,
         );
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
@@ -1196,19 +1214,14 @@ pub const Preparation = struct {
             retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
-        self.* = .{
-            .view = owned_view,
-            .route = route,
-            .writer = .{
-                .io = io,
-                .file = file,
-                .budget = budget,
-                .fail_write = faults.write,
-            },
-            .readonly = readonly,
-            .faults = faults,
-            .memos = memos,
+        self.writer = .{
+            .io = io,
+            .file = file,
+            .budget = budget,
+            .fail_write = faults.write,
         };
+        self.readonly = readonly;
+        self.active = true;
     }
 
     /// Write the request one item at a time: take the next item from the
@@ -1323,8 +1336,26 @@ pub const Preparation = struct {
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.?.model.slice()) catch {
                             self.continuation_unavailable = true;
                         };
-                        return .{ .item = .{ .replayed_output = entry.content.? } };
+                        self.replay_entry = entry;
+                        self.stage = .replay_verdict;
                     },
+                }
+            },
+            // Every replayed item is judged, even once continuation is
+            // unavailable: compatibility never excuses unauthenticated later
+            // items. The Store already judged a call before serving it, so
+            // each item gets one grammar pass. Unusable output stays private;
+            // no partial request can seal.
+            .replay_verdict => {
+                items_left.* += 1; // The Store charges its own reading work.
+                const verdict = try self.view.replayVerdictStep(&self.replay_entry, bytes_left, items_left) orelse return .pending;
+                self.stage = .history;
+                switch (verdict) {
+                    .incompatible => self.continuation_unavailable = true,
+                    .compatible => |compatible| if (!self.continuation_unavailable) return .{ .item = .{ .replayed_output = .{
+                        .content = self.replay_entry.content.?,
+                        .omit_reasoning_text = compatible.omit_reasoning_text,
+                    } } },
                 }
             },
             .tool_results => {
@@ -1462,7 +1493,10 @@ pub const Preparation = struct {
             .nested => |bytes| self.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
             .escaped_content => |content| self.emission = .{ .json = .{ .reader = try self.view.openContent(content) } },
             .verbatim_content => |content| self.emission = .{ .raw = .{ .reader = try self.view.openContent(content) } },
-            .replay => |content| self.emission = .{ .replay = .{ .reader = try self.view.openContent(content) } },
+            .replay => |replayed| self.emission = .{ .replay = .{
+                .reader = try self.view.openContent(replayed.content),
+                .cursor = .{ .omit_content = replayed.omit_reasoning_text },
+            } },
             .history_memo => self.emission = .{ .history_memo = {} },
         }
     }
@@ -1483,36 +1517,8 @@ pub const Preparation = struct {
                 raw.reader.close();
             },
             .replay => |*replay| {
-                if (!replay.validated) {
-                    const sequential = HistoricalSource{ .reader = &replay.reader };
-                    var incompatible = false;
-                    const complete = replay.validation.advance(sequential, bytes_left, items_left) catch |err| switch (err) {
-                        error.ContinuationUnavailable => done: {
-                            incompatible = true;
-                            break :done true;
-                        },
-                        error.SyntaxError,
-                        error.UnexpectedEndOfInput,
-                        error.UnexpectedJsonDelimiter,
-                        error.InvalidJsonUtf8,
-                        error.JsonTooDeep,
-                        error.DuplicateJsonField,
-                        => return replay.reader.malformed(),
-                        else => return err,
-                    };
-                    if (!complete) return false;
-                    const identity = replay.reader.itemIdentity();
-                    replay.validation.authenticateIdentity(identity.kind, identity.id_digest) catch return replay.reader.malformed();
-                    if (incompatible) self.continuation_unavailable = true;
-                    if (!self.continuation_unavailable) replay.cursor.omit_content = replay.validation.replaysReasoningText();
-                    replay.validated = true;
-                }
-                // Compatibility never excuses unauthenticated later items.
-                // Unusable output stays private; no partial request can seal.
-                if (!self.continuation_unavailable) {
-                    const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
-                    if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
-                }
+                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
+                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
@@ -3219,14 +3225,20 @@ test "request preparation resumes large private replay validation before emissio
         while (true) {
             turns += 1;
             try std.testing.expect(turns < 100000);
-            const before = if (preparation.emission == .replay) preparation.emission.replay.validation.position else 0;
+            // While the item is judged, nothing of it is emitted, and the
+            // grammar reads no more than the advance charges.
+            const judging = preparation.stage == .replay_verdict;
+            const written = preparation.writer.offset;
+            const read_before = preparation.view.itemCheckBytes() orelse 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (preparation.emission == .replay and !preparation.emission.replay.validated) {
+            if (judging and preparation.stage == .replay_verdict) {
                 validation_turns += 1;
-                try std.testing.expect(preparation.emission.replay.validation.position - before <= 7);
-                try std.testing.expectEqual(@as(u64, 0), preparation.emission.replay.cursor.position);
+                const read_after = preparation.view.itemCheckBytes().?;
+                try std.testing.expect(read_after >= read_before and read_after - read_before <= 7);
+                try std.testing.expectEqual(written, preparation.writer.offset);
+                try std.testing.expect(preparation.emission == .none);
                 try preparation.checkIntegrity(binding);
             }
             switch (progress) {
@@ -3444,7 +3456,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     defer metadata.deinit();
     var event_data = try Output.EventData.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, .{})) {
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{})) {
         .accepted => |value| value,
         .rejected => return error.UnexpectedOutputRejection,
     };
