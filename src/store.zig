@@ -3094,8 +3094,10 @@ pub const Store = struct {
                 "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
                 "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal," ++
                 // A rejected call is accepted when its Operation resolves; an
-                // Action call when the Action does.
-                "(SELECT max(coalesce(a.resolved_at,op.resolved_at)) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id) " ++
+                // Action call when the Action does. The last acceptance is the
+                // one at the greatest position: times order nothing.
+                "(SELECT coalesce(a.resolved_at,op.resolved_at) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
+                "WHERE c.operation_id=op.operation_id ORDER BY coalesce(c.acceptance_position,a.acceptance_position) DESC LIMIT 1) " ++
                 "FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
@@ -18577,6 +18579,34 @@ test "every activity row is dated by the fact that owns it" {
         seen.insert(item.value);
     }
     try std.testing.expectEqual(@as(usize, 7), seen.count());
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a Tool Result is dated by its group's last acceptance, even when the clock stepped back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "stepped-config");
+    try submitTestMessage(&storage, &tmp, "stepped-input", "stepped-input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "stepped-calls");
+    var stop = try completeSessionStop("stepped-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // The clock stepped back between the two acceptances: the later one,
+    // at the greater position, carries the earlier time.
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT acceptance_position) FROM action_operation"));
+    try exec(storage.database, "UPDATE action_operation SET resolved_at=" ++
+        "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END");
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const page = try storage.activityPage(request);
+    var results: usize = 0;
+    for (page.items[0..page.count]) |item| if (item.value == .tool_result) {
+        try std.testing.expectEqual(@as(u64, 100), item.at);
+        results += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), results);
     try std.testing.expect(!storage.isFenced());
 }
 
