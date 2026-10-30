@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("posix");
 const policy = @import("codex_credential_policy.zig");
+const test_poll = @import("test_poll");
 
 const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -373,9 +374,7 @@ test "installed local credential status completes under the exclusive mutation l
         lock.close(io);
         return err;
     };
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    while (!worker.done.load(.acquire) and start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.nanoseconds < 2 * std.time.ns_per_s)
-        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &worker.done, test_poll.isSet) catch {};
     // Record before releasing, then join even on the negative path: a shared
     // lock regression fails at this boundary rather than hanging the runner.
     const completed_while_locked = worker.done.load(.acquire);

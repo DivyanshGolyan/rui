@@ -273,7 +273,8 @@ class _Observations:
         assert version == 1 and process == self.process.pid and run > 0, "missing/foreign crash observation state"
         address = ctypes.addressof(ctypes.c_char.from_buffer(self.state))
         native = _observation_atomics()
-        while True:
+
+        def retired():
             active = native.observation_load(address + 32)
             count_loss = native.observation_load(address + 24)
             with self.condition:
@@ -282,10 +283,8 @@ class _Observations:
                 assert not count_loss & 1, "native loss before intentional crash"
                 assert all(item["run"] == str(run) for item in self.records), "mixed crash observation runs"
                 assert self.process.poll() is None, "Host exited before intentional crash"
-                assert time.monotonic() < deadline, "publication custody did not retire within crash budget"
-                if active == 0 and count_loss >> 1 == len(self.records):
-                    return
-            time.sleep(.001)
+                return active == 0 and count_loss >> 1 == len(self.records)
+        wait_for(retired, "publication custody to retire within crash budget", interval=.001, deadline=deadline)
 
     def dispose(self, deadline):
         """Revoke new publications, then drain existing custody before SIGKILL.
@@ -299,17 +298,18 @@ class _Observations:
         native = _observation_atomics()
         native.observation_seal(address + 32)
         self.sealed = True
-        while True:
+
+        def retired():
             active = native.observation_load(address + 32)
             count_loss = native.observation_load(address + 24)
             with self.condition:
                 assert self.error is None, f"Host observation failed: {self.error}"
                 assert not count_loss & 1, "native loss during observation disposal"
                 if active == OBSERVATION_SEALED and count_loss >> 1 == len(self.records):
-                    return
+                    return True
             assert self.process.poll() is None, "Host exited during observation disposal"
-            assert time.monotonic() < deadline, "observation custody did not retire within disposal budget"
-            time.sleep(.001)
+            return False
+        wait_for(retired, "observation custody to retire within disposal budget", interval=.001, deadline=deadline)
 
     def close(self):
         assert self.process.poll() is not None, "observation custody ended before reap"
@@ -496,18 +496,43 @@ def is_peer_disconnect(error):
         isinstance(error, OSError) and error.errno == errno.ENOTCONN)
 
 
+class WaitTimeout(AssertionError):
+    pass
+
+
+def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool):
+    """The one place a test sleeps to wait (CODING_STANDARDS.md#evidence).
+
+    Returns the first observation `ready` accepts that finished before the
+    deadline. An inspection can block past its caller's budget, and a clean
+    observation after the deadline is not evidence of timely reclamation.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + timeout
+    value = None
+    while time.monotonic() < deadline:
+        value = observe()
+        if time.monotonic() >= deadline:
+            break
+        if ready(value):
+            return value
+        time.sleep(interval)
+    raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
+
+
 def wait_for_execution_release(inspect, deadline):
     """Observe both accounting totals in one timely reply, not permanent idleness."""
-    execution = None
-    while True:
+    def execution():
         remaining = min(15, deadline - time.monotonic())
-        assert remaining > 0, ("custody drainage exhausted original deadline", execution)
-        execution = inspect(remaining)
-        assert time.monotonic() < deadline, ("custody drainage exceeded original deadline", execution)
-        assert execution["dispatch_fenced"] is False, execution
-        if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0":
-            return execution
-        time.sleep(min(0.025, max(0, deadline - time.monotonic())))
+        assert remaining > 0, "custody drainage exhausted original deadline"
+        observed = inspect(remaining)
+        # An inspection can block past its caller's budget. A clean reply after
+        # the deadline is not evidence of timely physical reclamation.
+        assert time.monotonic() < deadline, ("custody drainage exceeded original deadline", observed)
+        assert observed["dispatch_fenced"] is False, observed
+        return observed
+    return wait_for(execution, "custody drainage within the original deadline", deadline=deadline,
+                    ready=lambda observed: observed["custody_occupied"] == "0" and observed["scratch_used_bytes"] == "0")
 
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):
@@ -552,16 +577,13 @@ def _opens_with_h2_preface(sock, timeout=5):
     """Peek until the bytes rule the preface in or out, without consuming.
     A client that stalls inside a prefix of the preface gets the HTTP/1.1
     path, which answers it as that server would."""
-    deadline = time.monotonic() + timeout
-    while True:
-        head = sock.recv(len(H2_PREFACE), socket.MSG_PEEK)
-        if not head or not H2_PREFACE.startswith(head):
-            return False
-        if len(head) == len(H2_PREFACE):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.001)
+    try:
+        head = wait_for(lambda: sock.recv(len(H2_PREFACE), socket.MSG_PEEK), "a decisive preface prefix",
+                        timeout=timeout, interval=0.001,
+                        ready=lambda head: not head or not H2_PREFACE.startswith(head) or head == H2_PREFACE)
+    except WaitTimeout:
+        return False
+    return head == H2_PREFACE
 
 
 class _H2Stream:

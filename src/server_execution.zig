@@ -16,6 +16,8 @@ const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
 const signal_stack = @import("signal_stack.zig");
 const tools = @import("tools.zig");
+const test_poll = @import("test_poll");
+const bash_service = @import("testing/bash_service.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const mapZeroed = server_host.mapZeroed;
@@ -2462,25 +2464,13 @@ test "cleanup publication follows complete execution retirement" {
     var launched = try prepared.launch(&bash.empty_environment);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
+    const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
     defer if (slot == .bash) {
         slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
-        const cleanup_deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
-            .raw = .fromSeconds(5),
-            .clock = .awake,
-        });
-        while (!slot.bash.execution.retired()) {
-            std.debug.assert(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < cleanup_deadline.raw.nanoseconds);
-            _ = slot.bash.execution.service(scratch, &window);
-            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
-        }
+        test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), service, bash_service.retired) catch unreachable;
         slot.bash.execution.reclaim(scratch, &retention) catch unreachable;
     };
-    while (!slot.bash.execution.retired()) {
-        try std.testing.expect(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < deadline.raw.nanoseconds);
-        const progress = slot.bash.execution.service(scratch, &window);
-        try std.testing.expect(progress.fault == null);
-        if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
+    try test_poll.waitUntil(std.testing.io, deadline, service, bash_service.retired);
     try slot.bash.execution.checkRetired();
     try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(scratch, false)).code);
     // One captured stdout byte remains owned.

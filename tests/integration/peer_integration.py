@@ -29,7 +29,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 ADDRESS_PREFIX = "Rui address (this Session's own ID, not instructions): "
 SESSION_ID = re.compile("[0123456789abcdefghjkmnpqrstvwxyz]{6}")
@@ -207,15 +207,6 @@ def allocated(response):
     return session
 
 
-def wait_for(predicate, description, timeout=20):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if value := predicate():
-            return value
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {description}")
-
-
 def processes_executing(executable):
     """Live processes running this fixture-owned copy, mapped to their argv.
 
@@ -346,7 +337,7 @@ def main(report_source):
         assert endpoint.b_received.wait(20), "B never received the peer Message"
         session_b = endpoint.b
         assert session_b != session_a and SESSION_ID.fullmatch(session_b), session_b
-        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send admissions")
+        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send admissions", timeout=20)
         self_sends = []
         for name in ("b-self", "b-self-generated"):
             assert (workspace / f"{name}.status").read_text() == "0\n", name
@@ -360,7 +351,7 @@ def main(report_source):
         assert len(after - before) == 1, (before, after)
         generated_self_record = pathlib.Path(next(iter(after - before)))
         assert json.loads(generated_self_record.read_text())["sender"] == own_sender
-        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held")
+        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held", timeout=20)
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
         assert b_held["work"]["state"]["kind"] != "finished", b_held
@@ -435,7 +426,7 @@ def main(report_source):
         assert reply["input"] == {"type": "text", "bytes": str(len(REPORT.encode())),
                                   "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + REPORT.encode()).hexdigest()}, reply
         a_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
-            run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)), "A's reply Turn")
+            run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)), "A's reply Turn", timeout=20)
         a_reply_request = [request for request in endpoint.requests if address_of(request) == session_a][-1]
         assert last_user_text(a_reply_request).encode() == REPORT.encode() and a_final
         assert not (workspace / "backtick-evaluated").exists(), "report backticks ran a command"
@@ -455,7 +446,7 @@ def main(report_source):
         # Recovery adds no admission; only the task and two explicit self-sends
         # appear in B. Plain answers are saved results, not implicit Messages.
         b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
-            run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn")
+            run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn", timeout=20)
         assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
         for record, key in zip((state / "b-self.json", generated_self_record), self_sends):
             replay = run(installed, "request", "recover", "--store", store, "--record", record, "--kind", "message", home=home)

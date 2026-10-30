@@ -6,6 +6,7 @@
 //! A TLS peer generates its own CA and leaf certificate (P-256) at start,
 //! and writes the CA to `caPath()` for the client's `.ca_file` trust.
 const std = @import("std");
+const test_poll = @import("test_poll");
 const builtin = @import("builtin");
 const c = @import("h2_c");
 const tls = @import("../tls.zig");
@@ -348,21 +349,21 @@ pub fn awaitDelivery(self: *Peer) !void {
     // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
     const siocoutq = 0x5411;
     const so_nwrite = 0x1024;
-    for (self.connections.items) |connection| {
-        if (connection.closed) continue;
-        var waited_ms: u32 = 0;
-        while (true) : (waited_ms += 1) {
+    const Socket = struct {
+        fn delivered(socket: std.posix.fd_t) !bool {
             var unacknowledged: c_int = 0;
             var size: std.c.socklen_t = @sizeOf(c_int);
             const status = if (builtin.os.tag.isDarwin())
-                std.c.getsockopt(connection.socket, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
+                std.c.getsockopt(socket, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
             else
-                std.c.ioctl(connection.socket, siocoutq, &unacknowledged);
+                std.c.ioctl(socket, siocoutq, &unacknowledged);
             if (status != 0) return error.Unexpected;
-            if (unacknowledged == 0) break;
-            if (waited_ms == 2000) return error.Timeout;
-            _ = std.c.poll(&[_]std.c.pollfd{}, 0, 1);
+            return unacknowledged == 0;
         }
+    };
+    for (self.connections.items) |connection| {
+        if (connection.closed) continue;
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), connection.socket, Socket.delivered);
     }
 }
 

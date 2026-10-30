@@ -40,6 +40,7 @@ from host_process import (
     dispose_all,
     start_ready_process,
     stop_process,
+    wait_for,
 )
 
 
@@ -180,14 +181,15 @@ class _H2cProbeHandler(http.server.BaseHTTPRequestHandler):
             self.server.stalled.set()
             # The client resets the stream; its reset reaches the server
             # thread at some point, after which every write fails.
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
+
+            def write_fails():
                 try:
                     self.wfile.write(b"")
                 except OSError as error:
                     self.server.write_errors.append(error)
-                    break
-                time.sleep(0.01)
+                    return True
+                return False
+            wait_for(write_fails, "a write after the client's reset to fail", timeout=5, interval=0.01)
             self.close_connection = True
             return
         payload, step = (b"y" * (200 * 1024), 50000) if self.path == "/large" else (b"abcdefgh", 3)
@@ -281,10 +283,7 @@ def prove_h2c_fixture():
             assert endpoint.stalled.wait(5)
             client.conn.reset_stream(stream_id, h2.errors.ErrorCodes.CANCEL)
             client.sock.sendall(client.conn.data_to_send())
-            deadline = time.monotonic() + 5
-            while not endpoint.write_errors:
-                assert time.monotonic() < deadline, "write after reset did not fail"
-                time.sleep(0.01)
+            wait_for(lambda: endpoint.write_errors, "the write after reset to fail", timeout=5, interval=0.01)
             assert isinstance(endpoint.write_errors[0], BrokenPipeError), endpoint.write_errors
 
             # The same connection still serves; a handler that sends no head
@@ -444,11 +443,13 @@ def prove_short_optional_receipt():
     process.rui_observations = _Observations(process, reader, "list", observation_state(process.pid, 0))
     diagnostics = HostDiagnostics(process)
     try:
-        deadline = time.monotonic() + 1
-        while diagnostics.tail() != b"short fixture receipt\n":
+
+        def received():
+            if diagnostics.tail() == b"short fixture receipt\n":
+                return True
             assert diagnostics.read_error is None, diagnostics.read_error
-            assert time.monotonic() < deadline, "short receipt withheld until filler output or EOF"
-            time.sleep(.01)
+            return False
+        wait_for(received, "the short receipt before filler output or EOF", timeout=1, interval=.01)
         assert process.poll() is None, "receipt required writer exit"
         assert not diagnostics.records, "optional receipt became native owner evidence"
         process.stdin.write(b"r")
@@ -962,10 +963,8 @@ def prove_observation_disposal():
                 state[24] = 3
             worker = threading.Thread(target=dispose)
             worker.start()
-            deadline = time.monotonic() + 1
-            while not native.observation_load(address + 32) & OBSERVATION_SEALED:
-                assert time.monotonic() < deadline, "fixture failed to seal native admission"
-                time.sleep(.001)
+            wait_for(lambda: native.observation_load(address + 32) & OBSERVATION_SEALED,
+                     "the fixture to seal native admission", timeout=1, interval=.001)
             if case == "held-final":
                 assert worker.is_alive() and not result, "received final frame falsely proved retirement"
                 # Synthetic retirement shadow: only the count byte changes.

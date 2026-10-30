@@ -9,6 +9,8 @@ const deadline = @import("deadline.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
+const test_poll = @import("test_poll");
+const bash_service = @import("testing/bash_service.zig");
 
 pub const excerpt_bytes: usize = 10_000;
 pub const copy_window_bytes: usize = 16 * 1024;
@@ -147,19 +149,19 @@ test "native Bash observation agrees with reap for wide process exit values" {
             _ = std.c.waitpid(pid, null, 0);
         };
 
-        var observed: BashObservation = undefined;
-        var ready = false;
-        for (0..1000) |_| {
-            const result = rui_bash_observe(pid, &observed);
-            try std.testing.expect(result >= 0);
-            if (result == 1) {
-                ready = true;
-                break;
+        const Observation = struct {
+            pid: c_int,
+            value: BashObservation = undefined,
+
+            fn ready(self: *@This()) !bool {
+                const result = rui_bash_observe(self.pid, &self.value);
+                try std.testing.expect(result >= 0);
+                return result == 1;
             }
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-        }
-        try std.testing.expect(ready);
-        try std.testing.expectEqual(Term{ .exited = case.expected }, decodeObservation(observed));
+        };
+        var observed: Observation = .{ .pid = pid };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromMilliseconds(1500)), &observed, Observation.ready);
+        try std.testing.expectEqual(Term{ .exited = case.expected }, decodeObservation(observed.value));
 
         var consumed: BashObservation = undefined;
         try std.testing.expectEqual(@as(c_int, 1), rui_bash_reap(pid, &consumed));
@@ -1442,11 +1444,8 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
     var execution = try prepared.launch(&empty_environment);
     var window: [copy_window_bytes]u8 = undefined;
-    while (!execution.retired()) {
-        const progress = execution.service(scratch, &window);
-        try std.testing.expect(progress.fault == null);
-        if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
+    const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
     const result = try execution.outcome(scratch, false);
     try execution.reclaim(scratch, retention);
     return result;

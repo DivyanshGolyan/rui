@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process
+from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
 
 
@@ -114,17 +114,15 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
 
 def wait_for_descriptors(pid, expected=None, timeout=5):
     directory = pathlib.Path(f"/proc/{pid}/fd")
-    deadline = time.monotonic() + timeout
-    while True:
+
+    def snapshot():
         try:
-            observed = {entry.name: os.readlink(entry) for entry in directory.iterdir()}
+            return {entry.name: os.readlink(entry) for entry in directory.iterdir()}
         except FileNotFoundError:
             # Retry the whole snapshot if a connection closes during enumeration.
-            observed = None
-        if observed is not None and (expected is None or observed == expected):
-            return observed
-        assert time.monotonic() < deadline, (expected, observed)
-        time.sleep(.01)
+            return None
+    return wait_for(snapshot, f"descriptors {expected}", timeout=timeout, interval=.01,
+                    ready=lambda observed: observed is not None and (expected is None or observed == expected))
 
 
 def complete_response(stream):
@@ -245,9 +243,7 @@ def protected_saturation(root):
         assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
             "version": "1", "type": "host_stop_reply", "status": "acknowledged"}, ack
         deadline = time.monotonic() + 2
-        while socket_path(store).exists():
-            assert time.monotonic() < deadline, "stop did not close listener"
-            time.sleep(.01)
+        wait_for(lambda: not socket_path(store).exists(), "stop to close the listener", interval=.01, deadline=deadline)
         # These peers never handed a complete request to a worker. They must
         # retire without requiring peer close, unlike an already-owned reply.
         for stream in held:

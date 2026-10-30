@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from host_process import TestHTTPServer, is_peer_disconnect, start_ready_process, stop_process, wait_for_execution_release
+from host_process import TestHTTPServer, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -686,21 +686,6 @@ def read_action(store, session, action, field):
             f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
         )
     return completed.stdout
-
-
-def wait_for(predicate, description, timeout=8, interval=0.025, *, deadline=None):
-    if deadline is None:
-        deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        # An inspection can block past its caller's budget. A clean observation
-        # after the deadline is not evidence of timely physical reclamation.
-        if time.monotonic() >= deadline:
-            break
-        if value:
-            return value
-        time.sleep(interval)
-    raise AssertionError(f"timed out waiting for {description}")
 
 
 def completed_observation(store, key, *, deadline=None):

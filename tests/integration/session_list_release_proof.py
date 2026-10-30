@@ -122,9 +122,7 @@ def retained_report(process, diagnostics, store, request, mode, invocation):
             if isinstance(record, dict) and record.get("rui_test_phase") == f"release_probe_{mode}":
                 receipts.append(record)
         return receipts
-    while not (receipts := receipts_now()):
-        time.sleep(min(.025, remaining(invocation)))
-    remaining(invocation)
+    receipts = host_process.wait_for(receipts_now, f"the release_probe_{mode} receipt", deadline=invocation[2])
     assert len(receipts) == 1, receipts
     receipt = receipts[0]
     assert receipt["pid"] == process.pid and receipt["request"] == str(request), receipt

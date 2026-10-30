@@ -3,6 +3,7 @@ const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
+const test_poll = @import("test_poll");
 /// Reply grammar; public for callers built against this module alone.
 pub const protocol_reply = @import("protocol_reply.zig");
 
@@ -1789,21 +1790,16 @@ fn socketPair() ![2]std.posix.fd_t {
     return sockets;
 }
 
-fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, response: []const u8) void {
-    defer closeTestDescriptor(fd);
-    std.Io.sleep(io, delay, .awake) catch return;
-    writeAll(fd, response) catch {};
-}
-
 test "Host processing wait starts inactivity only after the first response byte" {
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-        std.testing.io,
-        sockets[1],
-        std.Io.Duration.fromMilliseconds(50),
-        empty_test_response,
-    });
+    const writer = try std.Thread.spawn(.{}, struct {
+        fn respond(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
+            writeAll(fd, empty_test_response) catch {};
+        }
+    }.respond, .{sockets[1]});
     defer writer.join();
     const head = try readResponseHeadWithInactivity(sockets[0], 10);
     try std.testing.expectEqual(@as(u16, 200), head.status);
@@ -1812,12 +1808,13 @@ test "Host processing wait starts inactivity only after the first response byte"
 test "Host-info first byte is bounded independently of normal processing waits" {
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-        std.testing.io,
-        sockets[1],
-        std.Io.Duration.fromMilliseconds(50),
-        empty_test_response,
-    });
+    const writer = try std.Thread.spawn(.{}, struct {
+        fn respond(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
+            writeAll(fd, empty_test_response) catch {};
+        }
+    }.respond, .{sockets[1]});
     defer writer.join();
     var buffer: ReplyBuffer = .{};
     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
@@ -1833,12 +1830,13 @@ test "response deadlines include partial header and body" {
             defer closeTestDescriptor(sockets[0]);
             try addNonblocking(sockets[0]);
             try writeAll(sockets[1], response[0..prefix_len]);
-            const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-                std.testing.io,
-                sockets[1],
-                std.Io.Duration.fromMilliseconds(50),
-                response[prefix_len..],
-            });
+            const writer = try std.Thread.spawn(.{}, struct {
+                fn respond(fd: std.posix.fd_t, rest: []const u8) void {
+                    defer closeTestDescriptor(fd);
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
+                    writeAll(fd, rest) catch {};
+                }
+            }.respond, .{ sockets[1], response[prefix_len..] });
             defer writer.join();
             var buffer: ReplyBuffer = .{};
             const until: ?i128 = if (mutation) null else std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
@@ -1878,12 +1876,13 @@ test "Host processing wait does not consume response transfer inactivity" {
         return error.SkipZigTest;
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-        std.testing.io,
-        sockets[1],
-        std.Io.Duration.fromSeconds(61),
-        empty_test_response,
-    });
+    const writer = try std.Thread.spawn(.{}, struct {
+        fn respond(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            std.Io.sleep(std.testing.io, .fromSeconds(61), .awake) catch return;
+            writeAll(fd, empty_test_response) catch {};
+        }
+    }.respond, .{sockets[1]});
     defer writer.join();
     var buffer: ReplyBuffer = .{};
     const reply = try readCommandResponse(sockets[0], &buffer);
@@ -1893,12 +1892,13 @@ test "Host processing wait does not consume response transfer inactivity" {
 test "response transfer inactivity begins after the first byte" {
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-        std.testing.io,
-        sockets[1],
-        std.Io.Duration.fromMilliseconds(50),
-        empty_test_response[1..],
-    });
+    const writer = try std.Thread.spawn(.{}, struct {
+        fn respond(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
+            writeAll(fd, empty_test_response[1..]) catch {};
+        }
+    }.respond, .{sockets[1]});
     defer writer.join();
     try writeAll(sockets[1], empty_test_response[0..1]);
     try std.testing.expectError(
@@ -3209,8 +3209,8 @@ test "transport cancellation returns before silent peer release and retains pinn
     }
     token.requestStop();
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-    while (!worker.done.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    test_poll.waitUntil(io, .{ .raw = .fromNanoseconds(until), .clock = .awake }, &worker.done, test_poll.isSet) catch |err|
+        if (err != error.Timeout) return err;
     const returned_before_release = worker.done.load(.acquire);
     if (returned_before_release) {
         try std.testing.expect(try waitRequest(.{ .io = io }, peer.socket.handle, std.posix.POLL.IN, until));
@@ -3262,9 +3262,8 @@ test "transport cancellation stops a backpressured nonblocking write after real 
     try std.testing.expectEqual(@as(usize, 1), try std.posix.read(sockets[1], &byte));
     try std.testing.expectEqualStrings("x", &byte);
     token.requestStop();
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-    while (!worker.done.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(1)), &worker.done, test_poll.isSet) catch |err|
+        if (err != error.Timeout) return err;
     const returned_before_release = worker.done.load(.acquire);
     closeTestDescriptor(sockets[1]);
     open = false;
@@ -3281,7 +3280,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         fail: bool,
         fn feed(self: *@This(), bytes: []const u8) !void {
             self.entered.store(true, .release);
-            while (!self.released.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &self.released, test_poll.isSet);
             try std.testing.expectEqualStrings("a", bytes);
             if (self.fail) return error.SinkFailed;
         }
@@ -3374,10 +3373,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\na", .{ content_type, length }));
         // An answer's final window is delivered only after its EOF.
         if (kind == .result) try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(peer.socket.handle, std.c.SHUT.WR));
-        const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-        while (!worker.sink.entered.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
-            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
-        try std.testing.expect(worker.sink.entered.load(.acquire));
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(1)), &worker.sink.entered, test_poll.isSet);
         token.requestStop();
         try std.testing.expect(!worker.done.load(.acquire)); // Loan still in feed.
         worker.sink.released.store(true, .release);

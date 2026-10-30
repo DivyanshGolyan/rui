@@ -9,10 +9,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 
 import model_fixture as fixture
-from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 
 class Handler(fixture.http.server.BaseHTTPRequestHandler):
@@ -50,15 +49,6 @@ class Handler(fixture.http.server.BaseHTTPRequestHandler):
 
     def log_message(self, _format, *_args):
         pass
-
-
-def wait_for(predicate, description):
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        if value := predicate():
-            return value
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {description}")
 
 
 def main():
@@ -135,7 +125,7 @@ def main():
             session = configure("--tools", "bash", "--permission-mode", "bypass")
             run("session", "send", "--to", session, input="hold sender")
             handle_path = workspace / f"{session}.handle"
-            handle = wait_for(lambda: handle_path.read_text() if handle_path.exists() else None, "issued Action handle")
+            handle = wait_for(lambda: handle_path.read_text() if handle_path.exists() else None, "issued Action handle", timeout=20)
             assert re.fullmatch("[0-9a-f]{32}", handle) and handle not in handles, "invalid or reused handle"
             handles.append(handle)
             receipt = send(f"valid-{ending}", session, handle)
@@ -166,12 +156,12 @@ def main():
                     assert not (state / f".{key}.json.capture.lock").exists(), "invalid context opened a capture"
             snapshot = inspect(endpoint.receiver)
             assert len(snapshot["full"]["messages"]) == expected_messages, "invalid identity admitted a Message"
-            wait_for(lambda: session in endpoint.senders, "Action-derived model sender")
+            wait_for(lambda: session in endpoint.senders, "Action-derived model sender", timeout=20)
             assert handle not in json.dumps(snapshot), "public snapshot exposed sender authority"
             assert all(issued not in json.dumps(request) for issued in handles for request in endpoint.requests), "model context exposed sender authority"
             if ending == "exit":
                 (workspace / f"{session}.release").touch()
-                wait_for(lambda: inspect(session)["work"]["state"]["kind"] == "finished", "normal Action exit")
+                wait_for(lambda: inspect(session)["work"]["state"]["kind"] == "finished", "normal Action exit", timeout=20)
             elif ending == "stop":
                 run("session", "stop", "--store", store, "--session", session)
             else:

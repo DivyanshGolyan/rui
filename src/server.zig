@@ -22,6 +22,7 @@ const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
 const signal_stack = @import("signal_stack.zig");
+const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
 const executionMain = server_execution.executionMain;
 
@@ -3414,7 +3415,8 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
 
         fn hold() void {
             entered.store(true, .release);
-            while (!released.load(.acquire)) std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), &released, test_poll.isSet) catch
+                @panic("held ingress write was never released");
         }
 
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -3549,17 +3551,22 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         const upload = try address.connect(std.testing.io);
         defer upload.socket.close(std.testing.io);
         try Probe.send(upload.socket.handle, "/v1/message", message, false);
-        const deadline = nowNs(&host) + 3 * std.time.ns_per_s;
-        while (!Probe.entered.load(.acquire) and nowNs(&host) < deadline)
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-        try std.testing.expect(Probe.entered.load(.acquire));
+        const deadline = test_poll.after(std.testing.io, .fromSeconds(3));
+        try test_poll.waitUntil(std.testing.io, deadline, &Probe.entered, test_poll.isSet);
         const sibling = try address.connect(std.testing.io);
         defer sibling.socket.close(std.testing.io);
         try Probe.send(sibling.socket.handle, "/v1/message", message, false);
         // Classification occurs in the socket pass before its worker handoff
         // and before that pass can read a subsequently issued control.
-        while (host.request_counter.load(.acquire) < before_uploads + 2 and nowNs(&host) < deadline)
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        const Uploads = struct {
+            host: *const Host,
+            expected: u64,
+
+            fn classified(self: @This()) bool {
+                return self.host.request_counter.load(.acquire) >= self.expected;
+            }
+        };
+        try test_poll.waitUntil(std.testing.io, deadline, Uploads{ .host = &host, .expected = before_uploads + 2 }, Uploads.classified);
         try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
         for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: protocol.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
             .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
