@@ -1658,15 +1658,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
-        const Keys = struct {
-            fn send(frontend: *Self, bytes: []const u8) !void {
-                for (bytes) |byte| {
-                    var decoded = frontend.input.stream.feed(byte, 0);
-                    while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
-                }
-            }
-        };
-        try Keys.send(&self, "kept");
+        try sendKeys(&self, "kept");
         screen.restartChoice();
         self.live.work.first_action = 7;
         screen.consent = .{};
@@ -1678,7 +1670,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         // Each change is followed by the frame that shows it.
         _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Approval.ready, screen.selected.approval);
-        try Keys.send(&self, line[0]);
+        try sendKeys(&self, line[0]);
         switch (change) {
             .decided_elsewhere => {
                 self.live.work.first_action = null;
@@ -1701,9 +1693,9 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Editor.choice, screen.selected.editor);
         try std.testing.expect(screen.selected.approval != .ready and screen.selected.approval != .draining);
-        try Keys.send(&self, line[1]);
+        try sendKeys(&self, line[1]);
         try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
-        try Keys.send(&self, "\r");
+        try sendKeys(&self, "\r");
         // Nothing reached the draft or was sent, and nothing was decided.
         try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
         try std.testing.expect(self.submission.view() == null);
@@ -1714,7 +1706,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         // The next line is the draft's again.
         _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Editor.draft, screen.selected.editor);
-        try Keys.send(&self, "!");
+        try sendKeys(&self, "!");
         try std.testing.expectEqualStrings("kept!", self.input.composition().bytes);
     };
 }
@@ -1898,7 +1890,7 @@ test "Ctrl-R while approval is paused keeps the draft, recovers nothing and says
         try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to it. Draft retained.", held.self.notice.?);
         try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
         try std.testing.expect(!held.screen.consent.acceptsInput());
-        // The draft took no rejection: once the Action is decided it sends.
+        // The draft took no rejection: it still edits.
         try sendKeys(&held.self, "!");
         try std.testing.expectEqualStrings("kept!", held.self.input.composition().bytes);
     }
@@ -1980,24 +1972,16 @@ test "each source admits a slash command while another is active as it always di
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    const Keys = struct {
-        fn send(frontend: *Self, bytes: []const u8) !void {
-            for (bytes) |byte| {
-                var decoded = frontend.input.stream.feed(byte, 0);
-                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
-            }
-        }
-    };
     // A running command: a draft inspection queues behind it.
     self.inspection.command_running = true;
-    try Keys.send(self, "/requests\r");
+    try sendKeys(self, "/requests\r");
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     // A queued one: every draft command waits, local ones too, and keeps the draft.
     for ([_][]const u8{ "/wait", "/exit", "/help" }) |text| {
         self.notice = null;
-        try Keys.send(self, text);
-        try Keys.send(self, "\r");
+        try sendKeys(self, text);
+        try sendKeys(self, "\r");
         try std.testing.expectEqualStrings(text, self.input.composition().bytes);
         try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.notice.?);
         try std.testing.expect(self.leaving == null);
@@ -2027,16 +2011,8 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    const Keys = struct {
-        fn send(frontend: *Self, bytes: []const u8) !void {
-            for (bytes) |byte| {
-                var decoded = frontend.input.stream.feed(byte, 0);
-                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
-            }
-        }
-    };
     // No draft outlives the frontend: Esc keeps it and says why.
-    try Keys.send(self, "draft\x07");
+    try sendKeys(self, "draft\x07");
     try std.testing.expect(self.leaving == null);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
@@ -2051,7 +2027,7 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     }) |case| {
         self.submission.state = case[0];
         self.notice = null;
-        try Keys.send(self, "\x07");
+        try sendKeys(self, "\x07");
         try std.testing.expect(self.leaving == null);
         try std.testing.expectEqualStrings(case[1], self.notice.?);
     }
@@ -2059,18 +2035,18 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     self.submission.state = .not_started;
     // A running command keeps the conversation open.
     self.inspection.command_running = true;
-    try Keys.send(self, "\x07");
+    try sendKeys(self, "\x07");
     try std.testing.expect(self.leaving == null);
     self.inspection.command_running = false;
     // A pending Action: Esc returns to it, not to the overview.
     const file = try held.adopt(4);
     defer file.close(std.testing.io);
-    try Keys.send(self, "\x07");
+    try sendKeys(self, "\x07");
     try std.testing.expect(self.leaving == null);
     held.screen.withdrawAction();
     self.live.work.first_action = null;
     // Ctrl-G stands for Esc and Alt-Esc.
-    try Keys.send(self, "\x07");
+    try sendKeys(self, "\x07");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
@@ -2078,20 +2054,12 @@ test "End on an empty draft goes to the latest view and never leaves the convers
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    const Keys = struct {
-        fn send(frontend: *Self, bytes: []const u8) !void {
-            for (bytes) |byte| {
-                var decoded = frontend.input.stream.feed(byte, 0);
-                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
-            }
-        }
-    };
     for ([_][]const u8{ "\x1b[F", "\x1bOF" }) |end| {
-        try Keys.send(self, end);
+        try sendKeys(self, end);
         try std.testing.expect(self.leaving == null);
     }
     // A rejected draft changes no key's meaning: Esc still returns.
-    try Keys.send(self, "\x00\x1b[27u");
+    try sendKeys(self, "\x00\x1b[27u");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
