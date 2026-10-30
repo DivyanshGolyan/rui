@@ -60,7 +60,9 @@ pub const StoreLease = struct {
         };
     }
 
-    pub fn acquire(io: std.Io, supplied_path: []const u8) !StoreLease {
+    /// Runs once per process; noinline keeps its path scratch off the
+    /// caller's frame, which lives as long as the Host.
+    pub noinline fn acquire(io: std.Io, supplied_path: []const u8) !StoreLease {
         var store_dir = try std.Io.Dir.cwd().createDirPathOpen(io, supplied_path, .{
             .permissions = .fromMode(0o700),
             .open_options = .{ .iterate = true },
@@ -89,7 +91,9 @@ pub const StoreLease = struct {
         };
     }
 
-    pub fn prepareForServing(self: *StoreLease, fault_cleanup: bool) !void {
+    /// Called once at Host startup; noinline keeps its directory listing and
+    /// path buffer off the caller's frame, which lives as long as the Host.
+    pub noinline fn prepareForServing(self: *StoreLease, fault_cleanup: bool) !void {
         var scratch = try self.store_dir.createDirPathOpen(self.io, "scratch", .{
             .permissions = .fromMode(0o700),
             .open_options = .{ .iterate = true },

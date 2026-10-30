@@ -6,7 +6,6 @@
     "AuthWorker": "codex_credentials.exchangeRefresh"
   },
   "exceptions": [
-    {"function": "server.serve", "frame_bytes": 28672, "cause": "startup-only buffers inlined into serve: bash.environment path and executable buffers (8 KB), HostDiagnostics repairTail [4096]u8, readiness FixedJsonBuffer(3319), store-version message [2480]u8, two Dir.Iterator"},
     {"function": "server.prepareActivityPage", "frame_bytes": 65536, "cause": "row 5: activity page rendered into a stack buffer [64448]u8, then duplicated to the Reply heap"},
     {"function": "store.Store.activityPage", "frame_bytes": 49152, "cause": "row 7: ActivityFacts (11.4 KB) returned through Access.finish, two copies"},
     {"function": "protocol.Ingress.parse", "frame_bytes": 45056, "cause": "row 7: Request (6.5 KB) returned by value from Parser.parse; dead SocketBody buffer"},

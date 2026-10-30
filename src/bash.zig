@@ -3,6 +3,7 @@ const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
+const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 const BashLifecycle = @import("BashLifecycle.zig");
 const deadline = @import("deadline.zig");
@@ -24,10 +25,16 @@ pub const fault_gate_name = "bash-fault-gate";
 pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !std.process.Environ.Map {
     var result = std.process.Environ.Map.init(allocator);
     errdefer result.deinit();
-    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const executable = executable_buffer[0..try std.process.executablePath(io, &executable_buffer)];
-    var path_buffer: [std.fs.max_path_bytes + system_path.len + 1]u8 = undefined;
-    try result.put("PATH", try searchPath(&path_buffer, std.fs.path.dirname(executable)));
+    // Built once at Host startup, so its 8 KiB of path buffers live in pages
+    // mapped for the call.
+    const mapped = try pages.Mapped(struct {
+        executable: [std.fs.max_path_bytes]u8,
+        path: [std.fs.max_path_bytes + system_path.len + 1]u8,
+    }).map();
+    defer mapped.unmap();
+    const buffers = mapped.value;
+    const executable = buffers.executable[0..try std.process.executablePath(io, &buffers.executable)];
+    try result.put("PATH", try searchPath(&buffers.path, std.fs.path.dirname(executable)));
     if (home) |value| if (std.fs.path.isAbsolute(value)) try result.put("HOME", value);
     return result;
 }

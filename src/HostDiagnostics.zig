@@ -19,7 +19,9 @@ failure: ?anyerror = null,
 
 /// The Store lease is held by the caller. Only this writer mutates diagnostic
 /// files; a failure disables further writes without changing Host work.
-pub fn open(io: std.Io, store_dir: std.Io.Dir, cap_bytes: u64) !Self {
+/// Called once at startup; noinline keeps its directory listing and tail
+/// buffer off the caller's frame, which lives as long as the Host.
+pub noinline fn open(io: std.Io, store_dir: std.Io.Dir, cap_bytes: u64) !Self {
     const file_cap = cap_bytes / max_files;
     if (file_cap < max_record_bytes) return error.InvalidDiagnosticCap;
     var dir = try store_dir.createDirPathOpen(io, "diagnostics", .{

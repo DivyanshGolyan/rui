@@ -803,22 +803,7 @@ pub fn serve(
     // Only the lease winner warns, before readiness. Preferences are advice
     // for future Sessions: unreadable/missing defaults must not stop this Host
     // from serving existing work, and an unsupported saved pin stays intact.
-    if (home) |absolute_home| {
-        const saved = @import("preferences.zig").load(absolute_home) catch null;
-        if (saved) |values| {
-            if (values.model.len != 0 and !model_capability.supportsModel(values.model.slice())) {
-                var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
-                var out = std.Io.Writer.fixed(&bytes);
-                try out.writeAll("rui: saved new-Session default model \"");
-                var text: TerminalText = .{ .mode = .line };
-                try text.feed(&out, values.model.slice());
-                try text.finish(&out);
-                try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
-                    "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
-                _ = stderr.writeHeld(out.buffered());
-            }
-        }
-    }
+    if (home) |absolute_home| try warnUnsupportedSavedModel(absolute_home);
     var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
         diagnostic_open_error = err;
@@ -843,21 +828,7 @@ pub fn serve(
         .{ .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
-            var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
-            var output = std.Io.Writer.fixed(&message);
-            const reason = if (found_schema_version == store_module.schema_version)
-                "unsupported or missing Store wire metadata"
-            else
-                "unsupported Store format";
-            try output.print("rui: {s} at ", .{reason});
-            var path_text: TerminalText = .{ .mode = .line };
-            try path_text.feed(&output, lease.paths.store.slice());
-            try path_text.finish(&output);
-            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
-                found_schema_version, store_module.schema_version, protocol.wire_version,
-            });
-            const text = output.buffered();
-            _ = rui_write_readiness(2, text.ptr, text.len);
+            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
             if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
         }
         return err;
@@ -956,28 +927,7 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
-        lease.paths.store.slice(),
-        lease.paths.socket.slice(),
-        active_capacity,
-        intake_capacity,
-        descriptor_requirement.total,
-        descriptor_limit_text,
-        @sizeOf(execution.CustodyRecord),
-        @sizeOf(ExecutionSlot),
-        @sizeOf(model_adapter.Preparation),
-        scratch_limit_bytes,
-        @sizeOf(output_retention.Entry),
-        retention_entries.len,
-        if (provider_endpoint != null) "enabled" else "unavailable",
-    });
-    if (provider_endpoint != null) {
-        try ready.appendFmt(" nghttp2={s} openssl={s}", .{ provider.nghttp2_version, provider.openssl_version });
-    }
-    try ready.append("\n");
-    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
-        return error.HostReadinessOutputUnavailable;
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, provider_endpoint != null);
     stderr.release();
     readiness_owned = false;
     if (diagnostic_open_error) |err|
@@ -990,6 +940,77 @@ pub fn serve(
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
+}
+
+// serve's frame stays resident for the Host's life, so each startup-only
+// buffer lives in a noinline function of its own.
+
+/// Warns, before readiness, about a saved default model this release cannot
+/// serve. Preferences are advice for future Sessions: unreadable or missing
+/// defaults never stop the Host, and the saved pin stays intact.
+noinline fn warnUnsupportedSavedModel(home: []const u8) !void {
+    const values = @import("preferences.zig").load(home) catch return;
+    if (values.model.len == 0 or model_capability.supportsModel(values.model.slice())) return;
+    var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try out.writeAll("rui: saved new-Session default model \"");
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(&out, values.model.slice());
+    try text.finish(&out);
+    try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
+        "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
+    _ = stderr.writeHeld(out.buffered());
+}
+
+noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
+    var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&message);
+    const reason = if (found_schema_version == store_module.schema_version)
+        "unsupported or missing Store wire metadata"
+    else
+        "unsupported Store format";
+    try output.print("rui: {s} at ", .{reason});
+    var path_text: TerminalText = .{ .mode = .line };
+    try path_text.feed(&output, store_path);
+    try path_text.finish(&output);
+    try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
+        found_schema_version, store_module.schema_version, protocol.wire_version,
+    });
+    const text = output.buffered();
+    _ = rui_write_readiness(2, text.ptr, text.len);
+}
+
+noinline fn writeReadiness(
+    paths: *const platform.Paths,
+    active_capacity: usize,
+    intake_capacity: usize,
+    descriptor_requirement: usize,
+    descriptor_limit_text: []const u8,
+    retention_capacity: usize,
+    provider_enabled: bool,
+) !void {
+    var ready: protocol.ResponseBuffer = .{};
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+        paths.store.slice(),
+        paths.socket.slice(),
+        active_capacity,
+        intake_capacity,
+        descriptor_requirement,
+        descriptor_limit_text,
+        @sizeOf(execution.CustodyRecord),
+        @sizeOf(ExecutionSlot),
+        @sizeOf(model_adapter.Preparation),
+        scratch_limit_bytes,
+        @sizeOf(output_retention.Entry),
+        retention_capacity,
+        if (provider_enabled) "enabled" else "unavailable",
+    });
+    if (provider_enabled) {
+        try ready.appendFmt(" nghttp2={s} openssl={s}", .{ provider.nghttp2_version, provider.openssl_version });
+    }
+    try ready.append("\n");
+    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
+        return error.HostReadinessOutputUnavailable;
 }
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {

@@ -1836,8 +1836,10 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
     }
 
-    /// Opens in place: the Host holds exactly one Store, never a copy.
-    pub fn openWithOptions(
+    /// Opens in place: the Host holds exactly one Store, never a copy. It
+    /// runs once per process; noinline keeps its path buffers off the
+    /// caller's frame, which lives as long as the Host.
+    pub noinline fn openWithOptions(
         self: *Store,
         io: std.Io,
         database_path: []const u8,
