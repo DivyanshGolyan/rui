@@ -119,14 +119,11 @@ const runnable_selection_sql =
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
-// A Turn ready without input also takes queued input, so any queued Message
-// in its Session is message selection's work, with no per-Turn eligibility read.
-comptime {
-    for (turn_policy.continues_without_input) |resolution| {
-        if (!turn_policy.contains(&turn_policy.continues_with_input, resolution))
-            @compileError("a Turn that continues without input must also continue with it");
-    }
-}
+// Excluding only queued input matches runnable eligibility because the indexed
+// Turn is its Session's only active one (turn_one_active_per_session), the two
+// continuation predicates share complete_tool_results_sql and turn_policy keeps
+// continues_without_input inside continues_with_input. It also trusts the stored
+// column, which validateRecordedContinuations fences.
 const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active INDEXED BY turn_tool_continuation JOIN session s ON s.session_ref=active.session_ref " ++
@@ -12248,6 +12245,23 @@ test "a Turn whose continuation was never recorded fences the Store" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "unrecorded-metadata", &calls);
     try exec(storage.database, "UPDATE turn SET continuation_operation_id=NULL");
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a continuation recorded for a Turn waiting on its tool results fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "premature-config");
+    try submitTestMessage(&storage, &tmp, "premature", "premature", session.slice(), "propose");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "premature-config");
+    try submitTestMessage(&storage, &tmp, "premature-input", "premature-input", session.slice(), "more");
+    try exec(storage.database, "UPDATE turn SET continuation_operation_id=operation_id");
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.tool_continuation, .{}));
     try std.testing.expect(storage.isFenced());

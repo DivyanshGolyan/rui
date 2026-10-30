@@ -39,6 +39,14 @@ pub const continues_with_input = [_]Resolution{ .answer, .compacted, .interrupte
 /// The active Turn continues with tool results and no queued input. An
 /// interrupted operation waits for new input.
 pub const continues_without_input = [_]Resolution{ .answer, .compacted, .context_overflow };
+// A Turn ready without input also takes queued input, so any queued Message
+// in its Session is message selection's work, with no per-Turn eligibility read.
+comptime {
+    for (continues_without_input) |resolution| {
+        if (!contains(&continues_with_input, resolution))
+            @compileError("a Turn that continues without input must also continue with it");
+    }
+}
 
 pub fn contains(comptime set: []const Resolution, resolution: Resolution) bool {
     return std.mem.indexOfScalar(Resolution, set, resolution) != null;
