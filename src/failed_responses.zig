@@ -24,7 +24,7 @@ const copy_window_bytes = 64 * 1024;
 /// One export's scratch. Exports are rare and need over 100 KiB, so each
 /// maps fresh pages for the call and unmaps them at return.
 const ExportScratch = struct {
-    iterator: std.Io.Dir.Iterator,
+    listing: Listing,
     metadata: [max_metadata_bytes]u8,
     /// Backs the metadata parse.
     parse_arena: [max_metadata_bytes * 4]u8,
@@ -33,7 +33,7 @@ const ExportScratch = struct {
 
 /// One retention's scratch, mapped for the call like `ExportScratch`.
 const RetainScratch = struct {
-    iterator: std.Io.Dir.Iterator,
+    listing: Listing,
     records: [max_records + 1]Record,
     window: [copy_window_bytes]u8,
     encoded: [max_metadata_bytes]u8,
@@ -109,8 +109,8 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     defer mapped.unmap();
     const scratch = mapped.value;
     var selected: ?Name = null;
-    iterate(&scratch.iterator, dir);
-    while (try scratch.iterator.next(io)) |entry| {
+    const listing = scratch.listing.start(dir);
+    while (try listing.next(io)) |entry| {
         const name = parse(entry.name) orelse continue;
         if (name.part != .metadata or name.binding.operation_id != binding.operation_id or name.binding.attempt_ordinal != binding.attempt_ordinal) continue;
         if (selected != null) return error.AmbiguousFailedResponse;
@@ -163,12 +163,19 @@ pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptB
     if (!std.mem.eql(u8, &expected, &digest)) return error.InvalidFailedResponseRecord;
 }
 
-/// Starts `iterator` over `dir` where it lives. `Dir.iterate` returns its
-/// 2 KiB buffer as an undefined literal, which ReleaseSafe fills on the stack
-/// before copying it.
-fn iterate(iterator: *std.Io.Dir.Iterator, dir: std.Io.Dir) void {
-    iterator.reader = .{ .dir = dir, .state = .reset, .buffer = &iterator.reader_buffer, .index = 0, .end = 0 };
-}
+/// A directory listing that lives in its scratch. `Dir.iterate` returns its
+/// 2 KiB buffer by value as an undefined literal, which ReleaseSafe fills on
+/// the stack before copying it; `Dir.Reader` borrows a buffer instead.
+const Listing = struct {
+    reader: std.Io.Dir.Reader,
+    buffer: [std.Io.Dir.Iterator.reader_buffer_len]u8 align(@alignOf(usize)),
+
+    /// Starts listing `dir` from its first entry.
+    fn start(self: *Listing, dir: std.Io.Dir) *std.Io.Dir.Reader {
+        self.reader = .init(dir, &self.buffer);
+        return &self.reader;
+    }
+};
 
 fn readWindow(io: std.Io, dir: std.Io.Dir, name: []const u8, offset: u64, bytes: []u8, expected_length: ?u64, cap: u64) !usize {
     const fd = std.posix.openat(dir.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
@@ -276,13 +283,12 @@ fn evictionCount(records: []const Record, limits: Limits, incoming: u64) usize {
 /// enough records for `incoming` bytes. A failed deletion never counts as
 /// reclaimed space: it fails this retention instead.
 fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64, scratch: *RetainScratch) !u64 {
-    const iterator = &scratch.iterator;
     const records = &scratch.records;
     while (true) {
         var stale_buffer: NameBuffer = undefined;
         var stale: ?[]const u8 = null;
-        iterate(iterator, dir);
-        while (try iterator.next(io)) |entry| {
+        const listing = scratch.listing.start(dir);
+        while (try listing.next(io)) |entry| {
             const name = parse(entry.name) orelse continue;
             if (name.part != .body_tmp and name.part != .metadata_tmp) continue;
             @memcpy(stale_buffer[0..entry.name.len], entry.name);
@@ -293,8 +299,8 @@ fn prune(io: std.Io, dir: std.Io.Dir, limits: Limits, incoming: u64, scratch: *R
     }
     var count: usize = 0;
     var next: u64 = 1;
-    iterate(iterator, dir);
-    while (try iterator.next(io)) |entry| {
+    const listing = scratch.listing.start(dir);
+    while (try listing.next(io)) |entry| {
         const name = parse(entry.name) orelse continue;
         const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
         if (stat.kind != .file) return error.InvalidFailedResponseRecord;
