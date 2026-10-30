@@ -532,8 +532,13 @@ pub const State = struct {
         return self.pendingAt(.start, null) != null;
     }
 
-    fn stopping(self: *const State, ref: Reference) bool {
-        return self.pendingAt(.stop, ref) != null;
+    /// A stop of `ref` still in flight, or one that may have reached the
+    /// Host. While one is open the row takes no other stop.
+    fn openStop(self: *const State, ref: Reference) ?*const Request {
+        for (self.requests[0..self.request_count]) |*held| {
+            if (held.kind == .stop and std.mem.eql(u8, &held.session.?, &ref) and (held.status == .pending or held.status == .unknown)) return held;
+        }
+        return null;
     }
 
     fn pendingAt(self: *const State, kind: @FieldType(Request, "kind"), ref: ?Reference) ?usize {
@@ -1000,24 +1005,29 @@ fn keyPress(state: *State, key: Key, effects: *Effects) void {
         .end_of_input => if (state.draft_len == 0 and !state.starting()) effects.add(.exit),
         .stop => {
             const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session to stop.", .{});
-            const rule = rules.get(shownKind(state, row));
-            if (rule.stoppable) {
+            if (rules.get(shownKind(state, row)).stoppable) {
                 state.prompt = .{ .stop = row.reference };
-            } else state.say(.quiet, "Nothing to stop: {s} is {s}.", .{ &row.reference, rule.word });
+            } else refuseStop(state, row);
         },
     }
 }
 
 fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
     const row = state.find(ref) orelse return;
-    const rule = rules.get(shownKind(state, row));
-    if (!rule.stoppable) return state.say(.quiet, "Nothing to stop: {s} is {s}.", .{ &ref, rule.word });
+    if (!rules.get(shownKind(state, row)).stoppable) return refuseStop(state, row);
     if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
-/// The kind a row shows: `stopping` while its stop awaits a result.
+/// Says why `row` takes no stop. An unconfirmed one names its recovery.
+fn refuseStop(state: *State, row: *const Row) void {
+    if (state.openStop(row.reference)) |held| if (held.status == .unknown)
+        return state.say(.attention, "! Unconfirmed stop of {s}: rui request recover {s}", .{ &row.reference, held.text.slice() });
+    state.say(.quiet, "Nothing to stop: {s} is {s}.", .{ &row.reference, rules.get(shownKind(state, row)).word });
+}
+
+/// The kind a row shows: `stopping` while a stop of it is open.
 fn shownKind(state: *const State, row: *const Row) Kind {
-    return if (state.stopping(row.reference)) .stopping else row.state;
+    return if (state.openStop(row.reference) != null) .stopping else row.state;
 }
 
 fn insert(state: *State, text: []const u8) void {
@@ -2148,32 +2158,47 @@ test "a cancelled stop prompt sends nothing" {
 }
 
 test "unconfirmed stops keep their handles until departure; a full ledger refuses another" {
-    var state = try opened(&mixed);
+    const refs = [_]Reference{ "k7m2qx".*, "r4t9vw".*, "a1b2c3".*, "b2c3d4".*, "c3d4e5".*, "d4e5f6".*, "f6g7h8".*, "g7h8j9".*, "m1n2p3".* };
+    comptime std.debug.assert(refs.len == max_requests + 1);
+    var rows: [refs.len]Listed = undefined;
+    for (&rows, &refs, 0..) |*row, *ref, n| row.* = session(ref, .{ .working = ago(10 * (n + 1)) }, .{});
+    var state = try opened(&rows);
     defer state.deinit();
-    try expectSelected(&state, "k7m2qx");
-    const handles = comptime handles: {
-        var handles: [8][]const u8 = undefined;
-        for (&handles, 0..) |*handle, n| handle.* = std.fmt.comptimePrint("stop-handle-{d}", .{n});
-        break :handles handles;
-    };
-    inline for (handles) |handle| {
+    var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer expected.deinit();
+    var stopped: [max_requests]Reference = undefined;
+    for (&stopped, 0..) |*ref, n| {
+        if (n != 0) try expectEffects(&.{}, try press(&state, .down));
+        ref.* = state.selected.?;
+        for (stopped[0..n]) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, ref));
+        var bytes: [32]u8 = undefined;
+        const handle = try std.fmt.bufPrint(&bytes, "stop-handle-{d}", .{n});
+        var notice: [128]u8 = undefined;
+        const recover = try std.fmt.bufPrint(&notice, "! Unconfirmed stop of {s}: rui request recover {s}", .{ ref, handle });
         try expectEffects(&.{}, try press(&state, .ctrl_x));
-        try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .ctrl_x));
-        try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .unconfirmed = handle } } }));
-        try expectNotice(&state, "! Unconfirmed stop of k7m2qx: rui request recover " ++ handle);
+        try expectEffects(&.{.{ .stop = ref.* }}, try press(&state, .ctrl_x));
+        try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref.*, .outcome = .{ .unconfirmed = handle } } }));
+        try expectNotice(&state, recover);
+        // The row stays stopping: another Ctrl-X sends nothing and names
+        // the recovery instead.
+        try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find(ref.*).?));
+        state.notice = null;
+        try expectEffects(&.{}, try press(&state, .ctrl_x));
+        try expectEffects(&.{}, try press(&state, .ctrl_x));
+        try expectNotice(&state, recover);
+        try expected.writer.print("rui: Stopping {s} was not confirmed; use rui request recover {s}. Do not stop it again.\n", .{ ref, handle });
     }
+    // A full ledger refuses a stop of a Session it does not hold.
+    try expectEffects(&.{}, try press(&state, .down));
+    const last = state.selected.?;
+    for (stopped) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, &last));
     try expectEffects(&.{}, try press(&state, .ctrl_x));
     try expectEffects(&.{}, try press(&state, .ctrl_x));
     try expectNotice(&state, "! Wait for earlier requests, or leave to recover unconfirmed ones.");
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try writeDeparture(&state, &departure.writer);
-    const expected = comptime expected: {
-        var text: []const u8 = "";
-        for (handles) |handle| text = text ++ "rui: Stopping k7m2qx was not confirmed; use rui request recover " ++ handle ++ ". Do not stop it again.\n";
-        break :expected text;
-    };
-    try std.testing.expectEqualStrings(expected, departure.written());
+    try std.testing.expectEqualStrings(expected.written(), departure.written());
 }
 
 test "enter on a row opens it" {

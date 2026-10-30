@@ -58,18 +58,20 @@ pub const Hooks = struct {
 
 /// The client operations the effects run. The worker runs all but
 /// `converse`, each with its own cancellable requests; the loop runs
-/// `converse`. Tests substitute their own.
+/// `converse`. Each returns what the Host answered, failures included, and
+/// an error when there was no answer. Tests substitute their own.
 pub const Operations = struct {
     /// host-info's facts, or null when the Host gives none.
     host: *const fn (*Self) ?view.Host,
-    /// Reads one `session list` page into `page`; false when the Host
-    /// answered with a failure.
-    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!bool,
-    /// The first line of a Session's first Message, read into `buffer`, or
-    /// null when the Host refused it. An error is no answer.
-    first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!?[]const u8,
-    start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) void,
-    stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) void,
+    /// Reads one `session list` page into `page`, or returns the Host's
+    /// failure.
+    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
+    /// The first line of a Session's first Message, read into `buffer`.
+    first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
+    /// Write the request's fate into the Reply, and return the error that
+    /// ends the overview after a canonical Store failure.
+    start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
+    stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     /// Lends the terminal to the Session's conversation. Null once the
     /// person returned to the overview.
     converse: *const fn (*Self, view.Reference) ?Left,
@@ -89,9 +91,7 @@ pub const Left = struct {
 /// The outcome of a `session start` or `session stop`, held until the loop
 /// steps it.
 pub const Reply = struct {
-    /// `fatal` is unconfirmed too, from a canonical Store failure, which
-    /// fences the Host.
-    outcome: enum { accepted, failed, unconfirmed, fatal } = .failed,
+    outcome: enum { accepted, failed, unconfirmed } = .failed,
     session: view.Reference = undefined,
     /// The failure code, or the handle that recovers an unconfirmed request.
     text: protocol.Bounded(protocol.max_code_bytes) = .{},
@@ -104,18 +104,24 @@ pub const Reply = struct {
         return reply;
     }
 
-    /// From a send of the captured request `handle`. Only the Host's answer
-    /// settles it: a failed send, or a reply that could not be read, leaves
-    /// the saved request to recover.
-    fn of(sent: anytype, handle: []const u8) Reply {
+    /// Records a send of the captured request `handle`. Only the Host's
+    /// answer settles it: a failed send, or a reply that could not be read,
+    /// leaves the saved request to recover. A canonical Store failure leaves
+    /// it too, and is returned, since it fences the Host.
+    fn record(self: *Reply, sent: anytype, handle: []const u8) error{CanonicalStoreFailure}!void {
         const reply = switch (sent) {
-            .failed => return unconfirmed(handle),
+            .failed => {
+                self.* = unconfirmed(handle);
+                return;
+            },
             .done => |reply| reply,
         };
         const answer = reply.answer catch |err| {
-            var unknown = unconfirmed(handle);
-            if (err == error.CanonicalStoreFailure) unknown.outcome = .fatal;
-            return unknown;
+            self.* = unconfirmed(handle);
+            return switch (err) {
+                error.CanonicalStoreFailure => |fenced| fenced,
+                else => {},
+            };
         };
         var result: Reply = switch (answer.result) {
             .accepted => .{ .outcome = .accepted },
@@ -128,7 +134,7 @@ pub const Reply = struct {
             if (session.len == len) result.session = session[0..len].*;
         }
         result.handle.set(handle) catch {};
-        return result;
+        self.* = result;
     }
 
     fn unconfirmed(handle: []const u8) Reply {
@@ -142,7 +148,7 @@ pub const Reply = struct {
         return switch (self.outcome) {
             .accepted => .{ .started = .{ .reference = self.session, .handle = self.handle.slice() } },
             .failed => .{ .failed = self.text.slice() },
-            .unconfirmed, .fatal => .{ .unconfirmed = self.text.slice() },
+            .unconfirmed => .{ .unconfirmed = self.text.slice() },
         };
     }
 
@@ -150,7 +156,7 @@ pub const Reply = struct {
         return switch (self.outcome) {
             .accepted => .stopped,
             .failed => .{ .failed = self.text.slice() },
-            .unconfirmed, .fatal => .{ .unconfirmed = self.text.slice() },
+            .unconfirmed => .{ .unconfirmed = self.text.slice() },
         };
     }
 };
@@ -214,7 +220,6 @@ job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
 job: Job = .list,
 traversal: protocol_reply.SessionTraversal = .init(null),
-listed: bool = false,
 host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
@@ -225,6 +230,8 @@ scratch: ?std.Io.File = null,
 /// The last frame written, so an unchanged one is not written again.
 drawn: std.ArrayList(u8) = .empty,
 frame: std.ArrayList(u8) = .empty,
+/// What a key read while output waited asks of the loop.
+pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
 /// The last accepted start, for guidance if its conversation fails.
@@ -343,35 +350,61 @@ fn destroy(self: *Self) void {
 
 const Ending = union(enum) { overview, conversation: Left };
 
+/// What the core asks of the loop: to leave, or to lend the terminal to a
+/// Session.
+const Next = union(enum) { leave, open: view.Reference };
+
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
-    if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |ending| return ending;
+    var next: ?Next = if (self.options.open) |reference| try self.event(.{ .open = reference }) else null;
     while (true) {
+        if (next) |value| if (self.proceed(value)) |ending| return ending;
         if (self.interrupted.stopped.load(.acquire)) return .overview;
-        const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
-        if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |ending| return ending;
-        try self.dispatch();
-        try self.draw();
-        // The core says when it next needs a tick; until then only input,
-        // the worker or a signal wakes the loop.
-        const budget: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-        const timeout = switch (self.input.wait(std.Io.Clock.awake.now(self.init.io).nanoseconds, budget)) {
-            .expire => 0,
-            .poll => |milliseconds| milliseconds,
-        };
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = self.terminal.input, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.done[0], .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.signalled[0], .events = std.posix.POLL.IN, .revents = 0 },
-        };
-        _ = try std.posix.poll(&fds, timeout);
-        if (fds[2].revents != 0) drain(self.signalled[0]);
-        if (fds[1].revents != 0) {
-            drain(self.done[0]);
-            if (try self.complete()) |ending| return ending;
-        }
-        if (fds[0].revents != 0 or timeout == 0) if (try self.readInput()) |ending| return ending;
+        next = try self.turn();
+    }
+}
+
+/// One pass: a due tick, the next job and a frame, then one wait for input,
+/// the worker or a signal.
+fn turn(self: *Self) !?Next {
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
+    try self.dispatch();
+    if (try self.draw()) |next| return next;
+    // The core says when it next needs a tick; until then only input,
+    // the worker or a signal wakes the loop.
+    const budget: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    const timeout = switch (self.input.wait(std.Io.Clock.awake.now(self.init.io).nanoseconds, budget)) {
+        .expire => 0,
+        .poll => |milliseconds| milliseconds,
+    };
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = self.terminal.input, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = self.done[0], .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = self.signalled[0], .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    _ = try std.posix.poll(&fds, timeout);
+    if (fds[2].revents != 0) drain(self.signalled[0]);
+    if (fds[1].revents != 0) {
+        drain(self.done[0]);
+        if (try self.complete()) |next| return next;
+    }
+    if (fds[0].revents != 0 or timeout == 0) return self.readInput(0);
+    return null;
+}
+
+/// Leaves, or lends the terminal to a Session until the person returns.
+fn proceed(self: *Self, next: Next) ?Ending {
+    switch (next) {
+        .leave => return .overview,
+        .open => |reference| {
+            self.opened = reference;
+            if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
+            // The conversation drew over the overview.
+            self.drawn.clearRetainingCapacity();
+            return null;
+        },
     }
 }
 
@@ -380,9 +413,11 @@ fn drain(fd: c_int) void {
     while (std.c.read(fd, &bytes, bytes.len) > 0) {}
 }
 
-/// Steps the core with one event and runs the effects it returns.
-fn event(self: *Self, value: view.Event) !?Ending {
+/// Steps the core with one event and queues the jobs it asks for. Opening a
+/// Session and leaving are the loop's to do.
+fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
+    var next: ?Next = null;
     for (effects.slice()) |effect| switch (effect) {
         .list => |since| {
             self.traversal = .init(since);
@@ -392,15 +427,10 @@ fn event(self: *Self, value: view.Event) !?Ending {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .start => |start| self.queue(.{ .start = .{ .settings = start.settings, .text = start.text } }),
         .stop => |reference| self.queue(.{ .stop = reference }),
-        .open => |reference| {
-            self.opened = reference;
-            if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
-            // The conversation drew over the overview.
-            self.drawn.clearRetainingCapacity();
-        },
-        .exit => return .overview,
+        .open => |reference| next = .{ .open = reference },
+        .exit => return .leave,
     };
-    return null;
+    return next;
 }
 
 fn queue(self: *Self, job: Job) void {
@@ -418,7 +448,8 @@ fn dispatch(self: *Self) !void {
     try self.worker.start(self.init.io, self, work);
 }
 
-/// The worker: runs one job and writes only its own output fields.
+/// The worker: runs one job and writes only its own output fields. Its
+/// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     defer {
@@ -428,29 +459,45 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
     const requests = task.requests();
     switch (self.job) {
         .host => self.host = self.ops.host(self),
-        .list => self.listed = self.ops.list(self, requests, self.traversal.cursor, &self.page) catch false,
-        .lines => |reads| for (reads.slice(), self.lines[0..reads.len]) |read, *line| {
-            line.result = .unanswered;
-            const text = (self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes) catch continue) orelse {
-                line.result = .refused;
-                continue;
+        .list => if (try self.ops.list(self, requests, self.traversal.cursor, &self.page)) |failure| return failure.err(),
+        .lines => |reads| {
+            const lines = self.lines[0..reads.len];
+            for (lines) |*line| line.result = .unanswered;
+            for (reads.slice(), lines) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
+                .line => |text| {
+                    line.result = .line;
+                    line.len = text.len;
+                },
+                // A refusal answers the row; a canonical Store failure ends
+                // the overview.
+                .failure => |failure| switch (failure.err()) {
+                    error.HostInvocationFailed => line.result = .refused,
+                    error.CanonicalStoreFailure => |err| return err,
+                },
             };
-            line.result = .line;
-            line.len = text.len;
         },
-        .start => |start| self.ops.start(self, requests, self.startInput(start.settings, start.text), &self.reply),
-        .stop => |*reference| self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .start => |start| try self.ops.start(self, requests, self.startInput(start.settings, start.text), &self.reply),
+        .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
     }
 }
 
-/// Joins the finished job and steps the core with its result.
-fn complete(self: *Self) !?Ending {
+/// Joins the finished job and steps the core with what it left: a failed
+/// job is one without an answer. After a canonical Store failure the
+/// overview then ends, as every other caller does, once the core holds any
+/// request the job left unconfirmed.
+fn complete(self: *Self) !?Next {
     if (self.worker.thread == null) return null;
-    self.worker.join() catch {};
+    const outcome = self.worker.join();
+    const next = try self.deliver(outcome);
+    outcome catch |err| if (err == error.CanonicalStoreFailure) return err;
+    return next;
+}
+
+fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     switch (self.job) {
         .host => return self.event(.{ .host = self.host }),
         .list => {
-            if (!self.listed) return self.event(.{ .list = .failed });
+            outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
             const page: view.Page = .of(&self.traversal, &self.page, &rows);
             // The next page goes before anything this page's result queues.
@@ -459,22 +506,15 @@ fn complete(self: *Self) !?Ending {
         },
         .lines => |reads| for (reads.slice(), self.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
-            if (try self.event(.{ .first_line = result })) |ending| return ending;
+            if (try self.event(.{ .first_line = result })) |next| return next;
         },
         .start => {
             if (self.reply.outcome == .accepted) self.started = .{ .session = self.reply.session, .handle = self.reply.handle };
-            return self.settled(.{ .start = self.reply.start() });
+            return self.event(.{ .start = self.reply.start() });
         },
-        .stop => |reference| return self.settled(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
     }
     return null;
-}
-
-/// Steps a start's or stop's result. After a canonical Store failure the
-/// overview ends, as every other caller does.
-fn settled(self: *Self, result: view.Event) !?Ending {
-    const ending = try self.event(result);
-    return if (self.reply.outcome == .fatal) error.CanonicalStoreFailure else ending;
 }
 
 /// One captured `session start`: the composer's text and start settings
@@ -510,13 +550,14 @@ fn startInput(self: *const Self, settings: *const view.StartSettings, text: []co
     } };
 }
 
-/// Reads what the terminal holds and steps each key. A lone Esc becomes a
-/// key once the stream says it expired.
-fn readInput(self: *Self) !?Ending {
-    for (0..4096) |_| {
-        const read = (self.terminal.next(self.init.io, &self.input, 0) catch |err| switch (err) {
+/// Reads what the terminal holds, waiting `wait` milliseconds for the
+/// first byte, and steps each key. A lone Esc becomes a key once the stream
+/// says it expired.
+fn readInput(self: *Self, wait: i32) !?Next {
+    for (0..4096) |count| {
+        const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                if (try self.input.expire()) if (try self.event(.{ .key = .escape })) |ending| return ending;
+                if (try self.input.expire()) if (try self.event(.{ .key = .escape })) |next| return next;
                 continue;
             },
             else => return err,
@@ -530,7 +571,7 @@ fn readInput(self: *Self) !?Ending {
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             },
-            else => if (keyOf(decoded)) |key| if (try self.event(.{ .key = key })) |ending| return ending,
+            else => if (keyOf(decoded)) |key| if (try self.event(.{ .key = key })) |next| return next,
         };
     }
     return null;
@@ -568,7 +609,7 @@ fn keyOf(decoded: TerminalInput.Decoded) ?view.Key {
 }
 
 /// Draws the core's screen, unless the terminal already shows it.
-fn draw(self: *Self) !void {
+fn draw(self: *Self) !?Next {
     const size = self.terminal.geometry();
     var screen = try view.render(self.init.gpa, &self.state, size.col, size.row, self.caps, 0);
     defer screen.deinit();
@@ -576,21 +617,28 @@ fn draw(self: *Self) !void {
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
     screen.writeFrame(&bytes.writer) catch return error.OutOfMemory;
     self.frame = bytes.toArrayList();
-    if (std.mem.eql(u8, self.frame.items, self.drawn.items)) return;
-    self.terminal.pump = .{ .context = self, .step = waitForOutput };
+    if (std.mem.eql(u8, self.frame.items, self.drawn.items)) return null;
+    self.terminal.pump = .{ .context = self, .step = pump };
     defer self.terminal.pump = null;
     // A failed write leaves the screen unknown: the next frame draws whole.
     self.drawn.clearRetainingCapacity();
-    try self.terminal.write(self.frame.items);
+    self.pumped = null;
+    self.terminal.write(self.frame.items) catch |err| {
+        const next = self.pumped orelse return err;
+        return next;
+    };
     std.mem.swap(std.ArrayList(u8), &self.frame, &self.drawn);
+    return null;
 }
 
-/// Waits for output credit; a signal ends the wait.
-fn waitForOutput(raw: *anyopaque) !void {
+/// While the terminal takes no output, reads input as the loop does, as the
+/// conversation's pump does. A key that leaves or opens a Session cuts the
+/// stale frame short, and a signal ends the wait.
+fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    var fds = [_]std.posix.pollfd{.{ .fd = self.terminal.output, .events = std.posix.POLL.OUT, .revents = 0 }};
-    _ = std.posix.poll(&fds, 100) catch {};
+    self.pumped = try self.readInput(16);
+    if (self.pumped != null) return error.InteractiveInterrupted;
 }
 
 /// Lends the terminal to the Session's conversation until the person
@@ -642,7 +690,7 @@ fn converse(self: *Self, session: view.Reference) ?Left {
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
-    const answered: anyerror!?Ending = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
+    const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
     // A ledger entry prints well under 512 bytes.
     var bytes: [view.max_requests * 512]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
@@ -705,7 +753,7 @@ fn hostFacts(self: *Self) ?view.Host {
     return .{ .started_at = ready.started_at, .slots = ready.active_capacity, .slots_in_use = ready.custody_occupied };
 }
 
-fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !bool {
+fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
     // Each page overwrites the one before from offset zero.
     const Sink = struct {
         io: std.Io,
@@ -723,19 +771,16 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     const reply = try requests.listSessions(self.options.store, null, cursor, &sink, &buffer);
     switch (try protocol_reply.SessionListReply.decode(self.init.io, file, null, cursor, reply)) {
         .page => |value| page.* = value,
-        .failure => return false,
+        .failure => |failure| return failure,
     }
-    return true;
+    return null;
 }
 
-fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, buffer: []u8) !?[]const u8 {
-    return switch (try requests.readActivityPrefix(self.options.store, session, position, buffer)) {
-        .line => |line| line,
-        .failure => null,
-    };
+fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    return requests.readActivityPrefix(self.options.store, session, position, buffer);
 }
 
-fn startSession(self: *Self, requests: client.Requests, input: client.MessageInput, reply: *Reply) void {
+fn startSession(self: *Self, requests: client.Requests, input: client.MessageInput, reply: *Reply) !void {
     const io = self.init.io;
     // A capture that fails sends nothing, so the text can be sent again.
     var captured = client.captureMessage(io, input, .{ .generated = self.options.directory }).get() catch |err| {
@@ -748,10 +793,10 @@ fn startSession(self: *Self, requests: client.Requests, input: client.MessageInp
         return;
     };
     var buffer: client.ReplyBuffer = .{};
-    reply.* = .of(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
 }
 
-fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) void {
+fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
     const io = self.init.io;
     var captured = client.captureSessionStop(io, input, .{ .generated = self.options.directory }) catch |err| {
         reply.* = .refused(@errorName(err));
@@ -759,7 +804,7 @@ fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStop
     };
     defer captured.close(io);
     var buffer: client.ReplyBuffer = .{};
-    reply.* = .of(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
 }
 
 const test_now_s: u64 = 1_800_000_000;
@@ -803,7 +848,7 @@ const fake_operations: Operations = .{
         }
     }.host,
     .list = struct {
-        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !bool {
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
             Seen.now.since = cursor.since;
             page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
@@ -814,19 +859,19 @@ const fake_operations: Operations = .{
             row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s - 10, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
             row.peers.from_person_at = test_now_s - 10;
             page.rows[0] = row;
-            return true;
+            return null;
         }
     }.list,
     .first_line = struct {
-        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, buffer: []u8) !?[]const u8 {
+        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
             Seen.now.line = .{ .session = session[0..6].*, .position = position };
             const text = "Fix the flaky test\nand more";
             @memcpy(buffer[0..text.len], text);
-            return buffer[0..text.len];
+            return .{ .line = buffer[0..text.len] };
         }
     }.firstLine,
     .start = struct {
-        fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) void {
+        fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) !void {
             const settings = input.configuration.?;
             Seen.now.starts += 1;
             Seen.now.start = .{
@@ -843,7 +888,7 @@ const fake_operations: Operations = .{
         }
     }.start,
     .stop = struct {
-        fn stop(_: *Self, _: client.Requests, input: client.SessionStopInput, reply: *Reply) void {
+        fn stop(_: *Self, _: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
             Seen.now.stops += 1;
             Seen.now.stopped = input.session[0..6].*;
             reply.* = .{ .outcome = .accepted };
@@ -906,7 +951,8 @@ const Rig = struct {
 
     fn press(rig: *Rig, bytes: []const u8) !?Ending {
         if (std.c.write(rig.keys[1], bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
-        return rig.overview.readInput();
+        const next = try rig.overview.readInput(0) orelse return null;
+        return rig.overview.proceed(next);
     }
 
     /// Runs queued jobs as the loop would, each result stepping the core.
@@ -918,7 +964,7 @@ const Rig = struct {
             var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
             if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
             drain(overview.done[0]);
-            if (try overview.complete()) |ending| return ending;
+            if (try overview.complete()) |next| if (overview.proceed(next)) |ending| return ending;
         }
     }
 
@@ -1010,7 +1056,7 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
     // The terminal already shows an unchanged screen.
-    try rig.overview.draw();
+    try std.testing.expect(try rig.overview.draw() == null);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }
 
@@ -1038,42 +1084,52 @@ test "a signal wakes the waiting loop and ends it" {
     try std.testing.expect(Signals.cancellation.stopped.load(.acquire));
 }
 
+/// The Reply a send leaves, whatever else it returns.
+fn recorded(sent: anytype, handle: []const u8) Reply {
+    var reply: Reply = .{};
+    reply.record(sent, handle) catch {};
+    return reply;
+}
+
 test "a captured request is unconfirmed until the Host answers it" {
     const Sent = client.Stepped(client.MutationSendError, protocol_reply.MutationReply);
     var context: protocol_reply.MutationIdentity = .{ .kind = .message };
     context.session.set("n3w5es") catch unreachable;
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 5, .digest = @splat(0), .creates_session = true } };
     const accepted: Sent = .{ .done = .{ .status = 200, .context = context, .target = target, .answer = .{ .result = .{ .accepted = .{ .message = .{ .admission = 1 } } }, .replayed = false } } };
-    const started = Reply.of(accepted, "h1");
+    var started: Reply = .{};
+    try started.record(accepted, "h1");
     try std.testing.expectEqual(.accepted, started.outcome);
     try std.testing.expectEqualStrings("n3w5es", &started.session);
     try std.testing.expectEqualStrings("h1", started.handle.slice());
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     code.set("model_unsupported") catch unreachable;
     const rejected: Sent = .{ .done = .{ .status = 200, .context = context, .target = target, .answer = .{ .result = .{ .rejected = code }, .replayed = false } } };
-    try std.testing.expectEqualStrings("model_unsupported", Reply.of(rejected, "h1").start().failed);
+    try std.testing.expectEqualStrings("model_unsupported", recorded(rejected, "h1").start().failed);
     const unread: Sent = .{ .done = .{ .status = 200, .context = context, .target = target, .answer = error.InvalidResponse } };
-    try std.testing.expectEqualStrings("h1", Reply.of(unread, "h1").start().unconfirmed);
+    var lost: Reply = .{};
+    try lost.record(unread, "h1");
+    try std.testing.expectEqualStrings("h1", lost.start().unconfirmed);
     // Even a send that never connected leaves a saved request to recover.
     const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.FileNotFound } };
-    try std.testing.expectEqualStrings("h1", Reply.of(unsent, "h1").start().unconfirmed);
+    try std.testing.expectEqualStrings("h1", recorded(unsent, "h1").start().unconfirmed);
     const uploaded: Sent = .{ .failed = .{ .step = .upload, .err = error.Cancelled } };
-    try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").start().unconfirmed);
-    try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").stop().unconfirmed);
-    try std.testing.expect(Reply.of(accepted, "h1").stop() == .stopped);
-    // A canonical Store failure is unconfirmed and fatal.
+    try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").start().unconfirmed);
+    try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").stop().unconfirmed);
+    try std.testing.expect(recorded(accepted, "h1").stop() == .stopped);
+    // A canonical Store failure is unconfirmed, and its error ends the overview.
     const fenced: Sent = .{ .done = .{ .status = 500, .context = context, .target = target, .answer = error.CanonicalStoreFailure } };
-    try std.testing.expectEqual(.fatal, Reply.of(fenced, "h1").outcome);
-    try std.testing.expectEqualStrings("h1", Reply.of(fenced, "h1").start().unconfirmed);
-    try std.testing.expectEqual(.unconfirmed, Reply.of(unread, "h1").outcome);
+    var unknown: Reply = .{};
+    try std.testing.expectError(error.CanonicalStoreFailure, unknown.record(fenced, "h1"));
+    try std.testing.expectEqualStrings("h1", unknown.start().unconfirmed);
 }
 
 test "a canonical Store failure ends the overview, which names the start's recovery" {
     var ops = fake_operations;
     ops.start = struct {
-        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) void {
+        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) !void {
             reply.* = .unconfirmed("fenced-handle");
-            reply.outcome = .fatal;
+            return error.CanonicalStoreFailure;
         }
     }.start;
     var cancellation: client.Cancellation = .{};
@@ -1087,10 +1143,90 @@ test "a canonical Store failure ends the overview, which names the start's recov
     try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover fenced-handle") != null);
 }
 
+/// A Host's failure reply with `code`, as the client validated it.
+fn readFailure(code: []const u8) protocol_reply.ReadFailure {
+    var failure: protocol_reply.ReadFailure = .{ .status = 500, .diagnostic = .{ .type = .{}, .code = .{} } };
+    failure.diagnostic.type.set("invocation_error") catch unreachable;
+    failure.diagnostic.code.set(code) catch unreachable;
+    return failure;
+}
+
+test "a canonical Store failure in a listing ends the overview" {
+    var ops = fake_operations;
+    ops.list = struct {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            return readFailure("canonical_store_failure");
+        }
+    }.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+}
+
+test "a refused first line answers its row, and a canonical Store failure ends the overview" {
+    const Refuse = struct {
+        var code: []const u8 = "";
+        fn firstLine(_: *Self, _: client.Requests, _: []const u8, _: u64, _: []u8) !protocol_reply.ActivityPrefixReply {
+            return .{ .failure = readFailure(code) };
+        }
+    };
+    var ops = fake_operations;
+    ops.first_line = Refuse.firstLine;
+    var cancellation: client.Cancellation = .{};
+    for ([_][]const u8{ "session_not_found", "canonical_store_failure" }) |code| {
+        Refuse.code = code;
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        if (std.mem.eql(u8, code, "canonical_store_failure")) {
+            try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+        } else {
+            try std.testing.expect(try rig.settle() == null);
+            const row = rig.overview.state.find("k7m2qx".*).?;
+            try std.testing.expect(rig.overview.state.lineOf(row) == null);
+        }
+    }
+}
+
+test "Ctrl-C ends the overview while the terminal takes no output" {
+    const Blocked = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        var drained: std.atomic.Value(bool) = .init(false);
+        /// Frees the terminal only if the overview has not left within two
+        /// seconds.
+        fn drain(fd: c_int) void {
+            for (0..200) |_| {
+                if (release.load(.acquire)) return;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch return;
+            }
+            drained.store(true, .release);
+            var bytes: [4096]u8 = undefined;
+            while (std.c.read(fd, &bytes, bytes.len) > 0) {}
+        }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const zeros: [4096]u8 = @splat(0);
+    while (std.c.write(rig.output[1], &zeros, zeros.len) > 0) {}
+    if (std.c.write(rig.keys[1], "\x03", 1) != 1) return error.TestUnexpectedResult;
+    Blocked.release.store(false, .release);
+    Blocked.drained.store(false, .release);
+    const drainer = try std.Thread.spawn(.{}, Blocked.drain, .{rig.output[0]});
+    const ended = rig.overview.loop();
+    Blocked.release.store(true, .release);
+    drainer.join();
+    try std.testing.expect(try ended == .overview);
+    try std.testing.expect(!Blocked.drained.load(.acquire));
+}
+
 test "a stop whose reply was lost names its request on departure" {
     var ops = fake_operations;
     ops.stop = struct {
-        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) void {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) !void {
+            Seen.now.stops += 1;
             reply.* = .unconfirmed("stop-handle");
         }
     }.stop;
@@ -1107,14 +1243,24 @@ test "a stop whose reply was lost names its request on departure" {
     defer departure.deinit();
     try view.writeDeparture(&rig.overview.state, &departure.writer);
     try std.testing.expectEqualStrings(guidance, departure.written());
-    // A stop still running as the overview ends is named the same way.
+    // Its row takes no second stop: Ctrl-X names the recovery and sends nothing.
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
+    rig.overview.state.notice = null;
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
-    try rig.overview.dispatch();
-    try std.testing.expectEqual(Job.stop, std.meta.activeTag(rig.overview.job));
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
+    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    // A stop still running as the overview ends is named the same way.
+    const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer running.close();
+    try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try running.settle() == null);
+    try std.testing.expect(try running.press("\x1b[H\x18\x18") == null);
+    try running.overview.dispatch();
+    try std.testing.expectEqual(Job.stop, std.meta.activeTag(running.overview.job));
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings(guidance ++ guidance, try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings(guidance, try finishedGuidance(running, &buffer));
 }
 
 /// Runs `finish` over a terminal whose restore failed, which writes nothing
@@ -1140,7 +1286,7 @@ fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
 test "a failed terminal restore still prints the departure guidance" {
     var ops = fake_operations;
     ops.start = struct {
-        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) void {
+        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) !void {
             reply.* = .unconfirmed("lost-handle");
         }
     }.start;
@@ -1178,10 +1324,10 @@ test "leaving while a start is queued or running says what became of it" {
 test "a stop captured and then not sent keeps its handle, here and on departure" {
     var ops = fake_operations;
     ops.stop = struct {
-        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) void {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) !void {
             // The Host stopped: the saved request never connected.
             const Sent = client.Stepped(client.MutationSendError, protocol_reply.MutationReply);
-            reply.* = .of(Sent{ .failed = .{ .step = .connect, .err = error.FileNotFound } }, "stop-handle");
+            return reply.record(Sent{ .failed = .{ .step = .connect, .err = error.FileNotFound } }, "stop-handle");
         }
     }.stop;
     var cancellation: client.Cancellation = .{};
