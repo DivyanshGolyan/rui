@@ -124,7 +124,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
-    if (job.result.work.first_action) |action| {
+    if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.files.scratch, &output, job.colour);

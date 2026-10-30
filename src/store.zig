@@ -3295,7 +3295,7 @@ pub const Store = struct {
         // Work as of this same read, so the footer, consent and first Action
         // always describe the page they arrive with.
         const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
-        page.work = .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action, .revision = session.revision };
+        page.work = .{ .work = .fromCore(work), .revision = session.revision };
         try page.work.workspace.set(session.workspace.slice());
         return page;
     }
@@ -10436,11 +10436,11 @@ fn pageWorkAgrees(store: *Store, report: std.json.Value, first_action: u64) !voi
     try std.json.Stringify.value(work.get("state").?, .{}, &writer);
     var page_state: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
     var page_writer: std.Io.Writer = .fixed(&page_state);
-    try (protocol.WorkStateJson{ .state = page.work.state }).writeJson(&page_writer);
+    try (protocol.WorkStateJson{ .state = page.work.work.state }).writeJson(&page_writer);
     try std.testing.expectEqualStrings(writer.buffered(), page_writer.buffered());
-    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("turn").?.string, 10), page.work.turn.?);
-    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("operation").?.string, 10), page.work.operation.?);
-    try std.testing.expectEqual(first_action, page.work.first_action.?);
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("turn").?.string, 10), page.work.work.turn.?);
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("operation").?.string, 10), page.work.work.operation.?);
+    try std.testing.expectEqual(first_action, page.work.work.first_action.?);
     const session = report.object.get("session").?.object;
     try std.testing.expectEqual(try std.fmt.parseInt(u64, session.get("revision").?.string, 10), page.work.revision);
     try std.testing.expectEqualStrings(session.get("workspace").?.string, page.work.workspace.slice());
@@ -10465,14 +10465,14 @@ fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8,
     const page = try storage.activityPage(request);
     var paged: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
     var paged_writer: std.Io.Writer = .fixed(&paged);
-    try (protocol.WorkStateJson{ .state = page.work.state }).writeJson(&paged_writer);
+    try (protocol.WorkStateJson{ .state = page.work.work.state }).writeJson(&paged_writer);
     try std.testing.expectEqualStrings(current_writer.buffered(), paged_writer.buffered());
     inline for (.{ "turn", "operation", "first_action" }) |name| {
         const value = work.get(name).?;
         const expected: ?u64 = if (value == .null) null else try std.fmt.parseInt(u64, value.string, 10);
-        try std.testing.expectEqual(expected, @field(page.work, name));
+        try std.testing.expectEqual(expected, @field(page.work.work, name));
     }
-    return page.work.state.since();
+    return page.work.work.state.since();
 }
 
 fn expectProgress(storage: *Store, key: []const u8, status: protocol.MessageProgressStatus) !void {
@@ -10516,7 +10516,7 @@ test "Current, activity pages and Message progress report one work in each state
     {
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        const failed = (try storage.activityPage(request)).work.state.failed;
+        const failed = (try storage.activityPage(request)).work.work.state.failed;
         try std.testing.expectEqualStrings("provider_usage_limit_reached", failed.code.slice());
         try std.testing.expectEqual(@as(?u64, 1792940000), failed.resets_at);
     }
@@ -10609,7 +10609,7 @@ test "a quota reset is read from a saved record and never fences" {
         try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        const failed = (try storage.activityPage(request)).work.state.failed;
+        const failed = (try storage.activityPage(request)).work.work.state.failed;
         try std.testing.expectEqualStrings(case.code, failed.code.slice());
         try std.testing.expectEqual(case.resets_at, failed.resets_at);
     }

@@ -318,17 +318,18 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
-        const work = &page.facts.work;
+        const facts = &page.facts.work;
+        const work = &facts.work;
         work.state = wire.work.state.value;
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
         // An operation belongs to its Turn; an Action to the active one.
         if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
-        work.revision = try id(wire.work.revision, false);
+        facts.revision = try id(wire.work.revision, false);
         // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
-        work.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
+        facts.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
         return page;
     }
 
@@ -1764,7 +1765,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
-    facts.work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2, .revision = std.math.maxInt(i64) };
+    facts.work = .{ .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
     // An absolute Workspace whose other bytes escape to their widest JSON form.
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
@@ -1797,7 +1798,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         // Like every ID and time on a page, zero is no time.
         .{ .value = .{ .assistant = content }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
-        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } }, .revision = 1 } };
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
         try facts.work.workspace.set("/w");
         var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
@@ -1808,7 +1809,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
     }
     // A row without its time is refused.
-    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } }, .revision = 1 } };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = content } };
     try facts.work.workspace.set("/w");
     var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;

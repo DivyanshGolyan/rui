@@ -93,7 +93,7 @@ admission: struct {
 live: struct {
     view: View.Live = .{},
     // The work the latest applied page carried.
-    work: protocol.PageWork = .{},
+    work: protocol.SessionWork = .{},
     cursor: protocol_reply.ActivityCursor = .{},
     // UI commits layout alongside delivered Activity; workers borrow a snapshot.
     compact_tools: bool = false,
@@ -1385,7 +1385,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
-        self.live.work = result.work;
+        self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;

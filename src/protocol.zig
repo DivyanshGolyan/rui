@@ -725,10 +725,7 @@ pub const SessionWork = struct {
 /// consent and first Action show with that page, beside the revision and
 /// Workspace a permission prompt shows.
 pub const PageWork = struct {
-    state: WorkState = .{ .idle = .{ .since = 0 } },
-    turn: ?u64 = null,
-    operation: ?u64 = null,
-    first_action: ?u64 = null,
+    work: SessionWork = .{},
     revision: u64 = 0,
     workspace: Bounded(max_workspace_bytes) = .{},
 
@@ -736,13 +733,8 @@ pub const PageWork = struct {
     pub const json_shape = .{"{"} ++ SessionWork.fields ++ .{ ",\"revision\":\"", Hole.decimal, "\",\"workspace\":", Hole{ .string = max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    pub fn work(self: *const PageWork) SessionWork {
-        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
-    }
-
     pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
-        const fields = self.work().args();
-        try writeShape(out, json_shape, .{ fields[0], fields[1], fields[2], fields[3], self.revision, self.workspace.slice() });
+        try writeShape(out, json_shape, self.work.args() ++ .{ self.revision, self.workspace.slice() });
     }
 };
 
