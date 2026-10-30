@@ -40,7 +40,9 @@ files: Files,
 command: Command,
 requests: Requests = undefined,
 status: Status = undefined,
-terminal: Terminal,
+terminal: *Terminal,
+/// Stops when the caller is signalled; a running command stops with it.
+interrupted: *client.Cancellation = undefined,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
@@ -146,10 +148,9 @@ dirty: bool = true,
 detached: bool = false,
 notice: ?[]const u8 = null,
 notice_buffer: [1536]u8 = undefined,
-previous_signals: [2]std.posix.Sigaction = undefined,
 
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .inspection_kind = self.inspection.kind, .interrupted = &interrupted };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted };
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.inspection.status_page and self.terminal.screen.view == .inspection;
@@ -169,35 +170,49 @@ fn launch(self: *Self, job: Job, worker: Task.Run) !void {
     try self.reader.start(self.init.io, &self.job, worker);
 }
 
-var interrupted: client.Cancellation = .{};
-fn interrupt(_: std.posix.SIG) callconv(.c) void {
-    interrupted.requestStop();
-}
+/// How the frontend stopped. Either way it stopped only its own client waits;
+/// Host work it started continues.
+pub const Outcome = enum { detached, interrupted };
 
-fn signals(self: *Self, install: bool) void {
-    const action: std.posix.Sigaction = .{ .handler = .{ .handler = interrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
-    inline for (.{ std.posix.SIG.INT, std.posix.SIG.TERM }, 0..) |signal, i| {
-        if (install) std.posix.sigaction(signal, &action, &self.previous_signals[i]) else std.posix.sigaction(signal, &self.previous_signals[i], null);
-    }
-}
-
-pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, initial_text: ?[]const u8) !void {
-    const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
-    const colour = no_colour.len == 0;
-    const screen = try init.gpa.create(Screen);
-    defer init.gpa.destroy(screen);
-    try screen.init(init.io, init.environ_map, colour);
-    defer screen.deinit();
-    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = undefined, .colour = colour, .tmux = init.environ_map.get("TMUX") != null };
+/// Draws the Session on a lent terminal until the person leaves or the caller's
+/// `interrupted` stops. Returns with the terminal still begun and the reader,
+/// the Admission wait and any running command told to stop but not joined. The
+/// caller restores the terminal before `leave` joins them, so a borrower that
+/// cannot stop at once never holds the terminal raw. `self` stays in the
+/// caller's storage until `leave` returns.
+pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation) !Outcome {
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
-    interrupted.stopped.store(false, .release);
-    self.signals(true);
-    defer self.signals(false);
-    self.terminal = try Terminal.begin(screen);
-    self.terminal.pump = .{ .context = &self, .step = pump };
-    const result = self.drive(initial_text);
-    const settled = self.quiesce();
+    terminal.pump = .{ .context = self, .step = pump };
+    defer terminal.pump = null;
+    defer self.stop();
+    self.driveActive() catch |err| switch (err) {
+        // A pumped write reports a detach as an interruption too.
+        error.InteractiveInterrupted => return if (interrupted.stopped.load(.acquire)) .interrupted else .detached,
+        else => return err,
+    };
+    return .detached;
+}
+
+/// What the restored screen shows after `leave`.
+pub const Departure = struct {
+    /// How the frontend stopped, or the failure the caller returns.
+    end: anyerror!Outcome,
+    /// The pending Action the Detached notice names, when one was on screen.
+    action: ?u64,
+    /// A failure still gets the notice when an Action was on screen and the
+    /// terminal was restored, so the main screen names the exact commands.
+    failure_notice: bool,
+    /// The recovery guide is written; otherwise a failed notice writes it.
+    recovery_shown: bool,
+};
+
+/// Joins what `run` stopped, after the caller restored the terminal, and writes
+/// the guidance that follows restoration. The caller prints the Detached notice.
+pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
+    std.debug.assert(!self.terminal.active);
+    const settled = self.settle(restored);
     self.submission.close();
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
@@ -205,41 +220,82 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         self.writePendingDiagnostic(&out) catch unreachable;
         TerminalText.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
-    const cause: ?anyerror = if (result) |_| null else |err| err;
+    const cause: ?anyerror = if (ended) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
-    if (plan.failure) |err| {
-        switch (err) {
-            error.TerminalTooSmall => TerminalText.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
-            error.TerminalTooLarge => TerminalText.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
-            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => TerminalText.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
-            else => {},
-        }
-        if (screen.action_view != null) {
-            if (settled.restored) |_| {
-                self.terminal.detached(store, session, self.live.work.first_action) catch |notice_error|
-                    TerminalText.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
-            } else |_| {} // Never write a main-screen notice before confirmed restoration.
-        }
-        return err;
-    }
-    const action = if (screen.action_view != null) self.live.work.first_action else null;
-    self.terminal.detached(store, session, action) catch |err| {
-        if (!plan.recovery_before_notice) self.recoveryGuide();
-        return err;
+    if (plan.failure) |err| switch (err) {
+        error.TerminalTooSmall => TerminalText.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
+        error.TerminalTooLarge => TerminalText.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
+        error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => TerminalText.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
+        else => {},
+    };
+    const action_view = self.terminal.screen.action_view != null;
+    return .{
+        .end = if (plan.failure) |err| err else ended,
+        .action = if (action_view) self.live.work.first_action else null,
+        // Never a main-screen notice before confirmed restoration.
+        .failure_notice = action_view and !std.meta.isError(restored),
+        .recovery_shown = plan.recovery_before_notice,
     };
 }
 
-fn quiesce(self: *Self) Settled {
+fn stop(self: *Self) void {
     // A running command observes exit as an interruption, exactly as a signal.
-    if (self.inspection.command_running) interrupted.requestStop();
-    const restored = self.terminal.finish();
+    if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
     self.submission.cancel();
+}
+
+fn settle(self: *Self, restored: anyerror!void) Settled {
     const reader = self.joinReader();
     const admission = self.joinAdmission();
     return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
+}
+
+test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no notice written" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    var input: [2]c_int = undefined;
+    var output: [2]c_int = undefined;
+    try std.testing.expect(std.c.pipe(&input) == 0);
+    try std.testing.expect(std.c.pipe(&output) == 0);
+    defer for (input ++ output) |fd| {
+        _ = std.c.close(fd);
+    };
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    _ = std.c.fcntl(output[0], std.c.F.SETFL, std.c.fcntl(output[0], std.c.F.GETFL) | nonblock);
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(input[1], "\x04", 1));
+    var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = input[0], .output = output[1] };
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = std.testing.allocator;
+    init.environ_map = &environ;
+    var interrupted: client.Cancellation = .{};
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page };
+    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted);
+    try std.testing.expectEqual(Outcome.detached, outcome);
+    try std.testing.expect(terminal.active and terminal.pump == null);
+    var written: [65536]u8 = undefined;
+    const count = @max(std.c.read(output[0], &written, written.len), 0);
+    try std.testing.expect(std.mem.indexOf(u8, written[0..@intCast(count)], "Detached") == null);
+    // The caller's part: nothing has restored the terminal, so only the
+    // borrowers run stopped are joined here.
+    self.reader.join() catch {};
+    _ = self.submission.join();
+    self.submission.close();
 }
 
 /// Exit interrupted a Host command before its output was shown. That output
@@ -266,7 +322,7 @@ fn commandOutputGuide(self: *const Self) void {
     }
 }
 
-fn recoveryGuide(self: *const Self) void {
+pub fn recoveryGuide(self: *const Self) void {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     self.writeRecoveryGuide(&out) catch unreachable;
@@ -312,11 +368,6 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
         try self.writeRecoveryGuide(&out);
         try std.testing.expectEqualStrings("rui: Message was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", out.buffered());
     }
-}
-
-fn drive(self: *Self, initial_text: ?[]const u8) !void {
-    if (initial_text) |text| try self.beginMessage(self.input.submitText(text));
-    try self.driveActive();
 }
 
 const History = enum { older, latest };
@@ -481,26 +532,28 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
         }
     };
     for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .screen = undefined, .active = false, .result = error.TerminalRestoreFailed }, .colour = false, .reading = .{ .phase = phase } };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .intent = .{ .message = self.input.submitText("current original B") } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
-        const settled = self.quiesce();
+        self.stop();
+        const settled = self.settle(error.TerminalRestoreFailed);
         try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.inspection, error.InteractiveInterrupted).?);
         try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission_error.?);
         try std.testing.expect(settled.reader == .cancelled);
         try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
         // A second cleanup cannot reconstruct or consume the errors again.
-        const repeated = self.quiesce();
+        self.stop();
+        const repeated = self.settle({});
         try std.testing.expect(repeated.reader == .absent and repeated.admission_error == null);
     }
 }
 
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
-        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         const admission = try self.submission.advance();
@@ -527,7 +580,7 @@ fn driveActive(self: *Self) !void {
             self.withdrawDecided();
         }
         if (self.reading.pending_diagnostic) |pending| {
-            if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
+            if (pending.recoverable) try self.presentReadDiagnostic(self.terminal);
         }
         if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
             const kind = parse(text).inspection;
@@ -626,7 +679,7 @@ fn draw(self: *Self) !bool {
             service = .budget_exhausted;
             if (self.detached) break;
         }
-        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
         if (self.detached) return true;
         if (self.consentReceipt(service)) try Editor.testChoiceReady(self.init.io);
     }
@@ -782,7 +835,7 @@ test "the composer status shows only live work, not an ending the transcript alr
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
-    if (self.detached or interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+    if (self.detached or self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
 }
 
 fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
@@ -1338,8 +1391,8 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.reader.join();
             self.input.init();
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
-            self.terminal = .{ .original = undefined, .flags = undefined, .screen = undefined, .active = false };
-            const settled = self.quiesce();
+            self.stop();
+            const settled = self.settle({});
             for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
                 try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
             var bytes: [1024]u8 = undefined;
@@ -1496,7 +1549,8 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
     const Change = enum { decided_elsewhere, command_page, status_page };
     for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "status" }, .{ "a", "" } }) |line| {
         errdefer std.debug.print("change={s} line={s}|{s}\n", .{ @tagName(change), line[0], line[1] });
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen }, .colour = false, .reading = .{ .opening = false } };
+        var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
@@ -1568,8 +1622,8 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     defer std.testing.allocator.destroy(screen);
     try screen.init(std.testing.io, &environ, false);
     defer screen.deinit();
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .opening = false } };
-    self.terminal.screen = screen;
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .screen = screen };
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
     try screen.append("GROWS-FIRST\n");
     self.live.marks.record(.{ .offset = 12, .cursor = .{ .end = 3 }, .admitted = 4 });
     // Unescaped, the rows after the mark fit; escaped, they evict it.
@@ -1590,6 +1644,8 @@ const HeldFrontend = struct {
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     pipes: [2][2]std.posix.fd_t,
     pumps: usize = 0,
+    terminal: Terminal = undefined,
+    interrupted: client.Cancellation = .{},
 
     fn create() !*HeldFrontend {
         const held = try std.testing.allocator.create(HeldFrontend);
@@ -1603,12 +1659,12 @@ const HeldFrontend = struct {
         held.* = .{ .self = undefined, .screen = screen, .environ = try std.testing.environ.createMap(std.testing.allocator), .tmp = std.testing.tmpDir(.{}), .pipes = pipes };
         try screen.init(std.testing.io, &held.environ, false);
         const directory = try held.tmp.dir.realPath(std.testing.io, &held.directory);
-        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1] }, .colour = false, .reading = .{ .opening = false } };
+        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .colour = false, .reading = .{ .opening = false } };
         held.self.init.io = std.testing.io;
         held.self.live.work = .{};
         held.self.input.init();
         held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input };
-        held.self.terminal.pump = .{ .context = held, .step = pumpHeld };
+        held.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1], .pump = .{ .context = held, .step = pumpHeld } };
         return held;
     }
 

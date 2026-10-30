@@ -3,6 +3,7 @@
 //! payloads are already-validated read facts, not a substitute Host or Store.
 const std = @import("std");
 const Screen = @import("SessionScreen.zig");
+const Terminal = @import("SessionTerminal.zig");
 const Task = @import("ClientTask.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -52,6 +53,8 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
         const Self = @This();
         front: *Frontend,
         screen: *Screen,
+        terminal: Terminal,
+        interrupted: client.Cancellation,
         tmp: std.testing.TmpDir,
         page: std.Io.File,
         action: std.Io.File,
@@ -73,6 +76,8 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             var environ = try std.testing.environ.createMap(std.testing.allocator);
             defer environ.deinit();
             try self.screen.init(std.testing.io, &environ, false);
+            self.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = self.screen, .output = self.output.handle, .active = false };
+            self.interrupted = .{};
             self.front = try std.testing.allocator.create(Frontend);
             const path = self.root[0..try self.tmp.dir.realPath(std.testing.io, &self.root)];
             self.front.* = .{
@@ -84,7 +89,8 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .command = undefined,
                 .colour = false,
                 .reading = .{ .opening = false },
-                .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = self.screen, .output = self.output.handle, .active = false },
+                .terminal = &self.terminal,
+                .interrupted = &self.interrupted,
             };
             self.front.init.io = std.testing.io;
             self.front.input.init();
