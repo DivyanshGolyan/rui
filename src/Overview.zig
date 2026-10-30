@@ -26,6 +26,7 @@ const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
+const keymap = @import("keymap.zig");
 const Self = @This();
 
 pub const Options = struct {
@@ -167,9 +168,16 @@ const Job = union(enum) {
     /// The traversal's next page.
     list,
     lines: view.Reads,
-    /// Borrows the draft, which takes no input until the result.
-    start: struct { settings: *const view.StartSettings, text: []const u8 },
+    /// Owns what Enter captured: nothing the core or the composer holds is
+    /// read on the worker's thread.
+    start: view.OwnedStart,
     stop: view.Reference,
+
+    /// A job owns its inputs until it is replaced or the overview ends,
+    /// whether or not it ran.
+    fn deinit(self: Job, gpa: std.mem.Allocator) void {
+        if (self == .start) self.start.deinit(gpa);
+    }
 };
 
 /// One host read and list page, at most one first-line batch, and the
@@ -351,6 +359,8 @@ fn closePipes(self: *Self) void {
 
 fn destroy(self: *Self) void {
     std.debug.assert(self.worker.thread == null);
+    self.job.deinit(self.init.gpa);
+    for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
     self.closePipes();
     self.forget();
@@ -431,7 +441,6 @@ fn drain(fd: c_int) void {
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
-    self.lendDraft();
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
     for (effects.slice()) |effect| switch (effect) {
@@ -441,7 +450,7 @@ fn event(self: *Self, value: view.Event) !?Next {
             self.queue(.list);
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
-        .start => |start| self.queue(.{ .start = .{ .settings = start.settings, .text = start.text } }),
+        .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = .{ .buffer = &self.draft },
@@ -450,8 +459,8 @@ fn event(self: *Self, value: view.Event) !?Next {
     return next;
 }
 
-fn lendDraft(self: *Self) void {
-    self.state.draft = .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor };
+fn composerDraft(self: *const Self) view.Draft {
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor };
 }
 
 fn queue(self: *Self, job: Job) void {
@@ -463,6 +472,7 @@ fn queue(self: *Self, job: Job) void {
 /// Starts the next job once the worker is free.
 fn dispatch(self: *Self) !void {
     if (self.worker.thread != null or self.job_count == 0) return;
+    self.job.deinit(self.init.gpa);
     self.job = self.jobs[0];
     std.mem.copyForwards(Job, self.jobs[0 .. self.job_count - 1], self.jobs[1..self.job_count]);
     self.job_count -= 1;
@@ -497,7 +507,7 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
                 },
             };
         },
-        .start => |start| try self.ops.start(self, requests, self.startInput(start.settings, start.text), &self.reply),
+        .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
     }
 }
@@ -540,9 +550,9 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
 
 /// One captured `session start`: the composer's text and start settings
 /// over the defaults a fresh Session gets.
-fn startInput(self: *const Self, settings: *const view.StartSettings, text: []const u8) client.MessageInput {
+fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageInput {
     const held = struct {
-        fn at(from: *const view.StartSettings, comptime name: []const u8) ?[]const u8 {
+        fn at(from: *const view.OwnedStart, comptime name: []const u8) ?[]const u8 {
             inline for (view.start_options, 0..) |option, index| if (comptime std.mem.eql(u8, option, name)) return from.get(index);
             @compileError("not a start setting: " ++ name);
         }
@@ -554,19 +564,19 @@ fn startInput(self: *const Self, settings: *const view.StartSettings, text: []co
             return .{ .present = true, .value = if (std.mem.eql(u8, given_value, "default")) null else given_value };
         }
     };
-    const label: client.OptionalPolicy = if (held.at(settings, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
-    return .{ .store = self.options.store, .session = "", .text_path = "", .text = text, .configuration = .{
+    const label: client.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
+    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
         .store = self.options.store,
         .session = .create,
         .require_model = true,
-        .workspace = .{ .present = true, .value = held.at(settings, "workspace") orelse self.options.workspace },
-        .provider = held.given(held.at(settings, "provider") orelse self.options.provider),
-        .model = held.given(held.at(settings, "model") orelse self.options.model),
-        .tools = held.at(settings, "tools") orelse product_defaults.tools,
-        .permission_mode = .{ .present = true, .value = held.at(settings, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = held.policy(held.at(settings, "compaction-trigger")),
-        .output_reservation = held.policy(held.at(settings, "output-reservation")),
-        .reasoning_effort = held.policy(held.at(settings, "reasoning-effort")),
+        .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
+        .provider = held.given(held.at(start, "provider") orelse self.options.provider),
+        .model = held.given(held.at(start, "model") orelse self.options.model),
+        .tools = held.at(start, "tools") orelse product_defaults.tools,
+        .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
+        .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
+        .output_reservation = held.policy(held.at(start, "output-reservation")),
+        .reasoning_effort = held.policy(held.at(start, "reasoning-effort")),
         .label = label,
     } };
 }
@@ -578,9 +588,10 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
     for (0..bytes) |count| {
         const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                if (try self.input.expire()) {
+                const expired = try self.input.expire();
+                if (expired != .none) {
                     if (try self.look()) |next| return next;
-                    if (try self.event(.{ .key = .escape })) |next| return next;
+                    if (try self.compose(expired)) |next| return next;
                 }
                 continue;
             },
@@ -650,48 +661,17 @@ fn askBackground(self: *Self) !?Next {
     return null;
 }
 
-/// Gives the overview its own keys and the line editor everything else,
-/// then steps the core with what the editor made of it. Every input is one
-/// event, whether or not it changed the draft. A start borrows the draft,
-/// so the editor takes nothing until its answer.
+/// Every input takes one route: the composer, with the overview's one key
+/// table, then one core step, whether or not the draft changed. While a
+/// start waits for its answer the composer is frozen: the keys the table
+/// binds still act, and nothing edits the text a failed start leaves to
+/// retry.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    const locked = self.state.starting();
-    if (overviewKey(decoded, locked or self.composer.length == 0)) |key| return self.event(.{ .key = key });
-    return self.event(if (locked) .{ .composer = .input } else switch (self.composer.apply(decoded)) {
-        .none, .page_up, .page_down, .latest, .expand, .append, .redraw => .{ .composer = .input },
-        // Past the draft's first or last line, Up and Down select rows,
-        // as they scroll a conversation.
-        .scroll_up => .{ .key = .up },
-        .scroll_down => .{ .key = .down },
-        .close_view => .{ .key = .escape },
-        .interrupt => .{ .key = .ctrl_c },
-        inline .submit, .eof, .invalid, .overflow, .edit_rejected, .unbound => |outcome| .{ .composer = @field(view.Composed, @tagName(outcome)) },
-    });
-}
-
-/// The overview's own key a decoded event names, if any. Ctrl-C leaves even
-/// while a start holds the draft. The arrows, Home and End select rows only
-/// while the editor has no draft to move through.
-fn overviewKey(decoded: TerminalInput.Decoded, selects: bool) ?view.Key {
-    const value = switch (decoded) {
-        .event => |value| value,
-        else => return null,
-    };
-    const key = switch (value.event) {
-        .key_press => |key| key,
-        else => return null,
-    };
-    if (value.pasted) return null;
-    const Key = vaxis.Key;
-    if (key.matchExact(Key.escape, .{}) or key.matchExact(Key.escape, .{ .alt = true })) return .escape;
-    if (key.matchExact('c', .{ .ctrl = true })) return .ctrl_c;
-    if (key.matchExact('x', .{ .ctrl = true })) return .ctrl_x;
-    if (!selects) return null;
-    if (key.matchExact(Key.up, .{})) return .up;
-    if (key.matchExact(Key.down, .{})) return .down;
-    if (key.matchExact(Key.home, .{})) return .home;
-    if (key.matchExact(Key.end, .{})) return .end;
-    return null;
+    const outcome: keymap.Outcome(view.Action) = if (self.state.starting())
+        if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none
+    else
+        self.composer.apply(view.keys, decoded);
+    return self.event(.{ .composed = .{ .outcome = outcome, .draft = self.composerDraft() } });
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
@@ -699,8 +679,7 @@ fn overviewKey(decoded: TerminalInput.Decoded, selects: bool) ?view.Key {
 /// next frame.
 fn draw(self: *Self, frame: u64) !?Next {
     const size = self.terminal.geometry();
-    self.lendDraft();
-    var screen = try view.render(self.init.gpa, &self.state, size.col, size.row, self.caps, frame);
+    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), size.col, size.row, self.caps, frame);
     errdefer screen.deinit();
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
@@ -938,6 +917,8 @@ const Seen = struct {
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
+    /// How many Sessions the fake listing returns, from `listed_references`.
+    listed: usize = 1,
 
     var now: Seen = .{};
 
@@ -947,6 +928,8 @@ const Seen = struct {
         return value;
     }
 };
+
+const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
 /// Operations that answer from fixed facts and record what they were asked.
 const fake_operations: Operations = .{
@@ -960,14 +943,16 @@ const fake_operations: Operations = .{
         fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
             Seen.now.since = cursor.since;
-            page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
-            var row: protocol.SessionRow = .{ .work = .{ .state = .{ .working = .{ .since = test_now_s - 10 } }, .turn = 1, .operation = 1 } };
-            row.reference.set("k7m2qx") catch unreachable;
-            row.workspace.set("/work") catch unreachable;
-            row.model.set("gpt-5.5") catch unreachable;
-            row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s - 10, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
-            row.peers.from_person_at = test_now_s - 10;
-            page.rows[0] = row;
+            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
+            for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
+                const since = test_now_s - 10 - at;
+                row.* = .{ .work = .{ .state = .{ .working = .{ .since = since } }, .turn = 1, .operation = 1 } };
+                row.reference.set(reference) catch unreachable;
+                row.workspace.set("/work") catch unreachable;
+                row.model.set("gpt-5.5") catch unreachable;
+                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
+                row.peers.from_person_at = since;
+            }
             return null;
         }
     }.list,
@@ -1648,18 +1633,184 @@ test "the composer edits at its caret, as a conversation's draft does" {
     try expectStarted(rig, "junk\x02\x1b[27uok\r", "ok");
 }
 
-test "a start holds its draft until the answer; the editor takes nothing meanwhile" {
+test "a start freezes the composer until its answer, and the overview's keys still act" {
     const rig = try openComposer();
     defer rig.close();
-    try expectStarted(rig, "hello\r\x7f\x7fXY\x1b[27u", "hello");
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("hello\r") == null);
+    // Typing, edits and caret keys change nothing while it waits.
+    try std.testing.expect(try rig.press("\x7f\x7fXY\x1b[D\x15\r") == null);
+    try std.testing.expectEqualStrings("hello", rig.overview.draft[0..rig.overview.composer.length]);
+    // Up, Down, Home and End select rows, whatever the draft holds.
+    for ([_][]const u8{ "\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F" }) |key| {
+        rig.overview.state.selected = null;
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expectEqualStrings("k7m2qx", &(rig.overview.state.selected orelse return error.TestExpectedSelection));
+    }
+    // Esc clears the draft; the start still sends what Enter captured.
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.length);
-    // The next frame shows the empty composer, not the text it lent.
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
+    // The next frame shows the empty composer, not the text it sent.
     try std.testing.expect(try rig.overview.draw(0) == null);
     var buffer: [64 * 1024]u8 = undefined;
     const frame = rig.drawn(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, frame, "Type a task to start a Session") != null);
     try std.testing.expect(std.mem.indexOf(u8, frame, "hello") == null);
     try expectStarted(rig, "next\r", "next");
+}
+
+/// A composer over five listed Sessions, the middle one selected, so the
+/// row above, below, first and last are four different rows.
+fn openListed() !*Rig {
+    const rig = try openComposer();
+    errdefer rig.close();
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(listed_references.len, rig.overview.state.order.items.len);
+    rig.overview.state.selected = shownRow(rig, 2);
+    return rig;
+}
+
+/// The Session shown at `at` in screen order.
+fn shownRow(rig: *const Rig, at: usize) view.Reference {
+    const state = &rig.overview.state;
+    return state.rows.items[state.order.items[at]].reference;
+}
+
+test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {
+    const rig = try openListed();
+    defer rig.close();
+    for ([_][]const u8{ "", "two\x1b\rlines", "junk\x00" }) |draft| {
+        for ([_]struct { bytes: []const u8, row: usize }{
+            .{ .bytes = "\x1b[1;2A", .row = 1 },
+            .{ .bytes = "\x1b[1;2:1A", .row = 1 },
+            .{ .bytes = "\x1b[1;2B", .row = 3 },
+            .{ .bytes = "\x1b[1;2:1B", .row = 3 },
+        }) |case| {
+            errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
+            rig.overview.composer = .{ .buffer = &rig.overview.draft };
+            try std.testing.expect(try rig.press(draft) == null);
+            rig.overview.state.selected = shownRow(rig, 2);
+            try std.testing.expect(try rig.press(case.bytes) == null);
+            try std.testing.expectEqualStrings(&shownRow(rig, case.row), &(rig.overview.state.selected orelse return error.TestExpectedSelection));
+        }
+    }
+}
+
+/// Every encoding of every key a screen may bind: raw or legacy, Kitty's
+/// CSI-u, and xterm's modifyOtherKeys where the key has them.
+const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.{
+    .escape = &.{ "\x1b", "\x1b[27u", "\x1b[27;3u", "\x1b[27;1;27~" },
+    .ctrl_c = &.{ "\x03", "\x1b[99;5u", "\x1b[27;5;99~" },
+    .ctrl_d = &.{ "\x04", "\x1b[100;5u", "\x1b[27;5;100~" },
+    .ctrl_g = &.{ "\x07", "\x1b[103;5u", "\x1b[27;5;103~" },
+    .ctrl_o = &.{ "\x0f", "\x1b[111;5u", "\x1b[27;5;111~" },
+    .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
+    .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
+    .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
+    .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
+    .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
+    .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
+    .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
+    .page_down = &.{ "\x1b[6~", "\x1b[6;1~", "\x1b[6;2~" },
+    .home = &.{ "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~", "\x1b[1;1H" },
+    .end = &.{ "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~", "\x1b[1;1F" },
+    .ctrl_end = &.{ "\x1b[1;5F", "\x1b[4;5~" },
+});
+
+/// The key a lone editor reads `bytes` as, a lone ESC once it expires.
+fn keyOf(bytes: []const u8) !?keymap.Key {
+    var storage: [8]u8 = undefined;
+    var editor: TerminalEditor = .{ .buffer = &storage };
+    var input: TerminalInput = .{};
+    var found: ?keymap.Key = null;
+    for (bytes) |byte| {
+        var decoded = input.feed(byte, 0);
+        while (decoded != .none) : (decoded = input.next()) switch (editor.apply(keymap.every, decoded)) {
+            .action => |key| found = key,
+            else => {},
+        };
+    }
+    if (input.pending() == .escape) switch (editor.apply(keymap.every, try input.expire())) {
+        .action => |key| found = key,
+        else => {},
+    };
+    return found;
+}
+
+/// Presses `bytes`, then lets a lone ESC expire into Esc, as the loop does.
+fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
+    if (try rig.press(bytes)) |ending| return ending;
+    const Expiry = struct {
+        fn done(overview: *Self) !bool {
+            if (try overview.readInput(0, 1) != null) return error.TestUnexpectedResult;
+            return overview.input.pending() == .none;
+        }
+    };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), rig.overview, Expiry.done);
+    return null;
+}
+
+test "every key does what the overview's table says, through the editor, in every encoding, on an empty and on a rejected draft" {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\x00" }) |draft| {
+        errdefer std.debug.print("key={s} bytes={s} draft={s}\n", .{ @tagName(key), bytes[1..], draft });
+        try std.testing.expectEqual(@as(?keymap.Key, key), try keyOf(bytes));
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press("/configure --permission-mode ask\r") == null);
+        try std.testing.expect(try rig.press(draft) == null);
+        const ending = try pressKey(rig, bytes);
+        const state = &rig.overview.state;
+        const selected = state.selected orelse return error.TestExpectedSelection;
+        const action = view.keys.get(key) orelse {
+            // Nothing happens, and the line is not rejected by it.
+            try std.testing.expect(ending == null);
+            try std.testing.expectEqualStrings(&shownRow(rig, 2), &selected);
+            try std.testing.expect(state.prompt == null and !state.settings.empty());
+            if (draft.len == 0) try expectStarted(rig, "ok\r", "ok");
+            continue;
+        };
+        if (action == .exit) {
+            try std.testing.expectEqual(@as(?Ending, .overview), ending);
+            continue;
+        }
+        try std.testing.expect(ending == null);
+        switch (action) {
+            .previous, .next, .first, .last => {
+                const row: usize = switch (action) {
+                    .previous => 1,
+                    .next => 3,
+                    .first => 0,
+                    .last => listed_references.len - 1,
+                    else => unreachable,
+                };
+                try std.testing.expectEqualStrings(&shownRow(rig, row), &selected);
+            },
+            .clear => try std.testing.expect(state.settings.empty()),
+            .stop => try std.testing.expectEqualStrings(&shownRow(rig, 2), &(state.prompt orelse return error.TestExpectedPrompt).stop),
+            .exit => unreachable,
+        }
+    };
+}
+
+test "a start sends what its Enter captured, whatever Esc clears before it runs" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/configure --permission-mode ask\rhello\r") == null);
+    try std.testing.expect(rig.overview.state.starting());
+    // Esc clears the draft, then the held settings, while the start waits.
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.length);
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    try std.testing.expect(rig.overview.state.settings.empty());
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
+    try std.testing.expectEqualStrings("ask", Seen.now.start.permission_mode.slice());
 }
 
 test "keys the editor declines say so and leave the draft" {

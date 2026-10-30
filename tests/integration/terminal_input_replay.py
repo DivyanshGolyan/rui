@@ -108,7 +108,7 @@ def input_replay_cases():
           f"Python {platform.python_version()} RLIMIT_NOFILE={resource.getrlimit(resource.RLIMIT_NOFILE)} "
           f"actor_sha256={digest}", flush=True)
     submit = event("key_press", 106, 4, outcome="submit")  # CR -> LF under ICRNL.
-    interrupt = event("key_press", 99, 4, outcome="interrupt")
+    interrupt = event("key_press", 99, 4, outcome="ctrl_c")
     # Protocol vectors and goldens match canonical TD2 owner regressions.
     # ESC CR is the historical Shift+Enter capture, decoded as Alt-Enter;
     # nothing here claims to press Shift or Option on physical Mac hardware.
@@ -145,7 +145,7 @@ def input_replay_cases():
         (b"\x1b[201~", [event("paste_end", pasted=True)]),
         (b"\r", [event("key_press", 106, 4, outcome="invalid")])])
     replay(actor, "Esc before paste preserves framing", [(b"\x1b\x1b[200~", [
-        event("key_press", 27, outcome="close_view"), start]),
+        event("key_press", 27, outcome="escape"), start]),
         (b"\x1b[201~\r", [event("paste_end", pasted=True), submit])])
     replay(actor, "unmatched paste end rejects submission", [(b"\x1b[201~", [event("paste_end")]),
         (b"\r", [event("key_press", 106, 4, outcome="invalid")])])

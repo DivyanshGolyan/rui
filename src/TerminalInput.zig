@@ -67,15 +67,17 @@ pub fn wait(self: *const Self, now: i96, budget: i32) Wait {
     return .{ .poll = if (budget < 0) milliseconds else @min(budget, milliseconds) };
 }
 
-/// Called when `wait` says so. Returns true when the expired input was a lone
-/// Escape key; anything else incomplete ends the caller's input.
-pub fn expire(self: *Self) !bool {
+/// Called when `wait` says so. A lone Escape that expired is the Escape key,
+/// decoded like any other so each reader routes it the one way it routes
+/// keys; `.none` when nothing was pending. Anything else incomplete ends the
+/// caller's input.
+pub fn expire(self: *Self) !Decoded {
     switch (self.pending()) {
-        .none => return false,
+        .none => return .none,
         .escape => {
             self.used = 0;
             self.consumed = 0;
-            return true;
+            return .{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = false } };
         },
         .incomplete => return error.IncompleteTerminalInput,
     }
@@ -251,7 +253,7 @@ test "terminal input owns fragmentation and paste provenance without an event qu
     try std.testing.expectEqual(Pending.none, input.pending());
     _ = input.feed(0x1b, 0);
     try std.testing.expectEqual(Pending.escape, input.pending());
-    try std.testing.expect(try input.expire());
+    try std.testing.expect((try input.expire()).event.event.key_press.matchExact(vaxis.Key.escape, .{}));
     try std.testing.expectEqual(Pending.none, input.pending());
 }
 
@@ -260,7 +262,7 @@ test "a held ESC ESC expires as one Esc" {
     try std.testing.expect(input.feed(0x1b, 0) == .none);
     try std.testing.expect(input.feed(0x1b, 0) == .none);
     try std.testing.expectEqual(Pending.escape, input.pending());
-    try std.testing.expect(try input.expire());
+    try std.testing.expect((try input.expire()).event.event.key_press.matchExact(vaxis.Key.escape, .{}));
     try std.testing.expectEqual(Pending.none, input.pending());
 }
 

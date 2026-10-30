@@ -2,11 +2,15 @@
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
+const keymap = @import("keymap.zig");
 const Self = @This();
 
 pub const capacity = 65_536;
 pub const Ticket = struct { owner: *const Self, serial: u64 };
-pub const Event = union(enum) { editor: Editor.Event, message: Ticket, command, busy };
+/// What one input did to the draft, on a screen whose keys mean `A`s.
+pub fn Event(comptime A: type) type {
+    return union(enum) { editor: keymap.Outcome(A), message: Ticket, command, busy };
+}
 pub const View = struct { bytes: []const u8, cursor: usize };
 
 /// The invocation's one terminal byte stream. Draft resets, bank switches and
@@ -36,21 +40,22 @@ pub fn pending(self: *const Self) Editor.Pending {
 }
 
 /// One byte for the draft and every event it completes (tests, which keep
-/// clear of input deadlines). Returns the last event that is not an editor `.none`.
-pub fn feed(self: *Self, byte: u8) Event {
-    var last: Event = .{ .editor = .none };
+/// clear of input deadlines), each key as itself. Returns the last event
+/// that is not an editor `.none`.
+pub fn feed(self: *Self, byte: u8) Event(keymap.Key) {
+    var last: Event(keymap.Key) = .{ .editor = .none };
     var decoded = self.stream.feed(byte, 0);
     while (decoded != .none) : (decoded = self.stream.next()) {
-        const event = self.applySelected(decoded, true);
+        const event = self.applySelected(keymap.every, decoded, true);
         if (!(event == .editor and event.editor == .none)) last = event;
     }
     return last;
 }
 
-pub fn applySelected(self: *Self, decoded: TerminalInput.Decoded, selected: bool) Event {
-    const event = self.editors[self.active].apply(decoded);
-    if (event == .invalid or event == .overflow) self.clear();
-    if (event != .submit) return .{ .editor = event };
+pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput.Decoded, selected: bool) Event(@TypeOf(keys).Action) {
+    const outcome = self.editors[self.active].apply(keys, decoded);
+    if (outcome == .refused and outcome.refused.endsLine()) self.clear();
+    if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;
     if (bytes.len == 0) return .{ .editor = .none };
     // A slash command stays in the draft; the caller clears it once it runs.
@@ -141,14 +146,14 @@ test "SessionInput malformed rejection resets only the active composition" {
     for ("original") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("\xff") |byte| _ = input.feed(byte);
-    try std.testing.expectEqual(.invalid, input.feed('\r').editor);
+    try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
     for ([_][]const u8{ "\x1b\n", "\x1b\r", "\x1b[20\n", "\x1b[201\r" }) |sequence| {
         for ("\x1b[200~left") |byte| _ = input.feed(byte);
         for (sequence) |byte| _ = input.feed(byte);
         try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
-        for ("a\r") |byte| try std.testing.expectEqual(.none, input.feed(byte).editor);
+        for ("a\r") |byte| try std.testing.expect(input.feed(byte).editor == .none);
         for ("\x1b[201~") |byte| _ = input.feed(byte);
-        try std.testing.expectEqual(.invalid, input.feed('\r').editor);
+        try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
         try std.testing.expectEqual(Editor.Pending.none, input.pending());
         try std.testing.expectEqualStrings("original", try input.message(ticket));
     }
@@ -179,7 +184,7 @@ test "one stream survives draft resets and replacement editors" {
     // its final byte as typed text.
     for ("draft\x1b[") |byte| _ = input.feed(byte);
     input.clear();
-    try std.testing.expectEqual(Editor.Event.scroll_up, input.feed('A').editor);
+    try std.testing.expectEqual(keymap.Outcome(keymap.Key){ .action = .up }, input.feed('A').editor);
     try std.testing.expectEqualStrings("", input.composition().bytes);
     // An editor that replaces another mid-paste, like a fresh choice field,
     // rejects the paste's remainder instead of adopting it as typed input.
@@ -188,6 +193,6 @@ test "one stream survives draft resets and replacement editors" {
     var choice: Editor = .{ .buffer = &storage, .allow_paste = false };
     for ("a\x1b[201~") |byte| _ = choice.feed(&input.stream, byte);
     try std.testing.expectEqualStrings("", storage[0..choice.length]);
-    try std.testing.expectEqual(Editor.Event.invalid, choice.feed(&input.stream, '\r'));
+    try std.testing.expect(std.meta.eql(choice.feed(&input.stream, '\r'), .{ .refused = .invalid }));
     try std.testing.expectEqual(Editor.Pending.none, input.pending());
 }

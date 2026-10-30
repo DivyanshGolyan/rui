@@ -209,7 +209,7 @@ def run(source, output, selector, cache):
         bridge += f'''
 test "TD1 sequence model {name}" {{
     try @import("session_sequence_model_test.zig").run(Self, .{{
-        .step = step, .draw = drawFrame, .navigation = navigation,
+        .step = step, .draw = drawFrame, .navigation = perform,
         .beginTranscript = beginTranscript, .settleReader = settleReader,
         .olderWanted = olderWanted,
         .showStaged = showStaged, .applyReader = applyReader,
