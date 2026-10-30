@@ -363,12 +363,11 @@ pub const ResponseCapture = struct {
         return .{ .file = if (fail_write) self.readonly.?.handle else self.file.handle };
     }
 
-    /// fsync, check the length h2 wrote, then keep only the read-only alias.
+    /// Check the length h2 wrote, then keep only the read-only alias.
     pub fn seal(self: *ResponseCapture, io: std.Io, fail: bool, written: u64) !void {
         std.debug.assert(!self.sealed);
         self.length = written;
         if (fail) return error.InjectedResponseSealFailure;
-        try self.file.sync(io);
         if (try self.file.length(io) != written) return error.ResponseSealFailed;
         const readonly = self.readonly orelse return error.ResponseSealFailed;
         self.file.close(io);

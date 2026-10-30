@@ -1542,7 +1542,6 @@ pub const Preparation = struct {
         if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.flush();
-        try self.writer.file.sync(self.writer.io);
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
         self.closeEmission();
         // The writer closes before a memo file opens.
