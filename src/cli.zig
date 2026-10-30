@@ -637,7 +637,7 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
         _ = try codex_credentials.readSnapshotInto(path, snapshot, &room.work.credentials);
     }
     if (loginInterrupted()) return error.LoginInterrupted;
-    var tokens = if (interactive)
+    if (interactive)
         try exchange(init.io, struct {
             fn display(code: []const u8) !void {
                 const output = std.Io.File.stdout();
@@ -646,17 +646,18 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
                 try output.writeStreamingAll(io, code);
                 try output.writeStreamingAll(io, "\n" ++ device_login_guidance);
             }
-        }.display, loginInterrupted)
+        }.display, loginInterrupted, &room.tokens)
     else
         try exchange(init.io, struct {
             fn display(code: []const u8) !void {
                 std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance, .{code});
             }
-        }.display, loginInterrupted);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+        }.display, loginInterrupted, &room.tokens);
+    const tokens = &room.tokens;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(tokens));
     const record = &room.record;
     defer std.crypto.secureZero(u8, std.mem.asBytes(record));
-    try codex_auth.loginRecord(&tokens, codex_auth.nowSeconds(init.io), record, &room.work.claims);
+    try codex_auth.loginRecord(tokens, codex_auth.nowSeconds(init.io), record, &room.work.claims);
     // Publication and SIGINT claim the same gate. Once publication wins,
     // cancellation cannot be reported as if installation were rolled back.
     if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
@@ -739,10 +740,10 @@ test "login owner preserves interruption, publication and independent defaults" 
             }
         };
 
-        fn exchange(io: std.Io, display: anytype, cancelled: *const fn () bool) !codex_auth.Tokens {
+        fn exchange(io: std.Io, display: anytype, cancelled: *const fn () bool, tokens: *codex_auth.Tokens) !void {
             _ = display;
-            var tokens: codex_auth.Tokens = .{};
-            errdefer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+            tokens.* = .{};
+            errdefer std.crypto.secureZero(u8, std.mem.asBytes(tokens));
             try tokens.id_token.set(codex_auth.fixture_id_token);
             try tokens.access_token.set(codex_auth.fixture_access_token);
             try tokens.refresh_token.set("new-synthetic-refresh");
@@ -751,7 +752,7 @@ test "login owner preserves interruption, publication and independent defaults" 
                 try std.testing.expect(cancelled());
                 // Return even after SIGINT: the production publication gate,
                 // not the synthetic exchange, must suppress installation.
-                return tokens;
+                return;
             }
             const held = try std.Io.Dir.cwd().openFile(io, lock_path, .{ .mode = .read_write, .lock = .exclusive });
             errdefer held.close(io);
@@ -772,7 +773,6 @@ test "login owner preserves interruption, publication and independent defaults" 
                     return login_state.load(.acquire) == .publishing;
                 }
             }.send, .{held});
-            return tokens;
         }
     };
     const io = std.Io.Threaded.global_single_threaded.io();

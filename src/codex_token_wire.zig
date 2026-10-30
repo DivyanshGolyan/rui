@@ -83,13 +83,12 @@ pub const DeviceStart = struct {
 
 /// Interprets the device-code start response. A code whose poll body cannot
 /// be built is rejected before it can be shown.
-pub fn parseDeviceStart(status: u16, body: []const u8, destination: *DeviceStart) !void {
+pub fn parseDeviceStart(status: u16, body: []const u8, arena: *[wire_arena_bytes]u8, destination: *DeviceStart) !void {
     if (status == 404) return error.DeviceAuthenticationUnavailable;
     if (status < 200 or status >= 300) return error.LoginStartRejected;
     const Device = struct { device_auth_id: []const u8, user_code: ?[]const u8 = null, usercode: ?[]const u8 = null, interval: []const u8 };
-    var arena: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    defer std.crypto.secureZero(u8, arena);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const parsed = std.json.parseFromSlice(Device, fixed.allocator(), body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceResponse;
     const user_code = parsed.value.user_code orelse parsed.value.usercode orelse return error.InvalidDeviceResponse;
     if (!policy.safeAscii(parsed.value.device_auth_id) or !policy.safeAscii(user_code) or
@@ -125,30 +124,28 @@ pub fn classifyPoll(status: u16, body: []const u8) !Poll {
 }
 
 /// Builds the authorization-code exchange from a device grant body.
-pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8) !Request {
+pub fn grantExchangeRequest(grant_body: []const u8, buffer: []u8, arena: *[wire_arena_bytes]u8) !Request {
     const Grant = struct { authorization_code: []const u8, code_challenge: []const u8, code_verifier: []const u8 };
-    var arena: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    defer std.crypto.secureZero(u8, arena);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     const grant = std.json.parseFromSlice(Grant, fixed.allocator(), grant_body, .{ .ignore_unknown_fields = true }) catch return error.InvalidDeviceGrant;
     return .{ .url = token_url, .content_type = form_content, .body = try formEncode(buffer, grant.value.authorization_code, grant.value.code_verifier) };
 }
 
-/// Parses a complete authorization-code exchange response.
-pub fn parseTokenResponse(status: u16, json: []const u8) !Tokens {
+/// Parses a complete authorization-code exchange response into
+/// `destination`, which is zeroed if a field fails.
+pub fn parseTokenResponse(status: u16, json: []const u8, arena: *[wire_arena_bytes]u8, destination: *Tokens) !void {
     if (status < 200 or status >= 300) return error.TokenExchangeRejected;
-    var arena: [wire_arena_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &arena);
-    const wire = try parseWire(json, &arena);
-    var result: Tokens = .{};
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&result));
+    defer std.crypto.secureZero(u8, arena);
+    const wire = try parseWire(json, arena);
+    destination.* = .{};
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
     const id = wire.id_token orelse return error.MissingIdToken;
     const access = wire.access_token orelse return error.MissingAccessToken;
     const refresh = wire.refresh_token orelse return error.MissingRefreshToken;
-    try result.id_token.set(id);
-    try result.access_token.set(access);
-    try result.refresh_token.set(refresh);
-    return result;
+    try destination.id_token.set(id);
+    try destination.access_token.set(access);
+    try destination.refresh_token.set(refresh);
 }
 
 pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
@@ -211,7 +208,8 @@ fn refreshRejection(json: []const u8, arena: *[wire_arena_bytes]u8) error{ Refre
     return error.RefreshRejected;
 }
 
-const wire_arena_bytes = 48 * 1024;
+/// Parse room for one issuer response.
+pub const wire_arena_bytes = 48 * 1024;
 
 /// The token fields of one exchange response. Each present value is
 /// nonempty, at most `token_limit` bytes, and borrows the response or the
@@ -426,20 +424,23 @@ test "authorization exchange requires and owns all token fields" {
     const access = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
     var json: [512]u8 = undefined;
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"{s}\",\"refresh_token\":\"refresh\"}}", .{ id, access });
-    const tokens = try parseTokenResponse(200, response);
+    var tokens: Tokens = undefined;
+    try parseTokenResponse(200, response, &scratch.json, &tokens);
     var record: policy.Record = undefined;
     try loginRecord(&tokens, 1, &record, &scratch.claims);
     try std.testing.expectEqualStrings("acct_1", record.account_id.slice());
-    try std.testing.expectError(error.TokenExchangeRejected, parseTokenResponse(400, response));
-    try std.testing.expectError(error.MissingRefreshToken, parseTokenResponse(200, "{\"id_token\":\"x\",\"access_token\":\"y\"}"));
+    try std.testing.expectError(error.TokenExchangeRejected, parseTokenResponse(400, response, &scratch.json, &tokens));
+    try std.testing.expectError(error.MissingRefreshToken, parseTokenResponse(200, "{\"id_token\":\"x\",\"access_token\":\"y\"}", &scratch.json, &tokens));
     const opaque_response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-access\",\"refresh_token\":\"refresh\"}}", .{id});
-    try std.testing.expectEqualStrings("opaque-access", (try parseTokenResponse(200, opaque_response)).access_token.slice());
-    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(200, "not json"));
+    try parseTokenResponse(200, opaque_response, &scratch.json, &tokens);
+    try std.testing.expectEqualStrings("opaque-access", tokens.access_token.slice());
+    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(200, "not json", &scratch.json, &tokens));
 }
 
 test "device start validates codes and builds the poll body" {
     var start: DeviceStart = undefined;
-    try parseDeviceStart(200, "{\"device_auth_id\":\"dev-1\",\"usercode\":\"ABCD-EFGH\",\"interval\":\"5\"}", &start);
+    var arena: [wire_arena_bytes]u8 = undefined;
+    try parseDeviceStart(200, "{\"device_auth_id\":\"dev-1\",\"usercode\":\"ABCD-EFGH\",\"interval\":\"5\"}", &arena, &start);
     try std.testing.expectEqualStrings("ABCD-EFGH", start.userCode());
     try std.testing.expectEqual(@as(u16, 5), start.interval_seconds);
     const poll = start.pollRequest();
@@ -447,15 +448,15 @@ test "device start validates codes and builds the poll body" {
     try std.testing.expectEqualStrings(json_content, poll.content_type);
     try std.testing.expectEqualStrings("{\"device_auth_id\":\"dev-1\",\"user_code\":\"ABCD-EFGH\"}", poll.body);
     try std.testing.expectEqualStrings("{\"client_id\":\"" ++ client_id ++ "\"}", device_start.body);
-    try std.testing.expectError(error.DeviceAuthenticationUnavailable, parseDeviceStart(404, "", &start));
-    try std.testing.expectError(error.LoginStartRejected, parseDeviceStart(500, "", &start));
+    try std.testing.expectError(error.DeviceAuthenticationUnavailable, parseDeviceStart(404, "", &arena, &start));
+    try std.testing.expectError(error.LoginStartRejected, parseDeviceStart(500, "", &arena, &start));
     for ([_][]const u8{
         "{\"device_auth_id\":\"dev-1\",\"interval\":\"5\"}",
         "{\"device_auth_id\":\"dev\\\"1\",\"user_code\":\"A\",\"interval\":\"5\"}",
         "{\"device_auth_id\":\"dev-1\",\"user_code\":\"A\",\"interval\":\"0\"}",
         "{\"device_auth_id\":\"dev-1\",\"user_code\":\"A\",\"interval\":\"901\"}",
         "{\"device_auth_id\":\"dev 1\",\"user_code\":\"A\",\"interval\":\"5\"}",
-    }) |body| try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, body, &start));
+    }) |body| try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, body, &arena, &start));
     // A code whose poll body cannot be built is rejected before it can be shown.
     var device_id: [600]u8 = undefined;
     @memset(&device_id, 'd');
@@ -463,9 +464,9 @@ test "device start validates codes and builds the poll body" {
     @memset(&code, 'U');
     var long: [2048]u8 = undefined;
     const overlong = try std.fmt.bufPrint(&long, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\",\"interval\":\"5\"}}", .{ &device_id, &code });
-    try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, overlong, &start));
+    try std.testing.expectError(error.InvalidDeviceResponse, parseDeviceStart(200, overlong, &arena, &start));
     const fits = try std.fmt.bufPrint(&long, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\",\"interval\":\"5\"}}", .{ device_id[0..500], &code });
-    try parseDeviceStart(200, fits, &start);
+    try parseDeviceStart(200, fits, &arena, &start);
     try std.testing.expectEqualSlices(u8, &code, start.userCode());
 }
 
@@ -482,7 +483,8 @@ test "device polling recognizes structured denial and expiration without retryin
 
 test "authorization exchange percent-encodes code and verifier independently" {
     var buffer: [512]u8 = undefined;
-    const request = try grantExchangeRequest("{\"authorization_code\":\"a+b &\",\"code_challenge\":\"x\",\"code_verifier\":\"v/=+\"}", &buffer);
+    var arena: [wire_arena_bytes]u8 = undefined;
+    const request = try grantExchangeRequest("{\"authorization_code\":\"a+b &\",\"code_challenge\":\"x\",\"code_verifier\":\"v/=+\"}", &buffer, &arena);
     try std.testing.expectEqualStrings(issuer ++ "/oauth/token", request.url);
     try std.testing.expectEqualStrings(form_content, request.content_type);
     try std.testing.expectEqualStrings(
@@ -490,7 +492,7 @@ test "authorization exchange percent-encodes code and verifier independently" {
             "&code=a%2Bb%20%26&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback&code_verifier=v%2F%3D%2B",
         request.body,
     );
-    try std.testing.expectError(error.InvalidDeviceGrant, grantExchangeRequest("{}", &buffer));
+    try std.testing.expectError(error.InvalidDeviceGrant, grantExchangeRequest("{}", &buffer, &arena));
 }
 
 fn raises(comptime function: anytype, comptime name: []const u8) bool {

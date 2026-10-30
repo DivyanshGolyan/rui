@@ -32,10 +32,12 @@ pub const Work = struct {
 };
 
 /// Storage for one `rui auth login`: the snapshot and installation it reads
-/// and writes through, and the record it builds. The command maps it for the
-/// call, as a refresh maps its own, instead of holding it on its stack.
+/// and writes through, the tokens its exchange returns, and the record it
+/// builds from them. The command maps it for the call, as a refresh maps
+/// its own, instead of holding it on its stack.
 pub const Login = struct {
     work: Work = undefined,
+    tokens: Tokens = undefined,
     record: credentials.Record = undefined,
 
     pub fn map() !*Login {
@@ -348,18 +350,33 @@ test "device login cancellation rejects before a provider request" {
             return true;
         }
     }.yes;
+    var tokens: Tokens = undefined;
     try std.testing.expectError(error.LoginInterrupted, login(std.testing.io, struct {
         fn display(_: []const u8) !void {}
-    }.display, cancelled));
+    }.display, cancelled, &tokens));
 }
 
-pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Tokens {
-    var begin: Response = .{};
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&begin));
-    const begin_status = try post(io, wire.device_start, &begin, cancelled);
-    var device: wire.DeviceStart = undefined;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&device));
-    try wire.parseDeviceStart(begin_status, begin.bytes[0..begin.len], &device);
+/// Storage for a device login's exchanges: the one response it reads at a
+/// time, the device code, the exchange form and the parse arena.
+const Device = struct {
+    response: Response = undefined,
+    start: wire.DeviceStart = undefined,
+    form: [32 * 1024]u8 = undefined,
+    arena: [wire.wire_arena_bytes]u8 = undefined,
+};
+
+/// Runs a device login and fills `tokens` from its authorization exchange.
+pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool, tokens: *Tokens) !void {
+    const room = try mapRoom(Device);
+    defer unmapRoom(room);
+    const answer = &room.response;
+    const device = &room.start;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(device));
+    {
+        defer std.crypto.secureZero(u8, std.mem.asBytes(answer));
+        const begin_status = try post(io, wire.device_start, answer, cancelled);
+        try wire.parseDeviceStart(begin_status, answer.bytes[0..answer.len], &room.arena, device);
+    }
     try callback(device.userCode());
 
     const started = std.Io.Clock.Timestamp.now(io, .boot);
@@ -368,9 +385,8 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
         if (cancelled()) return error.LoginInterrupted;
         const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
         if (elapsed >= deadline_ns) return error.LoginExpired;
-        var answer: Response = .{};
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-        const answer_status = try post(io, device.pollRequest(), &answer, cancelled);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(answer));
+        const answer_status = try post(io, device.pollRequest(), answer, cancelled);
         if (try wire.classifyPoll(answer_status, answer.bytes[0..answer.len]) == .pending) {
             const remaining = deadline_ns - started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
             if (remaining <= 0) return error.LoginExpired;
@@ -386,13 +402,11 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
             }
             continue;
         }
-        var form: [32 * 1024]u8 = undefined;
-        defer std.crypto.secureZero(u8, &form);
-        const exchange = try wire.grantExchangeRequest(answer.bytes[0..answer.len], &form);
-        var exchanged: Response = .{};
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&exchanged));
-        const exchange_status = try post(io, exchange, &exchanged, cancelled);
-        return wire.parseTokenResponse(exchange_status, exchanged.bytes[0..exchanged.len]);
+        defer std.crypto.secureZero(u8, &room.form);
+        const exchange = try wire.grantExchangeRequest(answer.bytes[0..answer.len], &room.form, &room.arena);
+        // The grant is consumed; the exchange's answer replaces it.
+        const exchange_status = try post(io, exchange, answer, cancelled);
+        return wire.parseTokenResponse(exchange_status, answer.bytes[0..answer.len], &room.arena, tokens);
     }
 }
 
