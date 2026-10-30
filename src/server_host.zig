@@ -2,6 +2,7 @@ const std = @import("std");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
+const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
 const output_retention = @import("output_retention.zig");
@@ -346,7 +347,7 @@ pub const AuthWorker = struct {
     /// The file and claims each acquisition reads through. The worker lives
     /// in the execution Workspace, so only the pages an acquisition writes
     /// become resident; a refresh maps its own storage for the call.
-    work: model_adapter.CredentialWork = undefined,
+    work: codex_auth.Work = undefined,
     failure: ?anyerror = null,
     /// Set with .requested for a forced refresh at this rejected generation.
     refresh_generation: ?u64 = null,
@@ -433,12 +434,12 @@ pub const AuthWorker = struct {
             self.refresh_generation = null;
             self.mutex.unlock(self.io);
             const refreshed: ?bool = if (refresh_generation) |generation|
-                model_adapter.forceCredentialRefresh(self.io, self.authentication, generation) catch |err| {
+                codex_auth.forceRefresh(self.io, self.authentication.path, self.authentication.fixture, generation) catch |err| {
                     self.publishFailure(err);
                     continue;
                 }
             else refreshed: {
-                model_adapter.acquireCredentialInto(self.io, self.authentication, &self.work, &self.credential) catch |err| {
+                codex_auth.acquireInto(self.io, self.authentication.path, self.authentication.fixture, &self.work, &self.credential) catch |err| {
                     self.publishFailure(err);
                     continue;
                 };
