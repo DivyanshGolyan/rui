@@ -1172,7 +1172,9 @@ pub const ContentReader = struct {
     pub const content_window_bytes = 64 * 1024;
 
     content_id: i64,
-    representation: union(enum) { raw, projection: ProjectionCursor },
+    /// A raw value reads at any offset; a derived one decodes through
+    /// `projection` from the encoded bytes `window` holds.
+    raw: bool,
     store: *Store,
     reference: ContentReference,
     active: bool = true,
@@ -1181,12 +1183,17 @@ pub const ContentReader = struct {
     prefetch_source: i64 = 0,
     prefetch_start: u64 = 0,
     prefetch_length: usize = 0,
+    /// Live only while `!raw`.
+    projection: ProjectionCursor = undefined,
+    window: [projection_read_window_bytes]u8 = undefined,
 
-    /// Builds the reader where it lives. Needs no Store access and writes
-    /// only header fields; the projection window stays unwritten.
+    /// Builds the reader where it lives. Needs no Store access. Writes the
+    /// header and, for a derived value, the decode state; the window stays
+    /// unwritten until a read fills it. (A tagged union here cost a 4.3 KB
+    /// write per open: its comptime `.raw` value is stored whole.)
     pub fn open(self: *ContentReader, location: ContentLocation) void {
-        self.* = .{ .content_id = location.content_id, .representation = .raw, .store = location.store, .reference = location.reference };
-        if (!location.raw) self.representation = .{ .projection = .{} };
+        self.* = .{ .content_id = location.content_id, .raw = location.raw, .store = location.store, .reference = location.reference };
+        if (!location.raw) self.projection = .{};
     }
 
     // Allocate outside Store access. Read-ahead is optional: allocation failure
@@ -1194,10 +1201,7 @@ pub const ContentReader = struct {
     // values keep the inline decode window. Encoded projections can exceed
     // the SQLite cache even when their decoded value does not.
     fn prepareRead(self: *ContentReader) void {
-        const extent = switch (self.representation) {
-            .raw => self.reference.length,
-            .projection => |*cursor| @max(self.reference.length, cursor.encoded_end),
-        };
+        const extent = if (self.raw) self.reference.length else @max(self.reference.length, self.projection.encoded_end);
         if (self.prefetch == null and extent > 1024 * 1024)
             self.prefetch = self.allocator.alloc(u8, content_prefetch_bytes) catch null;
     }
@@ -1214,9 +1218,9 @@ pub const ContentReader = struct {
         std.debug.assert(self.active and destination.len > 0);
         if (destination.len > content_window_bytes) return error.WindowTooLarge;
         if (start > self.reference.length) return error.RangeOutOfBounds;
-        if (self.representation == .projection) {
-            if (start < self.representation.projection.decoded_position) self.representation.projection = .{};
-            var offset = self.representation.projection.decoded_position;
+        if (!self.raw) {
+            if (start < self.projection.decoded_position) self.projection = .{};
+            var offset = self.projection.decoded_position;
             while (offset < start) {
                 const wanted: usize = @intCast(@min(start - offset, destination.len));
                 _ = try self.read(offset, destination[0..wanted]);
@@ -1778,18 +1782,16 @@ pub const Store = struct {
     /// The key of `session_ref`'s Workspace, or null when no such Session
     /// exists.
     fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        {
-            const statement = try self.cached("SELECT workspace FROM session WHERE session_ref=?1");
-            defer resetCached(statement);
-            try bindText(statement, 1, session_ref);
-            switch (c.sqlite3_step(statement)) {
-                c.SQLITE_DONE => return null,
-                c.SQLITE_ROW => try readText(statement, 0, &workspace),
-                else => return error.SessionReadFailed,
-            }
+        const statement = try self.cached("SELECT workspace FROM session WHERE session_ref=?1");
+        // Reset only after the key lookup: it binds this row's text in place.
+        defer resetCached(statement);
+        try bindText(statement, 1, session_ref);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return null,
+            c.SQLITE_ROW => {},
+            else => return error.SessionReadFailed,
         }
-        return try self.readWorkspaceKey(workspace.slice());
+        return try self.readWorkspaceKey(try boundedColumnText(statement, 0, protocol.max_workspace_bytes));
     }
 
     /// Runs a write whose `RETURNING session_ref` names each changed row's
@@ -3270,20 +3272,27 @@ pub const Store = struct {
         return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at, .sender = sender, .at = at };
     }
 
+    /// One content value read in order under the Store lock, a window at a
+    /// time. Declared with a literal of its Store and length, which leaves
+    /// the reader's projection window and this window unwritten, then
+    /// `reader.open`ed; `= undefined` would fill all 6.5 KB with 0xAA.
     const ContentSource = struct {
         store: *Store,
         reader: ContentReader = undefined,
         position: u64 = 0,
         end: u64,
-        window: [4096]u8 = undefined,
+        window: [2048]u8 = undefined,
         used: usize = 0,
         count: usize = 0,
 
-        fn init(source: *ContentSource, storage: *Store, id: i64, private: bool) !void {
-            const metadata = try storage.readContentMetadata(id);
-            const location = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private);
-            source.* = .{ .store = storage, .end = metadata.length };
-            source.reader.open(location);
+        /// The next window of bytes, consumed whole; null at the end.
+        fn nextWindow(source: *ContentSource) !?[]const u8 {
+            std.debug.assert(source.used == source.count);
+            const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
+            if (wanted == 0) return null;
+            try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+            source.position += wanted;
+            return source.window[0..wanted];
         }
 
         pub fn peek(source: *@This()) !?u8 {
@@ -3766,12 +3775,21 @@ pub const Store = struct {
             field.* = .{ .length = metadata.length, .digest = metadata.digest };
         }
         if (authenticate) {
-            var source: ContentSource = undefined;
-            try source.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
-            defer source.reader.close();
-            @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
+            try self.authenticateProposalLocked(try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, &result.metadata.fields);
         }
         return result;
+    }
+
+    /// Reads the call's private item back and checks it still carries the
+    /// certified fields. noinline: its content window lives in this frame
+    /// only, not in every proposal read's.
+    noinline fn authenticateProposalLocked(self: *Store, item_content_id: i64, fields: *const @FieldType(protocol.ProposalMetadata, "fields")) !void {
+        const metadata = try self.readContentMetadata(item_content_id);
+        const location = try self.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, true);
+        var source: ContentSource = .{ .store = self, .end = metadata.length };
+        source.reader.open(location);
+        defer source.reader.close();
+        @import("provider_output.zig").authenticateCall(&source, fields) catch return error.CorruptStore;
     }
 
     pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
@@ -5035,20 +5053,13 @@ pub const Store = struct {
     fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
-        var reader: ContentReader = undefined;
-        reader.open(.{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .raw = raw });
-        defer reader.close();
+        var source: ContentSource = .{ .store = self, .end = metadata.length };
+        source.reader.open(.{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .raw = raw });
+        defer source.reader.close();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
-        var buffer: [4096]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < metadata.length) {
-            const wanted: usize = @intCast(@min(metadata.length - offset, buffer.len));
-            try self.readOwnedContentLocked(&reader, offset, buffer[0..wanted]);
-            try capture.appendJsonStringBytes(buffer[0..wanted]);
-            offset += wanted;
-        }
+        while (try source.nextWindow()) |bytes| try capture.appendJsonStringBytes(bytes);
         try capture.append("\"}");
     }
 
@@ -6994,16 +7005,12 @@ pub const Store = struct {
                     else => return error.OutputReadFailed,
                 }
 
-                const call_facts = facts: {
-                    var call_name = try output_format.EncodedStringReader.init(self.io, output.source, name);
-                    var arguments = output_format.JsonStringSource{ .encoded = try output_format.EncodedStringReader.init(self.io, output.source, record) };
-                    break :facts try tool_catalog.inspectCall(&call_name, name.decoded_length, &arguments);
-                };
+                const call_facts = try inspectOutputCall(self.io, output.source, name, record);
                 const bash_arguments = call_facts.bash_arguments;
                 const rejection_code = tool_catalog.classifyCall(call_facts.name, bash_arguments != null, frozen_tools);
                 var rejection_buffer: [192]u8 = undefined;
                 const rejection_text = if (rejection_code) |code| text: {
-                    var rejected_name = try output_format.EncodedStringReader.init(self.io, output.source, name);
+                    var rejected_name: output_format.NameReader = .{ .io = self.io, .file = output.source, .position = name.start, .end = try name.end() };
                     break :text try tool_catalog.rejectionResult(code, &rejected_name, name.decoded_length, name.content_digest, &rejection_buffer);
                 } else null;
                 const rejection_content_id = if (rejection_text) |text|
@@ -7182,33 +7189,42 @@ pub const Store = struct {
         return slot.id;
     }
 
-    fn importAnswerProjection(self: *Store, binding: AttemptBinding, output: *const ValidatedOutput, owner: OutputMetadataRecord, metadata_start: u64, metadata_end: u64) !i64 {
+    /// noinline: the text's content window lives in this frame only, not in
+    /// the settlement frame that calls it once per message.
+    noinline fn importAnswerProjection(self: *Store, binding: AttemptBinding, output: *const ValidatedOutput, owner: OutputMetadataRecord, metadata_start: u64, metadata_end: u64) !i64 {
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         metadata.offset = metadata_start;
         metadata.length = metadata_end;
-        var hash = protocol.contentHasher();
-        var decoded_length: u64 = 0;
+        // Decoded bytes reach the hash a batch at a time. The literal's
+        // runtime hash leaves the batch unwritten until decoded bytes fill
+        // it; an all-comptime `.{}` would zero it first.
+        var decoded: struct {
+            hash: @TypeOf(protocol.contentHasher()),
+            length: u64 = 0,
+            batch: [512]u8 = undefined,
+            count: usize = 0,
+        } = .{ .hash = protocol.contentHasher() };
         while (try metadata.next()) |record| {
             if (record.tag != .text) continue;
             if (owner.ordinal != record.ordinal or owner.kind != .message or record.start < owner.start or
                 record.length > owner.length or record.start - owner.start > owner.length - record.length)
                 return error.CorruptOutputMetadata;
-            var text = try output_format.EncodedStringReader.init(self.io, output.source, record);
-            var buffer: [protocol.content_window_bytes]u8 = undefined;
-            var count: usize = 0;
+            var text: output_format.EncodedStringReader = .{ .io = self.io, .file = output.source, .position = record.start, .end = try record.end() };
             while (try text.next()) |byte| {
-                buffer[count] = byte;
-                count += 1;
-                if (count == buffer.len) {
-                    hash.update(&buffer);
-                    decoded_length = try std.math.add(u64, decoded_length, count);
-                    count = 0;
+                decoded.batch[decoded.count] = byte;
+                decoded.count += 1;
+                if (decoded.count == decoded.batch.len) {
+                    decoded.hash.update(&decoded.batch);
+                    decoded.length = try std.math.add(u64, decoded.length, decoded.count);
+                    decoded.count = 0;
                 }
             }
-            hash.update(buffer[0..count]);
-            decoded_length = try std.math.add(u64, decoded_length, count);
+            decoded.hash.update(decoded.batch[0..decoded.count]);
+            decoded.length = try std.math.add(u64, decoded.length, decoded.count);
+            decoded.count = 0;
         }
-        const digest = hash.finalResult();
+        const decoded_length = decoded.length;
+        const digest = decoded.hash.finalResult();
         const find = try self.cached("SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
         defer resetCached(find);
         try bindBlob(find, 1, &digest);
@@ -7352,64 +7368,61 @@ pub const Store = struct {
 
     /// Fills all of `destination` or fails, so no reader sees a short window.
     fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
-        switch (reader.representation) {
-            .raw => try self.readReaderBlob(reader, reader.content_id, start, reader.reference.length, destination),
-            .projection => |*cursor| {
-                std.debug.assert(start == cursor.decoded_position);
-                var filled: usize = 0;
-                while (filled < destination.len) {
-                    if (cursor.pending_start < cursor.pending_end) {
-                        const count = @min(destination.len - filled, cursor.pending_end - cursor.pending_start);
-                        @memcpy(destination[filled..][0..count], cursor.pending[cursor.pending_start..][0..count]);
-                        cursor.hash.update(destination[filled..][0..count]);
-                        cursor.pending_start += count;
-                        cursor.decoded_position += count;
-                        filled += count;
-                        continue;
-                    }
-                    if (cursor.encoded_position == cursor.encoded_end) {
-                        if (cursor.part_decoded != cursor.expected_decoded) return error.CorruptStore;
-                        const row = try self.cached("SELECT source_content_id,encoded_start,encoded_length,decoded_length FROM answer_text_projection " ++
-                            "WHERE answer_content_id=?1 AND part_ordinal=?2");
-                        defer resetCached(row);
-                        try bindI64(row, 1, reader.content_id);
-                        try bindU64(row, 2, cursor.next_part);
-                        if (c.sqlite3_step(row) != c.SQLITE_ROW) return error.CorruptStore;
-                        cursor.source_id = c.sqlite3_column_int64(row, 0);
-                        cursor.encoded_position = @intCast(c.sqlite3_column_int64(row, 1));
-                        cursor.encoded_end = try std.math.add(u64, cursor.encoded_position, @intCast(c.sqlite3_column_int64(row, 2)));
-                        cursor.expected_decoded = @intCast(c.sqlite3_column_int64(row, 3));
-                        cursor.part_decoded = 0;
-                        cursor.buffer_length = 0;
-                        cursor.next_part += 1;
-                        if (cursor.encoded_position == cursor.encoded_end) continue;
-                    }
-                    var source = ProjectedByteSource{ .store = self, .reader = reader, .cursor = cursor };
-                    cursor.pending_end = try decodeOutputScalar(&source, &cursor.pending);
-                    if (@import("builtin").is_test) _ = self.testing_content_work.decoded.fetchAdd(cursor.pending_end, .monotonic);
-                    cursor.pending_start = 0;
-                    cursor.part_decoded += cursor.pending_end;
-                }
-                if (cursor.decoded_position == reader.reference.length and
-                    (cursor.pending_start != cursor.pending_end or cursor.encoded_position != cursor.encoded_end or
-                        cursor.part_decoded != cursor.expected_decoded)) return error.CorruptStore;
-                // Complete-stream consistency, not authentication of an earlier
-                // range. Positioning discards participate in the same hash.
-                if (cursor.decoded_position == reader.reference.length) {
-                    // Empty text records are legitimate; any unvisited nonempty
-                    // part contradicts EOF, even beyond empty rows/ordinal gaps.
-                    const tail = try self.cached("SELECT EXISTS(SELECT 1 FROM answer_text_projection " ++
-                        "WHERE answer_content_id=?1 AND part_ordinal>=?2 AND (encoded_length!=0 OR decoded_length!=0))");
-                    defer resetCached(tail);
-                    try bindI64(tail, 1, reader.content_id);
-                    try bindU64(tail, 2, cursor.next_part);
-                    if (c.sqlite3_step(tail) != c.SQLITE_ROW) return error.ContentReadFailed;
-                    if (c.sqlite3_column_int(tail, 0) != 0) return error.CorruptStore;
-                    // finalResult mutates: preserve state for repeated EOF reads.
-                    var hash = cursor.hash;
-                    if (!std.mem.eql(u8, &hash.finalResult(), &reader.reference.digest)) return error.CorruptStore;
-                }
-            },
+        if (reader.raw) return self.readReaderBlob(reader, reader.content_id, start, reader.reference.length, destination);
+        const cursor = &reader.projection;
+        std.debug.assert(start == cursor.decoded_position);
+        var filled: usize = 0;
+        while (filled < destination.len) {
+            if (cursor.pending_start < cursor.pending_end) {
+                const count = @min(destination.len - filled, cursor.pending_end - cursor.pending_start);
+                @memcpy(destination[filled..][0..count], cursor.pending[cursor.pending_start..][0..count]);
+                cursor.hash.update(destination[filled..][0..count]);
+                cursor.pending_start += count;
+                cursor.decoded_position += count;
+                filled += count;
+                continue;
+            }
+            if (cursor.encoded_position == cursor.encoded_end) {
+                if (cursor.part_decoded != cursor.expected_decoded) return error.CorruptStore;
+                const row = try self.cached("SELECT source_content_id,encoded_start,encoded_length,decoded_length FROM answer_text_projection " ++
+                    "WHERE answer_content_id=?1 AND part_ordinal=?2");
+                defer resetCached(row);
+                try bindI64(row, 1, reader.content_id);
+                try bindU64(row, 2, cursor.next_part);
+                if (c.sqlite3_step(row) != c.SQLITE_ROW) return error.CorruptStore;
+                cursor.source_id = c.sqlite3_column_int64(row, 0);
+                cursor.encoded_position = @intCast(c.sqlite3_column_int64(row, 1));
+                cursor.encoded_end = try std.math.add(u64, cursor.encoded_position, @intCast(c.sqlite3_column_int64(row, 2)));
+                cursor.expected_decoded = @intCast(c.sqlite3_column_int64(row, 3));
+                cursor.part_decoded = 0;
+                cursor.buffer_length = 0;
+                cursor.next_part += 1;
+                if (cursor.encoded_position == cursor.encoded_end) continue;
+            }
+            var source = ProjectedByteSource{ .store = self, .reader = reader, .cursor = cursor };
+            cursor.pending_end = try decodeOutputScalar(&source, &cursor.pending);
+            if (@import("builtin").is_test) _ = self.testing_content_work.decoded.fetchAdd(cursor.pending_end, .monotonic);
+            cursor.pending_start = 0;
+            cursor.part_decoded += cursor.pending_end;
+        }
+        if (cursor.decoded_position == reader.reference.length and
+            (cursor.pending_start != cursor.pending_end or cursor.encoded_position != cursor.encoded_end or
+                cursor.part_decoded != cursor.expected_decoded)) return error.CorruptStore;
+        // Complete-stream consistency, not authentication of an earlier
+        // range. Positioning discards participate in the same hash.
+        if (cursor.decoded_position == reader.reference.length) {
+            // Empty text records are legitimate; any unvisited nonempty
+            // part contradicts EOF, even beyond empty rows/ordinal gaps.
+            const tail = try self.cached("SELECT EXISTS(SELECT 1 FROM answer_text_projection " ++
+                "WHERE answer_content_id=?1 AND part_ordinal>=?2 AND (encoded_length!=0 OR decoded_length!=0))");
+            defer resetCached(tail);
+            try bindI64(tail, 1, reader.content_id);
+            try bindU64(tail, 2, cursor.next_part);
+            if (c.sqlite3_step(tail) != c.SQLITE_ROW) return error.ContentReadFailed;
+            if (c.sqlite3_column_int(tail, 0) != 0) return error.CorruptStore;
+            // finalResult mutates: preserve state for repeated EOF reads.
+            var hash = cursor.hash;
+            if (!std.mem.eql(u8, &hash.finalResult(), &reader.reference.digest)) return error.CorruptStore;
         }
     }
 
@@ -8103,9 +8116,10 @@ const ProjectionCursor = struct {
     encoded_end: u64 = 0,
     expected_decoded: u64 = 0,
     part_decoded: u64 = 0,
+    /// The encoded bytes of the reader's `window`: from `buffer_start`, for
+    /// `buffer_length`.
     buffer_start: u64 = 0,
     buffer_length: usize = 0,
-    buffer: [projection_read_window_bytes]u8 = undefined,
     pending: [4]u8 = undefined,
     pending_start: usize = 0,
     pending_end: usize = 0,
@@ -8121,16 +8135,27 @@ const ProjectedByteSource = struct {
         if (cursor.encoded_position == cursor.encoded_end) return error.IncompleteJsonString;
         if (cursor.buffer_length == 0 or cursor.encoded_position >= cursor.buffer_start + cursor.buffer_length) {
             cursor.buffer_start = cursor.encoded_position;
-            cursor.buffer_length = @intCast(@min(cursor.encoded_end - cursor.encoded_position, cursor.buffer.len));
-            try self.store.readReaderBlob(self.reader, cursor.source_id, cursor.buffer_start, cursor.encoded_end, cursor.buffer[0..cursor.buffer_length]);
+            cursor.buffer_length = @intCast(@min(cursor.encoded_end - cursor.encoded_position, self.reader.window.len));
+            try self.store.readReaderBlob(self.reader, cursor.source_id, cursor.buffer_start, cursor.encoded_end, self.reader.window[0..cursor.buffer_length]);
         }
-        const byte = cursor.buffer[@intCast(cursor.encoded_position - cursor.buffer_start)];
+        const byte = self.reader.window[@intCast(cursor.encoded_position - cursor.buffer_start)];
         cursor.encoded_position += 1;
         return byte;
     }
 };
 
 const decodeOutputScalar = output_format.decodeScalar;
+
+/// One function call's catalog facts: its name and, for bash, its
+/// arguments. noinline: the arguments' content window lives in this frame
+/// only, not in the settlement frame that walks the output's metadata.
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord) !tool_catalog.CallFacts {
+    var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
+    var encoded: output_format.JsonStringSource = .{
+        .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
+    };
+    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded);
+}
 
 /// noinline: its read buffer serves the rare schema check, not every
 /// configure frame.
@@ -8751,6 +8776,15 @@ fn readText(statement: *c.sqlite3_stmt, index: c_int, destination: anytype) !voi
     try destination.set(try columnText(statement, index));
 }
 
+/// The column's text, held to the bound and UTF-8 check a
+/// Bounded(capacity) read applies, without copying it into one.
+fn boundedColumnText(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize) ![]const u8 {
+    const value = try columnText(statement, index);
+    if (value.len > capacity) return error.ValueTooLong;
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    return value;
+}
+
 /// The column's text as SQLite holds it, valid until the statement next
 /// steps or resets.
 fn columnText(statement: *c.sqlite3_stmt, index: c_int) ![]const u8 {
@@ -8771,13 +8805,8 @@ fn nextReportRow(statement: *c.sqlite3_stmt, first: *bool, capture: *SessionRepo
     return true;
 }
 
-/// Appends the column's own text, held to the bound and UTF-8 check a
-/// Bounded(capacity) read applies, without copying it into one first.
 fn appendColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
-    const value = try columnText(statement, index);
-    if (value.len > capacity) return error.ValueTooLong;
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-    try capture.appendJsonString(value);
+    try capture.appendJsonString(try boundedColumnText(statement, index, capacity));
 }
 
 fn appendNullableColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
@@ -17850,7 +17879,7 @@ test "continued accepted output keeps model immutable and public projection read
     try std.testing.expect(public_page.items[0].kind == .assistant);
     var public_reader: ContentReader = undefined;
     public_reader.open(try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position }));
-    try std.testing.expect(public_reader.representation == .projection);
+    try std.testing.expect(!public_reader.raw);
     {
         const backing = try prepare(storage.database, "SELECT exposed.private,source.private FROM answer_text_projection projection " ++
             "JOIN content exposed ON exposed.content_id=projection.answer_content_id " ++
