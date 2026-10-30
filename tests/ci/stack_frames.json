@@ -3,7 +3,7 @@
   "threads": {
     "intake worker": "server.Intake.Exchange.receive",
     "engine": "execution_turn.admitWork",
-    "AuthWorker": "codex_auth.exchangeAt"
+    "AuthWorker": "codex_credentials.exchangeRefresh"
   },
   "exceptions": [
     {"function": "server.serve", "frame_bytes": 28672, "cause": "startup-only buffers inlined into serve: bash.environment path and executable buffers (8 KB), HostDiagnostics repairTail [4096]u8, readiness FixedJsonBuffer(3319), store-version message [2480]u8, two Dir.Iterator"},

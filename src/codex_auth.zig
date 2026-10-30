@@ -2,6 +2,7 @@ const std = @import("std");
 const credentials = @import("codex_credentials.zig");
 const policy = @import("codex_credential_policy.zig");
 const wire = @import("codex_token_wire.zig");
+const pages = @import("os/pages.zig");
 
 const h2 = @import("h2");
 
@@ -33,27 +34,20 @@ pub const Work = struct {
 
 /// Storage for one `rui auth login`: the snapshot and installation it reads
 /// and writes through, the tokens its exchange returns, and the record it
-/// builds from them. The command maps it for the call, as a refresh maps
-/// its own, instead of holding it on its stack.
+/// builds from them. The command maps it for the call (`pages.Mapped`), as a
+/// refresh maps its own, instead of holding it on its stack.
 pub const Login = struct {
     work: Work = undefined,
     tokens: Tokens = undefined,
     record: credentials.Record = undefined,
-
-    pub fn map() !*Login {
-        return mapRoom(Login);
-    }
-
-    pub fn unmap(self: *Login) void {
-        unmapRoom(self);
-    }
 };
 
 /// Reads a snapshot without a refresh lock and applies the runtime's routing
 /// and expiry checks to it.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
-    const work = try mapRoom(Work);
-    defer unmapRoom(work);
+    const mapped = try pages.Mapped(Work).map();
+    defer mapped.unmap();
+    const work = mapped.value;
     const record = &work.credentials.current;
     defer std.crypto.secureZero(u8, std.mem.asBytes(record));
     if (!try credentials.readSnapshotInto(path, record, &work.credentials)) return .missing;
@@ -86,7 +80,9 @@ pub fn forceRefresh(io: std.Io, path: []const u8, fixture: bool, expected_genera
 }
 
 /// Storage for one refresh: the records it claims and builds, the request,
-/// the response and what parsing it needs.
+/// the response and what parsing it needs. A refresh or a login runs a few
+/// times an hour at most, so its storage lives in pages mapped for the call
+/// and leaves nothing resident or on a stack once the call returns.
 const Refresh = struct {
     credentials: credentials.Scratch = undefined,
     replacement: credentials.Record = undefined,
@@ -95,27 +91,14 @@ const Refresh = struct {
     body: [32 * 1024]u8 = undefined,
 };
 
-/// A refresh or a login runs a few times an hour at most, so its storage
-/// lives in pages mapped for the call, as h2.exchange's client does, and
-/// leaves nothing resident or on a stack once the call returns. Fresh pages
-/// are zero and become resident only where written.
-fn mapRoom(comptime T: type) !*T {
-    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse
-        return error.OutOfMemory;
-    return @ptrCast(@alignCast(bytes));
-}
-
-fn unmapRoom(room: anytype) void {
-    std.heap.page_allocator.rawFree(std.mem.asBytes(room), .of(@TypeOf(room.*)), @returnAddress());
-}
-
 /// One refresh claim at `expected_generation` under the exclusive credential
 /// lock. The synthetic fixture credential cannot reach the real issuer, so
 /// its exchange republishes the same tokens; generation, claim and
 /// replacement admission still follow the production owner.
 fn exchangeAt(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
-    const room = try mapRoom(Refresh);
-    defer unmapRoom(room);
+    const mapped = try pages.Mapped(Refresh).map();
+    defer mapped.unmap();
+    const room = mapped.value;
     const Context = struct { io: std.Io, fixture: bool, room: *Refresh };
     return credentials.exchangeRefresh(path, expected_generation, &room.credentials, &room.replacement, Context{ .io = io, .fixture = fixture, .room = room }, struct {
         fn exchange(context: Context, current: *const credentials.Record, replacement: *credentials.Record) !void {
@@ -367,8 +350,9 @@ const Device = struct {
 
 /// Runs a device login and fills `tokens` from its authorization exchange.
 pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool, tokens: *Tokens) !void {
-    const room = try mapRoom(Device);
-    defer unmapRoom(room);
+    const mapped = try pages.Mapped(Device).map();
+    defer mapped.unmap();
+    const room = mapped.value;
     const answer = &room.response;
     const device = &room.start;
     defer std.crypto.secureZero(u8, std.mem.asBytes(device));

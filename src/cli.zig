@@ -22,6 +22,7 @@ const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const signal_stack = @import("signal_stack.zig");
+const pages = @import("os/pages.zig");
 const product_defaults = @import("product_defaults.zig");
 const test_poll = @import("test_poll");
 
@@ -627,8 +628,9 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try credentialPath(init, &path_buffer, true);
     if (loginInterrupted()) return error.LoginInterrupted;
-    const room = try codex_auth.Login.map();
-    defer room.unmap();
+    const mapped = try pages.Mapped(codex_auth.Login).map();
+    defer mapped.unmap();
+    const room = mapped.value;
     // Preflight needs only a safe snapshot, not the refresh owner's lock or
     // generation. Installation rereads under its exclusive lock after winning.
     {
