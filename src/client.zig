@@ -745,12 +745,18 @@ pub const Binding = struct {
 pub const CaptureTarget = union(enum) {
     generated: []const u8, // Caller-selected private directory, not HOME policy.
     explicit: struct { record: []const u8, key: []const u8 },
+    // An identity a caller resolved ahead of capture, keeping its route.
+    reserved: Location,
+
+    /// Where a capture writes, the key it binds, and how it is replayed.
+    pub const Location = struct { record: []const u8, key: []const u8, replay: Replay };
 
     /// Reserve identity before asynchronous capture; returned slices borrow
     /// caller storage through capture return. This does not publish a record.
-    pub fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !@FieldType(CaptureTarget, "explicit") {
+    pub fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !Location {
         return switch (self) {
-            .explicit => |value| value,
+            .explicit => |value| .{ .record = value.record, .key = value.key, .replay = .{ .explicit = value.record } },
+            .reserved => |location| location,
             .generated => |directory| blk: {
                 var bytes: [16]u8 = undefined;
                 try std.Io.randomSecure(io, &bytes);
@@ -763,20 +769,30 @@ pub const CaptureTarget = union(enum) {
                     std.mem.readInt(u16, bytes[8..10], .big),
                     std.mem.readInt(u48, bytes[10..16], .big),
                 });
-                break :blk .{ .record = try requestPath(directory, id, path), .key = id };
+                break :blk .{ .record = try requestPath(directory, id, path), .key = id, .replay = .generated };
             },
         };
     }
 };
 
+/// How a caller replays a saved request: by its generated handle, which is
+/// the record's key, or by the explicit record path it was captured to or
+/// opened from. That path is borrowed from the caller, which keeps it alive
+/// as long as any copy of this value (the CLI passes argv).
+pub const Replay = union(enum) {
+    generated,
+    explicit: []const u8,
+};
+
 // Owns one read-only descriptor, never the saved name's deletion. Identity
 // borrows this value and remains available after any send failure. Do not copy
-// the live owner; close once after the last send/identity consumer.
+// the live owner; close once after the last send/identity/replay consumer.
 pub const CapturedRecord = struct {
     file: std.Io.File,
     length: u64,
     saved: protocol_reply.MutationIdentity,
     target: protocol_reply.MutationTarget,
+    replay: Replay,
 
     pub fn identity(self: *const CapturedRecord) *const protocol_reply.MutationIdentity {
         return &self.saved;
@@ -836,7 +852,11 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .generated => error.InvalidRequestRecord,
         .explicit => error.RequestBindingMismatch,
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
+    const replay: Replay = switch (saved) {
+        .generated => .generated,
+        .explicit => |explicit| .{ .explicit = explicit.record },
+    };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay };
 }
 
 /// Metadata-only projection for listing/inspection; cannot authorize a send or
@@ -1034,7 +1054,7 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
         try capture.writeRequest(protocol.configure_request.require_model_tail, .{})
     else
         try capture.writeRequest(protocol.configure_request.tail, .{});
-    return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
+    return finishCapture(io, &capture, &location, paths.store.slice(), session, .configure);
 }
 
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
@@ -1081,28 +1101,28 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
         try capture.writeRequest(protocol.message_request.require_model_tail, .{})
     else
         try capture.writeRequest(protocol.message_request.tail, .{});
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
 }
 
-fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: @FieldType(CaptureTarget, "explicit")) !CapturedRecord {
+fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writeRequest(protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session });
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .session_stop);
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_stop);
 }
 
 fn writeModelInterruptionCapture(
     io: std.Io,
     paths: *const platform.Paths,
     input: ModelInterruptionInput,
-    location: @FieldType(CaptureTarget, "explicit"),
+    location: CaptureTarget.Location,
 ) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writeRequest(protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id });
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .model_interruption);
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .model_interruption);
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -1116,10 +1136,10 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writePermissionDecision(paths.store.slice(), location.key, input);
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .permission_decision);
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .permission_decision);
 }
 
-fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
+fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
     // Pin the temporary inode under capture custody, before exposing its name.
     // This reader observes the final flush, not a later public-path replacement.
     var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
@@ -1129,8 +1149,8 @@ fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const 
     try capture.commit();
     const length = try file.length(io);
     const binding = try readCapturedBinding(io, &file);
-    if (!(Binding{ .store = store, .key = key, .session = session, .kind = kind }).matches(&binding.saved, binding.target)) return error.InvalidRequestRecord;
-    return .{ .file = file, .length = length, .saved = binding.saved, .target = binding.target };
+    if (!(Binding{ .store = store, .key = location.key, .session = session, .kind = kind }).matches(&binding.saved, binding.target)) return error.InvalidRequestRecord;
+    return .{ .file = file, .length = length, .saved = binding.saved, .target = binding.target, .replay = location.replay };
 }
 
 const Capture = struct {
@@ -2946,7 +2966,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
         .session = session,
-    }, .{ .record = stop_path, .key = &escaped_key });
+    }, .{ .record = stop_path, .key = &escaped_key, .replay = .{ .explicit = stop_path } });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -2966,7 +2986,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
         .session = session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    }, .{ .record = interruption_path, .key = &escaped_key });
+    }, .{ .record = interruption_path, .key = &escaped_key, .replay = .{ .explicit = interruption_path } });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
@@ -3281,7 +3301,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     var token: Cancellation = .{};
     token.requestStop();
     const requests: Requests = .{ .io = std.testing.io, .cancellation = &token };
-    var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{ .kind = .configure }, .target = .configure };
+    var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{ .kind = .configure }, .target = .configure, .replay = .generated };
     try captured.saved.store.set("/never-open");
     var buffer: ReplyBuffer = .{};
     try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, &buffer).get());

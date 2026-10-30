@@ -81,7 +81,7 @@ pub fn begin(self: *Self, intent: Intent) !void {
     self.reply = null;
     self.publication = .not_sent;
     const target: client.CaptureTarget = .{ .generated = self.directory };
-    self.target = .{ .explicit = try target.resolve(self.io, &self.path, &self.key) };
+    self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
     try self.task.start(self.io, self, submit);
     self.state = .submitting;
 }
@@ -436,7 +436,7 @@ test "submission recovery validates reopened originals and pins the saved reader
             try std.testing.expectEqualSlices(u8, &key, &self.recovery().uncertain);
             vtable.fileSync = io.vtable.fileSync;
             if (variant != .absent) {
-                const target: client.CaptureTarget = .{ .explicit = .{ .record = self.target.explicit.record, .key = if (variant == .key) "wrong-key" else &key } };
+                const target: client.CaptureTarget = .{ .explicit = .{ .record = self.target.reserved.record, .key = if (variant == .key) "wrong-key" else &key } };
                 const store = if (variant == .store) other_store else root;
                 const session = if (variant == .session) "09azvw" else "k7m2qx";
                 var record = if ((kind == 0) != (variant == .kind))
@@ -466,11 +466,11 @@ test "submission recovery validates reopened originals and pins the saved reader
                 // path must not make the next retry select a different inode.
                 self.cancel();
                 try std.testing.expect(self.join() == .absent);
-                try std.Io.Dir.cwd().deleteFile(io, self.target.explicit.record);
+                try std.Io.Dir.cwd().deleteFile(io, self.target.reserved.record);
                 try self.requestRecovery(null);
                 _ = try self.advance();
                 try std.testing.expectEqual(error.FileNotFound, self.join().failed.err);
-                try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, self.target.explicit.record, .{}));
+                try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, self.target.reserved.record, .{}));
                 self.close();
                 try std.testing.expectEqualSlices(u8, &key, &self.recovery().saved.original.key);
             }
@@ -564,6 +564,8 @@ test "submission settles wire Admission only after join and releases only accept
             for ("next té!\x1b[D") |byte| _ = input.feed(byte);
             const key = self.view().?.key;
             const end = self.join();
+            // Acceptance releases the record; an unresolved one keeps its route.
+            if (!accepted) try std.testing.expect(self.captured.?.replay == .generated);
             if (accepted) {
                 try std.testing.expect(end == .accepted);
                 try std.testing.expect(self.view() == null);
