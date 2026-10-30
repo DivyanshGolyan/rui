@@ -86,7 +86,9 @@ fn write(self: *Self, phase: []const u8, detail: []const u8) !void {
     self.length += record_bytes.len;
 }
 
-fn rotate(self: *Self) !void {
+/// noinline: rotation is rare, and its name buffers and directory iterator
+/// would otherwise sit in every record's frame beside the record buffer.
+noinline fn rotate(self: *Self) !void {
     if (self.file) |file| {
         file.close(self.io);
         self.file = null;

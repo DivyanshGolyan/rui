@@ -2424,7 +2424,7 @@ test "cleanup publication follows complete execution retirement" {
         .encoded = "{\\\"description\\\":\\\"Print test marker\\\",\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
         .decoded = arguments,
     }});
-    const arguments_location = try storage.openPublicConversationContent(content);
+    const arguments_location = try storage.openPublicConversationContent(&content);
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
@@ -2761,7 +2761,7 @@ test "no-work admission restores only its temporary custody reservation" {
             try std.testing.expect(host.launchAllowed());
             try std.testing.expectEqual(baseline, host.custody.occupied());
             try checkSlotCustodyAgreement(&slots, &host.custody);
-            try std.testing.expect(!(try storage.inspectSession("direct/no-work")).found);
+            try std.testing.expect(!(try storage.inspectSessionForTesting("direct/no-work")).found);
 
             // Restored accounting must mean immediately reusable capacity,
             // not just a corrected counter or accidental sibling release.

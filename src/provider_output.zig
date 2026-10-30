@@ -102,7 +102,6 @@ pub const EventData = struct {
     pub fn deinit(self: *EventData) void {
         self.window.file.close(self.window.io);
         self.budget.release(self.charged);
-        self.* = undefined;
     }
 };
 
@@ -765,7 +764,7 @@ const ItemSource = struct {
 
 fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64, answer_hash: *std.crypto.hash.sha2.Sha256) !ItemValidation {
     const item_check = response.item_check;
-    item_check.* = .{ .operation = response.operation };
+    item_check.reset(response.operation);
     var bytes: usize = std.math.maxInt(usize);
     var items: usize = std.math.maxInt(usize);
     // Unbounded allowances finish the item in one call.
@@ -908,6 +907,15 @@ pub const OutputItemCheck = struct {
         UnsupportedCaller,
         UnsupportedMetadataAuthority,
     };
+
+    /// Readies the check for one item under `operation`. The runtime
+    /// literal writes the header fields only: the input window, frames and
+    /// decode scratch keep their `undefined` defaults, unwritten until the
+    /// grammar fills them. An all-comptime `.{}` would copy the whole
+    /// 66 KB default instead.
+    pub fn reset(self: *OutputItemCheck, operation: ?output_format.ModelOperationKind) void {
+        self.* = .{ .operation = operation };
+    }
 
     /// Bind every retained item to its admission-certified type and ID.
     /// Compatibility errors are deferred until these canonical facts agree.

@@ -25,6 +25,11 @@ pub const OutputMetadataRecord = struct {
     id_digest: [32]u8 = @splat(0),
     content_digest: [32]u8 = @splat(0),
     usage_tokens: ?u64 = null,
+
+    /// One past the record's last encoded byte.
+    pub fn end(self: *const OutputMetadataRecord) !u64 {
+        return std.math.add(u64, self.start, self.length);
+    }
 };
 
 pub const output_metadata_record_bytes = 104;
@@ -209,49 +214,59 @@ pub fn readHexScalar(source: anytype) !u21 {
     return value;
 }
 
-/// Bounded decoded view of a certified JSON string range, excluding quotes.
-pub const EncodedStringReader = struct {
-    io: std.Io,
-    file: std.Io.File,
-    position: u64,
-    end: u64,
-    buffer_start: u64 = 0,
-    buffer_length: usize = 0,
-    buffer: [protocol.content_window_bytes]u8 = undefined,
-    pending: [4]u8 = undefined,
-    pending_start: u3 = 0,
-    pending_end: u3 = 0,
+/// Streams a value's decoded bytes through a whole content window.
+pub const EncodedStringReader = EncodedStringWindow(protocol.content_window_bytes);
 
-    pub fn init(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !EncodedStringReader {
-        return .{ .io = io, .file = file, .position = record.start, .end = try std.math.add(u64, record.start, record.length) };
-    }
+/// Reads a call name, which the Host only compares with a catalog name or
+/// quotes as a 32-byte prefix, so a short window serves it.
+pub const NameReader = EncodedStringWindow(64);
 
-    pub fn take(self: *EncodedStringReader) !u8 {
-        if (self.position == self.end) return error.InvalidEncodedString;
-        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
-            self.buffer_start = self.position;
-            const wanted: usize = @intCast(@min(self.end - self.position, self.buffer.len));
-            const count = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.position);
-            if (count != wanted) return error.ShortOutputRead;
-            self.buffer_length = count;
+/// Bounded decoded view of a certified JSON string range, excluding quotes,
+/// read through a `window_bytes` window. Declared with a literal of its
+/// range (`.position = record.start, .end = try record.end()`), so the
+/// window stays unwritten until a read fills it.
+fn EncodedStringWindow(comptime window_bytes: usize) type {
+    return struct {
+        const Self = @This();
+
+        io: std.Io,
+        file: std.Io.File,
+        position: u64,
+        end: u64,
+        buffer_start: u64 = 0,
+        buffer_length: usize = 0,
+        buffer: [window_bytes]u8 = undefined,
+        pending: [4]u8 = undefined,
+        pending_start: u3 = 0,
+        pending_end: u3 = 0,
+
+        pub fn take(self: *Self) !u8 {
+            if (self.position == self.end) return error.InvalidEncodedString;
+            if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
+                self.buffer_start = self.position;
+                const wanted: usize = @intCast(@min(self.end - self.position, self.buffer.len));
+                const count = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.position);
+                if (count != wanted) return error.ShortOutputRead;
+                self.buffer_length = count;
+            }
+            const byte = self.buffer[@intCast(self.position - self.buffer_start)];
+            self.position += 1;
+            if (byte < 0x20) return error.InvalidEncodedString;
+            return byte;
         }
-        const byte = self.buffer[@intCast(self.position - self.buffer_start)];
-        self.position += 1;
-        if (byte < 0x20) return error.InvalidEncodedString;
-        return byte;
-    }
 
-    pub fn next(self: *EncodedStringReader) !?u8 {
-        if (self.pending_start == self.pending_end) {
-            if (self.position == self.end) return null;
-            self.pending_end = @intCast(try decodeScalar(self, &self.pending));
-            self.pending_start = 0;
+        pub fn next(self: *Self) !?u8 {
+            if (self.pending_start == self.pending_end) {
+                if (self.position == self.end) return null;
+                self.pending_end = @intCast(try decodeScalar(self, &self.pending));
+                self.pending_start = 0;
+            }
+            const byte = self.pending[self.pending_start];
+            self.pending_start += 1;
+            return byte;
         }
-        const byte = self.pending[self.pending_start];
-        self.pending_start += 1;
-        return byte;
-    }
-};
+    };
+}
 
 pub const JsonStringSource = struct {
     encoded: EncodedStringReader,

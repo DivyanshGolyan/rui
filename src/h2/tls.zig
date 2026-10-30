@@ -146,7 +146,9 @@ fn opensslTrustVariable(name: [*:0]const u8) ?[*:0]const u8 {
 /// least one directory and every element is a directory this process can
 /// search, which is all OpenSSL's lookup needs. Empty elements are skipped,
 /// as OpenSSL skips them.
-fn allDirectories(list: []const u8) bool {
+/// noinline: trust loads once per endpoint, and this path buffer would
+/// otherwise sit in addEndpoint's frame beside loadTrust's own.
+noinline fn allDirectories(list: []const u8) bool {
     var paths = std.mem.tokenizeScalar(u8, list, ':');
     var count: usize = 0;
     while (paths.next()) |path| : (count += 1) {
