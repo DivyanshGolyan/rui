@@ -237,6 +237,8 @@ class StackFramesTest(unittest.TestCase):
             self.assertGreater(entry["frame_bytes"], rules["budget_bytes"], entry["function"])
             self.assertEqual(entry["frame_bytes"] % PAGE, 0, entry["function"])
             self.assertTrue(entry["cause"].strip(), entry["function"])
+            # A cause stands on its own; no table outside the repository explains it.
+            self.assertNotRegex(entry["cause"], r"\brows? \d", entry["function"])
         for label, spec in rules["threads"].items():
             self.assertGreater(spec["chain_ceiling"], 0, label)
             self.assertEqual(spec["chain_ceiling"] % PAGE, 0, label)
