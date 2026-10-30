@@ -128,9 +128,10 @@ pub const bindings = std.enums.EnumArray(Key, Action).init(.{
     .ctrl_x = .stop,
 });
 
-/// What the line editor made of the composer's input: an edit, or the end
-/// of its line. Rejected lines say why.
-pub const Composed = enum { edited, submit, eof, invalid, overflow, edit_rejected, unbound };
+/// What the line editor made of the composer's input: `input` when it ends
+/// no line, whether or not the draft changed, or the end of its line.
+/// Rejected lines say why.
+pub const Composed = enum { input, submit, eof, invalid, overflow, edit_rejected, unbound };
 
 /// The composer's text and caret, lent by the shell's line editor.
 pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0 };
@@ -1016,12 +1017,13 @@ fn dismissed(state: *State, action: ?Action, effects: *Effects) bool {
     return action == .escape;
 }
 
-/// The line editor's outcome. The shell sends none while a start holds the draft.
+/// The line editor's outcome. While a start holds the draft the shell sends
+/// only `input`.
 fn compose(state: *State, composed: Composed, effects: *Effects) void {
-    std.debug.assert(!state.starting());
+    std.debug.assert(composed == .input or !state.starting());
     _ = dismissed(state, null, effects);
     switch (composed) {
-        .edited => {},
+        .input => {},
         .submit => enter(state, effects),
         .eof => effects.add(.exit),
         .invalid => {
@@ -2001,7 +2003,7 @@ fn press(state: *State, key: Key) !Effects {
 /// editor does after an edit.
 fn typeText(state: *State, text: []const u8) !void {
     state.draft = .{ .bytes = text, .cursor = text.len };
-    try expectEffects(&.{}, try step(state, .{ .composer = .edited }));
+    try expectEffects(&.{}, try step(state, .{ .composer = .input }));
 }
 
 /// The line editor's Enter.
@@ -2174,6 +2176,10 @@ test "a cancelled stop prompt sends nothing" {
     try expectEffects(&.{}, try press(&state, .down));
     try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     try expectSelected(&state, "r4t9vw");
+    // So does input that left the draft as it was.
+    try expectEffects(&.{}, try press(&state, .ctrl_x));
+    try expectEffects(&.{}, try step(&state, .{ .composer = .input }));
+    try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     // A row that finished after the prompt opened has nothing left to stop.
     try expectEffects(&.{}, try press(&state, .ctrl_x));
     _ = try refresh(&state, .changed, testToken(2), &.{session("r4t9vw", .{ .finished = ago(0) }, .{ .label = "Review PR 412", .yours = true })});
