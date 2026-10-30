@@ -1140,8 +1140,7 @@ pub const Ingress = struct {
     }
 };
 
-// Discovery uses one absolute budget. Ordinary ingress keeps its existing
-// refill inactivity wait; progress cannot extend an absolute exchange.
+// One absolute budget; progress cannot extend an absolute exchange.
 pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128) !void {
     const end = deadline orelse {
         var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};

@@ -1383,7 +1383,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(200, protocol.max_proposal_page_response_bytes, renderProposalPage, .{page});
         },
         .proposal_field => |*command| {
-            const location = host.store.openProposalField(command.*) catch |err| switch (err) {
+            const location = host.store.openProposalField(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
@@ -1405,7 +1405,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
         },
         .activity_content => |*command| {
-            const location = host.store.openActivityContent(command.*) catch |err| switch (err) {
+            const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
@@ -1439,7 +1439,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 }
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
-    const location = host.store.openPublicConversationContent(command.*) catch |err| switch (err) {
+    const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
@@ -2013,7 +2013,7 @@ const Reply = struct {
     /// Renders one JSON body straight into heap storage reserved at the
     /// renderer's proven bound. The reservation writes none of its bytes, so
     /// only rendered pages become resident, and the body then shrinks to its
-    /// exact length. Allocation failure leaves no body and the exchange
+    /// exact length. Allocation or header failure leaves no body and the exchange
     /// retires unanswered: it cannot revoke an already saved semantic answer.
     /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
     fn json(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
@@ -2023,10 +2023,12 @@ const Reply = struct {
         try @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args);
         if (body.written().len > max_bytes) return error.BufferTooLarge;
         const bytes = body.toOwnedSlice() catch return;
+        self.prepareHeader(status, "application/json", bytes.len) catch {
+            self.allocator.free(bytes);
+            return;
+        };
         self.body = .{ .json = bytes };
         self.end = bytes.len;
-        // A JSON header fits its buffer for every status and length.
-        self.prepareHeader(status, "application/json", bytes.len) catch unreachable;
     }
 
     /// Moves a report, including its scratch charge, into delivery custody.

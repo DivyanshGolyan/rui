@@ -3170,13 +3170,13 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentLocation {
+    pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.public_content, self.openPublicConversationContentLocked(request));
     }
 
-    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentLocation {
+    fn openPublicConversationContentLocked(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const content = try self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal);
@@ -3655,14 +3655,14 @@ pub const Store = struct {
         return result;
     }
 
-    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
+    pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openActivityContentLocked(request));
     }
 
-    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentLocation {
+    fn openActivityContentLocked(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         self.validateActivitySequence(request.session.slice()) catch |err| return self.fence(err);
         // Only Tool Results have nonzero ordinals. Byte readers need their
         // canonical identity, not a second scan of the original arguments.
@@ -3800,14 +3800,14 @@ pub const Store = struct {
         @import("provider_output.zig").authenticateCall(&source, fields) catch return error.CorruptStore;
     }
 
-    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
+    pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
         const access = try self.enter(.none);
         defer access.release();
         return access.finish(Ordinary.content, self.openProposalFieldLocked(request));
     }
 
-    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentLocation {
+    fn openProposalFieldLocked(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return self.fence(err),
@@ -4002,22 +4002,12 @@ pub const Store = struct {
             try readText(statement, 0, &row.workspace);
             row.provider = try readProvider(statement, 1);
             try readText(statement, 2, &row.model);
-            const tools = c.sqlite3_column_int(statement, 3);
-            if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
-            row.bash = @as(u8, @intCast(tools)) & tool_catalog.toolBit(.bash) != 0;
-            row.permission_mode = switch (c.sqlite3_column_int(statement, 4)) {
-                0 => .ask,
-                1 => .bypass,
-                else => return error.CorruptStore,
-            };
+            row.bash = try readToolsMask(statement, 3) & tool_catalog.toolBit(.bash) != 0;
+            row.permission_mode = if (try readPermissionMode(statement, 4) == 0) .ask else .bypass;
             row.label = try readNullableLabel(statement, 5);
             row.created_at = @intCast(try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore);
-            const revision = c.sqlite3_column_int64(statement, 7);
-            if (revision <= 0) return error.CorruptStore;
-            row.revision = @intCast(revision);
-            const next_position = c.sqlite3_column_int64(statement, 8);
-            if (next_position <= 0) return error.CorruptStore;
-            row.end = @intCast(next_position - 1);
+            row.revision = try readPositiveU64(statement, 7);
+            row.end = try readPositiveU64(statement, 8) - 1;
         }
         row.first_message = try self.readFirstMessageLocked(session_ref);
         row.work = .fromCore((try self.readWorkLocked(session_ref, row.created_at, now_ms)).work);
@@ -7742,19 +7732,11 @@ pub const Store = struct {
         try readText(statement, 1, &current.model);
         current.instructions_id = (readNullablePositiveI64(statement, 2) catch return error.CorruptStore) orelse
             return error.CorruptStore;
-        const tools = c.sqlite3_column_int(statement, 3);
-        if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
-        current.tools_mask = @intCast(tools);
-        const permission = c.sqlite3_column_int(statement, 4);
-        if (permission < 0 or permission > 1) return error.CorruptStore;
-        current.permission_mode = @intCast(permission);
+        current.tools_mask = try readToolsMask(statement, 3);
+        current.permission_mode = try readPermissionMode(statement, 4);
         current.output_schema_id = readNullablePositiveI64(statement, 5) catch return error.CorruptStore;
-        const revision = c.sqlite3_column_int64(statement, 6);
-        if (revision <= 0) return error.CorruptStore;
-        current.revision = @intCast(revision);
-        const next_position = c.sqlite3_column_int64(statement, 7);
-        if (next_position <= 0) return error.CorruptStore;
-        current.next_position = @intCast(next_position);
+        current.revision = try readPositiveU64(statement, 6);
+        current.next_position = try readPositiveU64(statement, 7);
         current.provider = try readProvider(statement, 8);
         current.compaction_trigger = try readNullableTokens(statement, 9, false);
         current.output_reservation = try readNullableTokens(statement, 10, true);
@@ -7773,22 +7755,17 @@ pub const Store = struct {
         const step_result = c.sqlite3_step(statement);
         if (step_result == c.SQLITE_DONE) return null;
         if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
-        var facts: SessionFacts = .{ .provider = undefined, .permission_mode = undefined, .revision = undefined, .next_position = undefined, .created_at = undefined };
+        var facts: SessionFacts = .{
+            .permission_mode = try readPermissionMode(statement, 1),
+            .revision = try readPositiveU64(statement, 2),
+            .next_position = try readPositiveU64(statement, 3),
+            .compaction_trigger = try readNullableTokens(statement, 4, false),
+            .output_reservation = try readNullableTokens(statement, 5, true),
+            .reasoning_effort = try readNullableEffort(statement, 6),
+            .created_at = @intCast(try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore),
+            .provider = try readProvider(statement, 8),
+        };
         try readText(statement, 0, &facts.model);
-        const permission = c.sqlite3_column_int(statement, 1);
-        if (permission < 0 or permission > 1) return error.CorruptStore;
-        facts.permission_mode = @intCast(permission);
-        const revision = c.sqlite3_column_int64(statement, 2);
-        if (revision <= 0) return error.CorruptStore;
-        facts.revision = @intCast(revision);
-        const next_position = c.sqlite3_column_int64(statement, 3);
-        if (next_position <= 0) return error.CorruptStore;
-        facts.next_position = @intCast(next_position);
-        facts.compaction_trigger = try readNullableTokens(statement, 4, false);
-        facts.output_reservation = try readNullableTokens(statement, 5, true);
-        facts.reasoning_effort = try readNullableEffort(statement, 6);
-        facts.created_at = @intCast(try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore);
-        facts.provider = try readProvider(statement, 8);
         if (workspace) |destination| try readText(statement, 9, destination);
         return facts;
     }
@@ -8593,6 +8570,24 @@ fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bound
     try readText(statement, column, &label);
     if (!protocol.validLabel(label.slice())) return error.CorruptStore;
     return label;
+}
+
+fn readPositiveU64(statement: *c.sqlite3_stmt, column: c_int) !u64 {
+    const value = c.sqlite3_column_int64(statement, column);
+    if (value <= 0) return error.CorruptStore;
+    return @intCast(value);
+}
+
+fn readPermissionMode(statement: *c.sqlite3_stmt, column: c_int) !u8 {
+    const permission = c.sqlite3_column_int(statement, column);
+    if (permission < 0 or permission > 1) return error.CorruptStore;
+    return @intCast(permission);
+}
+
+fn readToolsMask(statement: *c.sqlite3_stmt, column: c_int) !u8 {
+    const tools = c.sqlite3_column_int(statement, column);
+    if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
+    return @intCast(tools);
 }
 
 fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
@@ -10572,7 +10567,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expect(proposed.items[0].kind == .user);
     // The provider's complete proposal, including its call arguments, is not
     // addressable as a public content position.
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
         .session = public_request.session,
         .position = proposed.end,
     }));
@@ -10665,7 +10660,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     };
     try std.testing.expectEqual(@as(usize, 2), results);
     var result_reader: ContentReader = undefined;
-    result_reader.open(try storage.openPublicConversationContent(.{
+    result_reader.open(try storage.openPublicConversationContent(&.{
         .session = public_request.session,
         .position = settled_page.items[0].position,
         .ordinal = 2,
@@ -14913,8 +14908,8 @@ test "large projected readers retain distinct copied sources across ranges and c
         try expectDone(update);
     }
     var readers: [3]ContentReader = undefined;
-    readers[0].open(try storage.openPublicConversationContent(request));
-    readers[1].open(try storage.openActivityContent(.{ .session = request.session, .position = request.position }));
+    readers[0].open(try storage.openPublicConversationContent(&request));
+    readers[1].open(try storage.openActivityContent(&.{ .session = request.session, .position = request.position }));
     readers[2].open(try storage.openContentIdentity(.{ .length = split, .digest = protocol.contentDigest(expected[0..split]) }, true));
     defer for (&readers) |*reader| reader.close();
     for (&readers) |*reader| reader.allocator = std.testing.allocator;
@@ -14958,7 +14953,7 @@ test "large projected readers never borrow another reader's prefetched integrity
     @memset(expected, 'x');
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
     var held: ContentReader = undefined;
-    held.open(try storage.openPublicConversationContent(request));
+    held.open(try storage.openPublicConversationContent(&request));
     defer held.close();
     held.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
@@ -14968,7 +14963,7 @@ test "large projected readers never borrow another reader's prefetched integrity
     try std.testing.expectEqual(buffer.len, try held.read(buffer.len, &buffer));
     try std.testing.expectEqualSlices(u8, expected[buffer.len..][0..buffer.len], &buffer);
     var fresh: ContentReader = undefined;
-    fresh.open(try storage.openPublicConversationContent(request));
+    fresh.open(try storage.openPublicConversationContent(&request));
     defer fresh.close();
     fresh.allocator = std.testing.allocator;
     try std.testing.expectEqual(buffer.len, try fresh.read(0, &buffer));
@@ -14994,7 +14989,7 @@ test "retained raw and projected readers allow checkpoints between committed win
         const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
         const location = if (projected) blk: {
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
-            break :blk try storage.openPublicConversationContent(request);
+            break :blk try storage.openPublicConversationContent(&request);
         } else blk: {
             _ = try storage.importBytesContent(text, false, false);
             break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });
@@ -15052,7 +15047,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = storage.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
         var preparation: bash.Preparation = undefined;
-        if (preparation.start(scratch, std.testing.allocator, try storage.openPublicConversationContent(request), &input, storage.selector.slice(), "/bin/bash", 11, .{})) |initial| {
+        if (preparation.start(scratch, std.testing.allocator, try storage.openPublicConversationContent(&request), &input, storage.selector.slice(), "/bin/bash", 11, .{})) |initial| {
             var failure = initial;
             try failure.cleanup.cleanup(scratch);
             return failure.cause;
@@ -15758,7 +15753,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, true, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
     var reader: ContentReader = undefined;
-    reader.open(try storage.openActivityContent(.{ .session = session, .position = own.items[0].position }));
+    reader.open(try storage.openActivityContent(&.{ .session = session, .position = own.items[0].position }));
     reader.close();
 
     // The model's historical view carries the recorded sender, not text.
@@ -16673,7 +16668,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     }));
     try std.testing.expect(!storage.isFenced());
     var unicode_reader: ContentReader = undefined;
-    unicode_reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 }));
+    unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 40 }));
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -16712,15 +16707,15 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expect(fresh.items[0].kind == .user);
     var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
     var reader: ContentReader = undefined;
-    reader.open(try storage.openPublicConversationContent(read));
+    reader.open(try storage.openPublicConversationContent(&read));
     var tail: [2]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
     try std.testing.expectEqualStrings("xx", &tail);
     reader.close();
     read.position = 41; // the applied instruction is not public content
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(read));
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = .{}, .position = 1 }));
-    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPageForTesting(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
     try std.testing.expect(!storage.isFenced());
 }
@@ -16745,9 +16740,9 @@ test "public content SQL failure fences Store instead of reporting absence" {
     defer c.sqlite3_progress_handler(storage.database, 0, null, null);
     // The shared provenance query is interrupted during preparation, before
     // identity lookup can step. Either phase must retain the public fence.
-    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(request));
+    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(&request));
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
+    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(&request));
 }
 
 test "public content SQLite step failure fences after successful preparation" {
@@ -16761,7 +16756,7 @@ test "public content SQLite step failure fences after successful preparation" {
     _ = (try storage.admitNextModelAttempt(.{})).?;
     var request = protocol.ConversationContent{ .position = 1 };
     try request.session.set(session.slice());
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = request.session, .position = 999 }));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = 999 }));
     try std.testing.expect(!storage.isFenced());
     const Interrupt = struct {
         database: *c.sqlite3,
@@ -16784,10 +16779,10 @@ test "public content SQLite step failure fences after successful preparation" {
     var interrupt = Interrupt{ .database = storage.database };
     c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, &interrupt);
     defer c.sqlite3_progress_handler(storage.database, 0, null, null);
-    try std.testing.expectError(error.ConversationReadFailed, storage.openPublicConversationContent(request));
+    try std.testing.expectError(error.ConversationReadFailed, storage.openPublicConversationContent(&request));
     try std.testing.expect(interrupt.interrupted_step);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
+    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(&request));
 }
 
 const TestingPublicReadRoute = enum { page, content, cursor };
@@ -16822,7 +16817,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     request.end = valid.end;
     if (route == .cursor) request.before_position = valid.items[0].position;
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
+        if (storage.openPublicConversationContent(&.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
             var reader: ContentReader = undefined;
             reader.open(location);
             reader.close();
@@ -16879,7 +16874,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
         var reader: ContentReader = undefined;
-        reader.open(try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
+        reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
@@ -16906,7 +16901,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         request.before_ordinal = item.ordinal;
     }
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
+        if (storage.openPublicConversationContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
             var reader: ContentReader = undefined;
             reader.open(location);
             reader.close();
@@ -16992,7 +16987,7 @@ test "public completed Action sibling corruption fences first Conversation read"
                 request.before_ordinal = 2;
             }
             const result: anyerror!void = if (route == .content)
-                if (storage.openPublicConversationContent(.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
+                if (storage.openPublicConversationContent(&.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
                     var reader: ContentReader = undefined;
                     reader.open(value);
                     reader.close();
@@ -17051,7 +17046,7 @@ test "private-only model output never becomes public conversation" {
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expect(page.items[0].kind == .user);
     try std.testing.expect(page.end > page.items[0].position);
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
         .session = request.session,
         .position = page.end,
     }));
@@ -17099,7 +17094,7 @@ test "public tool-result cursor crosses a completed group boundary" {
     try std.testing.expect(older.items[0].kind == .tool_result);
     try std.testing.expect(older.items[1].kind == .user);
     var reader: ContentReader = undefined;
-    reader.open(try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
+    reader.open(try storage.openPublicConversationContent(&.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
     defer reader.close();
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
@@ -17235,14 +17230,14 @@ test "public assistant message provenance binds the exact accepted item" {
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
                 .page => if (storage.publicConversationPageForTesting(.{ .session = request.session })) |_| {} else |err| err,
-                .bytes => if (storage.openPublicConversationContent(request)) |location| blk: {
+                .bytes => if (storage.openPublicConversationContent(&request)) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
                 .activity => if (storage.activityPageForTesting(.{ .session = request.session })) |_| {} else |err| err,
-                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |location| blk: {
+                .activity_bytes => if (storage.openActivityContent(&.{ .session = request.session, .position = request.position })) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
                     owned.close();
@@ -17327,7 +17322,7 @@ test "public projected content sequential work excludes repeated prefixes" {
     storage.testing_content_work = .{};
     var window: [protocol.content_window_bytes]u8 = undefined;
     var reader: ContentReader = undefined;
-    reader.open(try storage.openPublicConversationContent(request));
+    reader.open(try storage.openPublicConversationContent(&request));
     var offset: u64 = 0;
     while (offset < expected.len) : (offset += window.len) {
         try std.testing.expectEqual(window.len, try reader.readRange(offset, &window));
@@ -17341,7 +17336,7 @@ test "public projected content sequential work excludes repeated prefixes" {
     offset = 0;
     while (offset < expected.len) : (offset += window.len) {
         var ranged: ContentReader = undefined;
-        ranged.open(try storage.openPublicConversationContent(request));
+        ranged.open(try storage.openPublicConversationContent(&request));
         defer ranged.close();
         try std.testing.expectEqual(window.len, try ranged.readRange(offset, &window));
         try std.testing.expectEqualStrings(expected[@intCast(offset)..][0..window.len], &window);
@@ -17368,7 +17363,7 @@ test "public projected content equal-length repoint fences at complete-stream EO
         try exec(storage.database, "UPDATE answer_text_projection SET encoded_start=(SELECT encoded_start FROM answer_text_projection WHERE part_ordinal=1) WHERE part_ordinal=0");
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         var reader: ContentReader = undefined;
-        reader.open(try storage.openPublicConversationContent(request));
+        reader.open(try storage.openPublicConversationContent(&request));
         defer reader.close();
         var bytes: [4096]u8 = undefined;
         // An earlier range is not authenticated by an eventual EOF comparison.
@@ -17415,7 +17410,7 @@ test "public projected content EOF rejects nonempty trailing parts" {
                 try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             }
             var reader: ContentReader = undefined;
-            reader.open(try storage.openPublicConversationContent(request));
+            reader.open(try storage.openPublicConversationContent(&request));
             defer reader.close();
             var bytes: [1]u8 = undefined;
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
@@ -17439,7 +17434,7 @@ test "public projected content trailing empty parts retain final byte and repeat
         .{ .encoded = "", .decoded = "" },
     });
     var reader: ContentReader = undefined;
-    reader.open(try storage.openPublicConversationContent(request));
+    reader.open(try storage.openPublicConversationContent(&request));
     defer reader.close();
     var bytes: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try reader.readRange(7, &bytes));
@@ -17464,7 +17459,7 @@ test "public projected content ranges own positioning across windows and scalar 
         .{ .encoded = "tail", .decoded = "tail" },
     });
     var reader: ContentReader = undefined;
-    reader.open(try storage.openPublicConversationContent(request));
+    reader.open(try storage.openPublicConversationContent(&request));
     const reference = reader.reference;
     try std.testing.expectEqual(@as(u64, expected.len), reference.length);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
@@ -17551,12 +17546,12 @@ test "public projected content range positioning preserves decoding and backing 
         if (missing) {
             // Exact message provenance now rejects its absent raw item before
             // exposing a reader, rather than waiting for a projection read.
-            try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(request));
+            try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(&request));
             try std.testing.expect(storage.isFenced());
             continue;
         }
         var reader: ContentReader = undefined;
-        reader.open(try storage.openPublicConversationContent(request));
+        reader.open(try storage.openPublicConversationContent(&request));
         defer reader.close();
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(error.InvalidJsonEscape, reader.readRange(1, &bytes));
@@ -17895,7 +17890,7 @@ test "continued accepted output keeps model immutable and public projection read
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].kind == .assistant);
     var public_reader: ContentReader = undefined;
-    public_reader.open(try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position }));
+    public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_request.session, .position = public_page.items[0].position }));
     try std.testing.expect(!public_reader.raw);
     {
         const backing = try prepare(storage.database, "SELECT exposed.private,source.private FROM answer_text_projection projection " ++
@@ -18062,13 +18057,13 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
         const result: anyerror!void = switch (route) {
             .conversation => if (storage.publicConversationPageForTesting(.{ .session = session })) |_| {} else |err| err,
             .activity => if (storage.activityPageForTesting(.{ .session = session })) |_| {} else |err| err,
-            .conversation_content => if (storage.openPublicConversationContent(.{ .session = session, .position = position })) |value| blk: {
+            .conversation_content => if (storage.openPublicConversationContent(&.{ .session = session, .position = position })) |value| blk: {
                 var reader: ContentReader = undefined;
                 reader.open(value);
                 reader.close();
                 break :blk {};
             } else |err| err,
-            .activity_content => if (storage.openActivityContent(.{ .session = session, .position = position })) |value| blk: {
+            .activity_content => if (storage.openActivityContent(&.{ .session = session, .position = position })) |value| blk: {
                 var reader: ContentReader = undefined;
                 reader.open(value);
                 reader.close();
@@ -19083,7 +19078,7 @@ test "public proposal structural corruption fences independently on every route"
             request.end = healthy.end;
             if (route == .cursor) request.after = item.position;
             const result: anyerror!void = if (route == .content)
-                if (storage.openProposalField(.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
+                if (storage.openProposalField(&.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
                     var reader: ContentReader = undefined;
                     reader.open(value);
                     reader.close();
@@ -19121,7 +19116,7 @@ test "proposal callable cursor domain preserves healthy Store" {
     try std.testing.expectEqual(@as(u64, 0), page.end);
     try std.testing.expectEqual(@as(usize, 0), page.count);
     try std.testing.expect(!page.more and !storage.isFenced());
-    try std.testing.expectError(error.ContentNotFound, storage.openProposalField(.{ .position = std.math.maxInt(u64) }));
+    try std.testing.expectError(error.ContentNotFound, storage.openProposalField(&.{ .position = std.math.maxInt(u64) }));
 }
 
 test "public activity admission corruption fences page and content independently" {
@@ -19151,7 +19146,7 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             request.position = item.position - 1;
             const result: anyerror!void = if (content_route)
-                if (storage.openActivityContent(.{ .session = request.session, .position = item.position })) |value| blk: {
+                if (storage.openActivityContent(&.{ .session = request.session, .position = item.position })) |value| blk: {
                     var reader: ContentReader = undefined;
                     reader.open(value);
                     reader.close();
@@ -19445,7 +19440,7 @@ test "tool label observation trusts admission but exact inspection authenticates
             },
             .proposal => blk: {
                 const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
-                if (storage.openProposalField(.{ .session = request.session, .position = position, .field = .arguments })) |value| {
+                if (storage.openProposalField(&.{ .session = request.session, .position = position, .field = .arguments })) |value| {
                     var reader: ContentReader = undefined;
                     reader.open(value);
                     reader.close();
@@ -19692,7 +19687,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     for (parsed_report.value.object.get("full").?.object.get("conversation").?.array.items) |entry|
         try std.testing.expect(!std.mem.eql(u8, "assistant", entry.object.get("kind").?.string));
     const compaction_message = try queryU64(storage.database, "SELECT session_position FROM model_output_item WHERE item_kind=2");
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = request.session, .position = compaction_message }));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = compaction_message }));
     try std.testing.expect(!storage.isFenced());
     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(compact.turn_id, successor.turn_id);
