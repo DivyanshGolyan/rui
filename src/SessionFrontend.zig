@@ -14,6 +14,7 @@ const Screen = @import("SessionScreen.zig");
 const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
+const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -1813,6 +1814,135 @@ const HeldFrontend = struct {
         return file;
     }
 };
+
+/// Each byte through the frontend's one stream, as `step` delivers it.
+fn sendKeys(frontend: *Self, bytes: []const u8) !void {
+    for (bytes) |byte| {
+        var decoded = frontend.input.stream.feed(byte, 0);
+        while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
+    }
+}
+
+/// A ready choice, then a page over the Action: approval pauses and the
+/// draft is shown. The choice stays fresh until a key there.
+fn pauseApproval(held: *HeldFrontend) !void {
+    try held.settle();
+    try std.testing.expect(held.screen.consent.acceptsInput());
+    const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Status\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    held.self.dirty = true;
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Approval.paused, held.screen.selected.approval);
+    try std.testing.expectEqual(ConsentPolicy.Editor.draft, held.screen.selected.editor);
+    try std.testing.expect(held.screen.consent.acceptsInput());
+}
+
+/// Reads `bytes` through `step`, the loop's own input path, letting a lone
+/// ESC expire.
+fn stepKeys(held: *HeldFrontend, bytes: []const u8) !void {
+    if (std.c.write(held.pipes[0][1], bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
+    const Drained = struct {
+        fn done(frontend: *Self) !bool {
+            const service = try frontend.step(0);
+            return service == .empty or service == .decoder_expired;
+        }
+    };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, Drained.done);
+}
+
+test "Ctrl-R beside a ready Action refuses its line in every encoding, so the line decides nothing" {
+    for ([_][]const u8{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" }) |ctrl_r| {
+        errdefer std.debug.print("ctrl_r={s}\n", .{ctrl_r[1..]});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        try std.testing.expect(held.screen.consent.acceptsInput());
+        try sendKeys(&held.self, "a");
+        try sendKeys(&held.self, ctrl_r);
+        try sendKeys(&held.self, "\r");
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+        try std.testing.expectEqualStrings("! Decision input rejected. Type a or d; pasted text cannot authorize.", held.self.notice.?);
+    }
+}
+
+test "Ctrl-R while approval is paused keeps the draft, recovers nothing and says the Action waits" {
+    for ([_][]const u8{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" }) |ctrl_r| {
+        errdefer std.debug.print("ctrl_r={s}\n", .{ctrl_r[1..]});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try sendKeys(&held.self, "kept");
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try pauseApproval(held);
+        try stepKeys(held, ctrl_r);
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to it. Draft retained.", held.self.notice.?);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+        try std.testing.expect(!held.screen.consent.acceptsInput());
+        // The draft took no rejection: once the Action is decided it sends.
+        try sendKeys(&held.self, "!");
+        try std.testing.expectEqualStrings("kept!", held.self.input.composition().bytes);
+    }
+}
+
+test "an Esc that expires does what an Esc reported whole does, at the Action, from a paused draft and from the settled view" {
+    const Place = enum { choice, paused, settled };
+    for (std.enums.values(Place)) |place| for ([_][]const u8{ "\x1b", "\x1b[27u" }) |escape| {
+        errdefer std.debug.print("place={s} escape={s}\n", .{ @tagName(place), escape[1..] });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        switch (place) {
+            .settled => try held.settle(),
+            .choice, .paused => {
+                if (place == .paused) try sendKeys(&held.self, "kept");
+                _ = try held.adopt(3);
+                if (place == .paused) try pauseApproval(held) else {
+                    try held.settle();
+                    try sendKeys(&held.self, "a");
+                }
+            },
+        }
+        defer if (place != .settled) held.self.files.action.close(std.testing.io);
+        try stepKeys(held, escape);
+        switch (place) {
+            .settled => {
+                try std.testing.expectEqual(@as(?Outcome, .returned), held.self.leaving);
+                try std.testing.expect(!held.screen.consent.active());
+            },
+            .choice, .paused => {
+                try std.testing.expect(held.self.leaving == null);
+                try std.testing.expectEqual(place == .choice, held.screen.consent.acceptsInput());
+                try held.settle();
+                try std.testing.expect(held.screen.actionVisible());
+                try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
+                try std.testing.expectEqualStrings(if (place == .choice) "a" else "", held.screen.choiceText());
+                try std.testing.expectEqualStrings(if (place == .paused) "kept" else "", held.self.input.composition().bytes);
+                try std.testing.expect(held.self.submission.view() == null);
+            },
+        }
+    };
+}
+
+test "every way out of the conversation ends consent, from the choice and from a paused draft" {
+    for ([_]bool{ false, true }) |paused| for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |key| {
+        errdefer std.debug.print("paused={} key={s}\n", .{ paused, key });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        if (paused) try pauseApproval(held) else try held.settle();
+        try std.testing.expect(held.screen.consent.active());
+        try stepKeys(held, key);
+        try std.testing.expectEqual(@as(?Outcome, .detached), held.self.leaving);
+        try std.testing.expect(!held.screen.consent.active());
+    };
+}
 
 test "a command queued during a held draft frame blocks the later Message Enter" {
     const held = try HeldFrontend.create();
