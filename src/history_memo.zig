@@ -35,6 +35,9 @@ pub const default_byte_limit: u64 = 1024 * 1024 * 1024;
 /// here in ReleaseSafe; std's streaming XxHash3 measured 27 times slower.
 pub const Hasher = std.hash.Wyhash;
 
+/// Most bytes one `writeChunk` call copies; the caller owns a window this size.
+pub const chunk_bytes = 16 * 1024;
+
 pub fn newHasher() Hasher {
     return .init(0);
 }
@@ -264,15 +267,15 @@ pub const Table = struct {
         return write;
     }
 
-    /// Copy the span's next bytes, at most `limit`, from `request` to the
-    /// same offsets of the memo file, hashing them. Returns how many it
-    /// copied; `write.done()` tells when the span is complete.
-    pub fn writeChunk(_: *const Table, io: std.Io, write: *Write, request: std.Io.File, limit: usize) !usize {
-        var buffer: [16 * 1024]u8 = undefined;
-        const count: usize = @intCast(@min(write.memo.length - write.written, limit, buffer.len));
-        if (try request.readPositionalAll(io, buffer[0..count], write.span_start + write.written) != count) return error.EndOfStream;
-        write.hasher.update(buffer[0..count]);
-        try write.file.writePositionalAll(io, buffer[0..count], write.written);
+    /// Copy the span's next bytes, at most `limit` and `window.len`, from
+    /// `request` to the same offsets of the memo file through the caller's
+    /// `window`, hashing them. Returns how many it copied; `write.done()`
+    /// tells when the span is complete.
+    pub fn writeChunk(_: *const Table, io: std.Io, write: *Write, request: std.Io.File, limit: usize, window: []u8) !usize {
+        const count: usize = @intCast(@min(write.memo.length - write.written, limit, window.len));
+        if (try request.readPositionalAll(io, window[0..count], write.span_start + write.written) != count) return error.EndOfStream;
+        write.hasher.update(window[0..count]);
+        try write.file.writePositionalAll(io, window[0..count], write.written);
         write.written += count;
         return count;
     }
@@ -451,7 +454,8 @@ fn testFileBytes(table: *Table, session: []const u8, buffer: []u8) ![]const u8 {
 /// Keep `memo` through bounded chunks, as a preparation does.
 fn testKeep(table: *Table, memo: Memo, request: std.Io.File, span_start: u64, prefix: ?*const Prefix) !void {
     var write = table.begin(std.testing.io, memo, span_start, prefix) orelse return;
-    while (!write.done()) _ = table.writeChunk(std.testing.io, &write, request, 3) catch |err| {
+    var window: [8]u8 = undefined;
+    while (!write.done()) _ = table.writeChunk(std.testing.io, &write, request, 3, &window) catch |err| {
         table.abandon(std.testing.io, &write);
         return err;
     };
@@ -567,8 +571,9 @@ test "an abandoned span keeps no memo and releases its bytes" {
     // A new span for a cold Session, which replaces the oldest memo a, and a
     // rewrite of a held one, each abandoned midway, keep no memo and count
     // no bytes of their own.
+    var window: [8]u8 = undefined;
     var cold = table.begin(std.testing.io, try testMemo("c", "m", null, 2, 8), 4, null).?;
-    try std.testing.expectEqual(@as(usize, 3), try table.writeChunk(std.testing.io, &cold, request, 3));
+    try std.testing.expectEqual(@as(usize, 3), try table.writeChunk(std.testing.io, &cold, request, 3, &window));
     try std.testing.expectEqual(@as(u64, 4 + 8), table.bytes);
     table.abandon(std.testing.io, &cold);
     try std.testing.expect(table.held("a") == null);
@@ -576,7 +581,7 @@ test "an abandoned span keeps no memo and releases its bytes" {
     try std.testing.expectEqual(@as(u64, 4), table.held("b").?.length);
     try std.testing.expectEqual(@as(u64, 4), table.bytes);
     var rewrite = table.begin(std.testing.io, try testMemo("b", "m", null, 3, 10), 4, null).?;
-    _ = try table.writeChunk(std.testing.io, &rewrite, request, 5);
+    _ = try table.writeChunk(std.testing.io, &rewrite, request, 5, &window);
     table.abandon(std.testing.io, &rewrite);
     try std.testing.expect(table.held("b") == null);
     try std.testing.expectEqual(@as(u64, 0), table.bytes);

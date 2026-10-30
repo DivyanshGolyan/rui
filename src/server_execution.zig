@@ -1347,7 +1347,9 @@ fn beginAdmittedAttempt(
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-    const view = host.store.openHistoricalView(binding) catch |err| {
+    // The view opens where it lives for the whole preparation; it never
+    // moves.
+    host.store.openHistoricalView(binding, &preparation.view) catch |err| {
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, slot);
             return .admitted;
@@ -1359,7 +1361,6 @@ fn beginAdmittedAttempt(
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
-        view,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
         if (host.authentication != null) .managed else .endpoint,
@@ -3030,11 +3031,11 @@ test "preparing slots belong to their live preparations" {
 
     // A live preparation for Attempt A, held in final storage under test
     // ownership with a guard beside the acquisition.
-    const view = try storage.openHistoricalView(binding_a);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
-    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try storage.openHistoricalView(binding_a, &preparation.view);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3276,9 +3277,9 @@ test "Host fences dispose admitted preparation without touching canonical state"
         const binding = try host.custody.attach(token, &permit);
         var preparation: model_adapter.Preparation = undefined;
         var retained: ?named_scratch.Owner = null;
+        preparation.view = .{ .store = undefined, .binding = binding };
         try preparation.init(
             std.testing.io,
-            .{ .store = undefined, .binding = binding },
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
             .endpoint,
