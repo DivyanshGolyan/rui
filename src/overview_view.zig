@@ -2817,9 +2817,9 @@ test "a cancelled stop prompt sends nothing" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectSelected(&state, "k7m2qx");
-    // Esc only cancels.
+    // Esc only cancels: the draft stays.
     try expectEffects(&.{}, try press(&state, .{}, .stop));
-    try expectEffects(&.{}, try press(&state, .{}, .clear));
+    try expectEffects(&.{}, try press(&state, .{ .bytes = "keep", .cursor = 4 }, .clear));
     try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     try expectSelected(&state, "k7m2qx");
     // Another key cancels, then acts.
