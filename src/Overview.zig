@@ -1496,7 +1496,7 @@ test "a conversation that fails to open still names the unconfirmed start on dep
     try std.testing.expect(ending.conversation.frontend == null);
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, ending, error.AccessDenied, &buffer);
-    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n" ++
+    try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n" ++
         "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
 }
 
