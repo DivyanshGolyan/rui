@@ -1206,7 +1206,9 @@ test "each frame rewrites a pulsing mark alone, until its pulse ends" {
     try std.testing.expect(try overview.event(.{ .tick = changed + view.pulse_window_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.pulses);
-    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "m●\x1b[0m") != null);
+    // In colour the pen carries to the next changed span, so the mark
+    // ends in that span's SGR rather than a reset.
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "m●") != null);
     try std.testing.expect(try overview.draw(5) == null and !overview.shown.?.pulses);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }
