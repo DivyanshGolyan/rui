@@ -29,6 +29,16 @@ test "group EPERM is a zombie group only on Darwin" {
     }
 }
 
+/// Return the free heap pages the allocator still holds to the kernel. glibc's
+/// malloc_trim covers every thread's arena, whichever thread calls it.
+pub fn releaseFreeHeap() void {
+    if (os.glibc_malloc) _ = glibc.malloc_trim(0);
+}
+
+const glibc = struct {
+    extern "c" fn malloc_trim(pad: usize) c_int;
+};
+
 /// Darwin `rui host` replaces its image once with MallocMaxMagazines and
 /// MallocSpaceEfficient defaults, which libmalloc reads before main. Call it
 /// before acquiring Store custody; key presence prevents another exec, and

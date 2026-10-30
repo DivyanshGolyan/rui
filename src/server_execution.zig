@@ -8,6 +8,7 @@ const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
+const process = @import("os/process.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -436,6 +437,7 @@ pub fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
+    var heap_release: HeapRelease = .{};
     while (!host.executionEnding()) {
         var native = NativeTurn{
             .host = host,
@@ -448,8 +450,9 @@ pub fn executionMain(host: *Host) void {
             .fenced = false,
         };
         switch (execution_turn.run(&turn_state, &native)) {
-            .continue_immediately => {},
+            .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
+                if (heap_release.due(slots)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
                     .transport => reactor.?.wait(transportWaitMs(slots)) catch |err| {
@@ -748,6 +751,37 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
     const slot = &slots[(address - base) / @sizeOf(ExecutionSlot)];
     if (slot.* != .provider or &slot.provider.transfer != transfer) return null;
     return slot;
+}
+
+/// A burst leaves freed heap with the allocator. It goes back once each time
+/// the loop has worked and then waits with every slot free: steady work never
+/// releases, and an idle loop releases once.
+const HeapRelease = struct {
+    worked: bool = false,
+
+    fn due(self: *HeapRelease, slots: []const ExecutionSlot) bool {
+        if (!self.worked or countFreeSlots(slots) != slots.len) return false;
+        self.worked = false;
+        return true;
+    }
+};
+
+test "heap release is due once per return to all slots free" {
+    var slots = [_]ExecutionSlot{ .free, .free };
+    var release: HeapRelease = .{};
+    try std.testing.expect(!release.due(&slots));
+    release.worked = true;
+    slots[0] = .{ .provider = .{ .owner = .{} } };
+    for (0..3) |_| {
+        try std.testing.expect(!release.due(&slots));
+        release.worked = true;
+    }
+    slots[0] = .free;
+    try std.testing.expect(release.due(&slots));
+    try std.testing.expect(!release.due(&slots));
+    try std.testing.expect(!release.due(&slots));
+    release.worked = true;
+    try std.testing.expect(release.due(&slots));
 }
 
 /// The Client's wait already ends at socket readiness and at its own

@@ -25,6 +25,10 @@ pub const read_only_directory = switch (tag) {
     else => @compileError("no read-only directory for this OS"),
 };
 
+/// glibc's malloc keeps the pages of freed chunks in every arena until
+/// malloc_trim returns them. Other C libraries have no malloc_trim.
+pub const glibc_malloc = tag == .linux and builtin.link_libc and builtin.target.isGnuLibC();
+
 /// Linux queues a connect beyond a full listen backlog until it times out;
 /// Darwin refuses it at once.
 pub const full_backlog_blocks_connect = tag == .linux;
