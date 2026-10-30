@@ -2394,7 +2394,8 @@ test "cleanup publication follows complete execution retirement" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root});
-    var storage = try store_module.Store.open(std.testing.io, database, root);
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
     const arguments = "{\"description\":\"Print test marker\",\"cmd\":\"printf x\",\"timeout_ms\":1000}";
     const content = try store_module.testingPublicProjection(&storage, &tmp, &.{.{
@@ -2696,7 +2697,8 @@ test "no-work admission restores only its temporary custody reservation" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
-    var storage = try store_module.Store.open(std.testing.io, path, root);
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
 
     // Every call has genuinely free capacity and a real Store with no eligible
@@ -2769,7 +2771,8 @@ test "failed admission releases its reservation and fences the Store and dispatc
             const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-            var storage = try store_module.Store.open(std.testing.io, database, root);
+            var storage: store_module.Store = undefined;
+            try storage.open(std.testing.io, database, root);
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
@@ -2989,7 +2992,8 @@ test "preparing slots belong to their live preparations" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage = try store_module.Store.open(std.testing.io, database, root);
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});

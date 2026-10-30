@@ -1785,8 +1785,8 @@ pub const Store = struct {
         return err;
     }
 
-    pub fn open(io: std.Io, database_path: []const u8, selector: []const u8) !Store {
-        return openWithOptions(io, database_path, selector, .{});
+    pub fn open(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8) !void {
+        return self.openWithOptions(io, database_path, selector, .{});
     }
 
     /// Test fixture for a historical producing binding unavailable through
@@ -1807,12 +1807,15 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
     }
 
+    /// Opens in place: the Host holds exactly one Store, never a copy.
     pub fn openWithOptions(
+        self: *Store,
         io: std.Io,
         database_path: []const u8,
         selector: []const u8,
         options: OpenOptions,
-    ) !Store {
+    ) !void {
+        errdefer self.* = undefined;
         if (options.cache_kib == 0 or options.cache_kib > 4096) return error.InvalidSqliteCacheSize;
         if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
             return error.SqliteHeapLimitConfigurationFailed;
@@ -1892,15 +1895,14 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        var store: Store = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
         // Tells this opening's `since` tokens from another's. It grants
         // nothing, so the process CSPRNG serves, and Session IDs keep sole
         // use of secure draws.
-        io.random(&store.instance);
-        errdefer store.statements.deinit();
+        io.random(&self.instance);
+        errdefer self.statements.deinit();
         // Error paths then roll back without preparing or allocating.
-        _ = try store.cached("ROLLBACK");
-        return store;
+        _ = try self.cached("ROLLBACK");
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
@@ -8693,13 +8695,13 @@ fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool
     return @intCast(value);
 }
 
-fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
+fn testingStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    return Store.open(io, database, root) catch |err| {
+    return storage.open(io, database, root) catch |err| {
         std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -8721,7 +8723,8 @@ test "Store allocates six character IDs atomically retries collisions and replay
     io.vtable = &vtable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(io, &workspace_buffer);
@@ -8763,7 +8766,8 @@ test "Store allocates six character IDs atomically retries collisions and replay
 test "Store distinguishes noncanonical Session references from canonical unknown messages and controls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const content = try testingBytesContent(&tmp, "reference-input", "input\x00with\nbytes");
     defer content.file.?.close(std.testing.io);
@@ -8824,7 +8828,8 @@ test "Store open failures return typed errors without unwinding panics" {
     // A database path below a missing directory cannot be created; the open
     // must fail as a typed error rather than unwrapping a null handle.
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/missing-dir/store.sqlite3", .{root});
-    try std.testing.expectError(error.StoreOpenFailed, Store.open(std.testing.io, database, root));
+    var refused: Store = undefined;
+    try std.testing.expectError(error.StoreOpenFailed, refused.open(std.testing.io, database, root));
 }
 
 fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
@@ -9339,7 +9344,8 @@ fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: protoc
 test "Session list pages accepted creation order with exact workspace and fixed high water" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
@@ -9497,7 +9503,8 @@ const TestingListing = struct {
 test "a since listing answers only the Sessions changed since its token, or everything" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
@@ -9625,7 +9632,8 @@ const TestingSteps = struct {
 test "a Workspace's changed page reads only its own Sessions, however many others changed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
@@ -9705,7 +9713,8 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
     for (std.enums.values(Route)) |route| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
         var fault: TestingStatementFault = .{ .sql = workspace_key_sql };
@@ -9740,7 +9749,8 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
 test "a Session creation that rolls back never reaches a since listing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "rollback-config");
     const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
@@ -9764,7 +9774,8 @@ test "a Session creation that rolls back never reaches a since listing" {
 test "the touch oracle names a Session whose rows changed without a touch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     var command = try completeConfiguration("oracle", "", root[0..try tmp.dir.realPath(std.testing.io, &root)], "model");
@@ -9791,7 +9802,8 @@ test "the touch oracle names a Session whose rows changed without a touch" {
 test "Session list capture and cursor storage stay page bounded as dormant Sessions grow" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
@@ -9850,7 +9862,8 @@ fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8
 test "a list row reads the same steps however long its Session's history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     // One Session, measured at two lengths of the same shape: answered
     // Turns, each followed by a queued Message a stop excluded, then a last
@@ -9890,7 +9903,8 @@ test "a list row reads the same steps however long its Session's history" {
 test "a list row carries its Session's Label, times, first Message, work and peers" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -9956,7 +9970,8 @@ test "a list row carries its Session's Label, times, first Message, work and pee
 test "Current excludes history while Full exposes exact closed Session inventory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "profile-config");
 
@@ -9991,7 +10006,8 @@ test "Current excludes history while Full exposes exact closed Session inventory
 test "Current selects active then queued work and bounds recent Message identities" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "selection-config");
 
@@ -10046,7 +10062,8 @@ test "Current selects active then queued work and bounds recent Message identiti
 test "Current preserves empty Message identity across queue, active Turn and history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "empty-key-config");
     try submitTestMessage(&storage, &tmp, "empty-key-file", "", session.slice(), "input");
@@ -10083,7 +10100,8 @@ test "Current preserves empty Message identity across queue, active Turn and his
 test "Full preserves rejected model interruption targets as canonical u64 text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "interrupt-report-config");
 
@@ -10127,7 +10145,8 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
 test "Full revisions own repeated content once and render semantic settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -10229,7 +10248,8 @@ test "Full revisions own repeated content once and render semantic settings" {
 test "Full attributes unbound Messages to the earliest covering stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "stop-merge-config");
 
@@ -10260,7 +10280,8 @@ test "Full attributes unbound Messages to the earliest covering stop" {
 test "Bash proposals retain exact order permission provenance denial and stop terminality" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
@@ -10406,7 +10427,8 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var database: [platform.max_database_path_bytes]u8 = undefined;
-    var reopened = try Store.open(
+    var reopened: Store = undefined;
+    try reopened.open(
         std.testing.io,
         try std.fmt.bufPrint(&database, "{s}/store.sqlite3", .{root[0..root_length]}),
         root[0..root_length],
@@ -10427,7 +10449,8 @@ test "Bash proposals retain exact order permission provenance denial and stop te
 test "allow once survives mode changes and reopen without granting another Attempt" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "allow-config");
@@ -10465,7 +10488,7 @@ test "allow once survives mode changes and reopen without granting another Attem
         if (pass == 1) {
             try storage.close();
             storage_open = false;
-            storage = try testingStore(&tmp, std.testing.io);
+            try testingStore(&storage, &tmp, std.testing.io);
             storage_open = true;
         }
         const replay = storage.decidePermission(&allow, .{});
@@ -10488,7 +10511,8 @@ test "allow once survives mode changes and reopen without granting another Attem
 test "Current, activity pages and Message progress report one work through an approval" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "mixed-config");
     try submitTestMessage(&storage, &tmp, "mixed-file", "mixed-message", session.slice(), "propose");
@@ -10596,7 +10620,8 @@ fn expectProgress(storage: *Store, key: []const u8, status: protocol.MessageProg
 test "Current, activity pages and Message progress report one work in each state" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     // A configure-only Session is idle since its creation.
@@ -10667,7 +10692,8 @@ test "Current, activity pages and Message progress report one work in each state
 test "a stop that selected no Turn decides work only through the input it excluded" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "no-turn-stop-config");
     const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
@@ -10699,7 +10725,8 @@ test "a stop that selected no Turn decides work only through the input it exclud
 test "a quota reset is read from a saved record and never fences" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     for ([_]struct { code: []const u8, diagnostic: ?[]const u8, resets_at: ?u64 }{
         .{ .code = "provider_insufficient_quota", .diagnostic = "{\"provider_code\":\"insufficient_quota\",\"resets_at\":null}", .resets_at = null },
@@ -10741,7 +10768,8 @@ test "contradictory work inputs fence the Store" {
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "contradiction-config");
         try submitTestMessage(&storage, &tmp, "contradiction-file", "contradiction-message", session.slice(), "x");
@@ -10759,7 +10787,8 @@ test "contradictory work inputs fence the Store" {
 test "Action settlement atomically yields to an earlier Session stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const allocated_session_0 = try configureTestSessionAsk(&storage, "settlement-stop-config");
@@ -10833,7 +10862,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
 test "earlier Action settlement remains authoritative after Session stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const allocated_session_0 = try configureTestSessionAsk(&storage, "settlement-first-config");
@@ -10931,7 +10961,8 @@ test "earlier Action settlement remains authoritative after Session stop" {
 test "Full reports every closed Action resolution without fencing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSessionAsk(&storage, "shutdown-report-config");
@@ -10973,7 +11004,8 @@ test "Full reports every closed Action resolution without fencing" {
 test "report scratch exhaustion is an observation failure without Store fencing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "report-config");
     var root: [protocol.max_store_bytes]u8 = undefined;
@@ -10993,7 +11025,8 @@ test "report scratch exhaustion is an observation failure without Store fencing"
 test "report unlink failure retains a startup-owned zero-request file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "report-unlink-config");
     var root: [protocol.max_store_bytes]u8 = undefined;
@@ -11014,7 +11047,8 @@ test "report unlink failure retains a startup-owned zero-request file" {
 test "canonical report and Action read failures fence later commands" {
     var report_tmp = std.testing.tmpDir(.{});
     defer report_tmp.cleanup();
-    var report_store = try testingStore(&report_tmp, std.testing.io);
+    var report_store: Store = undefined;
+    try testingStore(&report_store, &report_tmp, std.testing.io);
     defer report_store.close() catch unreachable;
     const allocated_session_0 = try configureTestSession(&report_store, "report-corrupt-config");
     try exec(report_store.database, "PRAGMA foreign_keys=OFF");
@@ -11037,7 +11071,8 @@ test "canonical report and Action read failures fence later commands" {
 
     var action_tmp = std.testing.tmpDir(.{});
     defer action_tmp.cleanup();
-    var action_store = try testingStore(&action_tmp, std.testing.io);
+    var action_store: Store = undefined;
+    try testingStore(&action_store, &action_tmp, std.testing.io);
     defer action_store.close() catch unreachable;
     const allocated_session_1 = try configureTestSession(&action_store, "action-corrupt-config");
     try submitTestMessage(&action_store, &action_tmp, "action-corrupt-message", "action-corrupt-message", allocated_session_1.slice(), "propose");
@@ -11061,7 +11096,8 @@ test "canonical report and Action read failures fence later commands" {
         for ([_]enum { report, arguments, execution }{ .report, .arguments, .execution }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const allocated_session_2 = try configureTestSession(&storage, "descriptor-config");
             try submitTestMessage(&storage, &tmp, "descriptor-input", "descriptor-message", allocated_session_2.slice(), "propose");
@@ -11132,7 +11168,8 @@ test "canonical step faults fence rather than reading as ordinary misses" {
     for (std.enums.values(Route)) |route| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "step-fault-config");
         try submitTestMessage(&storage, &tmp, "step-fault-input", "step-fault-message", session.slice(), "work");
@@ -11200,7 +11237,8 @@ fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
@@ -11322,7 +11360,8 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var database: [platform.max_database_path_bytes]u8 = undefined;
-    var reopened = try Store.open(
+    var reopened: Store = undefined;
+    try reopened.open(
         std.testing.io,
         try std.fmt.bufPrint(&database, "{s}/store.sqlite3", .{root[0..root_length]}),
         root[0..root_length],
@@ -11369,7 +11408,8 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSessionAsk(&storage, "check-config");
@@ -11430,7 +11470,8 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
 test "each state-bearing row keeps exactly the time its state owns" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSessionAsk(&storage, "time-config");
@@ -11493,7 +11534,8 @@ test "each state-bearing row keeps exactly the time its state owns" {
 test "every transition dates its fact from the Host clock" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const before: u64 = @intCast(@divFloor(try readUnixMilliseconds(std.testing.io), 1000));
 
@@ -11537,7 +11579,8 @@ test "every transition dates its fact from the Host clock" {
 test "Action admission never visits an Action waiting for permission" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     // Each round adds a Turn with two Actions waiting for permission.
@@ -11585,7 +11628,8 @@ test "Action admission never visits an Action waiting for permission" {
 test "complete call outcomes continue once in call order ahead of pending input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSessionAsk(&storage, "result-config");
@@ -11614,7 +11658,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try deny_first.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&deny_first, .{}) == .accepted);
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(first_binding.turn_id, continuation.turn_id);
     try std.testing.expectEqual(first_binding.operation_id + 1, continuation.operation_id);
@@ -11676,7 +11720,8 @@ test "complete call outcomes continue once in call order ahead of pending input"
 test "kind-specific admission selects a tool continuation despite fresh input and rolls back atomically" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const allocated_session_0 = try configureTestSessionAsk(&storage, "peer-config");
     const allocated_session_1 = try configureTestSessionAsk(&storage, "fresh-config");
@@ -11690,7 +11735,7 @@ test "kind-specific admission selects a tool continuation despite fresh input an
     // A failed admission commit fences; recovery is a fresh Store open.
     try std.testing.expectError(error.StoreFenced, storage.admitModelAttempt(.tool_continuation, .{}));
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
     try std.testing.expectEqual(first.operation_id + 1, continued.operation_id);
@@ -11703,7 +11748,8 @@ test "kind-specific admission selects a tool continuation despite fresh input an
 test "tool continuation admission runs its selection once" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "config");
     try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "start");
@@ -11828,7 +11874,8 @@ test "production turn preserves skipped continuation preference through actual S
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const allocated_session_0 = try configureTestSession(&storage, "peer-config");
     const allocated_session_1 = try configureTestSession(&storage, "sender-config");
@@ -11846,7 +11893,7 @@ test "production turn preserves skipped continuation preference through actual S
     try std.testing.expect(context.model == null and context.action == null);
     try std.testing.expect(storage.isFenced());
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     context.faults = .{};
     context.failure = null;
     _ = turn.run(&state, &context);
@@ -11874,7 +11921,8 @@ test "production turn preserves skipped continuation preference through actual S
     // the production turn and Store still own eligibility and admission.
     var sustained_tmp = std.testing.tmpDir(.{});
     defer sustained_tmp.cleanup();
-    var sustained = try testingStore(&sustained_tmp, std.testing.io);
+    var sustained: Store = undefined;
+    try testingStore(&sustained, &sustained_tmp, std.testing.io);
     defer sustained.close() catch unreachable;
     var bindings: [3]AttemptBinding = undefined;
     for ([_][]const u8{ "continuing", "retrying", "sending" }, 0..) |reference, index| {
@@ -11932,7 +11980,8 @@ test "production turn preserves skipped continuation preference through actual S
 test "terminal call-result import and read failures preserve canonical authority" {
     var import_tmp = std.testing.tmpDir(.{});
     defer import_tmp.cleanup();
-    var import_store = try testingStore(&import_tmp, std.testing.io);
+    var import_store: Store = undefined;
+    try testingStore(&import_store, &import_tmp, std.testing.io);
     defer import_store.close() catch unreachable;
     const allocated_session_0 = try configureTestSessionAsk(&import_store, "result-import-config");
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", allocated_session_0.slice(), "call");
@@ -11949,7 +11998,8 @@ test "terminal call-result import and read failures preserve canonical authority
 
     var read_tmp = std.testing.tmpDir(.{});
     defer read_tmp.cleanup();
-    var read_store = try testingStore(&read_tmp, std.testing.io);
+    var read_store: Store = undefined;
+    try testingStore(&read_store, &read_tmp, std.testing.io);
     defer read_store.close() catch unreachable;
     const allocated_session_1 = try configureTestSession(&read_store, "result-read-config");
     try submitTestMessage(&read_store, &read_tmp, "result-read-message", "result-read-message", allocated_session_1.slice(), "call");
@@ -11978,7 +12028,8 @@ test "runnable discovery fences structurally incomplete current tool calls" {
     for (corruptions, 0..) |corruption, index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const configs = [_][]const u8{ "discovery-action-config", "discovery-call-config" };
         const messages = [_][]const u8{ "discovery-action-message", "discovery-call-message" };
@@ -12010,7 +12061,8 @@ test "compaction pressure uses provider usage appended input and complete call r
     for (0..3) |scenario| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
         var patch: protocol.ConfigureCommand = .{};
@@ -12094,7 +12146,8 @@ test "missing canonical call outcome rows fence history and inspection" {
     for (corruptions, 0..) |corruption, index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSessionAsk(&storage, config_keys[index]);
         const session_ref = session.slice();
@@ -12165,7 +12218,8 @@ test "missing canonical call outcome rows fence history and inspection" {
 test "historical tool-result EOF revalidates complete canonical coverage" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "eof-coverage-config");
     try submitTestMessage(
@@ -12215,7 +12269,8 @@ test "complete historical tool-result traversal scales with groups and calls" {
         fn run(group_count: usize, calls_per_group: usize) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "scale-config");
             try submitTestMessage(
@@ -12304,7 +12359,8 @@ fn testingHistoricalStep(view: *HistoricalView, after: *u64, bytes: *usize, item
 test "historical preparation yields covered group populations and cancels proposal authentication" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const allocated_session_0 = try configureTestSession(&storage, "bounded-config");
     try submitTestMessage(&storage, &tmp, "bounded-input", "bounded-input", allocated_session_0.slice(), "tools");
@@ -12369,7 +12425,8 @@ test "historical preparation yields covered group populations and cancels propos
 test "large historical readers and yielded group authentication leave checkpoints free" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const text = try std.testing.allocator.alloc(u8, 1024 * 1024 + 37);
     defer std.testing.allocator.free(text);
@@ -12441,7 +12498,8 @@ test "historical preparation rejects missing extra and reordered sibling classif
         }) |fault| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "sibling-config");
             try submitTestMessage(&storage, &tmp, "sibling-input", "sibling-input", session.slice(), "tools");
@@ -12541,7 +12599,8 @@ test "historical accepted assistant output completeness and provenance fence rea
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "output-config");
         try submitTestMessage(&storage, &tmp, "output-input", "output-input", session.slice(), "first");
@@ -12659,7 +12718,8 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "incompatible-config");
         try submitTestMessage(&storage, &tmp, "incompatible-input", "incompatible-input", session.slice(), "tools");
@@ -12713,7 +12773,8 @@ test "historical accepted output selection work excludes failed Operation popula
         fn run(population: usize) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "selection-config");
             try submitTestMessage(&storage, &tmp, "selection-input", "selection-input", session.slice(), "retain");
@@ -12758,7 +12819,8 @@ test "Current report work is independent of terminal tool history" {
         fn run(group_count: usize) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "current-cost-config");
             const calls = [_]TestingCall{.{
@@ -12835,7 +12897,8 @@ test "Current report work is independent of terminal tool history" {
 test "Current pending count skips excluded Message history by indexed cutoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "pending-cost-config");
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -12890,7 +12953,8 @@ test "Full Message projection work does not multiply Messages by stops" {
         fn run(message_count: usize, stop_count: usize) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "full-scale-config");
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -12941,7 +13005,8 @@ test "Full Message projection work does not multiply Messages by stops" {
 test "call classification uses the proposing Operation frozen catalog" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "frozen-call-config");
@@ -12977,7 +13042,8 @@ test "call classification uses the proposing Operation frozen catalog" {
 test "duplicate trustworthy call identity rolls back every imported consequence" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "duplicate-call-config");
@@ -13001,7 +13067,8 @@ test "valid and rejected call populations grow independently" {
     const population = 128;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var valid_item_storage: [population][24]u8 = undefined;
@@ -13061,7 +13128,8 @@ test "valid and rejected call populations grow independently" {
 test "Session stop freezes its selection and excludes only the admitted prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "configure-stop");
@@ -13116,7 +13184,8 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
 test "later idle stop does not reclassify a completed Message" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "completed-stop-config");
     try submitTestMessage(&storage, &tmp, "completed-stop-file", "completed-stop-message", session.slice(), "answer");
@@ -13149,7 +13218,8 @@ test "later idle stop does not reclassify a completed Message" {
 test "idle Session stop excludes queued work but not later admissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
@@ -13184,7 +13254,7 @@ test "idle Session stop excludes queued work but not later admissions" {
         if (pass == 1) {
             try storage.close();
             storage_open = false;
-            storage = try testingStore(&tmp, std.testing.io);
+            try testingStore(&storage, &tmp, std.testing.io);
             storage_open = true;
         }
         const replay = storage.stopSession(&stop, .{});
@@ -13211,7 +13281,8 @@ test "idle Session stop excludes queued work but not later admissions" {
 test "exact model interruption continues only with applicable pending input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "configure-interrupt");
@@ -13268,7 +13339,8 @@ test "exact model interruption continues only with applicable pending input" {
 test "exact model interruption rejects stale targets and replays before applicability" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "configure-rejected-interrupt");
@@ -13309,7 +13381,8 @@ test "exact model interruption rejects stale targets and replays before applicab
 test "controls wait behind an active model settlement transaction" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "transaction-race-config");
@@ -13553,7 +13626,8 @@ test "controls remove scheduled retries and replay without cancelling newer work
     for ([_]Control{ .none, .stop, .interruption }) |control| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         var storage_open = true;
         defer if (storage_open) storage.close() catch unreachable;
 
@@ -13593,7 +13667,7 @@ test "controls remove scheduled retries and replay without cancelling newer work
             if (pass == 1) {
                 try storage.close();
                 storage_open = false;
-                storage = try testingStore(&tmp, std.testing.io);
+                try testingStore(&storage, &tmp, std.testing.io);
                 storage_open = true;
             }
             if (is_stop) {
@@ -13624,7 +13698,8 @@ test "controls remove scheduled retries and replay without cancelling newer work
 test "accepted stop remains discoverable without a control hint" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "hintless-config");
     try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", session.slice(), "work");
@@ -13641,7 +13716,8 @@ test "accepted stop remains discoverable without a control hint" {
 test "dispatch handoff refuses a stopped Attempt without invoking the launch callback" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "handoff-config");
     try submitTestMessage(&storage, &tmp, "handoff-file", "handoff-message", session.slice(), "work");
@@ -13666,7 +13742,8 @@ test "dispatch handoff refuses a stopped Attempt without invoking the launch cal
 test "failed control commit saves no answer after reopening" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     const session = try configureTestSession(&storage, "configure-control-rollback");
     var stop = try completeSessionStop("rollback-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{ .before_commit = true }) == .infrastructure_failure);
@@ -13681,7 +13758,7 @@ test "failed control commit saves no answer after reopening" {
         "{s}/store.sqlite3",
         .{root_buffer[0..root_length]},
     );
-    storage = try Store.open(std.testing.io, database, root_buffer[0..root_length]);
+    try storage.open(std.testing.io, database, root_buffer[0..root_length]);
     defer storage.close() catch unreachable;
     try std.testing.expect((try storage.observeCommand("rollback-stop")).status == .absent);
 }
@@ -13789,7 +13866,8 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
 test "Store configuration requires and freezes provider model and workspace" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -13844,7 +13922,8 @@ test "Store configuration requires and freezes provider model and workspace" {
 test "unsupported provider rejects mixed configuration atomically and replays exact shape" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -13943,13 +14022,14 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     configuration.configuration.tools.values[0] = .bash;
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("ask");
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     const created_session_0_reply = storage.configure(&configuration, true, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
     try expectBindingPreserved(&storage, created_session_0.slice(), "before-reopen");
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const reopened = try storage.inspectSession(created_session_0.slice());
     try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
@@ -13970,7 +14050,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     view.close();
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", created_session_0.slice());
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
 
     try execSessionSql(storage.database, "UPDATE session SET provider='other' WHERE session_ref=?1", created_session_0.slice());
     try std.testing.expectError(error.CorruptStore, storage.inspectSession(created_session_0.slice()));
@@ -14172,7 +14252,8 @@ test "configuration rejections bypass content effects and replay committed answe
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
 
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         try std.testing.expect(storage.configure(&command, true, .{
             .content_import = true,
             .before_commit = true,
@@ -14180,7 +14261,8 @@ test "configuration rejections bypass content effects and replay committed answe
         try storage.close();
     }
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         try std.testing.expect((try storage.observeCommand("rejected-content")).status == .absent);
         const rolled_back_content = try prepare(storage.database, "SELECT COUNT(*) FROM content");
@@ -14214,7 +14296,8 @@ test "configuration rejections bypass content effects and replay committed answe
 test "configuration answers replay without reverting newer settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -14271,7 +14354,8 @@ test "content reader owns the bounded result-delivery window" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const session = try configureTestSession(&storage, "configure-window");
@@ -14308,7 +14392,8 @@ test "content reader owns the bounded result-delivery window" {
 test "interleaved large content readers bound repeated SQLite page reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const length = 4 * 1024 * 1024;
     const first = try std.testing.allocator.alloc(u8, length);
@@ -14389,7 +14474,8 @@ test "interleaved large content readers bound repeated SQLite page reads" {
 test "large projected readers retain distinct copied sources across ranges and commits" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const length = 2 * 1024 * 1024;
     const split = length / 2 + 17;
@@ -14451,7 +14537,8 @@ test "large projected readers retain distinct copied sources across ranges and c
 test "large projected readers never borrow another reader's prefetched integrity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const expected = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
     defer std.testing.allocator.free(expected);
@@ -14486,7 +14573,8 @@ test "retained raw and projected readers allow checkpoints between committed win
     for ([_]bool{ false, true }, 0..) |projected, index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
         var reader = if (projected) blk: {
@@ -14521,7 +14609,8 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
     for ([_]usize{ 0, 1024 * 1024 }) |padding_length| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const command = "printf " ++ @as([16384]u8, @splat('x'));
         const padding = try std.testing.allocator.alloc(u8, padding_length);
@@ -14580,7 +14669,8 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
 test "core preserves empty and NUL keys while Session references stay canonical" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -14616,7 +14706,8 @@ test "core preserves empty and NUL keys while Session references stay canonical"
 test "saved incomplete initialization stays rejected after Session creation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var incomplete: protocol.ConfigureCommand = .{};
@@ -14642,7 +14733,8 @@ test "saved incomplete initialization stays rejected after Session creation" {
 test "capability-required configuration rejects on replacement and replays its saved decision" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -14680,13 +14772,15 @@ test "failed commit saves neither answer nor partial Session" {
         "model-a",
     );
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         const reply = storage.configure(&command, true, .{ .before_commit = true });
         try std.testing.expect(reply == .infrastructure_failure);
         try storage.close();
     }
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         try std.testing.expect((try storage.observeCommand("commit-fault")).status == .absent);
         try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM session"));
@@ -14701,7 +14795,8 @@ test "an outside SQLite writer cannot take the open Store's lock" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var database_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
     const database = try std.fmt.bufPrintSentinel(&database_buffer, "{s}/store.sqlite3", .{root}, 0);
-    var storage = try Store.open(std.testing.io, database, root);
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
@@ -14742,7 +14837,8 @@ test "an outside SQLite writer cannot take the open Store's lock" {
     try storage.close();
     storage_open = false;
 
-    var reopened = try Store.open(std.testing.io, database, root);
+    var reopened: Store = undefined;
+    try reopened.open(std.testing.io, database, root);
     defer reopened.close() catch unreachable;
     try std.testing.expect((try reopened.observeCommand("busy-save")).status != .absent);
     try std.testing.expect((try reopened.inspectSession(configured.accepted.session.slice())).found);
@@ -14751,7 +14847,8 @@ test "an outside SQLite writer cannot take the open Store's lock" {
 test "real SQLite full during import publishes no canonical prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
@@ -14792,7 +14889,8 @@ test "real SQLite full during import publishes no canonical prefix" {
     try storage.close();
     storage_open = false;
 
-    var reopened = try testingStore(&tmp, std.testing.io);
+    var reopened: Store = undefined;
+    try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     try std.testing.expect((try reopened.observeCommand("full-import")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(reopened.database, "SELECT count(*) FROM session"));
@@ -14805,7 +14903,8 @@ test "real SQLite full during import publishes no canonical prefix" {
 test "message admissions remain queued in order and retain bounded canonical content" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -14870,7 +14969,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqualSlices(u8, first_text, &actual);
 
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const restarted = try storage.observeCommand("message-1");
     try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
@@ -14890,7 +14989,8 @@ fn testingLabel(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) 
 test "a Label is configured, replayed, cleared and validated like any setting" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -14962,7 +15062,8 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
 test "a creating Message with require_model creates nothing without a model" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -15001,7 +15102,8 @@ test "initial Message atomically allocates its Session and replays its original 
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     var first: AcceptedMessage = undefined;
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const reply = storage.submitMessageWithModel(&message, true, .{});
         try std.testing.expect(reply == .accepted);
@@ -15027,7 +15129,8 @@ test "initial Message atomically allocates its Session and replays its original 
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
     }
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         const replay = storage.submitMessageWithModel(&message, true, .{}).accepted;
         try std.testing.expect(replay.replayed);
         try std.testing.expectEqual(first.admission_id, replay.admission_id);
@@ -15039,7 +15142,8 @@ test "initial Message atomically allocates its Session and replays its original 
         try storage.close();
     }
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         try std.testing.expectEqual(.absent, (try storage.observeCommand("failed-start-commit")).status);
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
@@ -15061,7 +15165,8 @@ test "message rejections replay before current Session checks without retained i
     io.vtable = &vtable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, io);
     defer storage.close() catch unreachable;
 
     const text = "rejected input";
@@ -15095,7 +15200,8 @@ test "message rejections replay before current Session checks without retained i
 test "a peer sender is resolved from its Action handle and exact replays survive revocation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const sender_id = try configureTestSession(&storage, "configure-sender");
     const sender = sender_id.slice();
@@ -15244,7 +15350,8 @@ test "message observation validates accepted admission references independently"
     for (corruptions) |corruption| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
 
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -15317,7 +15424,8 @@ test "message observation validates accepted admission references independently"
 test "message observation rejects an answer attached to processing durable facts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -15359,7 +15467,8 @@ test "message observation rejects an answer attached to processing durable facts
 test "message conflicts and failed commits cannot create another admission" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -15377,7 +15486,7 @@ test "message conflicts and failed commits cannot create another admission" {
     try std.testing.expect(storage.submitMessageWithModel(&message, true, .{ .before_commit = true }) == .infrastructure_failure);
     try storage.close();
 
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     try std.testing.expect((try storage.observeCommand("message")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession(created_session_0.slice())).pending_messages);
     const accepted = storage.submitMessageWithModel(&message, true, .{});
@@ -15400,7 +15509,8 @@ test "message conflicts and failed commits cannot create another admission" {
 test "failed message import rolls back content command and admission" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -15417,7 +15527,7 @@ test "failed message import rolls back content command and admission" {
     try std.testing.expect(storage.submitMessageWithModel(&message, true, .{ .content_import = true }) == .infrastructure_failure);
     try storage.close();
 
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     try std.testing.expect((try storage.observeCommand("message-import")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession(created_session_0.slice())).pending_messages);
@@ -15448,7 +15558,8 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
 
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         const configured = storage.configure(&configuration, true, .{});
         try std.testing.expect(configured == .accepted);
         message.session = configured.accepted.session;
@@ -15470,7 +15581,8 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
 
     var binding: AttemptBinding = undefined;
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         try std.testing.expect((try storage.observeCommand("rollback-configure")).status == .accepted);
         try std.testing.expect(
             (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .queued,
@@ -15510,7 +15622,8 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     }
 
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const observation = (try storage.observeCommand("rollback-message")).message.?.queue.?;
         const observed_binding = switch (observation.state) {
@@ -15528,7 +15641,8 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
 test "production Store applies finite durable SQLite settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(u32, 0), try pragmaInt(storage.database, "PRAGMA busy_timeout"));
     try std.testing.expectEqual(@as(u32, 1), try pragmaInt(storage.database, "PRAGMA foreign_keys"));
@@ -15601,7 +15715,8 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try tmp.dir.createDir(io, "crash", .default_dir);
     try tmp.dir.createDir(io, "database-only", .default_dir);
 
-    var storage = try Store.open(io, database, paths.store.slice());
+    var storage: Store = undefined;
+    try storage.open(io, database, paths.store.slice());
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
     try exec(storage.database, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,NULL)");
@@ -15621,7 +15736,8 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
         defer _ = c.sqlite3_finalize(statement);
         try std.testing.expect(prepared == c.SQLITE_BUSY or (prepared == c.SQLITE_OK and c.sqlite3_step(statement) == c.SQLITE_BUSY));
     }
-    if (Store.open(io, database, paths.store.slice())) |_| return error.TestUnexpectedResult else |_| {}
+    var refused: Store = undefined;
+    if (refused.open(io, database, paths.store.slice())) |_| return error.TestUnexpectedResult else |_| {}
     // The failed open released the process-wide heap limit; restore it.
     _ = c.sqlite3_hard_heap_limit64(sqlite_heap_bytes);
 
@@ -15645,7 +15761,7 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     // commits; the database file alone does not.
     try tmp.dir.copyFile("crash/rui.sqlite3", cwd, database, io, .{});
     try tmp.dir.copyFile("crash/rui.sqlite3-wal", cwd, wal, io, .{});
-    storage = try Store.open(io, database, paths.store.slice());
+    try storage.open(io, database, paths.store.slice());
     storage_open = true;
     try std.testing.expectEqual(crash_rows, try queryU64(storage.database, "SELECT count(*) FROM content"));
     var database_only_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
@@ -15664,7 +15780,8 @@ test "measurement Store can disable cache spill without changing other limits" {
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage = try Store.openWithOptions(
+    var storage: Store = undefined;
+    try storage.openWithOptions(
         std.testing.io,
         database,
         root,
@@ -15689,17 +15806,19 @@ test "measurement Store can force a smaller SQLite cache without changing produc
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
-    var storage = try Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
+    var storage: Store = undefined;
+    try storage.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_setting);
+    var refused: Store = undefined;
 
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 0 }),
+        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 0 }),
     );
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 4097 }),
+        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 4097 }),
     );
 }
 
@@ -15712,7 +15831,8 @@ test "fresh Store uses current schema and rejects the prior version" {
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
-    var storage = try Store.open(std.testing.io, database, root);
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
     try std.testing.expectEqual(schema_version, try pragmaInt(storage.database, "PRAGMA user_version"));
     {
         const removed_index = try prepare(
@@ -15759,9 +15879,11 @@ test "fresh Store uses current schema and rejects the prior version" {
     defer std.testing.allocator.free(before);
     try std.testing.expectEqual(@as(u8, 1), before[18]);
 
+    var refused: Store = undefined;
+
     try std.testing.expectError(
         error.WrongStoreVersion,
-        Store.open(std.testing.io, database, root),
+        refused.open(std.testing.io, database, root),
     );
     const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(after);
@@ -15779,13 +15901,16 @@ test "existing Store rejects noncanonical durable authority" {
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
-    var storage = try Store.open(std.testing.io, database, root);
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
     try exec(storage.database, "CREATE TABLE tool_result_authority(call_id INTEGER PRIMARY KEY, result_content_id INTEGER NOT NULL)");
     try storage.close();
 
+    var refused: Store = undefined;
+
     try std.testing.expectError(
         error.WrongStoreSchema,
-        Store.open(std.testing.io, database, root),
+        refused.open(std.testing.io, database, root),
     );
 }
 
@@ -15797,18 +15922,21 @@ test "existing Store rejects a different canonical identity" {
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage = try Store.open(std.testing.io, database, root);
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
     try storage.close();
+    var refused: Store = undefined;
     try std.testing.expectError(
         error.WrongStoreIdentity,
-        Store.open(std.testing.io, database, "/different/canonical/store"),
+        refused.open(std.testing.io, database, "/different/canonical/store"),
     );
 }
 
 test "canonical observation failure fences later admission" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -15831,7 +15959,8 @@ test "canonical observation failure fences later admission" {
 test "external content import follows sealed descriptor custody" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const captured = "captured instructions";
@@ -15869,7 +15998,8 @@ test "external content import follows sealed descriptor custody" {
 test "external content identity is verified before canonical commit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const captured = "captured instructions";
@@ -15897,7 +16027,8 @@ test "content verification failure rolls back new imports and deduplicated input
         inline for (std.meta.tags(Case)) |case| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -15962,7 +16093,8 @@ test "content import reads once and rolls back sources that change during readin
     for (std.meta.tags(Probe.Change)) |change| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         var vtable = std.testing.io.vtable.*;
         vtable.fileReadPositional = Probe.read;
@@ -15999,7 +16131,8 @@ test "content import reads once and rolls back sources that change during readin
 test "multiwindow content import and deduplication preserve all bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -16032,7 +16165,8 @@ test "multiwindow content import and deduplication preserve all bytes" {
 test "large raw content opens without materializing its payload" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -16059,7 +16193,8 @@ test "large raw content opens without materializing its payload" {
 test "public conversation owner fixes end, filters settings and bounds content" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -16162,7 +16297,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
 test "public content SQL failure fences Store instead of reporting absence" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "public-read-config");
     try submitTestMessage(&storage, &tmp, "public-read-text", "public-read-key", session.slice(), "text");
@@ -16186,7 +16322,8 @@ test "public content SQL failure fences Store instead of reporting absence" {
 test "public content SQLite step failure fences after successful preparation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "step-config");
     try submitTestMessage(&storage, &tmp, "step-input", "step-key", session.slice(), "step text");
@@ -16227,7 +16364,8 @@ const TestingPublicReadRoute = enum { page, content, cursor };
 fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "ordinary-config");
     try submitTestMessage(&storage, &tmp, "ordinary-input", "ordinary-key", session.slice(), "public input");
@@ -16287,7 +16425,8 @@ test "public foreign Turn page fences" {
 fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id, sibling_call_id, sibling_arguments }, target_sibling: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "tool-config");
     try submitTestMessage(&storage, &tmp, "tool-input", "tool-key", session.slice(), "run tool");
@@ -16389,7 +16528,8 @@ test "public completed Action sibling corruption fences first Conversation read"
         for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSessionAsk(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "two tools");
@@ -16436,7 +16576,8 @@ test "public completed Action sibling corruption fences first Conversation read"
 test "private-only model output never becomes public conversation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "private-config");
     try submitTestMessage(&storage, &tmp, "private-input", "private-message", session.slice(), "hi");
@@ -16485,7 +16626,8 @@ test "private-only model output never becomes public conversation" {
 test "public tool-result cursor crosses a completed group boundary" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "group-config");
     try submitTestMessage(&storage, &tmp, "group-input", "group-message", session.slice(), "run tools");
@@ -16602,7 +16744,8 @@ fn answerTestTurn(
 test "a warm Turn prepares no statement" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "warm-config");
     const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
@@ -16644,7 +16787,8 @@ test "public assistant message provenance binds the exact accepted item" {
         for ([_]enum { page, bytes, activity, activity_bytes, full }{ .page, .bytes, .activity, .activity_bytes, .full }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "visible", .decoded = "visible" }});
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -16652,7 +16796,7 @@ test "public assistant message provenance binds the exact accepted item" {
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             try exec(storage.database, "PRAGMA foreign_keys=ON");
             try storage.close();
-            storage = try testingStore(&tmp, std.testing.io);
+            try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
                 .page => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
                 .bytes => if (storage.openPublicConversationContent(request)) |reader| blk: {
@@ -16683,7 +16827,8 @@ test "missing assistant certificates respect page windows and fixed ends" {
     for ([_]bool{ false, true }) |activity| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const missing = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "answer", .decoded = "answer" }});
         for (0..20) |index| {
@@ -16695,7 +16840,7 @@ test "missing assistant certificates respect page windows and fixed ends" {
         try exec(storage.database, "DELETE FROM conversation_entry WHERE entry_kind=3");
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         try storage.close();
-        storage = try testingStore(&tmp, std.testing.io);
+        try testingStore(&storage, &tmp, std.testing.io);
         // A historical window ending before the damage remains readable.
         _ = try storage.publicConversationPage(.{ .session = missing.session, .end = missing.position - 1 });
         _ = try storage.activityPage(.{ .session = missing.session, .end = missing.position - 1 });
@@ -16736,7 +16881,8 @@ test "missing assistant certificates respect page windows and fixed ends" {
 test "public projected content sequential work excludes repeated prefixes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const expected = &@as([32768]u8, @splat('a'));
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
@@ -16770,7 +16916,8 @@ test "public projected content equal-length repoint fences at complete-stream EO
     for ([_]bool{ false, true }) |range| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const request = try testingPublicProjection(&storage, &tmp, &.{
             .{ .encoded = &@as([2500]u8, @splat('a')), .decoded = &@as([2500]u8, @splat('a')) },
@@ -16806,7 +16953,8 @@ test "public projected content EOF rejects nonempty trailing parts" {
         }) |tail| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const request = try testingPublicProjection(&storage, &tmp, &.{
                 .{ .encoded = "prefix-x", .decoded = "prefix-x" },
@@ -16840,7 +16988,8 @@ test "public projected content EOF rejects nonempty trailing parts" {
 test "public projected content trailing empty parts retain final byte and repeated EOF" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const request = try testingPublicProjection(&storage, &tmp, &.{
         .{ .encoded = "prefix-x", .decoded = "prefix-x" },
@@ -16862,7 +17011,8 @@ test "public projected content trailing empty parts retain final byte and repeat
 test "public projected content ranges own positioning across windows and scalar splits" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const expected = @as([4094]u8, @splat('x')) ++ "é中🙂\n\\\"/tail";
     const request = try testingPublicProjection(&storage, &tmp, &.{
@@ -16898,7 +17048,8 @@ test "public projected content empty identity and repeated EOF" {
     for ([_]bool{ false, true }) |corrupt| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         // Empty assistant output has no Conversation row. Exercise the
         // canonical projected reader directly, as used by empty call fields.
@@ -16934,7 +17085,8 @@ test "public projected content range positioning preserves decoding and backing 
     for ([_]bool{ false, true }) |missing| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const request = try testingPublicProjection(&storage, &tmp, &.{
             .{ .encoded = "\\n", .decoded = "\n" },
@@ -16971,7 +17123,8 @@ test "public projected content range positioning preserves decoding and backing 
 test "definite rejections retain decisions without retaining payloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -17015,7 +17168,7 @@ test "definite rejections retain decisions without retaining payloads" {
     ));
 
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     try std.testing.expect(storage.submitMessageWithModel(&unknown_message, true, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&incomplete, true, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&exhausted, true, .{}).rejected.replayed);
@@ -17037,7 +17190,8 @@ test "definite rejections retain decisions without retaining payloads" {
 test "one committed selection freezes its settings and input prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -17074,7 +17228,7 @@ test "one committed selection freezes its settings and input prefix" {
     );
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("dispatch-1"));
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     try std.testing.expect(
         (try storage.observeCommand("dispatch-1")).message.?.queue.?.state == .queued,
     );
@@ -17195,7 +17349,8 @@ test "one committed selection freezes its settings and input prefix" {
 test "continued accepted output keeps model immutable and public projection readable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -17372,7 +17527,8 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
         var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
         var original_content: u64 = 0;
         {
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             session = try configureTestSession(&storage, "diagnostic-config");
             try submitTestMessage(&storage, &tmp, "diagnostic-input", "diagnostic-message", session.slice(), "input");
@@ -17390,14 +17546,16 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
             }));
         }
         {
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try std.testing.expectEqual(original_content, try queryU64(storage.database, "SELECT count(*) FROM content"));
             try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NOT NULL OR resolution_content_id IS NOT NULL OR request_id IS NOT NULL"));
             try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
         }
         {
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024, .full);
             defer std.testing.allocator.free(bytes);
@@ -17427,7 +17585,8 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
     for ([_]Route{ .conversation, .conversation_content, .activity, .activity_content }) |route| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "diagnostic-config");
         try submitTestMessage(&storage, &tmp, "diagnostic-input", "diagnostic-message", session.slice(), "input");
@@ -17475,7 +17634,8 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
     var created_session_0: protocol.Bounded(protocol.max_session_bytes) = undefined;
 
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         const created_session_0_reply = storage.configure(&configuration, true, .{});
         try std.testing.expect(created_session_0_reply == .accepted);
         created_session_0 = created_session_0_reply.accepted.session;
@@ -17498,7 +17658,8 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         try storage.close();
     }
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const observation = (try storage.observeCommand("failure-message")).message.?.queue.?;
         const observed_binding = switch (observation.state) {
@@ -17559,7 +17720,8 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
 test "HTTP status failures keep the settling Attempt's provider correlation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "correlation-config");
     try submitTestMessage(&storage, &tmp, "correlation-input", "correlation-message", session.slice(), "retry");
@@ -17623,7 +17785,8 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
     const diagnostic = "{\"reason\":\"TemporaryProviderFailure\",\"stage\":\"event\",\"byte_offset\":\"6\",\"output_index\":null}";
     var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
     {
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         session = try configureTestSession(&storage, "stream-retry-config");
         try submitTestMessage(&storage, &tmp, "stream-input", "stream-message", session.slice(), "retry");
@@ -17644,7 +17807,8 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
             }
         }
     }
-    var reopened = try testingStore(&tmp, std.testing.io);
+    var reopened: Store = undefined;
+    try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     const bytes = try testingSessionReportWithProfile(&reopened, &tmp, session.slice(), 64 * 1024, .full);
     defer std.testing.allocator.free(bytes);
@@ -17660,7 +17824,8 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
 test "retry settlement adds actual entropy after the provider deadline" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "jitter-config");
     try submitTestMessage(&storage, &tmp, "jitter-input", "jitter-message", session.slice(), "retry");
@@ -17691,7 +17856,8 @@ test "retry settlement adds actual entropy after the provider deadline" {
 test "temporary model failures conserve allowance and exhaust after four Attempts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -17814,7 +17980,8 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
 test "canonical historical read failure fences dispatch without a fabricated outcome" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -17848,7 +18015,8 @@ test "canonical historical read failure fences dispatch without a fabricated out
 test "runnable selection finds age through pending index then groups one session" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ runnable_selection_sql);
@@ -17877,7 +18045,8 @@ test "runnable selection finds age through pending index then groups one session
 test "activity revalidation takes the same steps however long a Session's history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
 
@@ -17911,7 +18080,8 @@ test "activity revalidation takes the same steps however long a Session's histor
 test "runnable discovery measures eligible ineligible and history populations independently" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -18051,7 +18221,8 @@ test "content reader metadata and decode window remain bounded" {
 test "retry admission and exhausted recovery use their selection indexes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     const queries = [_]struct { sql: [:0]const u8, index: []const u8, no_temporary_sort: bool }{
@@ -18106,7 +18277,8 @@ fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
 test "retry due index excludes future population and preserves age ordering" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -18211,7 +18383,8 @@ fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptB
 test "a 401 forced refresh is claimed at most once per Operation across failures and restart" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "refresh-config");
@@ -18263,7 +18436,8 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try std.testing.expect(try storage.claimModelAuthRefresh(c1));
     try storage.close();
     storage_open = false;
-    var reopened = try testingStore(&tmp, std.testing.io);
+    var reopened: Store = undefined;
+    try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     const c2 = (try admitRetryForTesting(&reopened)).?.permit.binding;
     try std.testing.expectEqual(c1.operation_id, c2.operation_id);
@@ -18274,7 +18448,8 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
 test "retry admission reads past a full page of active Operations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -18306,7 +18481,8 @@ test "retry admission reads past a full page of active Operations" {
 test "retry transitions preserve age and settle one exhausted outcome per call" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -18358,7 +18534,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(@as(usize, 5150), comparisons);
     comparisons = 0;
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
     try std.testing.expectEqual(@as(u64, 201), admitted.permit.binding.operation_id);
@@ -18424,7 +18600,8 @@ test "public proposal structural corruption fences independently on every route"
         for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "run tools");
@@ -18468,7 +18645,8 @@ test "public proposal structural corruption fences independently on every route"
 test "proposal callable cursor domain preserves healthy Store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "proposal-config");
     var request: protocol.ProposalPage = .{};
@@ -18499,7 +18677,8 @@ test "public activity admission corruption fences page and content independently
         for ([_]bool{ false, true }) |content_route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "input bytes");
@@ -18533,7 +18712,8 @@ test "public activity admission corruption fences page and content independently
 test "activity fixed admission prefix survives later application and stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "activity-config");
     var request: protocol.ActivityPage = .{};
@@ -18561,7 +18741,8 @@ test "activity fixed admission prefix survives later application and stop" {
 test "every activity row is dated by the fact that owns it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "dated-config");
     const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
@@ -18605,7 +18786,8 @@ test "every activity row is dated by the fact that owns it" {
 test "a Tool Result is dated by its group's last acceptance, even when the clock stepped back" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "stepped-config");
     try submitTestMessage(&storage, &tmp, "stepped-input", "stepped-input", session.slice(), "propose");
@@ -18640,7 +18822,8 @@ fn denyForTesting(storage: *Store, session: []const u8, key: []const u8, action_
 test "Session work dates a tool group by its last acceptance, even when the clock stepped back" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
     // Ask: denying one Action leaves the other awaiting, so the Session
@@ -18686,7 +18869,8 @@ test "queued input is pending from the newer of its admission and the latest out
     for ([_]enum { behind_the_turn, after_the_outcome }{ .behind_the_turn, .after_the_outcome }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "stepped-queue-config");
         switch (case) {
@@ -18728,7 +18912,8 @@ test "persisted tool label corruption fences every publication route" {
         for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSessionAsk(&storage, "label-config");
             try submitTestMessage(&storage, &tmp, "label-input", "label-input", session.slice(), "propose");
@@ -18769,7 +18954,8 @@ test "tool label observation trusts admission but exact inspection authenticates
     for ([_]enum { arguments, execution, proposal, full }{ .arguments, .execution, .proposal, .full }) |route| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "label-config");
         try submitTestMessage(&storage, &tmp, "label-input", "label-input", session.slice(), "propose");
@@ -18819,7 +19005,8 @@ test "tool label observation trusts admission but exact inspection authenticates
 test "completed tool labels trust admission while model replay authenticates payload" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "replay-config");
     try submitTestMessage(&storage, &tmp, "replay-input", "replay-input", session.slice(), "propose");
@@ -18860,7 +19047,8 @@ test "completed tool labels trust admission while model replay authenticates pay
 test "live tool activity survives completed Turns and split result pages" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "live-config");
     try submitTestMessage(&storage, &tmp, "live-input", "input", session.slice(), "propose");
@@ -18920,7 +19108,8 @@ test "live tool activity survives completed Turns and split result pages" {
 test "compaction overflow admits a new Operation without losing applied input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "compact-config");
     try submitTestMessage(&storage, &tmp, "compact-input", "input", session.slice(), "keep all input");
@@ -19008,7 +19197,8 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
 test "compaction success retains host inputs and ordered anchor suffix across reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "compact-config");
     try submitTestMessage(&storage, &tmp, "compact-input", "input", session.slice(), "original");
@@ -19027,7 +19217,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession(session.slice())).action_count);
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession(session.slice())).pending_messages);
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     // Accepted compaction message items remain private, without a required
     // assistant Conversation entry, across every public inventory on reopen.
     try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(request)).count);
@@ -19094,7 +19284,8 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
     for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -19121,7 +19312,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         try std.testing.expectEqual(@as(?u64, 10), selected.compaction_trigger_override);
         try std.testing.expectEqual(@as(?u64, 8), selected.output_reservation_override);
         try storage.close();
-        storage = try testingStore(&tmp, std.testing.io);
+        try testingStore(&storage, &tmp, std.testing.io);
         const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
         try std.testing.expectEqual(first.operation_id, retry.operation_id);
         {
@@ -19164,7 +19355,8 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
     for ([_][]const u8{ "{\"total_tokens\":999}", "{\"total_tokens\":1000}", "{\"total_tokens\":1000.5}", "{\"total_tokens\":1000e0}", "{\"total_tokens\":-1000}", "{\"total_tokens\":0}", "{\"total_tokens\":18446744073709551616}", "{\"total_tokens\":1000000}", "{\"total_tokens\":9223372036854775807}", "{\"input_tokens\":9223372036854775807,\"output_tokens\":9223372036854775807}" }, 0..) |usage, index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
         var patch: protocol.ConfigureCommand = .{};
@@ -19229,7 +19421,8 @@ test "compaction pressure uses the latest accepted output even without usage" {
         for ([_]enum { host_input, provider_output, small }{ .host_input, .provider_output, .small }) |context| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             var patch: protocol.ConfigureCommand = .{};
@@ -19262,7 +19455,8 @@ test "compaction pressure uses the latest accepted output even without usage" {
 test "compaction soft trigger freezes settings before selecting arrivals and instructions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "config");
     var patch: protocol.ConfigureCommand = .{};
@@ -19373,7 +19567,8 @@ fn testingRevisionEfforts(storage: *Store, session: []const u8, destination: []?
 test "reasoning effort overrides are model-checked and frozen on each admitted Operation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -19443,7 +19638,8 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expect(try configureTestEffort(&storage, "effort-xhigh", session.slice(), .value, "xhigh") == .accepted);
     try storage.close();
     storage_open = false;
-    var reopened = try testingStore(&tmp, std.testing.io);
+    var reopened: Store = undefined;
+    try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     var view = try reopened.openHistoricalView(second);
     defer view.close();
@@ -19454,7 +19650,8 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
 test "compaction failed and unresolved candidates preserve the accepted base" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "config");
     try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
@@ -19481,7 +19678,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
     try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, candidate, &.{}));
     try storage.settleModelAttemptFailure(candidate, .{ .uncorrelated = "bad_compaction" }, .ordinary, .{});
     try storage.close();
-    storage = try testingStore(&tmp, std.testing.io);
+    try testingStore(&storage, &tmp, std.testing.io);
     try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "new turn");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view = try storage.openHistoricalView(next);
@@ -19500,7 +19697,8 @@ test "compaction selected newest base corruption fences rather than using an old
     for ([_]enum { payload, anchor, tail }{ .payload, .anchor, .tail }) |corruption| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
@@ -19553,7 +19751,8 @@ test "historical accepted output completeness and provenance fence both read pat
             for ([_]bool{ false, true }) |context_read| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
-                var storage = try testingStore(&tmp, std.testing.io);
+                var storage: Store = undefined;
+                try testingStore(&storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
                 const session = try configureTestSession(&storage, "config");
                 try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
@@ -19612,7 +19811,8 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
     for ([_]bool{ false, true }) |with_base| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
@@ -19660,7 +19860,8 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
 test "compaction does not repeat a soft trigger after a failed assistant with unchanged source" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "config");
     try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
@@ -19693,7 +19894,8 @@ test "compaction missing usage estimates covered retained host input" {
     }) |usage| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
         var patch: protocol.ConfigureCommand = .{};
@@ -19731,7 +19933,8 @@ test "historical context selection work excludes nonmatching Operation populatio
         fn run(population: usize, with_base: bool) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
@@ -19787,7 +19990,8 @@ test "model admission work excludes failed historical Operation population" {
         fn run(population: usize, overflow: bool) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
@@ -19839,7 +20043,8 @@ test "model admission work excludes accepted compaction base history" {
         fn run(population: usize, suffix: Suffix) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
@@ -19910,7 +20115,8 @@ test "model admission work excludes usage-covered accepted tool and instruction 
         fn run(population: usize, kind: Population, compact: bool) !u64 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             if (kind == .action) {
@@ -20004,7 +20210,8 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
         for ([_]bool{ false, true }) |pressure| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var storage = try testingStore(&tmp, std.testing.io);
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "config");
             try submitTestMessage(&storage, &tmp, "original", "original", session.slice(), "retain original input");
@@ -20019,7 +20226,7 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
             try std.testing.expect(stopped == .accepted);
             try std.testing.expectEqual(protocol.SessionStopCompletion.completed, stopped.accepted.completion);
             try storage.close();
-            storage = try testingStore(&tmp, std.testing.io);
+            try testingStore(&storage, &tmp, std.testing.io);
 
             var patch: protocol.ConfigureCommand = .{};
             try patch.key.set("pressure");
@@ -20039,7 +20246,8 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
 test "compaction purpose admission fences a missing latest Turn Operation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "config");
     try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "original input");

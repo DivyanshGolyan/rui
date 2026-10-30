@@ -1701,7 +1701,8 @@ test "real preparation consumes the configured allowance across multiple advance
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage = try store.Store.open(std.testing.io, database, root);
+    var storage: store.Store = undefined;
+    try storage.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -1833,7 +1834,7 @@ const PreparationTestSetup = struct {
         self.root = self.root_buffer[0..root_length];
         var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{self.root});
-        self.storage = try store.Store.open(std.testing.io, database, self.root);
+        try self.storage.open(std.testing.io, database, self.root);
         errdefer self.storage.close() catch unreachable;
         var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
         defer directory.close(std.testing.io);
@@ -1952,7 +1953,7 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     try setup.storage.close();
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
-    setup.storage = try store.Store.open(std.testing.io, database, setup.root);
+    try setup.storage.open(std.testing.io, database, setup.root);
     var reopened = try setup.storage.openHistoricalView(binding_a);
     try std.testing.expectEqual(affinity_a, (try reopened.settings()).session_affinity);
     try std.testing.expectEqualStrings(session_a.slice(), (try reopened.settings()).session.slice());
@@ -2492,7 +2493,7 @@ test "request preparation retains the allocated ID across reopen and replacement
             try setup.storage.close();
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
-            setup.storage = try store.Store.open(std.testing.io, database, setup.root);
+            try setup.storage.open(std.testing.io, database, setup.root);
             var replacement = (try setup.storage.tryAdmitNextModelRetry(store.ActiveOperationFilter.empty(), .{})).?;
             binding = try replacement.permit.consume();
             try std.testing.expectEqual(original.turn_id, binding.turn_id);
