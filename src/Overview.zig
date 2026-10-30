@@ -930,7 +930,7 @@ const Seen = struct {
     }
 };
 
-const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz" };
+const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
 /// Operations that answer from fixed facts and record what they were asked.
 const fake_operations: Operations = .{
@@ -1664,41 +1664,16 @@ test "a start freezes the composer until its answer, and the overview's keys sti
     try expectStarted(rig, "next\r", "next");
 }
 
-test "every key the overview binds acts through the editor, on an empty draft and on a rejected one" {
-    const rig = try openComposer();
-    defer rig.close();
-    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    // Up and Down past a one-line draft select rows whether or not the line
-    // was rejected; Home and End do on an empty draft.
-    for ([_][]const u8{ "", "a\x00" }) |draft| {
-        for ([_][]const u8{ "\x1b[A", "\x1bOA", "\x1b[B", "\x1bOB", "\x1b[H", "\x1b[F" }) |key| {
-            if (draft.len != 0 and (key[key.len - 1] == 'H' or key[key.len - 1] == 'F')) continue;
-            rig.overview.composer = .{ .buffer = &rig.overview.draft };
-            try std.testing.expect(try rig.press(draft) == null);
-            rig.overview.state.selected = null;
-            try std.testing.expect(try rig.press(key) == null);
-            try std.testing.expectEqualStrings("k7m2qx", &(rig.overview.state.selected orelse return error.TestExpectedSelection));
-        }
-    }
-    // Ctrl-G is Esc in every encoding, on a rejected draft too.
-    for ([_][]const u8{ "\x07", "\x1b[103;5u", "\x1b[27;5;103~" }) |ctrl_g| {
-        try std.testing.expect(try rig.press("junk\x00") == null);
-        try std.testing.expect(try rig.press(ctrl_g) == null);
-        try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.length);
-    }
-    // A key the overview binds to nothing neither edits nor rejects the line.
-    try expectStarted(rig, "h\x12i\x1b[114;5u\r", "hi");
-}
-
-/// A composer over three listed Sessions, the middle one selected.
-fn openThreeRows() !*Rig {
+/// A composer over five listed Sessions, the middle one selected, so the
+/// row above, below, first and last are four different rows.
+fn openListed() !*Rig {
     const rig = try openComposer();
     errdefer rig.close();
-    Seen.now.listed = 3;
+    Seen.now.listed = listed_references.len;
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 3), rig.overview.state.order.items.len);
+    try std.testing.expectEqual(listed_references.len, rig.overview.state.order.items.len);
+    rig.overview.state.selected = shownRow(rig, 2);
     return rig;
 }
 
@@ -1709,23 +1684,119 @@ fn shownRow(rig: *const Rig, at: usize) view.Reference {
 }
 
 test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {
-    const rig = try openThreeRows();
+    const rig = try openListed();
     defer rig.close();
     for ([_][]const u8{ "", "two\x1b\rlines", "junk\x00" }) |draft| {
         for ([_]struct { bytes: []const u8, row: usize }{
-            .{ .bytes = "\x1b[1;2A", .row = 0 },
-            .{ .bytes = "\x1b[1;2:1A", .row = 0 },
-            .{ .bytes = "\x1b[1;2B", .row = 2 },
-            .{ .bytes = "\x1b[1;2:1B", .row = 2 },
+            .{ .bytes = "\x1b[1;2A", .row = 1 },
+            .{ .bytes = "\x1b[1;2:1A", .row = 1 },
+            .{ .bytes = "\x1b[1;2B", .row = 3 },
+            .{ .bytes = "\x1b[1;2:1B", .row = 3 },
         }) |case| {
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
             rig.overview.composer = .{ .buffer = &rig.overview.draft };
             try std.testing.expect(try rig.press(draft) == null);
-            rig.overview.state.selected = shownRow(rig, 1);
+            rig.overview.state.selected = shownRow(rig, 2);
             try std.testing.expect(try rig.press(case.bytes) == null);
             try std.testing.expectEqualStrings(&shownRow(rig, case.row), &(rig.overview.state.selected orelse return error.TestExpectedSelection));
         }
     }
+}
+
+/// Every encoding of every key a screen may bind: raw or legacy, Kitty's
+/// CSI-u, and xterm's modifyOtherKeys where the key has them.
+const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.{
+    .escape = &.{ "\x1b", "\x1b[27u", "\x1b[27;3u", "\x1b[27;1;27~" },
+    .ctrl_c = &.{ "\x03", "\x1b[99;5u", "\x1b[27;5;99~" },
+    .ctrl_d = &.{ "\x04", "\x1b[100;5u", "\x1b[27;5;100~" },
+    .ctrl_g = &.{ "\x07", "\x1b[103;5u", "\x1b[27;5;103~" },
+    .ctrl_o = &.{ "\x0f", "\x1b[111;5u", "\x1b[27;5;111~" },
+    .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
+    .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
+    .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
+    .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
+    .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
+    .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
+    .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
+    .page_down = &.{ "\x1b[6~", "\x1b[6;1~", "\x1b[6;2~" },
+    .home = &.{ "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~", "\x1b[1;1H" },
+    .end = &.{ "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~", "\x1b[1;1F" },
+    .ctrl_end = &.{ "\x1b[1;5F", "\x1b[4;5~" },
+});
+
+/// The key a lone editor reads `bytes` as, a lone ESC once it expires.
+fn keyOf(bytes: []const u8) !?keymap.Key {
+    var storage: [8]u8 = undefined;
+    var editor: TerminalEditor = .{ .buffer = &storage };
+    var input: TerminalInput = .{};
+    var found: ?keymap.Key = null;
+    for (bytes) |byte| {
+        var decoded = input.feed(byte, 0);
+        while (decoded != .none) : (decoded = input.next()) switch (editor.apply(keymap.every, decoded)) {
+            .action => |key| found = key,
+            else => {},
+        };
+    }
+    if (input.pending() == .escape) switch (editor.apply(keymap.every, try input.expire())) {
+        .action => |key| found = key,
+        else => {},
+    };
+    return found;
+}
+
+/// Presses `bytes`, then lets a lone ESC expire into Esc, as the loop does.
+fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
+    if (try rig.press(bytes)) |ending| return ending;
+    const Expiry = struct {
+        fn done(overview: *Self) !bool {
+            if (try overview.readInput(0, 1) != null) return error.TestUnexpectedResult;
+            return overview.input.pending() == .none;
+        }
+    };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), rig.overview, Expiry.done);
+    return null;
+}
+
+test "every key does what the overview's table says, through the editor, in every encoding, on an empty and on a rejected draft" {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| for ([_][]const u8{ "", "\x00" }) |draft| {
+        errdefer std.debug.print("key={s} bytes={s} draft={s}\n", .{ @tagName(key), bytes[1..], draft });
+        try std.testing.expectEqual(@as(?keymap.Key, key), try keyOf(bytes));
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press("/configure --permission-mode ask\r") == null);
+        try std.testing.expect(try rig.press(draft) == null);
+        const ending = try pressKey(rig, bytes);
+        const state = &rig.overview.state;
+        const selected = state.selected orelse return error.TestExpectedSelection;
+        const action = view.keys.get(key) orelse {
+            // Nothing happens, and the line is not rejected by it.
+            try std.testing.expect(ending == null);
+            try std.testing.expectEqualStrings(&shownRow(rig, 2), &selected);
+            try std.testing.expect(state.prompt == null and !state.settings.empty());
+            if (draft.len == 0) try expectStarted(rig, "ok\r", "ok");
+            continue;
+        };
+        if (action == .exit) {
+            try std.testing.expectEqual(@as(?Ending, .overview), ending);
+            continue;
+        }
+        try std.testing.expect(ending == null);
+        switch (action) {
+            .previous, .next, .first, .last => {
+                const row: usize = switch (action) {
+                    .previous => 1,
+                    .next => 3,
+                    .first => 0,
+                    .last => listed_references.len - 1,
+                    else => unreachable,
+                };
+                try std.testing.expectEqualStrings(&shownRow(rig, row), &selected);
+            },
+            .clear => try std.testing.expect(state.settings.empty()),
+            .stop => try std.testing.expectEqualStrings(&shownRow(rig, 2), &(state.prompt orelse return error.TestExpectedPrompt).stop),
+            .exit => unreachable,
+        }
+    };
 }
 
 test "a start sends what its Enter captured, whatever Esc clears before it runs" {
