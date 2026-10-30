@@ -140,17 +140,17 @@ pub const Reply = struct {
 
     fn start(self: *const Reply) view.StartResult {
         return switch (self.outcome) {
-            .accepted => .{ .started = self.session },
+            .accepted => .{ .started = .{ .reference = self.session, .handle = self.handle.slice() } },
             .failed => .{ .failed = self.text.slice() },
             .unconfirmed, .fatal => .{ .unconfirmed = self.text.slice() },
         };
     }
 
-    fn stopFailure(self: *const Reply) ?[]const u8 {
+    fn stop(self: *const Reply) view.StopOutcome {
         return switch (self.outcome) {
-            .accepted => null,
-            .failed => self.text.slice(),
-            .unconfirmed, .fatal => "unconfirmed",
+            .accepted => .stopped,
+            .failed => .{ .failed = self.text.slice() },
+            .unconfirmed, .fatal => .{ .unconfirmed = self.text.slice() },
         };
     }
 };
@@ -465,7 +465,7 @@ fn complete(self: *Self) !?Ending {
             if (self.reply.outcome == .accepted) self.started = .{ .session = self.reply.session, .handle = self.reply.handle };
             return self.settled(.{ .start = self.reply.start() });
         },
-        .stop => |reference| return self.settled(.{ .stop = .{ .reference = reference, .failure = self.reply.stopFailure() } }),
+        .stop => |reference| return self.settled(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
     }
     return null;
 }
@@ -642,11 +642,17 @@ fn converse(self: *Self, session: view.Reference) ?Left {
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
-    // A start the worker ran may now be unconfirmed; the core records that.
+    // The core records what became of a start or stop the worker ran.
+    var start: ?view.StartResult = null;
     if (self.worker.thread != null) {
         self.worker.join() catch {};
-        if (self.job == .start) _ = view.step(&self.state, .{ .start = self.reply.start() }) catch {};
+        switch (self.job) {
+            .start => start = self.reply.start(),
+            .stop => |reference| _ = view.step(&self.state, .{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }) catch {},
+            else => {},
+        }
     }
+    _ = view.step(&self.state, .{ .depart = start }) catch {};
     var guidance: std.Io.Writer.Allocating = .init(self.init.gpa);
     defer guidance.deinit();
     view.writeDeparture(&self.state, &guidance.writer) catch {};
@@ -656,8 +662,8 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     };
     switch (ending) {
         .overview => {
-            try restored;
             _ = stderr.write(guidance.written());
+            try restored;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |left| return self.leave(left, restored, guidance.written()),
@@ -1058,8 +1064,8 @@ test "a reply is unconfirmed only when the request may have reached the Host" {
     try std.testing.expectEqualStrings("Cancelled", Reply.of(unsent, "h1").start().failed);
     const uploaded: Sent = .{ .failed = .{ .step = .upload, .err = error.Cancelled } };
     try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").start().unconfirmed);
-    try std.testing.expectEqualStrings("unconfirmed", Reply.of(uploaded, "h1").stopFailure().?);
-    try std.testing.expect(Reply.of(accepted, "h1").stopFailure() == null);
+    try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").stop().unconfirmed);
+    try std.testing.expect(Reply.of(accepted, "h1").stop() == .stopped);
     // A canonical Store failure is unconfirmed and fatal.
     const fenced: Sent = .{ .done = .{ .status = 500, .context = context, .target = target, .answer = error.CanonicalStoreFailure } };
     try std.testing.expectEqual(.fatal, Reply.of(fenced, "h1").outcome);
@@ -1084,6 +1090,94 @@ test "a canonical Store failure ends the overview, which names the start's recov
     defer departure.deinit();
     try view.writeDeparture(&rig.overview.state, &departure.writer);
     try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover fenced-handle") != null);
+}
+
+test "a stop whose reply was lost names its request on departure" {
+    var ops = fake_operations;
+    ops.stop = struct {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) void {
+            reply.* = .unconfirmed("stop-handle");
+        }
+    }.stop;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    const guidance = "rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n";
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try view.writeDeparture(&rig.overview.state, &departure.writer);
+    try std.testing.expectEqualStrings(guidance, departure.written());
+    // A stop still running as the overview ends is named the same way.
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try rig.overview.dispatch();
+    try std.testing.expectEqual(Job.stop, std.meta.activeTag(rig.overview.job));
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(guidance ++ guidance, try finishedGuidance(rig, &buffer));
+}
+
+/// Runs `finish` over a terminal whose restore failed, which writes nothing
+/// to stdout, and returns what it wrote to stderr.
+fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
+    rig.terminal.active = false;
+    rig.terminal.result = error.TerminalRestoreFailed;
+    var pipe: [2]c_int = undefined;
+    try openPipe(&pipe);
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const saved = std.c.dup(2);
+    if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
+    const finished = rig.overview.finish(.overview);
+    _ = std.c.dup2(saved, 2);
+    _ = std.c.close(saved);
+    try std.testing.expectError(error.TerminalRestoreFailed, finished);
+    const count = std.c.read(pipe[0], buffer.ptr, buffer.len);
+    return if (count > 0) buffer[0..@intCast(count)] else "";
+}
+
+test "a failed terminal restore still prints the departure guidance" {
+    var ops = fake_operations;
+    ops.start = struct {
+        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) void {
+            reply.* = .unconfirmed("lost-handle");
+        }
+    }.start;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n", try finishedGuidance(rig, &buffer));
+}
+
+test "leaving while a start is queued or running says what became of it" {
+    var cancellation: client.Cancellation = .{};
+    var buffer: [1024]u8 = undefined;
+    // Enter and Ctrl-C in one read: the start is queued and never sent.
+    {
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect((try rig.press("race start\n\x03")).? == .overview);
+        try std.testing.expectEqualStrings("rui: The new Session was not started (cancelled); start it again from the overview.\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+    }
+    // The start ran as the overview ended: the Host accepted it.
+    {
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try rig.overview.dispatch();
+        try std.testing.expectEqualStrings("rui: Session start accepted: n3w5es.\nMessage request: start-handle (rui request inspect start-handle)\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    }
 }
 
 test "terminal keys reach the core as overview keys, and pasted line ends as text" {

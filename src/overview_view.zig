@@ -235,14 +235,24 @@ pub const Host = struct {
     slots_in_use: u64,
 };
 
-pub const StopResult = struct {
-    reference: Reference,
-    /// Null when the Host accepted the stop; else its failure code.
-    failure: ?[]const u8,
+pub const StopOutcome = union(enum) {
+    stopped,
+    /// The Host refused it, or it never left.
+    failed: []const u8,
+    /// It may have reached the Host. Its saved request handle recovers it.
+    unconfirmed: []const u8,
 };
 
+pub const StopResult = struct {
+    reference: Reference,
+    outcome: StopOutcome,
+};
+
+/// A stop whose result is unknown, and the handle that recovers it.
+pub const UnconfirmedStop = struct { reference: Reference, handle: Bounded(max_handle_bytes) };
+
 pub const StartResult = union(enum) {
-    started: Reference,
+    started: struct { reference: Reference, handle: []const u8 },
     /// The Host refused it, or it never left: the text can be sent again.
     failed: []const u8,
     /// It may have reached the Host. Its saved request handle recovers it;
@@ -258,6 +268,9 @@ pub const Event = union(enum) {
     first_line: FirstLine,
     stop: StopResult,
     start: StartResult,
+    /// The overview ended. The start in flight, if any, ended with this
+    /// result; null when it never ran.
+    depart: ?StartResult,
     /// Opens a Session named outside the overview, as `session resume` does.
     open: Reference,
     /// The Host's facts, read as a listing starts; null when it gave none.
@@ -428,10 +441,18 @@ pub const State = struct {
     starting: bool = false,
     /// The handle of the last start whose admission is unknown.
     unconfirmed: ?Bounded(max_handle_bytes) = null,
+    /// What became of a start still in flight when the person left.
+    departed: ?union(enum) {
+        not_started: Bounded(session_work.max_code_bytes),
+        started: struct { reference: Reference, handle: Bounded(max_handle_bytes) },
+    } = null,
     /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
     stops: [max_stops]Reference = undefined,
     stop_count: usize = 0,
+    /// The latest stops whose result is unknown, oldest first.
+    unconfirmed_stops: [max_stops]UnconfirmedStop = undefined,
+    unconfirmed_stop_count: usize = 0,
 
     /// The token of the last completed listing.
     token: ?Token = null,
@@ -630,18 +651,32 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.stop_count -= 1;
                 break;
             };
-            if (result.failure) |code| state.say(.attention, "! Could not stop {s}: {s}", .{ &result.reference, code });
+            switch (result.outcome) {
+                .stopped => {},
+                .failed => |code| state.say(.attention, "! Could not stop {s}: {s}", .{ &result.reference, code }),
+                .unconfirmed => |handle| {
+                    if (state.unconfirmed_stop_count == max_stops) {
+                        std.mem.copyForwards(UnconfirmedStop, state.unconfirmed_stops[0 .. max_stops - 1], state.unconfirmed_stops[1..]);
+                        state.unconfirmed_stop_count -= 1;
+                    }
+                    const held = &state.unconfirmed_stops[state.unconfirmed_stop_count];
+                    held.* = .{ .reference = result.reference, .handle = .{} };
+                    held.handle.set(handle) catch unreachable;
+                    state.unconfirmed_stop_count += 1;
+                    state.say(.attention, "! Unconfirmed stop of {s}: rui request recover {s}", .{ &result.reference, held.handle.slice() });
+                },
+            }
             state.next_list_ms = 0;
         },
         .start => |result| {
             state.starting = false;
             switch (result) {
-                .started => |ref| {
+                .started => |started| {
                     state.draft_len = 0;
                     state.settings = .{};
-                    state.selected = ref;
+                    state.selected = started.reference;
                     state.next_list_ms = 0;
-                    effects.add(.{ .open = ref });
+                    effects.add(.{ .open = started.reference });
                 },
                 .failed => |code| state.say(.attention, "! Could not start a Session: {s}", .{code}),
                 .unconfirmed => |handle| {
@@ -657,6 +692,24 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
             }
         },
+        .depart => |result| if (state.starting) {
+            state.starting = false;
+            // A start never sent was cancelled with the overview.
+            switch (result orelse StartResult{ .failed = "cancelled" }) {
+                .started => |started| {
+                    state.departed = .{ .started = .{ .reference = started.reference, .handle = .{} } };
+                    state.departed.?.started.handle.set(started.handle) catch unreachable;
+                },
+                .failed => |code| {
+                    state.departed = .{ .not_started = .{} };
+                    state.departed.?.not_started.set(code[0..@min(code.len, session_work.max_code_bytes)]) catch unreachable;
+                },
+                .unconfirmed => |handle| {
+                    state.unconfirmed = .{};
+                    state.unconfirmed.?.set(handle) catch unreachable;
+                },
+            }
+        },
         .open => |ref| {
             state.selected = ref;
             effects.add(.{ .open = ref });
@@ -666,11 +719,16 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     return effects;
 }
 
-/// What the shell prints once the terminal is restored: how to recover a
-/// start the overview could not confirm.
+/// What the shell prints once the terminal is restored: what became of a
+/// start in flight, and how to recover the start and stops the overview
+/// could not confirm.
 pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    const handle = state.unconfirmed orelse return;
-    try writer.print("rui: A new Session's start was not confirmed; use rui request recover {s}. Do not start it again.\n", .{handle.slice()});
+    if (state.departed) |departed| switch (departed) {
+        .not_started => |code| try writer.print("rui: The new Session was not started ({s}); start it again from the overview.\n", .{code.slice()}),
+        .started => |started| try writer.print("rui: Session start accepted: {s}.\nMessage request: {s} (rui request inspect {s})\n", .{ &started.reference, started.handle.slice(), started.handle.slice() }),
+    };
+    if (state.unconfirmed) |handle| try writer.print("rui: A new Session's start was not confirmed; use rui request recover {s}. Do not start it again.\n", .{handle.slice()});
+    for (state.unconfirmed_stops[0..state.unconfirmed_stop_count]) |*stop| try writer.print("rui: Stopping {s} was not confirmed; use rui request recover {s}. Do not stop it again.\n", .{ &stop.reference, stop.handle.slice() });
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
@@ -2033,7 +2091,7 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
         try std.testing.expect(std.mem.indexOf(u8, text, "● Write the notes                     stopping") != null);
         try expectEffects(&.{}, try press(&state, .ctrl_x));
         try expectNotice(&state, "Nothing to stop: k7m2qx is stopping.");
-        try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .failure = null } }));
+        try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .stopped } }));
         try std.testing.expectEqual(@as(usize, 0), state.stop_count);
         try std.testing.expectEqual(@as(u64, 0), state.next_list_ms);
     }
@@ -2063,8 +2121,24 @@ test "a cancelled stop prompt sends nothing" {
     try expectEffects(&.{}, try press(&state, .down));
     try expectEffects(&.{}, try press(&state, .ctrl_x));
     try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .ctrl_x));
-    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .failure = "session_not_found" } }));
+    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! Could not stop k7m2qx: session_not_found");
+}
+
+test "an unconfirmed stop names the request that recovers it, here and on departure" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectSelected(&state, "k7m2qx");
+    try expectEffects(&.{}, try press(&state, .ctrl_x));
+    try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .ctrl_x));
+    const handle = "5c1d9e2f-3a4b-4c6d-8e7f-9a0b1c2d3e4f";
+    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .unconfirmed = handle } } }));
+    try std.testing.expectEqual(@as(usize, 0), state.stop_count);
+    try expectNotice(&state, "! Unconfirmed stop of k7m2qx: rui request recover " ++ handle);
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try writeDeparture(&state, &departure.writer);
+    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not confirmed; use rui request recover " ++ handle ++ ". Do not stop it again.\n", departure.written());
 }
 
 test "enter on a row opens it" {
@@ -2110,7 +2184,7 @@ test "the composer starts a Session with its text and opens it" {
     try expectEffects(&.{}, try press(&state, .enter));
     try expectEffects(&.{}, try press(&state, .escape));
     try std.testing.expectEqualStrings("Fix the flaky resize test", state.draftText());
-    try expectEffects(&.{.{ .open = "z9y8x7".* }}, try step(&state, .{ .start = .{ .started = "z9y8x7".* } }));
+    try expectEffects(&.{.{ .open = "z9y8x7".* }}, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
     try std.testing.expect(!state.starting);
     try std.testing.expectEqual(@as(usize, 0), state.draft_len);
     try expectSelected(&state, "z9y8x7");
@@ -2174,7 +2248,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     try held.put(8, "lane \"five\"");
     try typeText(&state, "Run the tests");
     try expectEffects(&.{.{ .start = .{ .settings = &held, .text = "Run the tests" } }}, try press(&state, .enter));
-    _ = try step(&state, .{ .start = .{ .started = "z9y8x7".* } });
+    _ = try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } });
     try std.testing.expect(state.settings.empty());
 
     // Only `session start` options, in the conversation's grammar, are held.
@@ -2258,6 +2332,36 @@ test "an unconfirmed start clears the composer and names the request that recove
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
     try writeDeparture(&state, &departure.writer);
     try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n", departure.written());
+}
+
+test "leaving with a start in flight says what became of it" {
+    const handle = "0f8e2c1a-7b3d-4e5f-9a6b-1c2d3e4f5a6b";
+    const Case = struct { result: ?StartResult, departure: []const u8 };
+    for ([_]Case{
+        .{ .result = null, .departure = "rui: The new Session was not started (cancelled); start it again from the overview.\n" },
+        .{ .result = .{ .failed = "Cancelled" }, .departure = "rui: The new Session was not started (Cancelled); start it again from the overview.\n" },
+        .{ .result = .{ .started = .{ .reference = "n3w5es".*, .handle = handle } }, .departure = "rui: Session start accepted: n3w5es.\nMessage request: " ++ handle ++ " (rui request inspect " ++ handle ++ ")\n" },
+        .{ .result = .{ .unconfirmed = handle }, .departure = "rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n" },
+    }) |case| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        try typeText(&state, "Fix the flaky resize test");
+        _ = try press(&state, .enter);
+        try std.testing.expect(state.starting);
+        try expectEffects(&.{}, try step(&state, .{ .depart = case.result }));
+        var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer departure.deinit();
+        try writeDeparture(&state, &departure.writer);
+        try std.testing.expectEqualStrings(case.departure, departure.written());
+    }
+    // With no start in flight, leaving says nothing of one.
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{}, try step(&state, .{ .depart = null }));
+    var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer departure.deinit();
+    try writeDeparture(&state, &departure.writer);
+    try std.testing.expectEqualStrings("", departure.written());
 }
 
 test "the cursor sits at the composer's caret and hides while a start is locked" {

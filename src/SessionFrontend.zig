@@ -897,13 +897,20 @@ fn navigation(self: *Self, event: Editor.Event) !void {
         .latest, .close_view => {
             // Leaving also abandons a Message page not yet shown.
             self.dropMessageRequest();
-            if (event == .close_view and self.returnable()) {
-                if (self.input.composition().bytes.len == 0) {
+            if (event == .close_view and self.settledView()) {
+                if (self.submission.view()) |submission| {
+                    self.notice = switch (submission.state) {
+                        .rejected => "Esc returns to the overview once /discard clears the rejected original.",
+                        .submitting => "Esc returns to the overview once the original is confirmed.",
+                        .not_started, .unconfirmed => "Esc returns to the overview once Ctrl-R retries the original.",
+                    };
+                } else if (self.input.composition().bytes.len == 0) {
                     self.leaving = .returned;
                     return;
+                } else {
+                    // No draft outlives the frontend, so leaving would lose it.
+                    self.notice = "Esc returns to the overview once the draft is empty.";
                 }
-                // No draft outlives the frontend, so leaving would lose it.
-                self.notice = "Esc returns to the overview once the draft is empty.";
             }
             if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
         },
@@ -919,12 +926,12 @@ fn navigation(self: *Self, event: Editor.Event) !void {
     self.dirty = true;
 }
 
-/// The latest view with nothing to dismiss or lose by leaving: no Action,
-/// sub-view, command or unresolved submission.
-fn returnable(self: *const Self) bool {
+/// The latest view with nothing to dismiss: no Action, sub-view or command.
+/// Esc leaves it once no submission or draft would be lost.
+fn settledView(self: *const Self) bool {
     const screen = self.terminal.screen;
     return screen.view == .live and screen.action_view == null and self.live.work.first_action == null and
-        self.reading.prepared_action == null and !self.commandActive() and self.submission.view() == null;
+        self.reading.prepared_action == null and !self.commandActive();
 }
 
 const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
@@ -1837,6 +1844,22 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
     self.input.clear();
+    // An unresolved submission keeps the conversation open and says what
+    // resolves it.
+    self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
+    defer self.submission.intent = null;
+    for ([_]struct { Submission.State, []const u8 }{
+        .{ .rejected, "Esc returns to the overview once /discard clears the rejected original." },
+        .{ .unconfirmed, "Esc returns to the overview once Ctrl-R retries the original." },
+    }) |case| {
+        self.submission.state = case[0];
+        self.notice = null;
+        try Keys.send(self, "\x07");
+        try std.testing.expect(self.leaving == null);
+        try std.testing.expectEqualStrings(case[1], self.notice.?);
+    }
+    self.submission.intent = null;
+    self.submission.state = .not_started;
     // A running command keeps the conversation open.
     self.inspection.command_running = true;
     try Keys.send(self, "\x07");
