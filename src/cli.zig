@@ -1098,6 +1098,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
     }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
     const saved = captured.identity().*;
+    const replay = captured.replay;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
@@ -1108,7 +1109,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?protocol_
         };
     };
     if (!reply.isAccepted()) {
-        try writeMutationReply(init.io, reply, .human);
+        try writeMutationReply(init.io, reply, .human, replay);
         return error.SessionConfigurationRejected;
     }
     var configured = saved;
@@ -1363,16 +1364,17 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    const human = target == .generated;
     var sender = requester;
     sender.drop_reply = parsed.get("test-drop-reply");
     var captured = try takeCapture(&step, client.captureConfigure(io, input, target));
     const saved = captured.identity().*;
+    const replay = captured.replay;
+    const human = replay == .generated;
     var admitted: ?bool = null;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
-        if (human and !interactive) try announceCapture(io, saved.key.slice());
+        if (!interactive) try announceCapture(io, &captured);
         break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
@@ -1380,7 +1382,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .{ .json = .of(target) }) catch |err| {
+    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
@@ -1439,12 +1441,12 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(&step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, target, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, &step);
     defer captured.close(io);
-    if (target == .generated) try announceCapture(io, captured.identity().key.slice());
+    try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
-    if (!reply.isAccepted()) return writeMutationReply(io, reply, .{ .json = .of(target) });
+    if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
@@ -1809,7 +1811,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1821,22 +1823,23 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, target: client.CaptureTarget, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, reported: ?*?client.Step) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
+    const replay = captured.replay;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
-        if (target == .generated) try announceCapture(io, captured.identity().key.slice());
+        try announceCapture(io, captured);
         break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
     };
-    try writeMutationReply(io, reply, .{ .json = .of(target) });
+    try writeMutationReply(io, reply, .json, replay);
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -1853,7 +1856,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, target, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2063,7 +2066,10 @@ fn requestDirectory(init: std.process.Init, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/requests", .{home});
 }
 
-fn announceCapture(io: std.Io, handle: []const u8) !void {
+/// Announces a generated capture's handle; an explicit record needs none.
+fn announceCapture(io: std.Io, captured: *const client.CapturedRecord) !void {
+    if (captured.replay != .generated) return;
+    const handle = captured.identity().key.slice();
     try testGate(io, "RUI_TEST_CAPTURE_GATE");
     // Checked announcement precedes original transmission. Failure retains the
     // durable capture, but cannot submit unannounced work. stdout stays one
@@ -2090,27 +2096,13 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-/// How a caller replays a saved answer: by its generated handle, or by the
-/// explicit record it captured to.
-const Replay = union(enum) {
-    generated,
-    explicit: []const u8,
-
-    fn of(target: client.CaptureTarget) Replay {
-        return switch (target) {
-            .generated => .generated,
-            .explicit => |explicit| .{ .explicit = explicit.record },
-        };
-    }
-};
-
-const MutationPresentation = union(enum) {
-    json: Replay,
+const MutationPresentation = enum {
+    json,
     human,
     interactive_configuration,
 };
 
-fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
+fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation, replay: client.Replay) !void {
     if (reply.answer) |answer| {
         if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
             TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
@@ -2119,7 +2111,7 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
         var output: JsonOutput = undefined;
         presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| {
             const cause = output.failure(err);
-            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, presentation.json);
+            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, replay);
             return cause;
         };
         return output.finish();
@@ -2131,14 +2123,14 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
 
 /// Names the replay the caller actually holds: a generated handle, or the
 /// explicit record, since repeating its capture refuses the existing --record.
-fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: Replay) void {
+fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: client.Replay) void {
     var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
     writeNotAccepted(&notice, context, replay) catch return;
     TerminalText.diagnostic("{s}", .{notice.buffered()});
 }
 
-fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: Replay) !void {
+fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay) !void {
     try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
     switch (replay) {
         // validRequestHandle admits only shell-inert handle bytes.
@@ -2300,7 +2292,7 @@ test "mutation presentation complete modes preserve escaped original context" {
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
-    const modes = [_]MutationPresentation{ .{ .json = .generated }, .human, .interactive_configuration };
+    const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
         human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
@@ -2349,7 +2341,7 @@ test "mutation presentation wrong binding keeps caller context even interactivel
         try std.testing.expectEqualStrings("Store: /original-store\nSession: original\nkey: original-key\ninvocation: RequestBindingMismatch (HTTP 200); outcome unconfirmed\n", writer.buffered());
     }
     var writer = std.Io.Writer.fixed(&buffer);
-    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .{ .json = .generated }));
+    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .json));
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
@@ -2508,15 +2500,13 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
     };
     var captured = try client.openCaptured(init.io, saved);
+    const replay = captured.replay;
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
         break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
     };
-    try writeMutationReply(init.io, reply, .{ .json = switch (saved) {
-        .generated => .generated,
-        .explicit => |explicit| .{ .explicit = explicit.record },
-    } });
+    try writeMutationReply(init.io, reply, .json, replay);
 }
 
 /// A command kind in its `rui request recover --kind` spelling.
