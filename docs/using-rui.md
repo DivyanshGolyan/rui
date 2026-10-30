@@ -43,6 +43,17 @@ Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native 
 
 Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of every Session in this Store; each row shows its project. Type in its composer to start a new Session; Enter on a row opens one, and Esc returns. Ctrl-X stops the selected Session, and Ctrl-D leaves. `rui session resume` still opens one Session directly, inside the overview.
 
+| Key in the overview | What it does |
+| --- | --- |
+| Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. |
+| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. On a blank composer, opens the selected Session. |
+| Esc | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. In a conversation's latest view, returns to the overview. |
+| Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
+| Ctrl-D | Leaves, when the composer is empty. |
+| Ctrl-C | Leaves. |
+
+A stop works like `rui session stop`: if its reply is lost, the overview names the `rui request recover` command, and names it again after you leave. A stop still waiting to be sent when you leave is reported as not sent. The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered. Sessions the stopped Session messaged keep running.
+
 ```sh
 rui session resume SESSION_REF     # an exact Session
 rui session list                   # this project's Sessions, as JSON

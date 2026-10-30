@@ -1125,7 +1125,8 @@ def overview_cases():
     """Bare `rui` opens the overview of every Session. Enter opens one and
     Esc returns; the composer starts one with /configure's settings;
     `session resume` opens inside the overview; a start the process never
-    sent recovers from its saved request."""
+    sent recovers from its saved request; Ctrl-X twice stops a working
+    Session."""
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-overview."))
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -1133,9 +1134,11 @@ def overview_cases():
     workspace = state / "workspace"
     workspace.mkdir()
     codex_fixture.credentials(home / ".config/rui/codex.json")
+    held_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([], {
         "Fix the flaky test": fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "Flaky test fixed.")[0],
         "captured then killed": fixture.sse_answer("killed-answer", "killed-reason", "killed-message", "Recovered start answered.")[0],
+        "Hold for a stop": (fixture.sse_answer("held-answer", "held-reason", "held-message", "Never shown.")[0], held_release),
     })
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -1211,9 +1214,30 @@ def overview_cases():
         allocated = recovered["answer"]["session"]
         assert recovered["context"]["session"] == allocated and allocated != started, recovered
         fixture.wait_for(lambda: len(endpoint.requests) == 2, "recovered start's Turn")
+        # Ctrl-X asks, a second Ctrl-X stops the selected working Session, and
+        # its row turns stopped without leaving the overview.
+        before = set(records.glob("*.json"))
+        forget_terminal(master)
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        overview_frame(master, lambda frame: "lane four" in frame)
+        os.write(master, b"Hold for a stop\n")
+        fixture.wait_for(lambda: len(endpoint.requests) == 3, "held Turn sent")
+        record, = set(records.glob("*.json")) - before
+        held = fixture.observe(store, record.stem)["target"]
+        overview_frame(master, lambda frame: re.search(r"[●*] Hold for a stop", frame), keys=b"\x1b")
+        overview_frame(master, lambda frame: f"ctrl+x again to stop {held}" in frame, keys=b"\x18")
+        overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
+        work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
+        assert work["kind"] == "stopped", work
+        held_release.set()
+        leave_overview(master)
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
         completed = True
-        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview and recovery of a start never sent passed", flush=True)
+        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop passed", flush=True)
     finally:
+        held_release.set()
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
                     lambda: fixture.stop_host(host) if host is not None else None,
