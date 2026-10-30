@@ -975,11 +975,11 @@ fn separateInput(pieces: *Pieces, input_comma: *bool) void {
     input_comma.* = true;
 }
 
-/// The Codex Responses encoding of one item. Its pieces borrow from `item`
-/// and `settings`. `input_comma` is the only syntax state carried between
-/// items.
-fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool) Pieces {
-    var pieces: Pieces = .{};
+/// Fill `pieces` with the Codex Responses encoding of one item. Its pieces
+/// borrow from `item` and `settings`. `input_comma` is the only syntax state
+/// carried between items.
+fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, pieces: *Pieces) void {
+    pieces.* = .{};
     switch (item.*) {
         .settings => {
             pieces.add(.{ .syntax = "{\"model\":\"" });
@@ -1003,7 +1003,7 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
         // A memo is the span's first bytes and records its own comma state.
         .history_memo => pieces.add(.history_memo),
         .message => |*entry| {
-            separateInput(&pieces, input_comma);
+            separateInput(pieces, input_comma);
             pieces.add(.{ .syntax = if (entry.kind == .user)
                 "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
             else
@@ -1021,11 +1021,11 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .syntax = "\"}]}" });
         },
         .replayed_output => |replayed| {
-            separateInput(&pieces, input_comma);
+            separateInput(pieces, input_comma);
             pieces.add(.{ .replay = replayed });
         },
         .tool_result => |result| {
-            separateInput(&pieces, input_comma);
+            separateInput(pieces, input_comma);
             pieces.add(.{ .syntax = "{\"type\":\"function_call_output\",\"call_id\":\"" });
             pieces.add(.{ .escaped_content = result.call_id });
             pieces.add(.{ .syntax = "\",\"output\":\"" });
@@ -1033,7 +1033,7 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .syntax = "\"}" });
         },
         .compaction_trigger => {
-            separateInput(&pieces, input_comma);
+            separateInput(pieces, input_comma);
             pieces.add(.{ .syntax = "{\"type\":\"compaction_trigger\"}" });
         },
         .tools => {
@@ -1047,15 +1047,18 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .syntax = "}}}" });
         } else pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\"}}" }),
     }
-    return pieces;
 }
 
 pub const Preparation = struct {
-    view: store.HistoricalView,
+    /// Opened in place by `Store.openHistoricalView` before `init`; it never
+    /// moves.
+    view: store.HistoricalView = undefined,
     route: Route,
-    settings: ?store.HistoricalSettings = null,
-    writer: RequestWriter,
-    readonly: std.Io.File,
+    /// Filled in place at the settings stage; valid once `stage` is past
+    /// `.settings`.
+    settings: store.HistoricalSettings = undefined,
+    writer: RequestWriter = undefined,
+    readonly: std.Io.File = undefined,
     faults: PreparationFaults,
     /// Where the next item comes from.
     stage: Stage = .settings,
@@ -1080,6 +1083,8 @@ pub const Preparation = struct {
     span: ?MemoSpan = null,
     /// The sealed span being kept as the Session's memo.
     memo_write: ?history_memo.Write = null,
+    /// The window each memo chunk is copied through.
+    memo_window: [history_memo.chunk_bytes]u8 = undefined,
 
     const MemoSpan = struct {
         /// Request offset of the span's first byte, flushed before a copy.
@@ -1151,10 +1156,14 @@ pub const Preparation = struct {
         }
     };
 
+    /// Takes custody of `self.view`, which the caller opened in place with
+    /// `Store.openHistoricalView`, and closes it on error. The state is reset
+    /// field by field: a whole-struct literal would leave the open view
+    /// undefined, and the settings and windows need no bytes before their
+    /// stages write them.
     pub fn init(
         self: *Preparation,
         io: std.Io,
-        view: store.HistoricalView,
         scratch_path: []const u8,
         budget: ScratchBudget,
         route: Route,
@@ -1163,21 +1172,22 @@ pub const Preparation = struct {
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
-        // The view moves straight into place: a local copy would add the
-        // whole view to the caller's frame, all of it resident once probed.
-        // It moves only while no item is being read, since the grammar
-        // borrows its own nesting buffer.
-        std.debug.assert(view.itemCheckIdle());
-        self.* = .{
-            .view = view,
-            .route = route,
-            .writer = undefined,
-            .readonly = undefined,
-            .faults = faults,
-            .memos = memos,
-            .active = false,
-        };
         errdefer self.view.close();
+        std.debug.assert(self.view.itemCheckIdle());
+        self.route = route;
+        self.faults = faults;
+        self.stage = .settings;
+        self.item = .settings;
+        self.pieces = .{};
+        self.emission = .none;
+        self.input_comma = false;
+        self.continuation_unavailable = false;
+        self.history_position = 0;
+        self.active = false;
+        self.last_advance = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 };
+        self.memos = memos;
+        self.span = null;
+        self.memo_write = null;
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -1240,7 +1250,7 @@ pub const Preparation = struct {
             if (self.stage == .history_store) {
                 const write = &(self.memo_write orelse return self.finish());
                 const memos = self.memos.?;
-                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left) catch {
+                bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left, &self.memo_window) catch {
                     self.abandonMemoWrite();
                     return self.finish();
                 };
@@ -1253,9 +1263,9 @@ pub const Preparation = struct {
                 .pending => {},
                 .item => |item| {
                     self.item = item;
-                    self.pieces = switch (self.settings.?.provider) {
-                        .codex => codexPieces(&self.item, &self.settings.?, &self.input_comma),
-                    };
+                    switch (self.settings.provider) {
+                        .codex => codexPieces(&self.item, &self.settings, &self.input_comma, &self.pieces),
+                    }
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1269,8 +1279,8 @@ pub const Preparation = struct {
     fn nextItem(self: *Preparation, bytes_left: *usize, items_left: *usize) !Next {
         switch (self.stage) {
             .settings => {
-                self.settings = try self.view.settings();
-                if (self.route == .managed and self.settings.?.output_schema != null)
+                try self.view.settings(&self.settings);
+                if (self.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
                 self.stage = .history_validation;
             },
@@ -1292,7 +1302,7 @@ pub const Preparation = struct {
                 self.stage = .history;
                 const memos = self.memos orelse return .pending;
                 self.span = .{ .start = self.writer.offset };
-                const memo = memos.held(self.settings.?.session.slice()) orelse return .pending;
+                const memo = memos.held(self.settings.session.slice()) orelse return .pending;
                 const key = try self.memoKey();
                 if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
                 try self.writer.flush();
@@ -1320,7 +1330,7 @@ pub const Preparation = struct {
                     .tool_results => self.stage = if (covered) .covered_tool_results else .tool_results,
                     .provider_output => {
                         if (covered) return .pending;
-                        validateRequestedBinding(entry.requested_model.?.slice(), self.settings.?.model.slice()) catch {
+                        validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
                             self.continuation_unavailable = true;
                         };
                         self.replay_entry = entry;
@@ -1357,7 +1367,7 @@ pub const Preparation = struct {
             },
             .compaction_trigger => {
                 self.stage = .tools;
-                if (self.settings.?.operation == .compaction) return .{ .item = .compaction_trigger };
+                if (self.settings.operation == .compaction) return .{ .item = .compaction_trigger };
             },
             .tools => {
                 self.stage = .text_format;
@@ -1375,8 +1385,8 @@ pub const Preparation = struct {
 
     fn memoKey(self: *Preparation) !history_memo.Key {
         return .{
-            .session = self.settings.?.session,
-            .model = self.settings.?.model,
+            .session = self.settings.session,
+            .model = self.settings.model,
             .anchor = (try self.view.coverage()).anchor,
         };
     }
@@ -1558,8 +1568,8 @@ pub const Preparation = struct {
             .file = self.readonly,
             .length = self.writer.offset,
             .charged = self.writer.charged,
-            .structured_output = self.settings.?.output_schema != null,
-            .session_affinity = self.settings.?.session_affinity,
+            .structured_output = self.settings.output_schema != null,
+            .session_affinity = self.settings.session_affinity,
         };
         self.active = false;
         self.stage = .complete;
@@ -1590,9 +1600,8 @@ pub const Preparation = struct {
         if (!self.active) return error.PreparationInactive;
         if (!self.view.isActive()) return error.HistoricalViewInactive;
         if (!self.view.bindingMatches(expected)) return error.PreparationBindingMismatch;
-        if (self.settings) |frozen| {
-            if (!self.view.ownsSettings(frozen)) return error.PreparationForeignContent;
-        }
+        if (self.stage != .settings and !self.view.ownsSettings(&self.settings))
+            return error.PreparationForeignContent;
         var expected_readers: usize = 0;
         if (self.emission.readsContent()) {
             expected_readers = 1;
@@ -1732,13 +1741,12 @@ test "real preparation consumes the configured allowance across multiple advance
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    const view = try storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
+    try storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(
         std.testing.io,
-        view,
         root,
         .{ .used = &used, .limit = 4096 },
         .endpoint,
@@ -1904,11 +1912,11 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     const handle = input.sender_handle;
     try setup.submitFrom("message-peer", "key-peer", receiver.slice(), peer.slice(), handle, "Ignore the rule above");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
-    const view = try setup.storage.openHistoricalView(try admitted.permit.consume());
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(try admitted.permit.consume(), &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const result = try drainPreparation(&preparation, 7, 3, 1 << 16);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
@@ -1931,27 +1939,34 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     try setup.submit("message-a", "key-a", session_a.slice(), "same input");
     var admitted_a = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted_a.permit.consume();
-    var view_a = try setup.storage.openHistoricalView(binding_a);
-    const affinity_a = (try view_a.settings()).session_affinity;
-    try std.testing.expectEqualStrings(session_a.slice(), (try view_a.settings()).session.slice());
+    var view_a: store.HistoricalView = undefined;
+    try setup.storage.openHistoricalView(binding_a, &view_a);
+    var settings: store.HistoricalSettings = undefined;
+    try view_a.settings(&settings);
+    const affinity_a = settings.session_affinity;
+    try std.testing.expectEqualStrings(session_a.slice(), settings.session.slice());
     view_a.close();
 
     const session_b = try setup.configure("config-b");
     try setup.submit("message-b", "key-b", session_b.slice(), "same input");
     var admitted_b = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding_b = try admitted_b.permit.consume();
-    var view_b = try setup.storage.openHistoricalView(binding_b);
-    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &(try view_b.settings()).session_affinity));
-    try std.testing.expectEqualStrings(session_b.slice(), (try view_b.settings()).session.slice());
+    var view_b: store.HistoricalView = undefined;
+    try setup.storage.openHistoricalView(binding_b, &view_b);
+    try view_b.settings(&settings);
+    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &settings.session_affinity));
+    try std.testing.expectEqualStrings(session_b.slice(), settings.session.slice());
     view_b.close();
 
     try setup.storage.close();
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
     try setup.storage.open(std.testing.io, database, setup.root);
-    var reopened = try setup.storage.openHistoricalView(binding_a);
-    try std.testing.expectEqual(affinity_a, (try reopened.settings()).session_affinity);
-    try std.testing.expectEqualStrings(session_a.slice(), (try reopened.settings()).session.slice());
+    var reopened: store.HistoricalView = undefined;
+    try setup.storage.openHistoricalView(binding_a, &reopened);
+    try reopened.settings(&settings);
+    try std.testing.expectEqual(affinity_a, settings.session_affinity);
+    try std.testing.expectEqualStrings(session_a.slice(), settings.session.slice());
     reopened.close();
 
     var other: PreparationTestSetup = undefined;
@@ -1960,9 +1975,11 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     const other_session = try other.configure("config-a");
     try other.submit("message-a", "key-a", other_session.slice(), "same input");
     var admitted_other = (try other.storage.admitNextModelAttempt(.{})).?;
-    var other_view = try other.storage.openHistoricalView(try admitted_other.permit.consume());
-    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &(try other_view.settings()).session_affinity));
-    try std.testing.expectEqualStrings(other_session.slice(), (try other_view.settings()).session.slice());
+    var other_view: store.HistoricalView = undefined;
+    try other.storage.openHistoricalView(try admitted_other.permit.consume(), &other_view);
+    try other_view.settings(&settings);
+    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &settings.session_affinity));
+    try std.testing.expectEqualStrings(other_session.slice(), settings.session.slice());
     other_view.close();
 }
 
@@ -2377,7 +2394,8 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var retained_provider: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained_provider);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained_provider);
     defer preparation.cancel();
     if (Overlap.failure) |err| return err;
     if (!provider_first) try Overlap.admit(body[split..]);
@@ -2435,11 +2453,11 @@ test "request preparation minimal golden is exact across schedules" {
         try setup.submit(file, message_key, golden_session.slice(), "hi");
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try admitted.permit.consume();
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         try std.testing.expect(retained == null);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
         defer std.testing.allocator.free(result.bytes);
@@ -2499,7 +2517,8 @@ test "request preparation retains the allocated ID across reopen and replacement
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         const result = try drainPreparation(&preparation, 7, 3, 16384);
         defer std.testing.allocator.free(result.bytes);
@@ -2556,11 +2575,11 @@ test "request preparation escapes instructions and user content" {
 
     var admission = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admission.permit.consume();
-    const view = try setup.storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const first = try drainPreparation(&preparation, 2, 2, 4096);
     defer std.testing.allocator.free(first.bytes);
     try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
@@ -2611,11 +2630,11 @@ test "request preparation escapes instructions and user content" {
     try setup_two.submit("prep-escape2-file", "prep-escape2-message", session_two.slice(), user_text);
     var admitted_two = (try setup_two.storage.admitNextModelAttempt(.{})).?;
     const binding_two = try admitted_two.permit.consume();
-    const view_two = try setup_two.storage.openHistoricalView(binding_two);
     var used_two: std.atomic.Value(u64) = .init(0);
     var retained_two: ?named_scratch.Owner = null;
     var preparation_two: Preparation = undefined;
-    try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained_two);
+    try setup_two.storage.openHistoricalView(binding_two, &preparation_two.view);
+    try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained_two);
     const second = try drainPreparation(&preparation_two, 1, 1, 8192);
     defer std.testing.allocator.free(second.bytes);
     // Only each Operation's own address differs between the two Stores.
@@ -2632,11 +2651,11 @@ test "request preparation frozen selection excludes later messages" {
     try setup.submit("prep-frozen-first-file", "prep-frozen-first", session.slice(), "first");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    const view = try setup.storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Advance partially, then submit a later message while the admitted
     // historical view stays frozen.
     var partial: usize = 0;
@@ -2698,7 +2717,8 @@ test "request preparation emits catalog or explicit effort through sealed custod
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
             var preparation: Preparation = undefined;
-            try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+            try setup.storage.openHistoricalView(binding, &preparation.view);
+            try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (preparation.active) preparation.cancel();
             var sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
@@ -2761,11 +2781,11 @@ test "request preparation freezes settings at admission" {
         update.configuration.tools.count = 0;
         try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
     }
-    const view = try setup.storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
@@ -2787,12 +2807,12 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
 
-    const view = try setup.storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(41);
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Guard the active preparation separately from any sealed request: a
     // sealed preparation is inactive, so this guard never cancels a
     // transferred owner.
@@ -2806,10 +2826,10 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     // cancellation test uses, so the content reader is necessarily open.
     var probe: Preparation = undefined;
     {
-        const probe_view = try setup.storage.openHistoricalView(binding);
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
-        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+        try setup.storage.openHistoricalView(binding, &probe.view);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
         defer if (probe.active) probe.cancel();
         const probe_result = try drainPreparation(&probe, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
@@ -2835,7 +2855,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     // cancellation on both success and error paths.
     {
         var extra: store.HistoricalReader = undefined;
-        try preparation.view.openContent(preparation.settings.?.baseline_instructions, &extra);
+        try preparation.view.openContent(preparation.settings.baseline_instructions, &extra);
         defer extra.close();
         try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
     }
@@ -2865,19 +2885,19 @@ test "request preparation cancellation and failure release ownership" {
     // closure before view closure is enforced by the close-path asserts;
     // cancellation must return usage to the starting baseline.
     {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(7);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
-            const probe_view = try setup.storage.openHistoricalView(binding);
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
-            try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+            try setup.storage.openHistoricalView(binding, &probe.view);
+            try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
             defer if (probe.active) probe.cancel();
             const probe_result = try drainPreparation(&probe, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
@@ -2897,22 +2917,22 @@ test "request preparation cancellation and failure release ownership" {
 
     // First-step initialization failure owns nothing.
     {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .first_step = true }, &retained));
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .first_step = true }, &retained));
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 
     // Write and seal faults surface through advance and release on cancel.
     for ([_]PreparationFaults{ .{ .write = true }, .{ .seal = true } }) |faults| {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, faults, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, faults, &retained);
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
@@ -2940,12 +2960,12 @@ test "request preparation cancellation and failure release ownership" {
     // confirmed; clearing the test-owned gate completes the same
     // production reclamation path without leaking the descriptors.
     {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var gate: std.atomic.Value(bool) = .init(true);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var reclaimed = false;
@@ -2978,14 +2998,14 @@ test "request preparation completed request is fenced by later stop before hando
     try setup.submit("prep-fence-file", "prep-fence-message", session.slice(), "work");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    const view = try setup.storage.openHistoricalView(binding);
     // Nonzero unrelated baseline stays stable; the sealed request owns its
     // reservation until its recipient releases it.
     var used: std.atomic.Value(u64) = .init(41);
     const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
     // Guard the active preparation before any fallible observation: an
     // error before the request reaches the caller must still cancel it.
     // After sealing the preparation is inactive and this guard is inert.
@@ -3045,11 +3065,11 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     // the guarded drains below.
     const probe_allowance = [_]usize{ 16, 2 };
     const seal_steps = blk: {
-        const probe_view = try setup.storage.openHistoricalView(binding);
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         var probe: Preparation = undefined;
-        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+        try setup.storage.openHistoricalView(binding, &probe.view);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
         defer if (probe.active) probe.cancel();
         var count: usize = 0;
         while (count < 4096) {
@@ -3077,12 +3097,12 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     // baseline is restored. The same tripwire error fires here and below;
     // budget and preparation state are the load-bearing assertions.
     {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(13);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         // Validation may precede output; establish the charged checkpoint
         // independently of the first advance's incidental phase count.
@@ -3101,12 +3121,12 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     // it before the error escapes. The preparation is already inactive,
     // so the caller's guard stays inert and no second owner exists.
     {
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(13);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], seal_steps - 1));
         try std.testing.expect(!preparation.active);
@@ -3160,11 +3180,11 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         try settleComposedForTesting(&setup, first, "saved-metadata", case.kind, case.item, "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             var unexpected = request;
@@ -3211,11 +3231,11 @@ test "request preparation resumes large private replay validation before emissio
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         var validation_turns: usize = 0;
         var turns: usize = 0;
@@ -3269,11 +3289,11 @@ test "request preparation composes replay tool results and schema" {
         defer setup.close();
         const history = try establishComposedHistory(&setup);
         const binding = history.binding;
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
         const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
@@ -3303,14 +3323,16 @@ test "request preparation authenticates the historical requested model binding" 
     var retained: ?named_scratch.Owner = null;
     {
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.active) prep.cancel();
         var request = try drainLivePreparation(&prep, 1, 1, 32768);
         defer request.deinit(std.testing.io, prep.writer.budget);
     }
     try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
     var prep: Preparation = undefined;
-    try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &prep.view);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (prep.active) prep.cancel();
     if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
         var unexpected = prepared;
@@ -3358,7 +3380,8 @@ test "request preparation replays reasoning continuation without its private rea
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
@@ -3386,7 +3409,8 @@ test "request preparation cancellation yields inside canonical proposal authenti
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (preparation.active) preparation.cancel();
     var pending_turns: usize = 0;
     for (0..4096) |_| {
@@ -3426,7 +3450,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
         defer if (prep.active) prep.cancel();
         const request = try drainPreparation(&prep, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
@@ -3477,7 +3502,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
-    try prep.init(std.testing.io, try setup.storage.openHistoricalView(next_binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+    try setup.storage.openHistoricalView(next_binding, &prep.view);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
     defer if (prep.active) prep.cancel();
     const request = try drainPreparation(&prep, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
@@ -3531,14 +3557,16 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var retained: ?named_scratch.Owner = null;
         {
             var prep: Preparation = undefined;
-            try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+            try setup.storage.openHistoricalView(binding, &prep.view);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (prep.active) prep.cancel();
             var request = try drainLivePreparation(&prep, 1, 1, 32768);
             defer request.deinit(std.testing.io, prep.writer.budget);
         }
         try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
         var prep: Preparation = undefined;
-        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.active) prep.cancel();
         if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
             var unexpected = prepared;
@@ -3570,12 +3598,12 @@ test "request preparation cancels inside schema and replay emissions" {
             std.mem.indexOf(u8, expected, "{\"type\":\"object\"}").? + 2
         else
             std.mem.indexOf(u8, expected, composed_replayed).? + composed_replayed.len / 2;
-        const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
         const baseline = used.load(.acquire);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, target, 16384);
         // Direct owner prerequisite for each emission family: the intended
@@ -3598,7 +3626,8 @@ fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, faults, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, faults, &retained);
     defer if (preparation.active) preparation.cancel();
     // A rewound copy shrinks the request, so this drain does not require
     // monotonic growth as drainPreparation does.
@@ -3876,7 +3905,8 @@ test "a cold history memo build yields under the preparation allowance" {
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
         // Advances after the request reached its final length copy the
         // span into the memo file, each within the byte allowance.
@@ -3930,7 +3960,8 @@ fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []cons
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, .{}, &retained);
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, .{}, &retained);
     defer if (preparation.active) preparation.cancel();
     var final_advances: usize = 0;
     var steps: usize = 0;
