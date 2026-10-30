@@ -1012,8 +1012,8 @@ pub const SessionListCursor = struct {
 
 /// One `session list` traversal: which request comes next, and what the
 /// pages read so far answer together relative to the traversal's `since`.
-/// A changed traversal that turns `full` restarts as that full traversal;
-/// rows it already gave stay valid and are replaced by reference.
+/// A changed traversal that turns `full` restarts as that full traversal,
+/// which supersedes the rows it already gave.
 pub const SessionTraversal = struct {
     cursor: SessionListCursor,
     delta: protocol.ListDelta = .full,
@@ -1026,10 +1026,16 @@ pub const SessionTraversal = struct {
         return .{ .cursor = .{ .since = since } };
     }
 
+    /// Whether `page`, which the current cursor returned, starts the
+    /// traversal over, so the rows of earlier pages no longer belong to it.
+    pub fn restarts(self: *const SessionTraversal, page: *const SessionListPage) bool {
+        return self.since != null and self.delta != .full and page.delta == .full;
+    }
+
     /// Takes the page the current cursor returned. Returns whether another
     /// page follows; `cursor` is then its request.
     pub fn advance(self: *SessionTraversal, page: *const SessionListPage) bool {
-        if (self.since == null or (self.delta != .full and page.delta == .full)) {
+        if (self.since == null or self.restarts(page)) {
             self.delta = page.delta;
             self.since = page.since;
         }
@@ -2687,6 +2693,7 @@ test "a traversal keeps its first page's token, and a changed one that turns ful
     var full = SessionTraversal.init(null);
     try std.testing.expect(full.advance(&.{ .delta = .full, .since = first, .next = .{ .after = 8, .ceiling = 20 } }));
     try std.testing.expectEqualDeep(SessionListCursor{ .after = 8, .ceiling = 20 }, full.cursor);
+    try std.testing.expect(!full.restarts(&.{ .delta = .full, .since = later }));
     try std.testing.expect(!full.advance(&.{ .delta = .full, .since = later }));
     try std.testing.expectEqual(protocol.ListDelta.full, full.delta);
     try std.testing.expectEqualDeep(first, full.since.?);
@@ -2694,10 +2701,13 @@ test "a traversal keeps its first page's token, and a changed one that turns ful
     var traversal = SessionTraversal.init(first);
     try std.testing.expectEqualDeep(SessionListCursor{ .since = first }, traversal.cursor);
     const through = try protocol.SinceToken.parse("abababababababababababababababab.48");
+    try std.testing.expect(!traversal.restarts(&.{ .delta = .changed, .since = through, .next = changed_next }));
     try std.testing.expect(traversal.advance(&.{ .delta = .changed, .since = through, .next = changed_next }));
     try std.testing.expectEqual(protocol.ListDelta.changed, traversal.delta);
     try std.testing.expectEqualDeep(changed_next, traversal.cursor);
-    // ...until the hint stops covering the token: the traversal is then full, with the full traversal's token.
+    // ...until the hint stops covering the token: the traversal is then
+    // full, with the full traversal's token, and drops the rows before.
+    try std.testing.expect(traversal.restarts(&.{ .delta = .full, .since = other }));
     try std.testing.expect(traversal.advance(&.{ .delta = .full, .since = other, .next = .{ .after = 8, .ceiling = 20 } }));
     try std.testing.expectEqual(protocol.ListDelta.full, traversal.delta);
     try std.testing.expectEqualDeep(other, traversal.since.?);

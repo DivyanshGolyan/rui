@@ -2396,7 +2396,10 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Requ
     return identity;
 }
 
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, first: bool, writer: *std.Io.Writer) !struct { count: usize, more: bool } {
+/// Reads the traversal's next page and appends its rows to `rows`; a page
+/// that restarts the traversal replaces the rows there. Returns whether
+/// another page follows.
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, rows: *std.Io.File.Writer) !bool {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
@@ -2413,9 +2416,13 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
             return failure.err();
         },
     };
-    if (!first and page.count != 0) try writer.writeByte(',');
-    try page.writeRowsJson(writer);
-    return .{ .count = page.count, .more = traversal.advance(page) };
+    if (traversal.restarts(page)) {
+        try rows.seekTo(0);
+        try rows.end();
+    }
+    if (page.count != 0 and rows.logicalPos() != 0) rows.interface.writeByte(',') catch return rows.err.?;
+    page.writeRowsJson(&rows.interface) catch return rows.err.?;
+    return traversal.advance(page);
 }
 
 /// A token from an earlier listing's `since`.
@@ -2437,22 +2444,30 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const length = try directory.realPath(init.io, &workspace_buffer);
         break :blk workspace_buffer[0..length];
     };
-    // Bounded pages stream into one final JSON value; no page population is
-    // retained. A failed later page leaves incomplete output and exits nonzero.
-    // A changed listing that turns full goes on as that full listing, so a
-    // reference may appear twice; the later row replaces the earlier.
+    // Bounded pages collect their rows in unlinked scratch, not memory, and
+    // print as one JSON value once the last page is read: a failed page
+    // prints nothing, and a changed listing that turns full drops the rows
+    // it gave before, so each Session appears once.
     var traversal = protocol_reply.SessionTraversal.init(since);
+    const scratch = try renderScratch(init);
+    defer scratch.close(init.io);
+    var rows_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var rows = scratch.writer(init.io, &rows_buffer);
+    while (try sessionPage(init, store, workspace, &traversal, &rows)) {}
+    try rows.end();
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
-    var first = true;
-    while (true) {
-        const page = try sessionPage(init, store, workspace, &traversal, first, writer);
-        if (page.count != 0) first = false;
-        if (!page.more) break;
+    writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[") catch |err| return output.failure(err);
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < rows.pos) {
+        const count = try scratch.readPositionalAll(init.io, window[0..@intCast(@min(rows.pos - offset, window.len))], offset);
+        if (count == 0) return error.TruncatedResult;
+        writer.writeAll(window[0..count]) catch |err| return output.failure(err);
+        offset += count;
     }
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    try writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":null}}\n", .{ traversal.delta, traversal.since.?.format(&token) });
+    writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":null}}\n", .{ traversal.delta, traversal.since.?.format(&token) }) catch |err| return output.failure(err);
     try output.finish();
 }
 
