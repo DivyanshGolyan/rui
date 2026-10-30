@@ -257,9 +257,6 @@ pub const Host = struct {
     provider_ca_file: ?[]const u8 = null,
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
-    /// Response import's output item grammar, in the execution Workspace's
-    /// fresh pages; set by the execution owner.
-    item_check: ?*model_adapter.Output.OutputItemCheck = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
     scratch_budget: ?provider.ScratchBudget = null,
@@ -496,6 +493,9 @@ pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8
     return writer.begin(phase, subject);
 }
 
+/// Each trace below is an inline guard and a noinline body. A trace line
+/// needs a 3.3 KB ResponseBuffer; it lives only in the body's frame, which
+/// runs only while `phase_trace` is set, so no caller's frame holds it.
 pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
     if (!host.hooks.phase_trace) return;
     if (publication.*) |*value| value.record(trace.slice());
@@ -525,8 +525,11 @@ pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication:
     if (!stderr.writeHeld(complete.slice())) host.trace_lost.store(true, .release);
 }
 
-pub fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
+    if (host.hooks.phase_trace) writeSubjectTrace(host, phase, subject_kind, subject);
+}
+
+noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     var publication = beginTestObservation(host, phase, subject);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -540,8 +543,11 @@ pub fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, su
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
+    if (host.hooks.phase_trace) writeRequestTrace(host, phase, request_number, scratch_used_bytes);
+}
+
+noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -567,8 +573,11 @@ pub fn executionFacts(host: *Host) store_module.SessionReportExecution {
     };
 }
 
-pub fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
+    if (host.hooks.phase_trace) writeServiceBoundaryTrace(host, start_ns, end_ns, wait_ns);
+}
+
+noinline fn writeServiceBoundaryTrace(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_boundary", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -579,8 +588,11 @@ pub fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u6
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
+    if (host.hooks.phase_trace) writeLifecycleServiceTrace(host, maximum_gap_ns);
+}
+
+noinline fn writeLifecycleServiceTrace(host: *Host, maximum_gap_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_service_observation", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -591,8 +603,11 @@ pub fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
+    if (host.hooks.phase_trace) writeOperationTrace(host, phase, binding);
+}
+
+noinline fn writeOperationTrace(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -607,13 +622,21 @@ pub fn traceOperation(host: *Host, phase: []const u8, binding: store_module.Atte
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn tracePreparationAdvance(
+pub inline fn tracePreparationAdvance(
     host: *Host,
     phase: []const u8,
     stats: model_adapter.PreparationAdvanceStats,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writePreparationAdvanceTrace(host, phase, stats, binding);
+}
+
+noinline fn writePreparationAdvanceTrace(
+    host: *Host,
+    phase: []const u8,
+    stats: model_adapter.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -626,14 +649,23 @@ pub fn tracePreparationAdvance(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn tracePreparationAdvanceError(
+pub inline fn tracePreparationAdvanceError(
     host: *Host,
     phase: []const u8,
     err: anyerror,
     stats: model_adapter.PreparationAdvanceStats,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writePreparationAdvanceErrorTrace(host, phase, err, stats, binding);
+}
+
+noinline fn writePreparationAdvanceErrorTrace(
+    host: *Host,
+    phase: []const u8,
+    err: anyerror,
+    stats: model_adapter.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -648,8 +680,11 @@ pub fn tracePreparationAdvanceError(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
+    if (host.hooks.phase_trace) writeCompletionQueueTrace(host, queued_after, binding);
+}
+
+noinline fn writeCompletionQueueTrace(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, "provider_completion_removed", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -660,8 +695,11 @@ pub fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_mod
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
-    if (!host.hooks.phase_trace) return;
+pub inline fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
+    if (host.hooks.phase_trace) writeActionTrace(host, phase, binding);
+}
+
+noinline fn writeActionTrace(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -676,13 +714,21 @@ pub fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionA
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceOperationControl(
+pub inline fn traceOperationControl(
     host: *Host,
     phase: []const u8,
     command_key: []const u8,
     binding: store_module.AttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writeOperationControlTrace(host, phase, command_key, binding);
+}
+
+noinline fn writeOperationControlTrace(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.AttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -698,13 +744,21 @@ pub fn traceOperationControl(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceActionControl(
+pub inline fn traceActionControl(
     host: *Host,
     phase: []const u8,
     command_key: []const u8,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writeActionControlTrace(host, phase, command_key, binding);
+}
+
+noinline fn writeActionControlTrace(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.ActionAttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -720,7 +774,7 @@ pub fn traceActionControl(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceActionControlOutcome(
+pub inline fn traceActionControlOutcome(
     host: *Host,
     phase: []const u8,
     command_key: []const u8,
@@ -728,7 +782,17 @@ pub fn traceActionControlOutcome(
     failed: bool,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writeActionControlOutcomeTrace(host, phase, command_key, attempted, failed, binding);
+}
+
+noinline fn writeActionControlOutcomeTrace(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    attempted: bool,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -746,14 +810,23 @@ pub fn traceActionControlOutcome(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceActionDeadline(
+pub inline fn traceActionDeadline(
     host: *Host,
     phase: []const u8,
     deadline_ns: u64,
     failed: bool,
     binding: store_module.ActionAttemptBinding,
 ) void {
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writeActionDeadlineTrace(host, phase, deadline_ns, failed, binding);
+}
+
+noinline fn writeActionDeadlineTrace(
+    host: *Host,
+    phase: []const u8,
+    deadline_ns: u64,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -855,13 +928,16 @@ pub fn testGateActive(host: *Host, path: []const u8) bool {
     return true;
 }
 
-pub fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
+pub inline fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
     const count: u64 = reactor.finishedCount();
     if (host.last_unprocessed_completions) |previous| {
         if (previous == count) return;
     }
     host.last_unprocessed_completions = count;
-    if (!host.hooks.phase_trace) return;
+    if (host.hooks.phase_trace) writeUnprocessedCompletionsTrace(host, count);
+}
+
+noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
     var publication = beginTestObservation(host, "native_completions_unprocessed", null);
     defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
@@ -897,8 +973,11 @@ fn appendOptionalSigned(
 }
 
 /// A managed Transfer's connection reuse and request correlation, for tests.
-pub fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.authentication == null or !host.hooks.phase_trace) return;
+pub inline fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+    if (host.authentication != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
+}
+
+noinline fn writeCodexTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, "codex_transfer", null);
     defer if (publication) |*value| value.finish();
     const observation = transfer.protocolObservation();
@@ -916,8 +995,11 @@ pub fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: st
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
-    if (!host.hooks.phase_trace or !host.hooks.sqlite_diagnostics) return;
+pub inline fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
+    if (host.hooks.phase_trace and host.hooks.sqlite_diagnostics) writeSqliteDiagnosticTrace(host, subject);
+}
+
+noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
     defer if (publication) |*value| value.finish();
     const value = host.store.sqliteDiagnostic();
