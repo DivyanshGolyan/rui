@@ -1328,6 +1328,8 @@ Measure allocator-live, retained allocations and physical footprint separately; 
 
 On macOS, `rui host serve` supplies `MallocMaxMagazines=1` and `MallocSpaceEfficient=1` only when each variable is absent. If either is added, it replaces its process image with the same executable and arguments before opening the Store; libmalloc reads the resulting environment before `main`. This reduces allocator-retained pages after repeated work without changing live-data ownership. Explicit values, including empty values, take precedence. `RUI_HOST_MALLOC_DEFAULTS=0` disables both defaults without removing caller-supplied settings. Linux and non-Host CLI commands add nothing. Path resolution or replacement failure aborts startup before Store effects. These Apple implementation settings are not a public compatibility guarantee: correctness must not depend on their effect, and resource qualification must record the OS and overrides. The measured macOS 15.7.7 tradeoff does not qualify other releases or Linux; retain the opt-out rather than adding an allocator replacement or periodic trimming.
 
+On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it has done work and then waits with every execution slot free, returning the free pages every thread's arena keeps after a burst; steady work never trims, and an idle Host trims once.
+
 | Boundary | Selected value and scope |
 | --- | --- |
 | Active Capacity | Startup default 100 shared model/Bash/Edit executions and cleanup, the product default for every start path; adjustable with `--active-capacity`, no independent hard maximum. A running Host keeps its startup value. |
