@@ -5913,7 +5913,7 @@ def main(selected="all"):
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # The composer's capture fails before any send: the draft stays.
             overview_frame(master, overview_title)
-            refused = overview_frame(master, lambda frame: "Could not start a Session: NotDir" in frame, keys=b"never captured\n")
+            refused = overview_frame(master, lambda frame: "Could not start the Session. (NotDir)" in frame, keys=b"never captured\n")
             assert "never captured" in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
