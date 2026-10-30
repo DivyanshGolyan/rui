@@ -834,7 +834,8 @@ pub fn serve(
     }
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
     var found_schema_version: u32 = store_module.schema_version;
-    var storage = store_module.Store.openWithOptions(
+    var storage: store_module.Store = undefined;
+    storage.openWithOptions(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
@@ -2159,7 +2160,8 @@ test "Conversation stream native delivery decodes once and closes on failed hand
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
-    var storage = try store_module.Store.open(std.testing.io, path, root);
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
     const expected = @as([8189]u8, @splat('x')) ++ @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail";
     var command = try store_module.testingPublicProjection(&storage, &tmp, &.{
@@ -3495,7 +3497,8 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try lease.paths.socket.set(socket_path);
         var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/{s}.sqlite", .{ root, @tagName(phase) });
-        var storage = try store_module.Store.open(std.testing.io, database, root);
+        var storage: store_module.Store = undefined;
+        try storage.open(std.testing.io, database, root);
         defer storage.close() catch unreachable;
         var configure: protocol.ConfigureCommand = .{};
         try configure.key.set("config");

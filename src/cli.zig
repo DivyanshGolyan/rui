@@ -63,18 +63,15 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
+    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] });
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
         TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
         return error.InvalidArguments;
     }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return newSession(init, args[1..]);
-    var help_buffer: [4096]u8 = undefined;
-    var help_writer = std.Io.File.stdout().writerStreaming(init.io, &help_buffer);
+    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] });
     if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
-        try cli_args.resourceHelp(resource, &help_writer.interface);
-        return help_writer.flush();
+        return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
         TerminalText.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
@@ -99,17 +96,8 @@ fn run(init: std.process.Init) !void {
         TerminalText.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
         return err;
     };
-    if (parsed.help) {
-        try definition.help(&help_writer.interface);
-        return help_writer.flush();
-    }
-    if (parsed.missing()) |group| {
-        var missing_buffer: [256]u8 = undefined;
-        var missing_writer: std.Io.Writer = .fixed(&missing_buffer);
-        try definition.writeGroup(&missing_writer, group);
-        TerminalText.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, missing_writer.buffered(), @tagName(resource), definition.name });
-        return error.InvalidArguments;
-    }
+    if (parsed.help) return printHelp(init.io, .{ .command = definition });
+    if (parsed.missing()) |group| return reportMissing(resource, definition, group);
     dispatching = true;
     dispatch(init, command, &parsed, args) catch |err| {
         if (err == error.InvalidArguments) {
@@ -126,6 +114,26 @@ fn run(init: std.process.Init) !void {
     try postCommandHold(init);
 }
 
+// `run` stays under the Host for its whole life, so client-only buffers
+// live in frames of their own: these, `clientCommand` and `newSession`.
+noinline fn printHelp(io: std.Io, topic: union(enum) { resource: cli_args.Resource, command: cli_args.Definition }) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    switch (topic) {
+        .resource => |resource| try cli_args.resourceHelp(resource, &writer.interface),
+        .command => |definition| try definition.help(&writer.interface),
+    }
+    return writer.flush();
+}
+
+noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try definition.writeGroup(&writer, group);
+    TerminalText.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, writer.buffered(), @tagName(resource), definition.name });
+    return error.InvalidArguments;
+}
+
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
     if (parsed.get("session")) |id| {
         if (!protocol.validSessionId(id)) {
@@ -136,6 +144,16 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
     if (command == .session_resume) if (parsed.positional) |id| {
         if (!protocol.validSessionId(id)) return error.InvalidSession;
     };
+    if (command == .host_serve) {
+        try @import("os/process.zig").applyHostMallocDefaults(init, args);
+        return serve(init, parsed);
+    }
+    return clientCommand(init, command, parsed);
+}
+
+/// Never inlined: the Host stays under `dispatch` for its whole life, and
+/// this frame is as large as the largest client command's buffers.
+noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     switch (command) {
         .session_start => try configure(init, .{ .io = init.io }, parsed, null, true),
         .session_configure => try configure(init, .{ .io = init.io }, parsed, null, false),
@@ -156,10 +174,7 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
         .host_start, .host_stop, .host_status => try host(init, command, parsed),
-        .host_serve => {
-            try @import("os/process.zig").applyHostMallocDefaults(init, args);
-            try serve(init, parsed);
-        },
+        .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
         .defaults_inspect, .defaults_configure => try setup(init, parsed, false),
