@@ -15,32 +15,37 @@ pub const capacity = 4096;
 pub const id_bytes = 6;
 pub const Id = [id_bytes]u8;
 
-/// The Sessions one entry point changed. A Message to a peer touches two.
+/// The Sessions one entry point changed, each with its Workspace's key. A
+/// Message to a peer touches two.
 pub const Touched = struct {
     pub const max = 4;
 
-    ids: [max]Id = undefined,
+    entries: [max]Entry = undefined,
     count: usize = 0,
-    /// Too many, or an ID that is not a Session's: every Session may have
-    /// changed.
+    /// Too many, an ID that is not a Session's, or a change that rolled
+    /// back: every Session may have changed.
     everything: bool = false,
 
-    pub fn add(self: *Touched, id: []const u8) void {
-        if (id.len != id_bytes) {
+    /// Whether touching `id` needs a new entry: false when it has one, or
+    /// when it touches everything (a fifth Session, or not a Session ID).
+    pub fn needsEntry(self: *Touched, id: []const u8) bool {
+        if (self.everything or self.contains(id)) return false;
+        if (id.len != id_bytes or self.count == max) {
             self.everything = true;
-            return;
+            return false;
         }
-        if (self.contains(id)) return;
-        if (self.count == max) {
-            self.everything = true;
-            return;
-        }
-        @memcpy(&self.ids[self.count], id);
+        return true;
+    }
+
+    /// Adds the entry `needsEntry` asked for.
+    pub fn add(self: *Touched, entry: Entry) void {
+        std.debug.assert(self.count < max and !self.contains(&entry.session));
+        self.entries[self.count] = entry;
         self.count += 1;
     }
 
     pub fn contains(self: *const Touched, id: []const u8) bool {
-        for (self.ids[0..self.count]) |*touched| if (std.mem.eql(u8, touched, id)) return true;
+        for (self.entries[0..self.count]) |*entry| if (std.mem.eql(u8, &entry.session, id)) return true;
         return false;
     }
 };
@@ -60,8 +65,13 @@ pub const Ring = struct {
     /// A change at or below this generation may have been overwritten.
     forgotten_through: u64 = 0,
 
-    /// Records that one Session changed at `generation`.
-    pub fn record(self: *Ring, generation: u64, entry: Entry) void {
+    /// Records the Sessions one commit changed, under its generation.
+    pub fn record(self: *Ring, generation: u64, touched: *const Touched) void {
+        if (touched.everything) return self.forget(generation);
+        for (touched.entries[0..touched.count]) |entry| self.push(generation, entry);
+    }
+
+    fn push(self: *Ring, generation: u64, entry: Entry) void {
         if (self.len == capacity) {
             self.forget(self.generations[self.next]);
         } else self.len += 1;
@@ -134,14 +144,14 @@ pub const Token = struct {
     }
 };
 
-fn touchedOf(ids: []const []const u8) Touched {
+fn touchedOf(workspace: u64, ids: []const []const u8) Touched {
     var result: Touched = .{};
-    for (ids) |id| result.add(id);
+    for (ids) |id| if (result.needsEntry(id)) result.add(.{ .session = id[0..id_bytes].*, .workspace = workspace });
     return result;
 }
 
-fn recordAll(ring: *Ring, generation: u64, workspace: u64, ids: []const *const Id) void {
-    for (ids) |id| ring.record(generation, .{ .session = id.*, .workspace = workspace });
+fn recordAll(ring: *Ring, generation: u64, workspace: u64, ids: []const []const u8) void {
+    ring.record(generation, &touchedOf(workspace, ids));
 }
 
 test "a ring names each Session changed since a generation once, in ID order" {
@@ -201,15 +211,15 @@ test "an overwritten change stops the ring covering earlier generations" {
 
 test "touching too many Sessions, or a non-Session, touches everything" {
     var many: Touched = .{};
-    for ([_][]const u8{ "000001", "000002", "000003", "000004", "000005" }) |id| many.add(id);
+    for ([_][]const u8{ "000001", "000002", "000003", "000004", "000005" }) |id| if (many.needsEntry(id)) many.add(.{ .session = id[0..id_bytes].*, .workspace = 1 });
     try std.testing.expect(many.everything);
-    try std.testing.expect(touchedOf(&.{"short"}).everything);
+    try std.testing.expect(touchedOf(1, &.{"short"}).everything);
     // The same Session twice is one touch.
-    try std.testing.expectEqual(@as(usize, 1), touchedOf(&.{ "k7m2qx", "k7m2qx" }).count);
-    // Forgetting a generation stops covering the ones before it.
+    try std.testing.expectEqual(@as(usize, 1), touchedOf(1, &.{ "k7m2qx", "k7m2qx" }).count);
+    // Recording everything stops covering the generations before it.
     var ring: Ring = .{};
     recordAll(&ring, 1, 1, &.{"k7m2qx"});
-    ring.forget(5);
+    ring.record(5, &many);
     try std.testing.expect(!ring.covers(4) and ring.covers(5));
 }
 

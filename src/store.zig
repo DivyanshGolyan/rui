@@ -1621,12 +1621,12 @@ pub const Store = struct {
             store.read_blob.close();
             if (@import("builtin").is_test) store.statements.assertIdle();
             // Counts autocommit and explicit-transaction writes alike. A
-            // rolled-back change also records: a spurious change, never a
-            // missed one.
+            // rolled-back change touched everything: never a missed change.
             if (c.sqlite3_total_changes64(store.database) != self.changes) {
                 if (@import("builtin").is_test) if (store.untouchedForTesting()) |id|
                     std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
-                store.recordTouched(store.commit_generation.fetchAdd(1, .release) + 1);
+                const generation = store.commit_generation.fetchAdd(1, .release) + 1;
+                store.changes.record(generation, &store.touched);
             }
             self.trace.mark(.complete);
             store.mutex.unlock(store.io);
@@ -1659,27 +1659,27 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
     }
 
-    /// Records that this entry point changes `session_ref`'s rows.
-    fn touch(self: *Store, session_ref: []const u8) void {
-        self.touched.add(session_ref);
+    /// Records that this entry point changes `session_ref`'s rows, with its
+    /// Workspace's key, read here inside the entry point: a failed read
+    /// fails it, and fences, like any other. The Session's row must exist.
+    fn touch(self: *Store, session_ref: []const u8) !void {
+        if (!self.touched.needsEntry(session_ref)) return;
+        const workspace = try self.readSessionWorkspaceKey(session_ref) orelse return error.CorruptStore;
+        self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
     }
 
-    /// Records each Session this entry point touched under its Workspace's
-    /// key. A creation that rolled back has no row and changed nothing; a
-    /// failed read forgets every change through `generation` instead.
-    fn recordTouched(self: *Store, generation: u64) void {
-        if (self.touched.everything) return self.changes.forget(generation);
-        for (self.touched.ids[0..self.touched.count]) |*id| {
-            const workspace = self.readSessionWorkspaceKey(id) catch return self.changes.forget(generation);
-            self.changes.record(generation, .{ .session = id.*, .workspace = workspace orelse continue });
-        }
+    /// Rolls back the open transaction. A Session it created no longer
+    /// exists, so the entry point has touched everything.
+    fn rollback(self: *Store) !void {
+        self.touched.everything = true;
+        try self.execute("ROLLBACK");
     }
 
     /// The change ring's key for a Workspace: the rowid of its first
     /// Session, or 0 while it has none. Workspaces are immutable and
     /// Sessions are never deleted, so a Session's key never changes.
     fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
-        const statement = try self.cached("SELECT rowid FROM session INDEXED BY session_workspace_list WHERE workspace=?1 ORDER BY rowid LIMIT 1");
+        const statement = try self.cached(workspace_key_sql);
         defer resetCached(statement);
         try bindText(statement, 1, workspace);
         return switch (c.sqlite3_step(statement)) {
@@ -1714,7 +1714,7 @@ pub const Store = struct {
             c.SQLITE_ROW => {
                 var session: protocol.Bounded(protocol.max_session_bytes) = .{};
                 try readText(statement, 0, &session);
-                self.touch(session.slice());
+                try self.touch(session.slice());
                 count += 1;
             },
             c.SQLITE_DONE => return count,
@@ -2566,7 +2566,7 @@ pub const Store = struct {
         if (rejection) |code| {
             return self.saveModelInterruptionAnswer(command, &digest, false, @tagName(code), faults);
         }
-        self.touch(command.session.slice());
+        try self.touch(command.session.slice());
 
         const current_turn = try self.cached(
             "SELECT 1 FROM turn WHERE turn_id=?1 AND session_ref=?2 AND operation_id=?3 AND outcome_code IS NULL",
@@ -2716,7 +2716,7 @@ pub const Store = struct {
         try bindText(save, 3, @tagName(command.decision));
         try expectDone(save);
         if (rejection == null) {
-            self.touch(command.session.slice());
+            try self.touch(command.session.slice());
             switch (command.decision) {
                 .allow_once => {
                     const update = try self.cached("UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
@@ -5521,7 +5521,7 @@ pub const Store = struct {
         }
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session_ref);
-        self.touch(session_ref.slice());
+        try self.touch(session_ref.slice());
         const first_admission = c.sqlite3_column_int64(select, 1);
         const cutoff = c.sqlite3_column_int64(select, 2);
         var selected = c.sqlite3_column_int64(select, 3);
@@ -5742,7 +5742,7 @@ pub const Store = struct {
         try bindU64(update, 4, current.attempt_ordinal);
         try bindI64(update, 5, snapshot_ms);
         if (try self.stepTouching(update) != 1) {
-            try self.execute("ROLLBACK");
+            try self.rollback();
             return null;
         }
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -5818,7 +5818,7 @@ pub const Store = struct {
         // Every write that settles this Attempt changes its Session.
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 4, &session);
-        self.touch(session.slice());
+        try self.touch(session.slice());
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
             return error.StaleAttemptBinding;
@@ -6446,7 +6446,7 @@ pub const Store = struct {
         try bindU64(update, 2, binding.attempt_ordinal);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) {
-            try self.execute("ROLLBACK");
+            try self.rollback();
             return false;
         }
         try self.execute("COMMIT");
@@ -7286,6 +7286,8 @@ pub const Store = struct {
     }
 
     fn rollbackAfterError(self: *Store, faults: Faults) !void {
+        // SQLite may already have rolled back what the entry point touched.
+        self.touched.everything = true;
         if (c.sqlite3_get_autocommit(self.database) != 0) return;
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
         self.execute("ROLLBACK") catch return error.CanonicalRollbackFailed;
@@ -7324,7 +7326,7 @@ pub const Store = struct {
         digest: *const [32]u8,
     ) !Replay(Rejection) {
         const existing = try self.readExistingCommand(key) orelse return .fresh;
-        try self.execute("ROLLBACK");
+        try self.rollback();
         if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
             !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
         if (existing.accepted) return .{ .accepted = existing };
@@ -7556,17 +7558,18 @@ pub const Store = struct {
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-        self.touch(session_ref);
         const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
         try bindU64(statement, 9, current.next_position);
         try expectDone(statement);
-        return c.sqlite3_changes(self.database) == 1;
+        if (c.sqlite3_changes(self.database) != 1) return false;
+        try self.touch(session_ref);
+        return true;
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        self.touch(session_ref);
+        try self.touch(session_ref);
         const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
@@ -7675,7 +7678,7 @@ pub const Store = struct {
     /// owning write transaction; no separate frontier.
     fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
         // Every activity row claims here, so every writer of one touches.
-        self.touch(session);
+        try self.touch(session);
         if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
         const statement = try self.cached("UPDATE session SET next_position=next_position+?2 " ++
             "WHERE session_ref=?1 AND next_position<=9223372036854775807-?2 RETURNING next_position-?2");
@@ -8393,6 +8396,9 @@ const StatementCache = struct {
         self.* = undefined;
     }
 };
+
+/// A Workspace's change-ring key: the rowid of its first Session.
+const workspace_key_sql = "SELECT rowid FROM session INDEXED BY session_workspace_list WHERE workspace=?1 ORDER BY rowid LIMIT 1";
 
 fn resetCached(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
@@ -9643,6 +9649,98 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
 }
 
+/// Interrupts the one statement whose text is `sql` as it steps, the way an
+/// I/O fault fails a read. No schema changes, so no cached plan expires.
+const TestingStatementFault = struct {
+    sql: [:0]const u8,
+    running: bool = false,
+    failed: u64 = 0,
+
+    fn arm(self: *TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
+        c.sqlite3_progress_handler(database, 1, progress, self);
+    }
+
+    fn disarm(_: *const TestingStatementFault, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, 0, null, null);
+        c.sqlite3_progress_handler(database, 0, null, null);
+    }
+
+    fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        self.running = std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql);
+        return 0;
+    }
+
+    fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
+        if (!self.running) return 0;
+        self.failed += 1;
+        return 1;
+    }
+};
+
+test "a failed Workspace-key read fails and fences the entry point that touched its Session" {
+    const Route = enum { configure, message };
+    for (std.enums.values(Route)) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "key-fault-config");
+        var fault: TestingStatementFault = .{ .sql = workspace_key_sql };
+        switch (route) {
+            .configure => {
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var relabel = try completeConfiguration("key-fault-relabel", session.slice(), try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                relabel.configuration.label.state = .value;
+                try relabel.configuration.label.value.set("Relabelled");
+                fault.arm(storage.database);
+                defer fault.disarm(storage.database);
+                try std.testing.expectEqual(std.meta.Tag(ConfigureReply).infrastructure_failure, std.meta.activeTag(storage.configure(&relabel, true, .{})));
+            },
+            .message => {
+                const file = try tmp.dir.createFile(std.testing.io, "key-fault-message", .{ .read = true });
+                try file.writeStreamingAll(std.testing.io, "work");
+                try file.sync(std.testing.io);
+                var command = try completeMessage("key-fault-message", session.slice(), file, "work");
+                defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+                fault.arm(storage.database);
+                defer fault.disarm(storage.database);
+                try std.testing.expectEqual(std.meta.Tag(MessageReply).infrastructure_failure, std.meta.activeTag(storage.submitMessageWithModel(&command, true, .{})));
+            },
+        }
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+        // Nothing of the failed command committed.
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE command_key IN ('key-fault-relabel','key-fault-message')"));
+    }
+}
+
+test "a Session creation that rolls back never reaches a since listing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "rollback-config");
+    const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+    {
+        const access = try storage.enter(.none);
+        defer access.release();
+        try storage.execute("BEGIN IMMEDIATE");
+        const current = (try storage.readSession(session.slice())).?;
+        try std.testing.expect(try storage.insertSession("zzzzzz", &current));
+        try storage.rollbackAfterError(.{});
+    }
+    // The rolled-back insert still moved the commit counter. The hint
+    // forgot instead of naming a Session that does not exist.
+    try std.testing.expect(!storage.notModified(since));
+    const listed = try TestingListing.read(&storage, &tmp, .{ .since = since });
+    try std.testing.expectEqual(protocol.ListDelta.full, listed.delta);
+    try listed.expectReferences(&.{session.slice()[0..protocol.session_id_bytes].*});
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "the touch oracle names a Session whose rows changed without a touch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9661,7 +9759,7 @@ test "the touch oracle names a Session whose rows changed without a touch" {
         var sql: [96]u8 = undefined;
         try exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE session SET label='forgot' WHERE session_ref='{s}'", .{session}, 0));
         try std.testing.expectEqualStrings(session, &storage.untouchedForTesting().?);
-        storage.touch(session);
+        try storage.touch(session);
         try std.testing.expect(storage.untouchedForTesting() == null);
     }
     // The touched write is recorded under the generation it advanced to.
@@ -17972,6 +18070,17 @@ test "retry admission and exhausted recovery use their selection indexes" {
     }
 }
 
+/// Gives each Session an Operation names a row, for a fixture that inserts
+/// Operations with foreign keys off: a writer reads every Session it touches.
+fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
+    try exec(
+        database,
+        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask," ++
+            "permission_mode,revision,next_position,created_at) " ++
+            "SELECT DISTINCT session_ref,'/w','codex','m',1,0,0,1,1,1 FROM model_operation",
+    );
+}
+
 test "retry due index excludes future population and preserves age ordering" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -18055,6 +18164,7 @@ test "retry due index excludes future population and preserves age ordering" {
             "(2,2,'000002',1,1,1,1,50,0,1)," ++
             "(3,3,'000003',1,1,1,1,1,0,1)",
     );
+    try insertTestingSessionsForOperations(storage.database);
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
             return operation_id == 1;
@@ -18156,6 +18266,7 @@ test "retry admission reads past a full page of active Operations" {
     );
     defer std.testing.allocator.free(insert);
     try exec(storage.database, insert);
+    try insertTestingSessionsForOperations(storage.database);
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
             return operation_id <= retry_admission_page_rows;
@@ -18185,6 +18296,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
             "SELECT value,value,printf('%06d',value),1,1,1,1," ++
             "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1 FROM sequence",
     );
+    try insertTestingSessionsForOperations(storage.database);
 
     const Active = struct {
         const Context = struct {
