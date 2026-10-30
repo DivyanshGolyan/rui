@@ -1,4 +1,6 @@
 set -eu
+# Enter through the shared fixture module, which admits every fixture process.
+[ "${RUI_FIXTURE_ENTERED:-}" = 1 ] || exec python3 "$(dirname -- "$0")/host_process.py" sh "$0" "$@"
 
 rui=$1
 mode=${2:-full}

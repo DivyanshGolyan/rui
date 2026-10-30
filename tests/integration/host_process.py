@@ -1,5 +1,24 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
+import os
+import sys
+
+# Every fixture process imports this module, so this is the one place a
+# fixture is admitted. Root is refused before the fixture packages load, since
+# root's Python often lacks them.
+NON_ROOT_INSTRUCTION = (
+    "Rui fixtures must run as a non-root user. This fixture is running as root "
+    "(effective user ID 0), and root bypasses the file and socket permission denials "
+    "that fixtures assert, so their results would be wrong. Run the same command again "
+    "as an ordinary user, for example a dedicated tester account that owns its own "
+    "checkout, Zig caches and Python environment."
+)
+# Set by `python3 host_process.py COMMAND...` for a shell fixture's re-entry.
+FIXTURE_ENTERED = "RUI_FIXTURE_ENTERED"
+
+if os.geteuid() == 0:
+    sys.exit(NON_ROOT_INSTRUCTION)
+
 import atexit
 import http.client
 import http.server
@@ -9,7 +28,6 @@ import functools
 import io
 import json
 import mmap
-import os
 import pathlib
 import selectors
 import socket
@@ -19,7 +37,6 @@ import ssl
 import stat
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -1371,3 +1388,9 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
         raise
     finally:
         selector.close()
+
+
+if __name__ == "__main__":
+    # A shell fixture's re-entry: admitted above, then the shell runs on.
+    os.environ[FIXTURE_ENTERED] = "1"
+    os.execvp(sys.argv[1], sys.argv[1:])

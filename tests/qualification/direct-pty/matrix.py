@@ -15,6 +15,8 @@ import threading
 import time
 import traceback
 
+import driver  # noqa: F401, admits this fixture through host_process before any worker starts
+
 HERE = pathlib.Path(__file__).resolve().parent
 STOP = threading.Event()
 ACTIVE = set()
@@ -149,6 +151,7 @@ def worker(binary, output, vector):
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupted)
+    # Imported here: model_fixture reads its binary from this process's argv at import.
     from scenarios import Fixture, SCENARIOS
     from tmux_smoke import smoke
     SCENARIOS["tmux"] = smoke

@@ -22,9 +22,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/integration/host_process.py")
 HOST = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HOST)
-USER_SPEC = importlib.util.spec_from_file_location("fixture_user", ROOT / "tests/integration/fixture_user.py")
-FIXTURE_USER = importlib.util.module_from_spec(USER_SPEC)
-USER_SPEC.loader.exec_module(FIXTURE_USER)
 
 # Independent current schema, not expectations read from either codec.
 FIELDS = (
@@ -436,17 +433,6 @@ class Handler:
     def test_every_allowlist_entry_has_a_reason(self):
         self.assertEqual([key for key, (count, reason) in SLEEP_ORDERED.items()
                           if count < 1 or not reason.strip() or "\n" in reason], [])
-
-
-class FixtureUserTest(unittest.TestCase):
-    def test_root_stops_with_the_non_root_instruction(self):
-        with patch.object(FIXTURE_USER.os, "geteuid", return_value=0), self.assertRaises(SystemExit) as stopped:
-            FIXTURE_USER.main()
-        self.assertIn("must run as a non-root user", stopped.exception.code)
-
-    def test_ordinary_user_proceeds(self):
-        with patch.object(FIXTURE_USER.os, "geteuid", return_value=30033):
-            self.assertIsNone(FIXTURE_USER.main())
 
 
 FIXTURE_DIRECTORIES = ("tests/integration", "tests/qualification/direct-pty")

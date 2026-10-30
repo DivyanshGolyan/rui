@@ -1,10 +1,14 @@
 #!/bin/sh
 set -eu
 
-python3 - <<'PY'
+# Every case admits itself through host_process.py; importing it here refuses
+# root once, before any case starts.
+python3 - "$(dirname -- "$0")" <<'PY'
 import sys
 if sys.version_info < (3, 11):
     sys.exit(f"Rui integration checks require Python 3.11 or newer; found {sys.version.split()[0]} at {sys.executable}. Select a newer python3 on PATH before running checks.")
+sys.path.insert(0, sys.argv[1])
+import host_process
 print(f"Integration Python: {sys.version.split()[0]} ({sys.executable})")
 PY
 

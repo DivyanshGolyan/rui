@@ -148,13 +148,8 @@ pub fn build(b: *std.Build) void {
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
 
-    const fixture_user = b.addSystemCommand(&.{ "python3", "-B" });
-    fixture_user.addFileArg(b.path("tests/integration/fixture_user.py"));
-    fixture_user.has_side_effects = true;
-    const fixtures: Fixtures = .{ .b = b, .user = &fixture_user.step };
-
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
-    const terminal_restoration = fixtures.command(&.{"env"});
+    const terminal_restoration = b.addSystemCommand(&.{"env"});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
@@ -166,7 +161,7 @@ pub fn build(b: *std.Build) void {
     // Nonblocking renderer contracts. No gate root imports these sources, and
     // check, check-full, test and test-logic never depend on these steps.
     // Each Python harness requires a fresh evidence directory: -- --output DIR.
-    const sequence_model = fixtures.command(&.{"python3"});
+    const sequence_model = b.addSystemCommand(&.{"python3"});
     sequence_model.addFileArg(b.path("tests/integration/session_sequence_model.py"));
     sequence_model.addPassthruArgs();
     sequence_model.has_side_effects = true;
@@ -191,15 +186,15 @@ pub fn build(b: *std.Build) void {
     b.step(
         "direct-pty",
         "Run the synthetic direct-PTY key matrix and tmux smoke (nonblocking)",
-    ).dependOn(&addPtyHarness(fixtures, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",
         "Run direct-PTY driver and disposal controls (nonblocking)",
-    ).dependOn(&addPtyHarness(fixtures, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
     b.step(
         "input-equivalence",
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
-    ).dependOn(&addPtyHarness(fixtures, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
+    ).dependOn(&addPtyHarness(b, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -229,7 +224,7 @@ pub fn build(b: *std.Build) void {
     });
     proposal_client.root_module.link_libc = true;
     proposal_client.root_module.addImport("rui_client", read_client);
-    const proposal_integration = fixtures.command(&.{"python3"});
+    const proposal_integration = b.addSystemCommand(&.{"python3"});
     proposal_integration.addFileArg(b.path("tests/integration/proposal_integration.py"));
     proposal_integration.addFileArg(ci.path(release_safe));
     proposal_integration.addFileArg(ci.path(proposal_client));
@@ -245,12 +240,12 @@ pub fn build(b: *std.Build) void {
     });
     activity_client.root_module.link_libc = true;
     activity_client.root_module.addImport("rui_client", read_client);
-    const activity_integration = fixtures.command(&.{"python3"});
+    const activity_integration = b.addSystemCommand(&.{"python3"});
     activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
     activity_integration.addFileArg(ci.path(release_safe));
     activity_integration.addFileArg(ci.path(activity_client));
     b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
-    const integration = fixtures.command(&.{"sh"});
+    const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addFileArg(ci.path(release_safe));
     const integration_step = b.step(
@@ -259,7 +254,7 @@ pub fn build(b: *std.Build) void {
     );
     integration_step.dependOn(&integration.step);
 
-    const dispatch_integration = fixtures.command(&.{"python3"});
+    const dispatch_integration = b.addSystemCommand(&.{"python3"});
     dispatch_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
     dispatch_integration.addFileArg(ci.path(release_safe));
     const dispatch_integration_step = b.step(
@@ -268,30 +263,30 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
-    const login_signal_integration = fixtures.command(&.{"python3"});
+    const login_signal_integration = b.addSystemCommand(&.{"python3"});
     login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
     login_signal_integration.addFileArg(ci.path(release_safe));
     b.step("login-signal-integration", "Run the Linux-only one-shot login signal loader witness").dependOn(&login_signal_integration.step);
 
-    const current_facts_integration = fixtures.command(&.{"python3"});
+    const current_facts_integration = b.addSystemCommand(&.{"python3"});
     current_facts_integration.addFileArg(b.path("tests/integration/current_facts_integration.py"));
     current_facts_integration.addFileArg(ci.path(release_safe));
     b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
 
-    const canonical_failure_integration = fixtures.command(&.{"python3"});
+    const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
     canonical_failure_integration.addFileArg(ci.path(release_safe));
     b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
 
-    const server_delivery_integration = fixtures.command(&.{"python3"});
+    const server_delivery_integration = b.addSystemCommand(&.{"python3"});
     server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
     server_delivery_integration.addFileArg(ci.path(release_safe));
     b.step("server-delivery-integration", "Run real reply inactivity, connection headroom and Host drain separately from load").dependOn(&server_delivery_integration.step);
 
-    const h2_integration = fixtures.command(&.{"python3"});
+    const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
     h2_integration.addFileArg(ci.path(release_safe));
-    const h2_oracle_tests = fixtures.command(&.{"python3"});
+    const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
     h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
     h2_oracle_tests.addFileArg(ci.path(release_safe));
     h2_integration.step.dependOn(&h2_oracle_tests.step);
@@ -301,7 +296,7 @@ pub fn build(b: *std.Build) void {
     );
     h2_integration_step.dependOn(&h2_integration.step);
 
-    const bash_integration = fixtures.command(&.{"python3"});
+    const bash_integration = b.addSystemCommand(&.{"python3"});
     bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
     bash_integration.addFileArg(ci.path(release_safe));
     const bash_integration_step = b.step(
@@ -310,7 +305,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_integration_step.dependOn(&bash_integration.step);
 
-    const bash_walkthrough = fixtures.command(&.{"python3"});
+    const bash_walkthrough = b.addSystemCommand(&.{"python3"});
     bash_walkthrough.addFileArg(b.path("tests/integration/bash_integration.py"));
     bash_walkthrough.addFileArg(ci.path(release_safe));
     bash_walkthrough.addArg("--walkthrough");
@@ -320,7 +315,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_walkthrough_step.dependOn(&bash_walkthrough.step);
 
-    const bash_owner_integration = fixtures.command(&.{"python3"});
+    const bash_owner_integration = b.addSystemCommand(&.{"python3"});
     bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
     bash_owner_integration.addFileArg(ci.path(release_safe));
     const bash_owner_integration_step = b.step(
@@ -329,7 +324,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_owner_integration_step.dependOn(&bash_owner_integration.step);
 
-    const bash_lifecycle_integration = fixtures.command(&.{"python3"});
+    const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
     bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
     bash_lifecycle_integration.addFileArg(ci.path(release_safe));
     const bash_lifecycle_integration_step = b.step(
@@ -338,7 +333,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
-    const bash_recovery_integration = fixtures.command(&.{"python3"});
+    const bash_recovery_integration = b.addSystemCommand(&.{"python3"});
     bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
     bash_recovery_integration.addFileArg(ci.path(release_safe));
     const bash_recovery_integration_step = b.step(
@@ -347,7 +342,7 @@ pub fn build(b: *std.Build) void {
     );
     bash_recovery_integration_step.dependOn(&bash_recovery_integration.step);
 
-    const codex_integration = fixtures.command(&.{"python3"});
+    const codex_integration = b.addSystemCommand(&.{"python3"});
     codex_integration.addFileArg(b.path("tests/integration/codex_integration.py"));
     codex_integration.addFileArg(ci.path(release_safe));
     const codex_integration_step = b.step(
@@ -372,7 +367,7 @@ pub fn build(b: *std.Build) void {
     });
     configurePosix(b, credentials_module);
     credential_actor.root_module.addImport("codex_credentials", credentials_module);
-    const credential_integration = fixtures.command(&.{"python3"});
+    const credential_integration = b.addSystemCommand(&.{"python3"});
     credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
     credential_integration.addFileArg(ci.path(credential_actor));
     const credential_integration_step = b.step(
@@ -398,13 +393,13 @@ pub fn build(b: *std.Build) void {
     });
     configurePosix(b, preferences_module);
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
-    const preference_policy_integration = fixtures.command(&.{"python3"});
+    const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
     preference_policy_integration.addFileArg(ci.path(preference_policy_actor));
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
-    const codex_h2_integration = fixtures.command(&.{"python3"});
+    const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
     codex_h2_integration.addFileArg(ci.path(release_safe));
     const codex_h2_integration_step = b.step(
@@ -413,7 +408,7 @@ pub fn build(b: *std.Build) void {
     );
     codex_h2_integration_step.dependOn(&codex_h2_integration.step);
 
-    const control_integration = fixtures.command(&.{"python3"});
+    const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
     control_integration.addFileArg(ci.path(release_safe));
     const control_integration_step = b.step(
@@ -422,7 +417,7 @@ pub fn build(b: *std.Build) void {
     );
     control_integration_step.dependOn(&control_integration.step);
 
-    const descriptor_capacity_integration = fixtures.command(&.{"python3"});
+    const descriptor_capacity_integration = b.addSystemCommand(&.{"python3"});
     descriptor_capacity_integration.addFileArg(b.path("tests/integration/descriptor_capacity_integration.py"));
     descriptor_capacity_integration.addFileArg(ci.path(release_safe));
     const descriptor_capacity_integration_step = b.step(
@@ -442,20 +437,20 @@ pub fn build(b: *std.Build) void {
     });
     host_status_actor.root_module.link_libc = true;
     host_status_actor.root_module.addImport("client", read_client);
-    const host_status_integration = fixtures.command(&.{"python3"});
+    const host_status_integration = b.addSystemCommand(&.{"python3"});
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
     host_status_integration.addFileArg(ci.path(release_safe));
     host_status_integration.addFileArg(ci.path(host_status_actor));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
-    const host_launch_integration = fixtures.command(&.{"python3"});
+    const host_launch_integration = b.addSystemCommand(&.{"python3"});
     host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
     host_launch_integration.addFileArg(ci.path(release_safe));
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
-    const host_stop_integration = fixtures.command(&.{"python3"});
+    const host_stop_integration = b.addSystemCommand(&.{"python3"});
     host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
     host_stop_integration.addFileArg(ci.path(release_safe));
     host_stop_integration.addFileArg(ci.path(host_status_actor));
@@ -463,7 +458,7 @@ pub fn build(b: *std.Build) void {
     host_stop_step.dependOn(&host_stop_integration.step);
 
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
-    const debug_integration = fixtures.command(&.{"sh"});
+    const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addFileArg(ci.path(debug));
     const debug_integration_step = b.step(
@@ -473,7 +468,7 @@ pub fn build(b: *std.Build) void {
     debug_integration_step.dependOn(&debug_integration.step);
     // A bounded Debug subset of the dispatch scenarios: failure provenance
     // through SQLite. The full dispatch journey stays on ReleaseSafe.
-    const dispatch_debug_integration = fixtures.command(&.{"python3"});
+    const dispatch_debug_integration = b.addSystemCommand(&.{"python3"});
     dispatch_debug_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
     dispatch_debug_integration.addFileArg(ci.path(debug));
     dispatch_debug_integration.addArg("failure-correlation");
@@ -496,7 +491,7 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = fixtures.command(&.{"sh"});
+    const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
@@ -519,7 +514,7 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = fixtures.command(&.{"sh"});
+    const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));
@@ -630,7 +625,7 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const measure = fixtures.command(&.{
+    const measure = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./configuration-admission",
     });
     measure.setCwd(b.path("tests/qualification"));
@@ -642,7 +637,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_step.dependOn(&measure.step);
 
-    const measure_messages = fixtures.command(&.{
+    const measure_messages = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./message-admission",
     });
     measure_messages.setCwd(b.path("tests/qualification"));
@@ -654,7 +649,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_messages_step.dependOn(&measure_messages.step);
 
-    const measure_dispatch = fixtures.command(&.{
+    const measure_dispatch = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-dispatch",
     });
     measure_dispatch.setCwd(b.path("tests/qualification"));
@@ -666,7 +661,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_dispatch_step.dependOn(&measure_dispatch.step);
 
-    const measure_output = fixtures.command(&.{
+    const measure_output = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-output",
     });
     measure_output.setCwd(b.path("tests/qualification"));
@@ -679,7 +674,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_output_step.dependOn(&measure_output.step);
 
-    const measure_repeat_work = fixtures.command(&.{
+    const measure_repeat_work = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-output", "--repeat-work",
     });
     measure_repeat_work.setCwd(b.path("tests/qualification"));
@@ -691,7 +686,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_repeat_work_step.dependOn(&measure_repeat_work.step);
 
-    const measure_retry = fixtures.command(&.{
+    const measure_retry = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-retry",
     });
     measure_retry.setCwd(b.path("tests/qualification"));
@@ -703,7 +698,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_retry_step.dependOn(&measure_retry.step);
 
-    const measure_queue = fixtures.command(&.{
+    const measure_queue = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-queue",
     });
     measure_queue.setCwd(b.path("tests/qualification"));
@@ -719,7 +714,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_queue_step.dependOn(&measure_queue.step);
 
-    const measure_control = fixtures.command(&.{
+    const measure_control = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-control",
     });
     measure_control.setCwd(b.path("tests/qualification"));
@@ -731,7 +726,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_control_step.dependOn(&measure_control.step);
 
-    const measure_call_classification = fixtures.command(&.{
+    const measure_call_classification = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./call-classification",
     });
     measure_call_classification.setCwd(b.path("tests/qualification"));
@@ -745,7 +740,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_call_classification_step.dependOn(&measure_call_classification.step);
 
-    const measure_execution_service = fixtures.command(&.{
+    const measure_execution_service = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./execution-service",
     });
     measure_execution_service.setCwd(b.path("tests/qualification"));
@@ -839,24 +834,11 @@ const CiArtifacts = struct {
     }
 };
 
-/// Root bypasses the permission denials fixtures assert, so every step that
-/// launches a built Rui or a fixture actor first requires a non-root user.
-const Fixtures = struct {
-    b: *std.Build,
-    user: *std.Build.Step,
-
-    fn command(fixtures: Fixtures, argv: []const []const u8) *std.Build.Step.Run {
-        const run = fixtures.b.addSystemCommand(argv);
-        run.step.dependOn(fixtures.user);
-        return run;
-    }
-};
-
 /// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
 /// pass the harness's own options, including a fresh --output, after `--`.
-fn addPtyHarness(fixtures: Fixtures, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
-    const run = fixtures.command(&.{"python3"});
-    run.addFileArg(fixtures.b.path(harness));
+fn addPtyHarness(b: *std.Build, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"python3"});
+    run.addFileArg(b.path(harness));
     run.addFileArg(rui);
     run.addPassthruArgs();
     run.has_side_effects = true;

@@ -13,6 +13,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+
+import host_process  # noqa: F401, admits this fixture before it launches Rui
 import os_semantics
 
 

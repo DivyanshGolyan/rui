@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import sys
 
+import host_process  # noqa: F401, admits this fixture before it starts the matrix
+
 
 def vectors():
     # Literal control/kitty/modifyOtherKeys vectors. ESC-prefix cannot encode
