@@ -46,6 +46,7 @@ Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of e
 | Key in the overview | What it does |
 | --- | --- |
 | Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
+| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
 | Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. On a blank composer, opens the selected Session. |
 | Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
 | Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |

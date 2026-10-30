@@ -918,6 +918,8 @@ const Seen = struct {
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
+    /// How many Sessions the fake listing returns, from `listed_references`.
+    listed: usize = 1,
 
     var now: Seen = .{};
 
@@ -927,6 +929,8 @@ const Seen = struct {
         return value;
     }
 };
+
+const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz" };
 
 /// Operations that answer from fixed facts and record what they were asked.
 const fake_operations: Operations = .{
@@ -940,14 +944,16 @@ const fake_operations: Operations = .{
         fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
             Seen.now.since = cursor.since;
-            page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
-            var row: protocol.SessionRow = .{ .work = .{ .state = .{ .working = .{ .since = test_now_s - 10 } }, .turn = 1, .operation = 1 } };
-            row.reference.set("k7m2qx") catch unreachable;
-            row.workspace.set("/work") catch unreachable;
-            row.model.set("gpt-5.5") catch unreachable;
-            row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s - 10, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
-            row.peers.from_person_at = test_now_s - 10;
-            page.rows[0] = row;
+            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
+            for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
+                const since = test_now_s - 10 - at;
+                row.* = .{ .work = .{ .state = .{ .working = .{ .since = since } }, .turn = 1, .operation = 1 } };
+                row.reference.set(reference) catch unreachable;
+                row.workspace.set("/work") catch unreachable;
+                row.model.set("gpt-5.5") catch unreachable;
+                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
+                row.peers.from_person_at = since;
+            }
             return null;
         }
     }.list,
@@ -1683,6 +1689,43 @@ test "every key the overview binds acts through the editor, on an empty draft an
     }
     // A key the overview binds to nothing neither edits nor rejects the line.
     try expectStarted(rig, "h\x12i\x1b[114;5u\r", "hi");
+}
+
+/// A composer over three listed Sessions, the middle one selected.
+fn openThreeRows() !*Rig {
+    const rig = try openComposer();
+    errdefer rig.close();
+    Seen.now.listed = 3;
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 3), rig.overview.state.order.items.len);
+    return rig;
+}
+
+/// The Session shown at `at` in screen order.
+fn shownRow(rig: *const Rig, at: usize) view.Reference {
+    const state = &rig.overview.state;
+    return state.rows.items[state.order.items[at]].reference;
+}
+
+test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {
+    const rig = try openThreeRows();
+    defer rig.close();
+    for ([_][]const u8{ "", "two\x1b\rlines", "junk\x00" }) |draft| {
+        for ([_]struct { bytes: []const u8, row: usize }{
+            .{ .bytes = "\x1b[1;2A", .row = 0 },
+            .{ .bytes = "\x1b[1;2:1A", .row = 0 },
+            .{ .bytes = "\x1b[1;2B", .row = 2 },
+            .{ .bytes = "\x1b[1;2:1B", .row = 2 },
+        }) |case| {
+            errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
+            rig.overview.composer = .{ .buffer = &rig.overview.draft };
+            try std.testing.expect(try rig.press(draft) == null);
+            rig.overview.state.selected = shownRow(rig, 1);
+            try std.testing.expect(try rig.press(case.bytes) == null);
+            try std.testing.expectEqualStrings(&shownRow(rig, case.row), &(rig.overview.state.selected orelse return error.TestExpectedSelection));
+        }
+    }
 }
 
 test "a start sends what its Enter captured, whatever Esc clears before it runs" {
