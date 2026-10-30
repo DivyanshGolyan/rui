@@ -221,6 +221,7 @@ def fixture_main(args):
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
+      * text containing "invalid output": a stream that is not JSON, so the Turn fails
       * text containing "rate limit": HTTP 429 with Retry-After 8 the first time, then the echo answer
       * otherwise: "Fixture answer N: received <json of the exact text>"
     Unbounded: it never exhausts, so extra submissions stay visible instead of failing.
@@ -298,6 +299,10 @@ def fixture_main(args):
             elif user_text and "long bash" in user_text:
                 kind = "long-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", "sleep 8; echo slept", "Sleep eight seconds")])
+            elif user_text and "invalid output" in user_text:
+                # A stream the provider adapter cannot read: the Turn fails.
+                kind = "invalid-output"
+                payload = b"data: {not json\n\n"
             elif user_text and "consent check" in user_text:
                 kind = "consent-call"
                 command = "set -eu\n" + "\n".join(f"printf 'step {k:02d}\\n' >> progress.log" for k in range(1, 31)) + "\nwc -l progress.log"

@@ -441,7 +441,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 if line is None:
                     # Bare rui opens the overview; its composer starts the Session.
                     requested = len(endpoint.requests)
-                    human.overview_frame(master, lambda screen: screen.startswith(" rui "))
+                    human.overview_frame(master, human.overview_title)
                     os.write(master, b"fresh overview bytes\n")
                     if binding:
                         # An unconfirmed start stays recoverable: the overview

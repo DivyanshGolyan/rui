@@ -179,6 +179,9 @@ const Job = union(enum) {
 /// requests the core's ledger allows can wait at once.
 const max_jobs = 3 + view.max_requests;
 
+/// The longest the first frame waits for the terminal's background.
+const background_wait_ms = 200;
+
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
 
 /// Wakes the loop from a signal handler: SIGINT and SIGTERM stop it, and
@@ -247,6 +250,9 @@ started: ?Started = null,
 screen_fresh: bool = true,
 /// The screen is initialized, so `run` disposes of it.
 screen_ready: bool = false,
+/// The terminal has not yet answered the DA1 that follows the background
+/// question.
+asking: bool = false,
 
 /// Opens the overview and returns once the person leaves it, or a signal
 /// stops it. Every way out restores the terminal and then prints the
@@ -315,7 +321,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .hooks = hooks,
         .ops = ops,
         .state = undefined,
-        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR") }),
+        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .terminal = undefined,
         .interrupted = interrupted,
     };
@@ -365,7 +371,9 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
-    var next: ?Next = if (self.options.open) |reference| try self.event(.{ .open = reference }) else null;
+    if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
+    // After the open: keys typed during the wait act on the overview.
+    var next = try self.askBackground();
     while (true) {
         if (next) |value| if (self.proceed(value)) |ending| return ending;
         if (self.interrupted.stopped.load(.acquire)) return .overview;
@@ -376,7 +384,7 @@ fn loop(self: *Self) !Ending {
 /// One pass: a due tick, the next job and a frame, then one wait for input,
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
-    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
     try self.dispatch();
     // Frames count on the monotonic clock, so a wall-clock step cannot
@@ -400,7 +408,7 @@ fn turn(self: *Self) !?Next {
         drain(self.done[0]);
         if (try self.complete()) |next| return next;
     }
-    if (fds[0].revents != 0 or timeout == 0) return self.readInput(0);
+    if (fds[0].revents != 0 or timeout == 0) return self.readInput(0, 4096);
     return null;
 }
 
@@ -566,20 +574,35 @@ fn startInput(self: *const Self, settings: *const view.StartSettings, text: []co
     } };
 }
 
-/// Reads what the terminal holds, waiting `wait` milliseconds for the
-/// first byte, and steps each key. A lone Esc becomes a key once the stream
-/// says it expired.
-fn readInput(self: *Self, wait: i32) !?Next {
-    for (0..4096) |count| {
+/// Reads up to `bytes` of what the terminal holds, waiting `wait`
+/// milliseconds for the first byte, and steps each key. A lone Esc becomes a
+/// key once the stream says it expired.
+fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
+    for (0..bytes) |count| {
         const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                if (try self.input.expire()) if (try self.event(.{ .key = .escape })) |next| return next;
+                if (try self.input.expire()) {
+                    if (try self.look()) |next| return next;
+                    if (try self.event(.{ .key = .escape })) |next| return next;
+                }
                 continue;
             },
             else => return err,
         }) orelse return null;
         var decoded = self.input.feed(read.byte, read.at);
         while (decoded != .none) : (decoded = self.input.next()) switch (decoded) {
+            .event => |value| switch (value.event) {
+                // An answer applies whenever it comes; a late one repaints.
+                .color_report => |report| if (report.kind == .bg) {
+                    self.caps.background = report.value;
+                },
+                .cap_da1 => self.asking = false,
+                .key_press => {
+                    if (try self.look()) |next| return next;
+                    if (try self.compose(decoded)) |next| return next;
+                },
+                else => if (try self.compose(decoded)) |next| return next,
+            },
             .report => |report| switch (report) {
                 .width => |method| {
                     self.terminal.screen.setWidth(method);
@@ -589,6 +612,43 @@ fn readInput(self: *Self, wait: i32) !?Next {
             },
             else => if (try self.compose(decoded)) |next| return next,
         };
+    }
+    return null;
+}
+
+/// Tells the core the person pressed a key now, before the key itself.
+fn look(self: *Self) !?Next {
+    return self.event(.{ .looked = self.realMs() });
+}
+
+/// The wall clock in Unix milliseconds, as the core's times are.
+fn realMs(self: *const Self) u64 {
+    return @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+}
+
+/// Asks the terminal for its background, then waits up to
+/// `background_wait_ms` so the first frame has its skin. Every terminal
+/// answers the DA1 that follows the question, so its answer ends the wait
+/// early on one that does not answer OSC 11.
+fn askBackground(self: *Self) !?Next {
+    if (self.caps.depth == .none) return null;
+    const ask = "\x1b]11;?\x1b\\\x1b[c";
+    {
+        self.terminal.pump = .{ .context = self, .step = pump };
+        defer self.terminal.pump = null;
+        self.pumped = null;
+        self.terminal.write(ask) catch |err| return self.pumped orelse err;
+    }
+    self.asking = true;
+    // The wait ends here; a late answer still applies when it comes.
+    defer self.asking = false;
+    const deadline = std.Io.Clock.awake.now(self.init.io).toMilliseconds() + background_wait_ms;
+    while (self.asking and self.caps.background == null) {
+        const left = deadline - std.Io.Clock.awake.now(self.init.io).toMilliseconds();
+        if (left <= 0) break;
+        // A byte at a time, so keys typed after the answer wait for the
+        // first frame.
+        if (try self.readInput(@intCast(left), 1)) |next| return next;
     }
     return null;
 }
@@ -691,7 +751,7 @@ fn budget(self: *const Self, now_ms: u64, awake_ms: u64, pulses: bool) i32 {
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    self.pumped = try self.readInput(16);
+    self.pumped = try self.readInput(16, 4096);
     if (self.pumped != null) return error.InteractiveInterrupted;
 }
 
@@ -1003,7 +1063,7 @@ const Rig = struct {
 
     fn press(rig: *Rig, bytes: []const u8) !?Ending {
         if (std.c.write(rig.keys[1], bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
-        const next = try rig.overview.readInput(0) orelse return null;
+        const next = try rig.overview.readInput(0, 4096) orelse return null;
         return rig.overview.proceed(next);
     }
 
@@ -1095,8 +1155,13 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = "k7m2qx".* }, fake_operations, &cancellation);
     defer rig.close();
-    // Ctrl-D waits in the terminal until the overview is back.
-    if (std.c.write(rig.keys[1], "\x04", 1) != 1) return error.TestUnexpectedResult;
+    // The overview asks for the background whatever the test's environment
+    // says about colour. The terminal answers the question's DA1 first,
+    // without a background; Ctrl-D waits behind it until the overview has
+    // drawn.
+    rig.overview.caps.depth = .indexed;
+    const keys = "\x1b[?1;2;4c\x04";
+    if (std.c.write(rig.keys[1], keys, keys.len) != keys.len) return error.TestUnexpectedResult;
     try std.testing.expect(try rig.overview.loop() == .overview);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
@@ -1104,10 +1169,16 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     rig.overview.worker.join() catch {};
     try std.testing.expectEqual(@as(usize, 1), Seen.now.hosts);
     var buffer: [64 * 1024]u8 = undefined;
-    const frame = rig.drawn(&buffer);
+    const written = rig.drawn(&buffer);
+    const question = "\x1b]11;?\x1b\\\x1b[c";
+    try std.testing.expect(std.mem.startsWith(u8, written, question));
+    const frame = written[question.len..];
     try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
-    // The terminal already shows an unchanged screen.
+    // The terminal already shows an unchanged screen. The Host read may
+    // have answered after that frame, so draw what it changed first.
+    try std.testing.expect(try rig.overview.draw(0) == null);
+    _ = rig.drawn(&buffer);
     try std.testing.expect(try rig.overview.draw(0) == null);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }

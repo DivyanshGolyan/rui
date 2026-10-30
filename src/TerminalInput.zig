@@ -345,6 +345,25 @@ test "an interrupted OSC keeps the following sequence and key" {
     }
 }
 
+test "a background answer is a colour report; a malformed one is dropped and keeps the next key" {
+    for ([_]struct { bytes: []const u8, report: ?vaxis.Color.Report }{
+        .{ .bytes = "\x1b]11;rgb:1212/1818/3333\x1b\\", .report = .{ .kind = .bg, .value = .{ 0x12, 0x18, 0x33 } } },
+        .{ .bytes = "\x1b]11;rgb:f3f3/eeee/e2e2\x07", .report = .{ .kind = .bg, .value = .{ 0xf3, 0xee, 0xe2 } } },
+        .{ .bytes = "\x1b]11;rgb:zz/00/00\x1b\\", .report = null },
+        .{ .bytes = "\x1b]11;?\x07", .report = null },
+    }) |case| {
+        var input: Self = .{};
+        var found: ?vaxis.Color.Report = null;
+        for (case.bytes) |byte| {
+            var decoded = input.feed(byte, 0);
+            while (decoded != .none) : (decoded = input.next()) found = testEvent(decoded).?.color_report;
+        }
+        try std.testing.expectEqualDeep(case.report, found);
+        try std.testing.expectEqual(Pending.none, input.pending());
+        try std.testing.expectEqualStrings("q", testEvent(input.feed('q', 0)).?.key_press.text.?);
+    }
+}
+
 test "fragmented APC and oversized associated text keep the following key" {
     var input: Self = .{};
     for ("\x1b_Greply\x1b") |byte| try std.testing.expect(input.feed(byte, 0) == .none);
