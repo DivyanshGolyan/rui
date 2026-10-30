@@ -197,15 +197,18 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
     return self.leaving orelse .detached;
 }
 
-/// After `run` returned `returned`: joins the stopped reader while the
-/// terminal stays lent. Returning needs no running command and no
-/// unresolved submission, so the reader is the one borrower left, and it
-/// observes its stop within one transport poll.
-pub fn close(self: *Self) void {
+/// After `run` returned `returned`, which Esc only asks for: settles the
+/// stopped borrowers as `leave` does, while the terminal stays lent. Esc
+/// needs no running command and no unresolved submission, so they observe
+/// their stop within one transport poll. Null goes back to the overview;
+/// a failure or recovery to show is instead the ending of a normal `leave`.
+pub fn back(self: *Self) ?(anyerror!Outcome) {
     std.debug.assert(self.leaving == .returned);
-    _ = self.joinReader();
-    _ = self.submission.join();
+    const plan = departure.exit(self.settle({}), null, self.submission.view() != null);
+    if (plan.failure) |err| return err;
+    if (plan.recovery_before_notice or self.reading.pending_diagnostic != null) return .detached;
     self.submission.close();
+    return null;
 }
 
 /// What the restored screen shows after `leave`.
@@ -531,6 +534,29 @@ test "frontend consumed canonical reader and admission failures survive external
             return error.TestUnexpectedResult;
         };
         try std.testing.expectEqual(error.CanonicalStoreFailure, failure);
+    }
+}
+
+test "Esc goes back to the overview only when the joined reader leaves nothing to show" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *Task) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.CanonicalStoreFailure;
+        }
+    };
+    for ([_]struct { Task.Run, ?anyerror }{ .{ Worker.read, null }, .{ Worker.fail, error.CanonicalStoreFailure } }) |case| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        // The reader is still running as Esc returns.
+        try self.reader.start(std.testing.io, &self, case[0]);
+        self.stop();
+        const failure: ?anyerror = if (self.back()) |ending| if (ending) |_| error.TestUnexpectedResult else |err| err else null;
+        try std.testing.expectEqual(case[1], failure);
     }
 }
 

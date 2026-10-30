@@ -43,8 +43,8 @@ pub const max_line_read_bytes = max_line_bytes + 1;
 pub const max_draft_bytes = 64 * 1024;
 /// Rows a folded group shows before its "more" line.
 pub const fold_rows = 5;
-/// Stops awaiting their result at once.
-pub const max_stops = 8;
+/// Starts and stops the ledger holds at once.
+pub const max_requests = 8;
 /// The least time between two list requests.
 pub const list_interval_ms = 1000;
 /// A generated request handle, as `rui request recover` takes it.
@@ -237,7 +237,7 @@ pub const Host = struct {
 
 pub const StopOutcome = union(enum) {
     stopped,
-    /// The Host refused it, or it never left.
+    /// The Host refused it, or it was never captured.
     failed: []const u8,
     /// It may have reached the Host. Its saved request handle recovers it.
     unconfirmed: []const u8,
@@ -248,12 +248,9 @@ pub const StopResult = struct {
     outcome: StopOutcome,
 };
 
-/// A stop whose result is unknown, and the handle that recovers it.
-pub const UnconfirmedStop = struct { reference: Reference, handle: Bounded(max_handle_bytes) };
-
 pub const StartResult = union(enum) {
     started: struct { reference: Reference, handle: []const u8 },
-    /// The Host refused it, or it never left: the text can be sent again.
+    /// The Host refused it, or it was never captured: the text can be sent again.
     failed: []const u8,
     /// It may have reached the Host. Its saved request handle recovers it;
     /// another Enter would start a second Session.
@@ -268,9 +265,8 @@ pub const Event = union(enum) {
     first_line: FirstLine,
     stop: StopResult,
     start: StartResult,
-    /// The overview ended. The start in flight, if any, ended with this
-    /// result; null when it never ran.
-    depart: ?StartResult,
+    /// The overview ended: later results are kept for `writeDeparture`.
+    leave,
     /// Opens a Session named outside the overview, as `session resume` does.
     open: Reference,
     /// The Host's facts, read as a listing starts; null when it gave none.
@@ -371,6 +367,19 @@ pub const StartSettings = struct {
 
 pub const Prompt = struct { stop: Reference };
 
+/// A start or stop `step` asked the shell to send. Only its answer removes
+/// it, and only while the overview shows that answer; one that may have
+/// reached the Host keeps its recover handle until departure. Nothing is
+/// evicted: a full ledger refuses new requests.
+pub const Request = struct {
+    kind: enum { start, stop },
+    /// The Session a stop names, or the one an accepted start made.
+    session: ?Reference = null,
+    status: enum { pending, done, failed, unknown } = .pending,
+    /// The failure code, or the handle of an unknown or accepted request.
+    text: Bounded(@max(max_handle_bytes, session_work.max_code_bytes)) = .{},
+};
+
 pub const Notice = struct {
     bytes: [256]u8 = undefined,
     len: usize = 0,
@@ -437,22 +446,13 @@ pub const State = struct {
     draft: [max_draft_bytes]u8 = undefined,
     draft_len: usize = 0,
     settings: StartSettings = .{},
-    /// A start is in flight; the composer is locked until its result.
-    starting: bool = false,
-    /// The handle of the last start whose admission is unknown.
-    unconfirmed: ?Bounded(max_handle_bytes) = null,
-    /// What became of a start still in flight when the person left.
-    departed: ?union(enum) {
-        not_started: Bounded(session_work.max_code_bytes),
-        started: struct { reference: Reference, handle: Bounded(max_handle_bytes) },
-    } = null,
+    /// Every start and stop without an answer the overview showed, oldest first.
+    requests: [max_requests]Request = undefined,
+    request_count: usize = 0,
+    /// The person left, so answers wait for `writeDeparture`.
+    left: bool = false,
     /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
-    stops: [max_stops]Reference = undefined,
-    stop_count: usize = 0,
-    /// The latest stops whose result is unknown, oldest first.
-    unconfirmed_stops: [max_stops]UnconfirmedStop = undefined,
-    unconfirmed_stop_count: usize = 0,
 
     /// The token of the last completed listing.
     token: ?Token = null,
@@ -527,9 +527,47 @@ pub const State = struct {
         return self.find(self.selected orelse return null);
     }
 
+    /// A start is in flight; the composer is locked until its answer.
+    pub fn starting(self: *const State) bool {
+        return self.pendingAt(.start, null) != null;
+    }
+
     fn stopping(self: *const State, ref: Reference) bool {
-        for (self.stops[0..self.stop_count]) |*held| if (std.mem.eql(u8, held, &ref)) return true;
-        return false;
+        return self.pendingAt(.stop, ref) != null;
+    }
+
+    fn pendingAt(self: *const State, kind: @FieldType(Request, "kind"), ref: ?Reference) ?usize {
+        for (self.requests[0..self.request_count], 0..) |*held, at| {
+            if (held.kind != kind or held.status != .pending) continue;
+            if (ref == null or std.mem.eql(u8, &held.session.?, &ref.?)) return at;
+        }
+        return null;
+    }
+
+    /// Records a request `step` asks the shell to send; false when the
+    /// ledger is full, and the overview says so.
+    fn request(self: *State, kind: @FieldType(Request, "kind"), ref: ?Reference) bool {
+        if (self.request_count == max_requests) {
+            self.say(.attention, "! Wait for earlier requests, or leave to recover unconfirmed ones.", .{});
+            return false;
+        }
+        self.requests[self.request_count] = .{ .kind = kind, .session = ref };
+        self.request_count += 1;
+        return true;
+    }
+
+    /// The answer to the request at `at`. One shown on screen is gone; one
+    /// that may have reached the Host, or that came after the person left,
+    /// stays for `writeDeparture`.
+    fn answer(self: *State, at: usize, status: @FieldType(Request, "status"), text: []const u8) void {
+        if (status != .unknown and !self.left) {
+            std.mem.copyForwards(Request, self.requests[at .. self.request_count - 1], self.requests[at + 1 .. self.request_count]);
+            self.request_count -= 1;
+            return;
+        }
+        const held = &self.requests[at];
+        held.status = status;
+        held.text.set(text) catch unreachable;
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
@@ -646,70 +684,49 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .first_line => |result| try firstLine(state, result),
         .stop => |result| {
-            for (state.stops[0..state.stop_count], 0..) |*held, at| if (std.mem.eql(u8, held, &result.reference)) {
-                state.stops[at] = state.stops[state.stop_count - 1];
-                state.stop_count -= 1;
-                break;
-            };
+            const at = state.pendingAt(.stop, result.reference).?;
             switch (result.outcome) {
-                .stopped => {},
-                .failed => |code| state.say(.attention, "! Could not stop {s}: {s}", .{ &result.reference, code }),
+                .stopped => state.answer(at, .done, ""),
+                .failed => |code| {
+                    state.answer(at, .failed, code);
+                    state.say(.attention, "! Could not stop {s}: {s}", .{ &result.reference, code });
+                },
                 .unconfirmed => |handle| {
-                    if (state.unconfirmed_stop_count == max_stops) {
-                        std.mem.copyForwards(UnconfirmedStop, state.unconfirmed_stops[0 .. max_stops - 1], state.unconfirmed_stops[1..]);
-                        state.unconfirmed_stop_count -= 1;
-                    }
-                    const held = &state.unconfirmed_stops[state.unconfirmed_stop_count];
-                    held.* = .{ .reference = result.reference, .handle = .{} };
-                    held.handle.set(handle) catch unreachable;
-                    state.unconfirmed_stop_count += 1;
-                    state.say(.attention, "! Unconfirmed stop of {s}: rui request recover {s}", .{ &result.reference, held.handle.slice() });
+                    state.answer(at, .unknown, handle);
+                    state.say(.attention, "! Unconfirmed stop of {s}: rui request recover {s}", .{ &result.reference, handle });
                 },
             }
             state.next_list_ms = 0;
         },
         .start => |result| {
-            state.starting = false;
+            const at = state.pendingAt(.start, null).?;
             switch (result) {
                 .started => |started| {
+                    state.requests[at].session = started.reference;
+                    state.answer(at, .done, started.handle);
+                    if (state.left) return effects;
                     state.draft_len = 0;
                     state.settings = .{};
                     state.selected = started.reference;
                     state.next_list_ms = 0;
                     effects.add(.{ .open = started.reference });
                 },
-                .failed => |code| state.say(.attention, "! Could not start a Session: {s}", .{code}),
+                .failed => |code| {
+                    state.answer(at, .failed, code);
+                    state.say(.attention, "! Could not start a Session: {s}", .{code});
+                },
                 .unconfirmed => |handle| {
                     // The saved request holds the text; recovery, not a
                     // second Enter, finds out whether it started.
+                    state.answer(at, .unknown, handle);
                     state.draft_len = 0;
                     state.settings = .{};
                     state.next_list_ms = 0;
-                    var held: Bounded(max_handle_bytes) = .{};
-                    held.set(handle) catch unreachable;
-                    state.unconfirmed = held;
-                    state.say(.attention, "! Unconfirmed: rui request recover {s}", .{held.slice()});
+                    state.say(.attention, "! Unconfirmed: rui request recover {s}", .{handle});
                 },
             }
         },
-        .depart => |result| if (state.starting) {
-            state.starting = false;
-            // A start never sent was cancelled with the overview.
-            switch (result orelse StartResult{ .failed = "cancelled" }) {
-                .started => |started| {
-                    state.departed = .{ .started = .{ .reference = started.reference, .handle = .{} } };
-                    state.departed.?.started.handle.set(started.handle) catch unreachable;
-                },
-                .failed => |code| {
-                    state.departed = .{ .not_started = .{} };
-                    state.departed.?.not_started.set(code[0..@min(code.len, session_work.max_code_bytes)]) catch unreachable;
-                },
-                .unconfirmed => |handle| {
-                    state.unconfirmed = .{};
-                    state.unconfirmed.?.set(handle) catch unreachable;
-                },
-            }
-        },
+        .leave => state.left = true,
         .open => |ref| {
             state.selected = ref;
             effects.add(.{ .open = ref });
@@ -719,16 +736,26 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     return effects;
 }
 
-/// What the shell prints once the terminal is restored: what became of a
-/// start in flight, and how to recover the start and stops the overview
-/// could not confirm.
+/// What the shell prints once the terminal is restored: one line for each
+/// request left in the ledger.
 pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (state.departed) |departed| switch (departed) {
-        .not_started => |code| try writer.print("rui: The new Session was not started ({s}); start it again from the overview.\n", .{code.slice()}),
-        .started => |started| try writer.print("rui: Session start accepted: {s}.\nMessage request: {s} (rui request inspect {s})\n", .{ &started.reference, started.handle.slice(), started.handle.slice() }),
-    };
-    if (state.unconfirmed) |handle| try writer.print("rui: A new Session's start was not confirmed; use rui request recover {s}. Do not start it again.\n", .{handle.slice()});
-    for (state.unconfirmed_stops[0..state.unconfirmed_stop_count]) |*stop| try writer.print("rui: Stopping {s} was not confirmed; use rui request recover {s}. Do not stop it again.\n", .{ &stop.reference, stop.handle.slice() });
+    for (state.requests[0..state.request_count]) |*request| {
+        const text = request.text.slice();
+        switch (request.kind) {
+            .start => switch (request.status) {
+                .pending => try writer.writeAll("rui: The new Session was not started (cancelled); start it again from the overview.\n"),
+                .failed => try writer.print("rui: The new Session was not started ({s}); start it again from the overview.\n", .{text}),
+                .unknown => try writer.print("rui: A new Session's start was not confirmed; use rui request recover {s}. Do not start it again.\n", .{text}),
+                .done => try writer.print("rui: Session start accepted: {s}.\nMessage request: {s} (rui request inspect {s})\n", .{ &request.session.?, text, text }),
+            },
+            .stop => switch (request.status) {
+                .pending => try writer.print("rui: Stopping {s} was not sent; stop it again from the overview.\n", .{&request.session.?}),
+                .failed => try writer.print("rui: Could not stop {s}: {s}\n", .{ &request.session.?, text }),
+                .unknown => try writer.print("rui: Stopping {s} was not confirmed; use rui request recover {s}. Do not stop it again.\n", .{ &request.session.?, text }),
+                .done => try writer.print("rui: Stopped {s}.\n", .{&request.session.?}),
+            },
+        }
+    }
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
@@ -961,16 +988,16 @@ fn keyPress(state: *State, key: Key, effects: *Effects) void {
     }
     switch (action) {
         .insert => insert(state, key.text),
-        .erase => if (!state.starting and state.draft_len != 0) {
+        .erase => if (!state.starting() and state.draft_len != 0) {
             state.draft_len = codepointStart(state.draftText(), state.draft_len - 1);
         },
         .previous, .next, .first, .last => move(state, action),
         .enter => enter(state, effects),
-        .escape => if (!state.starting) {
+        .escape => if (!state.starting()) {
             if (state.draft_len != 0) state.draft_len = 0 else state.settings = .{};
         },
         .exit => effects.add(.exit),
-        .end_of_input => if (state.draft_len == 0 and !state.starting) effects.add(.exit),
+        .end_of_input => if (state.draft_len == 0 and !state.starting()) effects.add(.exit),
         .stop => {
             const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session to stop.", .{});
             const rule = rules.get(shownKind(state, row));
@@ -985,10 +1012,7 @@ fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
     const row = state.find(ref) orelse return;
     const rule = rules.get(shownKind(state, row));
     if (!rule.stoppable) return state.say(.quiet, "Nothing to stop: {s} is {s}.", .{ &ref, rule.word });
-    if (state.stop_count == max_stops) return state.say(.attention, "! Wait for earlier stops to finish.", .{});
-    state.stops[state.stop_count] = ref;
-    state.stop_count += 1;
-    effects.add(.{ .stop = ref });
+    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
 /// The kind a row shows: `stopping` while its stop awaits a result.
@@ -997,14 +1021,14 @@ fn shownKind(state: *const State, row: *const Row) Kind {
 }
 
 fn insert(state: *State, text: []const u8) void {
-    if (state.starting) return;
+    if (state.starting()) return;
     if (text.len > max_draft_bytes - state.draft_len) return state.say(.attention, "! The composer holds at most 64 KiB.", .{});
     @memcpy(state.draft[state.draft_len..][0..text.len], text);
     state.draft_len += text.len;
 }
 
 fn enter(state: *State, effects: *Effects) void {
-    if (state.starting) return;
+    if (state.starting()) return;
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
     const text = state.draftText();
@@ -1015,7 +1039,7 @@ fn enter(state: *State, effects: *Effects) void {
     }
     // As in a conversation, `//` starts text with one slash.
     if (text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
-        state.starting = true;
+        if (!state.request(.start, null)) return;
         return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text } });
     }
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
@@ -1362,7 +1386,7 @@ pub fn render(gpa: Allocator, state: *const State, width: u16, height: u16, caps
         // The caret ends the draft, the composer's last span.
         const spans = lines[height - 2];
         const column = if (state.draft_len == 0 or spans.len == 0) 3 else spans[spans.len - 1].column + spans[spans.len - 1].cells;
-        if (!state.starting) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
+        if (!state.starting()) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
     }
     return screen;
 }
@@ -1644,7 +1668,7 @@ fn composer(painter: *Painter, state: *const State) error{OutOfMemory}![]const S
     if (state.draft_len == 0) {
         _ = try painter.put(3, "describe a task for a new Session", painter.width -| 4, .{ .colour = .quiet });
     } else {
-        _ = try painter.putTail(3, state.draftText(), painter.width -| 4, .{ .colour = if (state.starting) .quiet else .normal });
+        _ = try painter.putTail(3, state.draftText(), painter.width -| 4, .{ .colour = if (state.starting()) .quiet else .normal });
     }
     return painter.finish();
 }
@@ -1658,7 +1682,7 @@ fn hints(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.notice) |*notice| {
         _ = try painter.put(1, notice.text(), room, .{ .colour = notice.colour });
-    } else if (state.starting) {
+    } else if (state.starting()) {
         _ = try painter.put(1, "Starting a Session", room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
         var text: std.Io.Writer.Allocating = .init(painter.arena);
@@ -2092,7 +2116,6 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
         try expectEffects(&.{}, try press(&state, .ctrl_x));
         try expectNotice(&state, "Nothing to stop: k7m2qx is stopping.");
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .stopped } }));
-        try std.testing.expectEqual(@as(usize, 0), state.stop_count);
         try std.testing.expectEqual(@as(u64, 0), state.next_list_ms);
     }
 }
@@ -2106,7 +2129,6 @@ test "a cancelled stop prompt sends nothing" {
     try expectEffects(&.{}, try press(&state, .escape));
     try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     try expectSelected(&state, "k7m2qx");
-    try std.testing.expectEqual(@as(usize, 0), state.stop_count);
     // Another key cancels, then acts.
     try expectEffects(&.{}, try press(&state, .ctrl_x));
     try expectEffects(&.{}, try press(&state, .down));
@@ -2125,20 +2147,33 @@ test "a cancelled stop prompt sends nothing" {
     try expectNotice(&state, "! Could not stop k7m2qx: session_not_found");
 }
 
-test "an unconfirmed stop names the request that recovers it, here and on departure" {
+test "unconfirmed stops keep their handles until departure; a full ledger refuses another" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectSelected(&state, "k7m2qx");
+    const handles = comptime handles: {
+        var handles: [8][]const u8 = undefined;
+        for (&handles, 0..) |*handle, n| handle.* = std.fmt.comptimePrint("stop-handle-{d}", .{n});
+        break :handles handles;
+    };
+    inline for (handles) |handle| {
+        try expectEffects(&.{}, try press(&state, .ctrl_x));
+        try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .ctrl_x));
+        try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .unconfirmed = handle } } }));
+        try expectNotice(&state, "! Unconfirmed stop of k7m2qx: rui request recover " ++ handle);
+    }
     try expectEffects(&.{}, try press(&state, .ctrl_x));
-    try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .ctrl_x));
-    const handle = "5c1d9e2f-3a4b-4c6d-8e7f-9a0b1c2d3e4f";
-    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .unconfirmed = handle } } }));
-    try std.testing.expectEqual(@as(usize, 0), state.stop_count);
-    try expectNotice(&state, "! Unconfirmed stop of k7m2qx: rui request recover " ++ handle);
+    try expectEffects(&.{}, try press(&state, .ctrl_x));
+    try expectNotice(&state, "! Wait for earlier requests, or leave to recover unconfirmed ones.");
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try writeDeparture(&state, &departure.writer);
-    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not confirmed; use rui request recover " ++ handle ++ ". Do not stop it again.\n", departure.written());
+    const expected = comptime expected: {
+        var text: []const u8 = "";
+        for (handles) |handle| text = text ++ "rui: Stopping k7m2qx was not confirmed; use rui request recover " ++ handle ++ ". Do not stop it again.\n";
+        break :expected text;
+    };
+    try std.testing.expectEqualStrings(expected, departure.written());
 }
 
 test "enter on a row opens it" {
@@ -2178,14 +2213,14 @@ test "the composer starts a Session with its text and opens it" {
     try expectEffects(&.{}, try press(&state, .backspace));
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "Fix the flaky resize test" } }}, try press(&state, .enter));
-    try std.testing.expect(state.starting);
+    try std.testing.expect(state.starting());
     // The composer stays locked until the result: the effect borrows it.
     try typeText(&state, "more");
     try expectEffects(&.{}, try press(&state, .enter));
     try expectEffects(&.{}, try press(&state, .escape));
     try std.testing.expectEqualStrings("Fix the flaky resize test", state.draftText());
     try expectEffects(&.{.{ .open = "z9y8x7".* }}, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
-    try std.testing.expect(!state.starting);
+    try std.testing.expect(!state.starting());
     try std.testing.expectEqual(@as(usize, 0), state.draft_len);
     try expectSelected(&state, "z9y8x7");
     // The next tick lists at once, so the new row is there on return.
@@ -2197,7 +2232,7 @@ test "the composer starts a Session with its text and opens it" {
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
     try expectNotice(&state, "! Could not start a Session: model_capability_unavailable");
     try std.testing.expectEqualStrings("Try again", state.draftText());
-    try std.testing.expect(!state.starting);
+    try std.testing.expect(!state.starting());
 }
 
 test "the composer starts text with one slash from //, as a conversation does" {
@@ -2322,7 +2357,7 @@ test "an unconfirmed start clears the composer and names the request that recove
     _ = try press(&state, .enter);
     const handle = "0f8e2c1a-7b3d-4e5f-9a6b-1c2d3e4f5a6b";
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
-    try std.testing.expect(!state.starting);
+    try std.testing.expect(!state.starting());
     // Another Enter would be a second Session, so the text is not kept.
     try std.testing.expectEqual(@as(usize, 0), state.draft_len);
     try std.testing.expect(state.settings.empty());
@@ -2330,8 +2365,14 @@ test "an unconfirmed start clears the composer and names the request that recove
     try expectScreenLine(&state, 23, " ! Unconfirmed: rui request recover " ++ handle);
     // The next tick lists at once, so a start that did land shows.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
+    // A second unconfirmed start keeps the first one's handle.
+    const second = "9a0b1c2d-3e4f-4a6b-8c7d-0f8e2c1a7b3d";
+    try typeText(&state, "Fix it again");
+    _ = try press(&state, .enter);
+    try expectEffects(&.{}, try step(&state, .{ .start = .{ .unconfirmed = second } }));
     try writeDeparture(&state, &departure.writer);
-    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n", departure.written());
+    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover " ++ handle ++ ". Do not start it again.\n" ++
+        "rui: A new Session's start was not confirmed; use rui request recover " ++ second ++ ". Do not start it again.\n", departure.written());
 }
 
 test "leaving with a start in flight says what became of it" {
@@ -2347,8 +2388,9 @@ test "leaving with a start in flight says what became of it" {
         defer state.deinit();
         try typeText(&state, "Fix the flaky resize test");
         _ = try press(&state, .enter);
-        try std.testing.expect(state.starting);
-        try expectEffects(&.{}, try step(&state, .{ .depart = case.result }));
+        try expectEffects(&.{}, try step(&state, .leave));
+        // An accepted start no longer opens: the terminal is gone.
+        if (case.result) |result| try expectEffects(&.{}, try step(&state, .{ .start = result }));
         var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer departure.deinit();
         try writeDeparture(&state, &departure.writer);
@@ -2357,7 +2399,7 @@ test "leaving with a start in flight says what became of it" {
     // With no start in flight, leaving says nothing of one.
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{}, try step(&state, .{ .depart = null }));
+    try expectEffects(&.{}, try step(&state, .leave));
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try writeDeparture(&state, &departure.writer);

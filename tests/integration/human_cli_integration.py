@@ -5892,7 +5892,7 @@ def main(selected="all"):
             output, errors = terminal_exit(blocked, master, timeout=20)
             assert blocked.returncode == 0 and errors == b"", (output, errors)
             assert b"Detached. Host work continues." in output and b"request: " not in output, output
-            assert termios.tcgetattr(slave) == original_mode
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
         finally:

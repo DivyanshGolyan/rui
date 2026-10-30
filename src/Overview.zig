@@ -104,12 +104,12 @@ pub const Reply = struct {
         return reply;
     }
 
-    /// From a send of the captured request `handle`. Only a send that may
-    /// have reached the Host, or a reply that could not be read, leaves the
-    /// outcome unknown.
+    /// From a send of the captured request `handle`. Only the Host's answer
+    /// settles it: a failed send, or a reply that could not be read, leaves
+    /// the saved request to recover.
     fn of(sent: anytype, handle: []const u8) Reply {
         const reply = switch (sent) {
-            .failed => |failure| return if (failure.step != null and failure.step.?.mayHaveReachedHost()) unconfirmed(handle) else refused(@errorName(failure.err)),
+            .failed => return unconfirmed(handle),
             .done => |reply| reply,
         };
         const answer = reply.answer catch |err| {
@@ -166,9 +166,9 @@ const Job = union(enum) {
     stop: view.Reference,
 };
 
-/// One host read and list page, at most one first-line batch, one start and
-/// the stops the core allows can wait at once.
-const max_jobs = 4 + view.max_stops;
+/// One host read and list page, at most one first-line batch, and the
+/// requests the core's ledger allows can wait at once.
+const max_jobs = 3 + view.max_requests;
 
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
 
@@ -624,49 +624,44 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         left.ended = err;
         return left;
     };
-    const ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted);
+    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted);
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
-    if (returned) {
-        frontend.close();
+    if (returned) ended = frontend.back() orelse {
         self.init.gpa.destroy(frontend);
         for (opened) |file| file.close(io);
         return null;
-    }
+    };
     return .{ .session = session, .frontend = frontend, .files = files, .ended = ended };
 }
 
-/// Every way out: restores the terminal, joins the worker, then writes the
-/// guidance and the Detached notice once.
+/// Every way out: restores the terminal, answers the worker's job through
+/// `complete` as the loop does, then writes the guidance and the Detached
+/// notice once. The departure is whole before the restore result is read.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
-    // The core records what became of a start or stop the worker ran.
-    var start: ?view.StartResult = null;
-    if (self.worker.thread != null) {
-        self.worker.join() catch {};
-        switch (self.job) {
-            .start => start = self.reply.start(),
-            .stop => |reference| _ = view.step(&self.state, .{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }) catch {},
-            else => {},
-        }
-    }
-    _ = view.step(&self.state, .{ .depart = start }) catch {};
-    var guidance: std.Io.Writer.Allocating = .init(self.init.gpa);
-    defer guidance.deinit();
-    view.writeDeparture(&self.state, &guidance.writer) catch {};
-    const ending = ended catch |err| {
-        _ = stderr.write(guidance.written());
+    const answered: anyerror!?Ending = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
+    // A ledger entry prints well under 512 bytes.
+    var bytes: [view.max_requests * 512]u8 = undefined;
+    var guidance = std.Io.Writer.fixed(&bytes);
+    view.writeDeparture(&self.state, &guidance) catch unreachable;
+    var ending = ended catch |err| {
+        _ = stderr.write(guidance.buffered());
         return err;
     };
     switch (ending) {
         .overview => {
-            _ = stderr.write(guidance.written());
+            _ = stderr.write(guidance.buffered());
             try restored;
+            _ = try answered;
             try self.terminal.detached(self.options.store, null, null);
         },
-        .conversation => |left| return self.leave(left, restored, guidance.written()),
+        .conversation => |*left| {
+            if (answered) |_| {} else |err| left.ended = err;
+            return self.leave(left.*, restored, guidance.buffered());
+        },
     }
 }
 
@@ -1043,7 +1038,7 @@ test "a signal wakes the waiting loop and ends it" {
     try std.testing.expect(Signals.cancellation.stopped.load(.acquire));
 }
 
-test "a reply is unconfirmed only when the request may have reached the Host" {
+test "a captured request is unconfirmed until the Host answers it" {
     const Sent = client.Stepped(client.MutationSendError, protocol_reply.MutationReply);
     var context: protocol_reply.MutationIdentity = .{ .kind = .message };
     context.session.set("n3w5es") catch unreachable;
@@ -1059,9 +1054,9 @@ test "a reply is unconfirmed only when the request may have reached the Host" {
     try std.testing.expectEqualStrings("model_unsupported", Reply.of(rejected, "h1").start().failed);
     const unread: Sent = .{ .done = .{ .status = 200, .context = context, .target = target, .answer = error.InvalidResponse } };
     try std.testing.expectEqualStrings("h1", Reply.of(unread, "h1").start().unconfirmed);
-    // Refused before upload: nothing reached the Host, so the text can go again.
-    const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.Cancelled } };
-    try std.testing.expectEqualStrings("Cancelled", Reply.of(unsent, "h1").start().failed);
+    // Even a send that never connected leaves a saved request to recover.
+    const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.FileNotFound } };
+    try std.testing.expectEqualStrings("h1", Reply.of(unsent, "h1").start().unconfirmed);
     const uploaded: Sent = .{ .failed = .{ .step = .upload, .err = error.Cancelled } };
     try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").start().unconfirmed);
     try std.testing.expectEqualStrings("h1", Reply.of(uploaded, "h1").stop().unconfirmed);
@@ -1178,6 +1173,40 @@ test "leaving while a start is queued or running says what became of it" {
         try std.testing.expectEqualStrings("rui: Session start accepted: n3w5es.\nMessage request: start-handle (rui request inspect start-handle)\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
     }
+}
+
+test "a stop captured and then not sent keeps its handle, here and on departure" {
+    var ops = fake_operations;
+    ops.stop = struct {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, reply: *Reply) void {
+            // The Host stopped: the saved request never connected.
+            const Sent = client.Stepped(client.MutationSendError, protocol_reply.MutationReply);
+            reply.* = .of(Sent{ .failed = .{ .step = .connect, .err = error.FileNotFound } }, "stop-handle");
+        }
+    }.stop;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n", try finishedGuidance(rig, &buffer));
+}
+
+test "leaving with a stop still queued says it was not sent" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
+    try std.testing.expect((try rig.press("\x1b[H\x18\x18\x03")).? == .overview);
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not sent; stop it again from the overview.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
 test "terminal keys reach the core as overview keys, and pasted line ends as text" {
