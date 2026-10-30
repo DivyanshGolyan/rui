@@ -1159,8 +1159,8 @@ def overview_cases():
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # An empty Store shows the composer and a hint.
-        empty = overview_frame(master, lambda frame: "No Sessions yet. Describe a task below to start one." in frame)
-        assert "describe a task for a new Session" in empty and not records.exists(), empty
+        empty = overview_frame(master, lambda frame: "No Sessions yet. Type a task below." in frame)
+        assert "Type a task to start a Session" in empty and not records.exists(), empty
         held = overview_frame(master, lambda frame: "--permission-mode ask" in frame,
             keys=b'/configure --permission-mode ask --label "lane four"\n')
         assert "start settings:" in held, held
@@ -1181,7 +1181,7 @@ def overview_cases():
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
-        assert "Your conversations" in listed, listed
+        assert "Yours" in listed, listed
         # Enter opens the selected Session; Esc returns.
         os.write(master, b"\n")
         read_terminal(master, "Flaky test fixed.", composer=True)

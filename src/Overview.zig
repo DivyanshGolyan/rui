@@ -45,9 +45,6 @@ pub const Options = struct {
     open: ?view.Reference = null,
 };
 
-/// An accepted start: the Session it made and its request's handle.
-pub const Started = struct { session: view.Reference, handle: protocol.Bounded(protocol.max_key_bytes) };
-
 /// What the CLI lends a conversation: its scratch files and slash commands.
 pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
@@ -244,8 +241,9 @@ frame: std.ArrayList(u8) = .empty,
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
-/// The last accepted start, for guidance if its conversation fails.
-started: ?Started = null,
+/// The Session the last accepted start made, for guidance if its
+/// conversation fails.
+started: ?view.Reference = null,
 /// The screen holds no Session's state, so a conversation may use it as is.
 screen_fresh: bool = true,
 /// The screen is initialized, so `run` disposes of it.
@@ -291,17 +289,16 @@ fn failed(self: *const Self, err: anyerror, session: ?view.Reference) anyerror {
 
 /// Prints guidance for a failure and returns it: how to fix TMPDIR, and the
 /// Session to resume when one was being opened.
-pub fn printFailure(err: anyerror, store: []const u8, session: ?view.Reference, started: ?Started) anyerror {
+pub fn printFailure(err: anyerror, store: []const u8, session: ?view.Reference, started: ?view.Reference) anyerror {
     // Four bytes per escaped selector byte, plus labels and hex syntax.
-    var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 384]u8 = undefined;
+    var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 384]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
     write: {
         if (err == error.InvalidTemporaryDirectory)
             notice.writeAll(if (session == null) "rui: Fix or unset TMPDIR before opening the overview.\n" else "rui: Fix or unset TMPDIR before resuming.\n") catch break :write;
         const reference = session orelse break :write;
-        if (started) |*start| if (std.mem.eql(u8, &start.session, &reference)) {
-            // Admission only: the Message may not have run yet.
-            notice.print("\nrui: Session start accepted.\nMessage request: {s} (rui request inspect {s})\n", .{ start.handle.slice(), start.handle.slice() }) catch break :write;
+        if (started) |start| if (std.mem.eql(u8, &start, &reference)) {
+            notice.print("\nrui: Started {s}.\n", .{&reference}) catch break :write;
         };
         notice.writeAll("\nResume: rui session resume --store ") catch break :write;
         TerminalText.writeShellWord(&notice, store) catch break :write;
@@ -533,7 +530,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             if (try self.event(.{ .first_line = result })) |next| return next;
         },
         .start => {
-            if (self.reply.outcome == .accepted) self.started = .{ .session = self.reply.session, .handle = self.reply.handle };
+            if (self.reply.outcome == .accepted) self.started = self.reply.session;
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
@@ -1123,7 +1120,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("lane four", start.label.?.slice());
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
-    try std.testing.expectEqualStrings("start-handle", overview.started.?.handle.slice());
+    try std.testing.expectEqualStrings("n3w5es", &overview.started.?);
 
     // Ctrl-X twice stops the selected Session.
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
@@ -1408,8 +1405,8 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
-    const guidance = "rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n";
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
+    const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try view.writeDeparture(&rig.overview.state, &departure.writer);
@@ -1421,7 +1418,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
     // A stop still running as the overview ends is named the same way.
     const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer running.close();
@@ -1472,7 +1469,7 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expect(try rig.press("hello\n") == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 test "a conversation that fails to open still names the unconfirmed start on departure" {
@@ -1511,7 +1508,7 @@ test "leaving while a start is queued or running says what became of it" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect((try rig.press("race start\n\x03")).? == .overview);
-        try std.testing.expectEqualStrings("rui: The new Session was not started (cancelled); start it again from the overview.\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: The new Session did not start.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
     }
     // The start ran as the overview ended: the Host accepted it.
@@ -1520,7 +1517,7 @@ test "leaving while a start is queued or running says what became of it" {
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try rig.overview.dispatch();
-        try std.testing.expectEqualStrings("rui: Session start accepted: n3w5es.\nMessage request: start-handle (rui request inspect start-handle)\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: Started n3w5es.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
     }
 }
@@ -1541,9 +1538,9 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Unconfirmed stop of k7m2qx: rui request recover stop-handle", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not confirmed; use rui request recover stop-handle. Do not stop it again.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 test "leaving with a stop still queued says it was not sent" {
@@ -1555,7 +1552,7 @@ test "leaving with a stop still queued says it was not sent" {
     // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
     try std.testing.expect((try rig.press("\x1b[H\x18\x18\x03")).? == .overview);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not sent; stop it again from the overview.\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: k7m2qx was not stopped.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
@@ -1632,7 +1629,7 @@ test "a draft past the editor's capacity starts nothing" {
     defer rig.close();
     const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~\r";
     try expectStarted(rig, pasted, null);
-    try std.testing.expectEqualStrings("! The composer holds at most 64 KiB.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! That's too long to send.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "next\r", "next");
 }
 
@@ -1658,7 +1655,7 @@ test "a start holds its draft until the answer; the editor takes nothing meanwhi
     try std.testing.expect(try rig.overview.draw(0) == null);
     var buffer: [64 * 1024]u8 = undefined;
     const frame = rig.drawn(&buffer);
-    try std.testing.expect(std.mem.indexOf(u8, frame, "describe a task for a new Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Type a task to start a Session") != null);
     try std.testing.expect(std.mem.indexOf(u8, frame, "hello") == null);
     try expectStarted(rig, "next\r", "next");
 }
