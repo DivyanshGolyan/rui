@@ -102,7 +102,6 @@ pub const EventData = struct {
     pub fn deinit(self: *EventData) void {
         self.window.file.close(self.window.io);
         self.budget.release(self.charged);
-        self.* = undefined;
     }
 };
 

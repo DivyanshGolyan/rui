@@ -1293,6 +1293,20 @@ const CurrentConfiguration = struct {
     created_at: u64 = 0,
 };
 
+/// The Session columns turn work, settlement and page cursors read, without
+/// the 4 KB workspace a whole CurrentConfiguration carries.
+const SessionFacts = struct {
+    provider: protocol.Provider,
+    model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    permission_mode: u8,
+    revision: u64,
+    next_position: u64,
+    compaction_trigger: ?u64 = null,
+    output_reservation: ?u64 = null,
+    reasoning_effort: ?protocol.ReasoningEffort = null,
+    created_at: u64,
+};
+
 const MessageProjection = struct {
     admission_id: u64,
     command_key: protocol.Bounded(128),
@@ -1376,26 +1390,28 @@ fn configurationBeforeWorkspace(
 
 /// The effort a new Operation freezes: the Session override, otherwise the
 /// exact binding's catalog default, otherwise none.
-fn effectiveReasoningEffort(current: *const CurrentConfiguration) ?protocol.ReasoningEffort {
+fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
     return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
 }
 
+/// `next` holds the current configuration's values, or the defaults when
+/// there is none, and may be `current` itself: each field of `current` is
+/// read before `next`'s same field is written. A requested workspace is
+/// canonicalized by the caller, which answers `workspace_matches` (whether
+/// it is the current Session's) and has already written a created
+/// Session's into `next`.
 fn planConfigurationUpdate(
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
-    canonical_workspace: ?*const protocol.Bounded(protocol.max_workspace_bytes),
+    workspace_matches: ?bool,
     next: *CurrentConfiguration,
 ) ConfigurationUpdatePlan {
     const created = current == null;
     if (requested.workspace.state == .value) {
-        const workspace = canonical_workspace orelse unreachable;
-        if (current) |existing| {
-            if (!existing.workspace.eql(workspace.slice())) {
-                return .{ .rejected = .workspace_is_immutable };
-            }
-        }
+        const matches = workspace_matches orelse unreachable;
+        if (current != null and !matches) return .{ .rejected = .workspace_is_immutable };
     } else {
-        std.debug.assert(canonical_workspace == null);
+        std.debug.assert(workspace_matches == null);
     }
     if (current) |existing| {
         if (existing.revision == std.math.maxInt(i64)) {
@@ -1403,7 +1419,6 @@ fn planConfigurationUpdate(
         }
     }
 
-    if (canonical_workspace) |workspace| next.workspace = workspace.*;
     if (requested.provider.state == .value) next.provider = std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()).?;
     if (requested.model.state == .value) next.model = requested.model.value;
     if (requested.tools.state == .value) {
@@ -1839,9 +1854,11 @@ pub const Store = struct {
         return self.openWithOptions(io, database_path, selector, .{});
     }
 
-    /// Test fixture for a historical producing binding unavailable through
-    /// today's immutable Session configuration admission. Requires a newer
-    /// current revision, leaving that revision and its frozen inputs intact.
+    fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
+        var current: CurrentConfiguration = .{};
+        return if (try self.readSession(session_ref, &current)) current else null;
+    }
+
     pub fn inspectSessionForTesting(self: *Store, session_ref: []const u8) !SessionObservation {
         var observation: SessionObservation = undefined;
         try self.inspectSession(session_ref, &observation);
@@ -1866,6 +1883,9 @@ pub const Store = struct {
         return page;
     }
 
+    /// Test fixture for a historical producing binding unavailable through
+    /// today's immutable Session configuration admission. Requires a newer
+    /// current revision, leaving that revision and its frozen inputs intact.
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
         var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
@@ -2191,34 +2211,38 @@ pub const Store = struct {
             return .{ .rejected = .invalid_output_schema };
         }
 
-        const current = try self.readSession(session);
-        if (!creating and current == null) {
+        // The current configuration is read into `next`, which the plan
+        // then updates in place: one 4.6 KB value, not a copy of it.
+        var next: CurrentConfiguration = .{};
+        const found = try self.readSession(session, &next);
+        if (!creating and !found) {
             return .{ .rejected = .unknown_session };
         }
-        const current_configuration: ?*const CurrentConfiguration = if (current) |*value| value else null;
+        const current_configuration: ?*const CurrentConfiguration = if (found) &next else null;
         if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
             return .{ .rejected = rejection };
         }
 
-        var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        const canonical_workspace_ref: ?*const protocol.Bounded(protocol.max_workspace_bytes) =
-            if (configuration.workspace.state == .value) canonical: {
-                validateWorkspace(
-                    self.io,
-                    configuration.workspace.value.slice(),
-                    &canonical_workspace,
-                ) catch {
+        // A created Session's canonical workspace lands in `next` itself;
+        // an existing one's is only compared, in sameWorkspace's own frame.
+        const workspace_matches: ?bool = if (configuration.workspace.state == .value) matches: {
+            const supplied = configuration.workspace.value.slice();
+            if (found) {
+                break :matches sameWorkspace(self.io, supplied, next.workspace.slice()) catch {
                     return .{ .rejected = .invalid_workspace };
                 };
-                break :canonical &canonical_workspace;
-            } else null;
+            }
+            validateWorkspace(self.io, supplied, &next.workspace) catch {
+                return .{ .rejected = .invalid_workspace };
+            };
+            break :matches true;
+        } else null;
 
-        const created = current_configuration == null;
-        var next = if (current_configuration) |existing| existing.* else CurrentConfiguration{};
+        const created = !found;
         const content_actions = switch (planConfigurationUpdate(
             current_configuration,
             configuration,
-            canonical_workspace_ref,
+            workspace_matches,
             &next,
         )) {
             .rejected => |rejection| return .{ .rejected = rejection },
@@ -2974,7 +2998,7 @@ pub const Store = struct {
     /// A pending Message's progress is its Session's work: its own active
     /// Turn, or the work ahead of it in the queue.
     fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
-        const session = (try self.readSession(session_ref)) orelse return error.CorruptStore;
+        const session = (try self.readSessionFacts(session_ref, null)) orelse return error.CorruptStore;
         const work = (try self.readWorkLocked(session_ref, session.created_at, try readUnixMilliseconds(self.io))).work;
         if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
         return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
@@ -3021,11 +3045,11 @@ pub const Store = struct {
     }
 
     fn inspectSessionLocked(self: *Store, session_ref: []const u8, observation: *SessionObservation) !void {
-        const maybe_current = try self.readSession(session_ref);
-        const current = maybe_current orelse {
+        var current: CurrentConfiguration = .{};
+        if (!try self.readSession(session_ref, &current)) {
             observation.* = .{};
             return;
-        };
+        }
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         observation.* = .{
             .found = true,
@@ -3361,7 +3385,8 @@ pub const Store = struct {
     }
 
     fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
-        const session = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
+        page.* = .{ .end = 0, .direction = request.direction };
+        const session = (try self.readSessionFacts(request.session.slice(), &page.work.workspace)) orelse return error.SessionNotFound;
         const end = request.end orelse session.next_position - 1;
         if (end >= session.next_position or request.position > end) return error.InvalidCursor;
         try self.validateActivitySequence(request.session.slice());
@@ -3371,7 +3396,7 @@ pub const Store = struct {
                 else => return err,
             };
         }
-        page.* = .{ .end = end, .direction = request.direction };
+        page.end = end;
         const statement = try self.cached(activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
             "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
             "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
@@ -3406,8 +3431,8 @@ pub const Store = struct {
         // Work as of this same read, so the footer, consent and first Action
         // always describe the page they arrive with.
         const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
-        page.work = .{ .work = .fromCore(work), .revision = session.revision };
-        try page.work.workspace.set(session.workspace.slice());
+        page.work.work = .fromCore(work);
+        page.work.revision = session.revision;
     }
 
     // This projection shares the page's canonical capture, not Current's active
@@ -3925,37 +3950,52 @@ pub const Store = struct {
     fn appendSessionRows(self: *Store, references: []const []const u8, capture: *SessionReportCapture) !void {
         const now_ms = try readUnixMilliseconds(self.io);
         try capture.appendShape(protocol.session_list_reply.head, .{});
+        var row: protocol.SessionRow = .{};
         for (references, 0..) |reference, index| {
             if (index != 0) try capture.append(",");
-            const row = try self.readSessionRowLocked(reference, now_ms);
+            try self.readSessionRowLocked(reference, now_ms, &row);
             try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow }}, .{&row});
         }
     }
 
     /// One list row: the Session's settings, then a fixed number of seeks
     /// into its own indexed rows, none of which grows with its history.
-    fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64) !protocol.SessionRow {
-        const current = try self.readSession(session_ref) orelse return error.CorruptStore;
-        var row: protocol.SessionRow = .{
-            .workspace = current.workspace,
-            .provider = current.provider,
-            .model = current.model,
-            .bash = current.tools_mask & tool_catalog.toolBit(.bash) != 0,
-            .permission_mode = switch (current.permission_mode) {
+    fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, row: *protocol.SessionRow) !void {
+        row.* = .{};
+        {
+            // The settings land straight in the row: no configuration copy.
+            const statement = try self.cached("SELECT workspace,provider,model,tools_mask,permission_mode,label,created_at,revision,next_position FROM session WHERE session_ref=?1");
+            defer resetCached(statement);
+            try bindText(statement, 1, session_ref);
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_ROW => {},
+                c.SQLITE_DONE => return error.CorruptStore,
+                else => return error.SessionReadFailed,
+            }
+            try readText(statement, 0, &row.workspace);
+            row.provider = try readProvider(statement, 1);
+            try readText(statement, 2, &row.model);
+            const tools = c.sqlite3_column_int(statement, 3);
+            if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
+            row.bash = @as(u8, @intCast(tools)) & tool_catalog.toolBit(.bash) != 0;
+            row.permission_mode = switch (c.sqlite3_column_int(statement, 4)) {
                 0 => .ask,
                 1 => .bypass,
                 else => return error.CorruptStore,
-            },
-            .label = current.label,
-            .created_at = current.created_at,
-            .revision = current.revision,
-            .end = current.next_position - 1,
-            .first_message = try self.readFirstMessageLocked(session_ref),
-            .work = .fromCore((try self.readWorkLocked(session_ref, current.created_at, now_ms)).work),
-            .peers = try self.readPeerFactsLocked(session_ref),
-        };
+            };
+            row.label = try readNullableLabel(statement, 5);
+            row.created_at = @intCast(try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore);
+            const revision = c.sqlite3_column_int64(statement, 7);
+            if (revision <= 0) return error.CorruptStore;
+            row.revision = @intCast(revision);
+            const next_position = c.sqlite3_column_int64(statement, 8);
+            if (next_position <= 0) return error.CorruptStore;
+            row.end = @intCast(next_position - 1);
+        }
+        row.first_message = try self.readFirstMessageLocked(session_ref);
+        row.work = .fromCore((try self.readWorkLocked(session_ref, row.created_at, now_ms)).work);
+        row.peers = try self.readPeerFactsLocked(session_ref);
         try row.reference.set(session_ref);
-        return row;
     }
 
     /// One seek: the latest Message with no Session sender.
@@ -4016,14 +4056,15 @@ pub const Store = struct {
         execution: SessionReportExecution,
         capture: *SessionReportCapture,
     ) !void {
-        const maybe_current = try self.readSession(session_ref);
+        var current: CurrentConfiguration = .{};
+        const found = try self.readSession(session_ref, &current);
         try capture.append("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"");
         try capture.append(@tagName(profile));
         try capture.append("\",\"session\":");
-        const current = maybe_current orelse {
+        if (!found) {
             try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
             return;
-        };
+        }
         const instructions = try self.readContentMetadata(current.instructions_id orelse return error.CorruptStore);
         const output_schema = if (current.output_schema_id) |content_id|
             try self.readContentMetadata(content_id)
@@ -5508,7 +5549,7 @@ pub const Store = struct {
         try expectDone(update);
     }
 
-    fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
+    fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const SessionFacts, policy: model_capability.CompactionPolicy) !ModelOperationKind {
         const last = try self.cached("SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
             "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
             "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
@@ -5670,7 +5711,7 @@ pub const Store = struct {
         // row read above is still the selection inside the write transaction.
         std.debug.assert(c.sqlite3_get_autocommit(self.database) != 0);
         try self.execute("BEGIN IMMEDIATE");
-        const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const current = try self.readSessionFacts(session_ref.slice(), null) orelse return error.CorruptStore;
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         const purpose = try self.nextModelOperationKind(session_ref.slice(), first_admission, &current, policy);
         if (purpose == .compaction) selected = 0;
@@ -6800,7 +6841,7 @@ pub const Store = struct {
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(operation, 0, &session_ref);
         const frozen_tools = try toolSet(c.sqlite3_column_int(operation, 1));
-        const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const current = try self.readSessionFacts(session_ref.slice(), null) orelse return error.CorruptStore;
         const purpose = try self.readModelOperationKind(binding.operation_id);
         // Validate the explicit candidate before imports, projections or effects.
         var candidate_metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
@@ -7668,14 +7709,16 @@ pub const Store = struct {
         return @intCast(next_position);
     }
 
-    fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
+    /// Fills `current` and answers whether the Session exists; a missing
+    /// one leaves the defaults a creation starts from.
+    fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
+        current.* = .{};
         const statement = try self.cached("SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
-        if (step_result == c.SQLITE_DONE) return null;
+        if (step_result == c.SQLITE_DONE) return false;
         if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
-        var current: CurrentConfiguration = .{};
         try readText(statement, 0, &current.workspace);
         try readText(statement, 1, &current.model);
         current.instructions_id = (readNullablePositiveI64(statement, 2) catch return error.CorruptStore) orelse
@@ -7699,7 +7742,36 @@ pub const Store = struct {
         current.reasoning_effort = try readNullableEffort(statement, 11);
         current.label = try readNullableLabel(statement, 12);
         current.created_at = @intCast(try readNullablePositiveI64(statement, 13) orelse return error.CorruptStore);
-        return current;
+        return true;
+    }
+
+    /// The Session facts turn work binds to, without the workspace or label
+    /// a whole configuration carries, and optionally its workspace.
+    fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*protocol.Bounded(protocol.max_workspace_bytes)) !?SessionFacts {
+        const statement = try self.cached("SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace FROM session WHERE session_ref=?1");
+        defer resetCached(statement);
+        try bindText(statement, 1, session_ref);
+        const step_result = c.sqlite3_step(statement);
+        if (step_result == c.SQLITE_DONE) return null;
+        if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
+        var facts: SessionFacts = .{ .provider = undefined, .permission_mode = undefined, .revision = undefined, .next_position = undefined, .created_at = undefined };
+        try readText(statement, 0, &facts.model);
+        const permission = c.sqlite3_column_int(statement, 1);
+        if (permission < 0 or permission > 1) return error.CorruptStore;
+        facts.permission_mode = @intCast(permission);
+        const revision = c.sqlite3_column_int64(statement, 2);
+        if (revision <= 0) return error.CorruptStore;
+        facts.revision = @intCast(revision);
+        const next_position = c.sqlite3_column_int64(statement, 3);
+        if (next_position <= 0) return error.CorruptStore;
+        facts.next_position = @intCast(next_position);
+        facts.compaction_trigger = try readNullableTokens(statement, 4, false);
+        facts.output_reservation = try readNullableTokens(statement, 5, true);
+        facts.reasoning_effort = try readNullableEffort(statement, 6);
+        facts.created_at = @intCast(try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore);
+        facts.provider = try readProvider(statement, 8);
+        if (workspace) |destination| try readText(statement, 9, destination);
+        return facts;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
@@ -7963,14 +8035,26 @@ pub const Store = struct {
     }
 };
 
-fn validateWorkspace(io: std.Io, supplied: []const u8, destination: anytype) !void {
+/// Whether `supplied` canonicalizes to `existing`. Its canonical path
+/// buffer lives in this call's frame only, never in the configure frame
+/// that holds the whole next configuration.
+noinline fn sameWorkspace(io: std.Io, supplied: []const u8, existing: []const u8) !bool {
+    var canonical: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try validateWorkspace(io, supplied, &canonical);
+    return canonical.eql(existing);
+}
+
+/// Canonicalizes `supplied` straight into `destination`'s own bytes, with
+/// the UTF-8 check `Bounded.set` applies; no second path buffer.
+fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *protocol.Bounded(protocol.max_workspace_bytes)) !void {
     if (!std.fs.path.isAbsolute(supplied)) return error.WorkspaceMustBeAbsolute;
     if (std.mem.indexOfScalar(u8, supplied, 0) != null) return error.InvalidWorkspace;
     var directory = try std.Io.Dir.cwd().openDir(io, supplied, .{});
     defer directory.close(io);
-    var canonical: [protocol.max_workspace_bytes]u8 = undefined;
-    const length = try directory.realPath(io, &canonical);
-    try destination.set(canonical[0..length]);
+    destination.len = 0;
+    const length = try directory.realPath(io, &destination.bytes);
+    if (!std.unicode.utf8ValidateSlice(destination.bytes[0..length])) return error.InvalidUtf8;
+    destination.len = length;
 }
 
 fn verifyExternalContent(
@@ -8048,7 +8132,9 @@ const ProjectedByteSource = struct {
 
 const decodeOutputScalar = output_format.decodeScalar;
 
-fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
+/// noinline: its read buffer serves the rare schema check, not every
+/// configure frame.
+noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
     var read_buffer: [protocol.content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
@@ -8662,12 +8748,18 @@ fn expectDone(statement: *c.sqlite3_stmt) !void {
 }
 
 fn readText(statement: *c.sqlite3_stmt, index: c_int, destination: anytype) !void {
+    try destination.set(try columnText(statement, index));
+}
+
+/// The column's text as SQLite holds it, valid until the statement next
+/// steps or resets.
+fn columnText(statement: *c.sqlite3_stmt, index: c_int) ![]const u8 {
     const length = c.sqlite3_column_bytes(statement, index);
     if (length < 0) return error.CorruptStore;
-    if (length == 0) return destination.set("");
+    if (length == 0) return "";
     const pointer = c.sqlite3_column_text(statement, index) orelse return error.CorruptStore;
     const bytes: [*]const u8 = @ptrCast(pointer);
-    try destination.set(bytes[0..@intCast(length)]);
+    return bytes[0..@intCast(length)];
 }
 
 fn nextReportRow(statement: *c.sqlite3_stmt, first: *bool, capture: *SessionReportCapture, read_error: anyerror) !bool {
@@ -8679,10 +8771,13 @@ fn nextReportRow(statement: *c.sqlite3_stmt, first: *bool, capture: *SessionRepo
     return true;
 }
 
+/// Appends the column's own text, held to the bound and UTF-8 check a
+/// Bounded(capacity) read applies, without copying it into one first.
 fn appendColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
-    var value: protocol.Bounded(capacity) = .{};
-    try readText(statement, index, &value);
-    try capture.appendJsonString(value.slice());
+    const value = try columnText(statement, index);
+    if (value.len > capacity) return error.ValueTooLong;
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    try capture.appendJsonString(value);
 }
 
 fn appendNullableColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
@@ -8873,19 +8968,19 @@ test "Store allocates six character IDs atomically retries collisions and replay
     try std.testing.expect(b.created and !b.replayed);
     try std.testing.expectEqualStrings("zzzzzz", b.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    try std.testing.expectEqualStrings("model-a", (try storage.readSession(a.session.slice())).?.model.slice());
-    try std.testing.expectEqualStrings("model-b", (try storage.readSession(b.session.slice())).?.model.slice());
+    try std.testing.expectEqualStrings("model-a", (try storage.readSessionForTesting(a.session.slice())).?.model.slice());
+    try std.testing.expectEqualStrings("model-b", (try storage.readSessionForTesting(b.session.slice())).?.model.slice());
     const replay = storage.configure(&second, true, .{}).accepted;
     try std.testing.expect(replay.replayed and replay.created);
     try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    const current = (try storage.readSession(a.session.slice())).?;
+    const current = (try storage.readSessionForTesting(a.session.slice())).?;
     for ([_][]const u8{ "short", "1234567", "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
         try std.testing.expectError(error.StatementFailed, storage.insertSession(invalid, &current));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, true, .{}).rejected.code);
-    try std.testing.expect(try storage.readSession("k7m2qx") == null);
+    try std.testing.expect(try storage.readSessionForTesting("k7m2qx") == null);
     for ([_][]const u8{ "old/name", "K7m2qx", "k7m2qi", "k7\x00qx" }, 0..) |invalid, index| {
         var key: [32]u8 = undefined;
         var bad = try completeConfiguration(try std.fmt.bufPrint(&key, "invalid-id-{d}", .{index}), invalid, workspace, "model-c");
@@ -9891,7 +9986,7 @@ test "a Session creation that rolls back never reaches a since listing" {
         const access = try storage.enter(.none);
         defer access.release();
         try storage.execute("BEGIN IMMEDIATE");
-        const current = (try storage.readSession(session.slice())).?;
+        const current = (try storage.readSessionForTesting(session.slice())).?;
         try std.testing.expect(try storage.insertSession("zzzzzz", &current));
         try storage.rollbackAfterError(.{});
     }
@@ -10014,11 +10109,12 @@ test "a list row reads the same steps however long its Session's history" {
     };
     const Counter = struct {
         fn rowSteps(store: *Store, session: []const u8) !u64 {
-            _ = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
+            var row: protocol.SessionRow = .{};
+            try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io), &row);
             var counter: TestingSteps = .{};
             counter.begin(store.database);
             defer counter.end(store.database);
-            const row = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
+            try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io), &row);
             try std.testing.expect(row.work.state == .finished and row.first_message != null);
             return counter.steps;
         }
@@ -14459,16 +14555,14 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .clear => .explicit_null,
         };
 
-        var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try canonical_workspace.set(switch (case.workspace) {
-            .omitted, .same => "/canonical/workspace",
-            .different => "/different/workspace",
-        });
-        const canonical_workspace_ref: ?*const protocol.Bounded(protocol.max_workspace_bytes) =
-            if (case.workspace == .omitted) null else &canonical_workspace;
+        const workspace_matches: ?bool = switch (case.workspace) {
+            .omitted => null,
+            .same => true,
+            .different => false,
+        };
         const current: ?*const CurrentConfiguration = if (case.created) null else &existing;
         var next = if (current) |value| value.* else CurrentConfiguration{};
-        const plan = planConfigurationUpdate(current, &requested, canonical_workspace_ref, &next);
+        const plan = planConfigurationUpdate(current, &requested, workspace_matches, &next);
 
         if (case.expected_rejection) |expected| {
             std.testing.expect(plan == .rejected) catch |err| {
