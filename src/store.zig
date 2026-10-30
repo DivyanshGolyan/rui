@@ -1626,8 +1626,7 @@ pub const Store = struct {
             if (c.sqlite3_total_changes64(store.database) != self.changes) {
                 if (@import("builtin").is_test) if (store.untouchedForTesting()) |id|
                     std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
-                const generation = store.commit_generation.fetchAdd(1, .release) + 1;
-                store.changes.record(generation, &store.touched);
+                store.recordTouched(store.commit_generation.fetchAdd(1, .release) + 1);
             }
             self.trace.mark(.complete);
             store.mutex.unlock(store.io);
@@ -1663,6 +1662,48 @@ pub const Store = struct {
     /// Records that this entry point changes `session_ref`'s rows.
     fn touch(self: *Store, session_ref: []const u8) void {
         self.touched.add(session_ref);
+    }
+
+    /// Records each Session this entry point touched under its Workspace's
+    /// key. A creation that rolled back has no row and changed nothing; a
+    /// failed read forgets every change through `generation` instead.
+    fn recordTouched(self: *Store, generation: u64) void {
+        if (self.touched.everything) return self.changes.forget(generation);
+        for (self.touched.ids[0..self.touched.count]) |*id| {
+            const workspace = self.readSessionWorkspaceKey(id) catch return self.changes.forget(generation);
+            self.changes.record(generation, .{ .session = id.*, .workspace = workspace orelse continue });
+        }
+    }
+
+    /// The change ring's key for a Workspace: the rowid of its first
+    /// Session, or 0 while it has none. Workspaces are immutable and
+    /// Sessions are never deleted, so a Session's key never changes.
+    fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
+        const statement = try self.cached("SELECT rowid FROM session INDEXED BY session_workspace_list WHERE workspace=?1 ORDER BY rowid LIMIT 1");
+        defer resetCached(statement);
+        try bindText(statement, 1, workspace);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => 0,
+            c.SQLITE_ROW => @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+            else => error.SessionReadFailed,
+        };
+    }
+
+    /// The key of `session_ref`'s Workspace, or null when no such Session
+    /// exists.
+    fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
+        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+        {
+            const statement = try self.cached("SELECT workspace FROM session WHERE session_ref=?1");
+            defer resetCached(statement);
+            try bindText(statement, 1, session_ref);
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => return null,
+                c.SQLITE_ROW => try readText(statement, 0, &workspace),
+                else => return error.SessionReadFailed,
+            }
+        }
+        return try self.readWorkspaceKey(workspace.slice());
     }
 
     /// Runs a write whose `RETURNING session_ref` names each changed row's
@@ -3751,33 +3792,22 @@ pub const Store = struct {
     }
 
     /// The Sessions in scope that the hint says changed in (since, through],
-    /// in ID order, eight per page. A Session it names may be unchanged, or
-    /// outside the scope; one it omits did not change.
+    /// in ID order, eight per page: one pass over the ring in memory, then
+    /// each shown row's own read. A Session it names may be unchanged; one
+    /// it omits did not change.
     fn renderChangedSessionsLocked(self: *Store, request: protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
+        const workspace: ?u64 = if (request.workspace) |*scope| try self.readWorkspaceKey(scope.slice()) else null;
+        const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
         var references: [protocol.session_list_page_size + 1]change_ring.Id = undefined;
-        var count: usize = 0;
-        var after: ?change_ring.Id = if (request.changed) |changed| changed.after_reference else null;
-        var batch: [16]change_ring.Id = undefined;
-        scan: while (true) {
-            const ids = self.changes.changed(since, through, if (after) |*id| id else null, &batch);
-            for (ids) |*id| {
-                after = id.*;
-                // A touched creation may have rolled back.
-                const current = try self.readSession(id) orelse continue;
-                if (request.workspace) |*workspace| if (!current.workspace.eql(workspace.slice())) continue;
-                references[count] = id.*;
-                count += 1;
-                if (count == references.len) break :scan;
-            }
-            if (ids.len < batch.len) break;
-        }
+        const changed = self.changes.changed(since, through, workspace, after, &references);
         var shown: [protocol.session_list_page_size][]const u8 = undefined;
-        for (references[0..@min(count, shown.len)], 0..) |*id, index| shown[index] = id;
-        try self.appendSessionRows(shown[0..@min(count, shown.len)], capture);
+        const count = @min(changed.len, shown.len);
+        for (changed[0..count], 0..) |*id, index| shown[index] = id;
+        try self.appendSessionRows(shown[0..count], capture);
         var token: [protocol.SinceToken.max_bytes]u8 = undefined;
         const next = (protocol.SinceToken{ .instance = self.instance, .generation = through }).format(&token);
-        if (count > shown.len)
-            try capture.appendShape(protocol.session_list_reply.changed_tail, .{ protocol.ListDelta.changed, next, through, &references[shown.len - 1] })
+        if (changed.len > count)
+            try capture.appendShape(protocol.session_list_reply.changed_tail, .{ protocol.ListDelta.changed, next, through, &changed[count - 1] })
         else
             try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.changed, next });
         std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
@@ -9536,9 +9566,7 @@ test "a since listing answers only the Sessions changed since its token, or ever
     // Once the hint forgets a change after the token, the answer is the
     // ordinary traversal, and so is a changed continuation that was
     // overtaken.
-    var filler: change_ring.Touched = .{};
-    filler.add(&elsewhere);
-    for (0..change_ring.capacity) |_| storage.changes.record(storage.commit_generation.load(.acquire), &filler);
+    storage.changes.forget(storage.commit_generation.load(.acquire));
     _ = try Change.configure(&storage, &commands, &ids[0], workspace);
     for ([_]protocol.ListSessions{ since, first.next.? }) |request| {
         const restarted = try TestingListing.read(&storage, &tmp, request);
@@ -9556,6 +9584,74 @@ test "a since listing answers only the Sessions changed since its token, or ever
 
 fn testingIdLess(_: void, left: change_ring.Id, right: change_ring.Id) bool {
     return std.mem.order(u8, &left, &right) == .lt;
+}
+
+/// Counts SQLite VM steps from `begin` to `end`. Preparing a statement also
+/// steps, so measure a call only after the same call prepared its
+/// statements.
+const TestingSteps = struct {
+    steps: u64 = 0,
+
+    fn begin(self: *TestingSteps, database: *c.sqlite3) void {
+        c.sqlite3_progress_handler(database, 1, progress, self);
+    }
+
+    fn end(_: *const TestingSteps, database: *c.sqlite3) void {
+        c.sqlite3_progress_handler(database, 0, null, null);
+    }
+
+    fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingSteps = @ptrCast(@alignCast(context.?));
+        self.steps += 1;
+        return 0;
+    }
+};
+
+test "a Workspace's changed page reads only its own Sessions, however many others changed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var nested = try tmp.dir.createDirPathOpen(std.testing.io, "other", .{});
+    defer nested.close(std.testing.io);
+    var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const other = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+    const Page = struct {
+        fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
+            var command = try completeConfiguration(key, session, place, "model");
+            const configured = store.configure(&command, true, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
+        }
+
+        /// Steps for the page, which names only `watched`.
+        fn steps(store: *Store, dir: *std.testing.TmpDir, request: protocol.ListSessions, watched: *const change_ring.Id) !u64 {
+            _ = try TestingListing.read(store, dir, request);
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            const page = try TestingListing.read(store, dir, request);
+            try std.testing.expectEqual(protocol.ListDelta.changed, page.delta);
+            try page.expectReferences(&.{watched.*});
+            try std.testing.expect(page.next == null);
+            return counter.steps;
+        }
+    };
+    const watched = try Page.configure(&storage, "scoped-watched", "", workspace);
+    var request: protocol.ListSessions = .{ .workspace = .{}, .since = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) } };
+    try request.workspace.?.set(workspace);
+    _ = try Page.configure(&storage, "scoped-watched-again", &watched, workspace);
+    const alone = try Page.steps(&storage, &tmp, request, &watched);
+    // The rest of the ring: a distinct Session in another Workspace per
+    // entry, each changed after the token.
+    for (1..change_ring.capacity) |index| {
+        var key: [32]u8 = undefined;
+        _ = try Page.configure(&storage, try std.fmt.bufPrint(&key, "scoped-other-{d}", .{index}), "", other);
+    }
+    try std.testing.expect(storage.changes.covers(request.since.?.generation));
+    try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
 }
 
 test "the touch oracle names a Session whose rows changed without a touch" {
@@ -9582,7 +9678,7 @@ test "the touch oracle names a Session whose rows changed without a touch" {
     // The touched write is recorded under the generation it advanced to.
     try std.testing.expectEqual(generation + 1, storage.commit_generation.load(.acquire));
     var out: [1]change_ring.Id = undefined;
-    try std.testing.expectEqualStrings(session, &storage.changes.changed(generation, generation + 1, null, &out)[0]);
+    try std.testing.expectEqualStrings(session, &storage.changes.changed(generation, generation + 1, null, null, &out)[0]);
 }
 
 test "Session list capture and cursor storage stay page bounded as dormant Sessions grow" {
@@ -9664,20 +9760,11 @@ test "a list row reads the same steps however long its Session's history" {
         }
     };
     const Counter = struct {
-        steps: u64 = 0,
-        fn progress(context: ?*anyopaque) callconv(.c) c_int {
-            const counter: *@This() = @ptrCast(@alignCast(context.?));
-            counter.steps += 1;
-            return 0;
-        }
-
-        /// VM steps for one row read. Preparing also runs the handler, so
-        /// the statements are prepared by an unmeasured read first.
         fn rowSteps(store: *Store, session: []const u8) !u64 {
             _ = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
-            var counter: @This() = .{};
-            c.sqlite3_progress_handler(store.database, 1, progress, &counter);
-            defer c.sqlite3_progress_handler(store.database, 0, null, null);
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
             const row = try store.readSessionRowLocked(session, try readUnixMilliseconds(std.testing.io));
             try std.testing.expect(row.work.state == .finished and row.first_message != null);
             return counter.steps;
