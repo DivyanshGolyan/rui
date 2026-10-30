@@ -1479,6 +1479,33 @@ const TurnOutcome = union(enum) {
     }
 };
 
+// The frame that holds a Store keeps every byte of it resident, so a fixed
+// buffer belongs in memory of its own, like the change ring's. The production
+// Store is 688 bytes; the margin fits a few more scalars, never a buffer.
+comptime {
+    if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
+}
+
+/// The change ring in pages of its own, which the kernel faults in only as
+/// entries are recorded: an idle Host keeps none of its 88 KiB resident. Not
+/// `Allocator.create`, whose ReleaseSafe 0xAA fill would write every page now.
+fn createRing() error{OutOfMemory}!*change_ring.Ring {
+    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(change_ring.Ring), .of(change_ring.Ring), @returnAddress()) orelse return error.OutOfMemory;
+    const ring: *change_ring.Ring = @ptrCast(@alignCast(bytes));
+    // Every scalar takes Ring's own default; the columns stay unwritten, since
+    // only entries below `len` are read.
+    const info = @typeInfo(change_ring.Ring).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
+        if (@typeInfo(Field) == .array) continue;
+        @field(ring, name) = attrs.defaultValue(Field) orelse @compileError("Ring." ++ name ++ " needs a default");
+    }
+    return ring;
+}
+
+fn destroyRing(ring: *change_ring.Ring) void {
+    std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(ring))[0..@sizeOf(change_ring.Ring)], .of(change_ring.Ring), @returnAddress());
+}
+
 pub const Store = struct {
     io: std.Io,
     database: *c.sqlite3,
@@ -1494,8 +1521,9 @@ pub const Store = struct {
     /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
     /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, guarded by the mutex.
-    changes: change_ring.Ring = .{},
+    /// `since` hint, guarded by the mutex. Owned: `openWithOptions` maps it
+    /// and `close` unmaps it.
+    changes: *change_ring.Ring,
     /// This opening's identity: a `since` token from any other opening
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
@@ -1862,7 +1890,9 @@ pub const Store = struct {
 
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
-        var store: Store = .{ .io = io, .database = database.?, .selector = stored_selector };
+        const changes = try createRing();
+        errdefer destroyRing(changes);
+        var store: Store = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
         // Tells this opening's `since` tokens from another's. It grants
         // nothing, so the process CSPRNG serves, and Session IDs keep sole
         // use of secure draws.
@@ -1927,6 +1957,8 @@ pub const Store = struct {
         self.statements.deinit();
         const close_result = c.sqlite3_close(self.database);
         self.mutex.unlock(self.io);
+        // Freed even when SQLite keeps the handle: nothing retries a close.
+        destroyRing(self.changes);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
         _ = c.sqlite3_hard_heap_limit64(0);
         self.* = undefined;

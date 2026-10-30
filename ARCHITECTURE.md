@@ -1318,7 +1318,7 @@ The four-kind order adds fixed-size discovery policy, not per-Session workers, t
 
 #### Resident-memory invariant
 
-At fixed configured capacity and live-exchange population, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Workflows retain no resident graph, worker, socket or credit. The Session change ring is fixed-size (4,096 entries, 57,368 bytes) and independent of Session count.
+At fixed configured capacity and live-exchange population, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Workflows retain no resident graph, worker, socket or credit. The Session change ring is fixed-size (4,096 entries, 90,136 bytes) and independent of Session count.
 
 This is not a whole-process ban on allocation after startup. Library, transport and evaluator allocations remain separately bounded. User-held decoded values consume evaluator heap within its own limit.
 
@@ -1334,7 +1334,7 @@ On macOS, `rui host serve` supplies `MallocMaxMagazines=1` and `MallocSpaceEffic
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
 | History memo | At most 1 GiB of [memo](#history-memo) file bytes in the scratch directory, additional to shared scratch; one fixed-size index entry per unit of Active Capacity. |
 | Session list page | Eight rows. The worst-case row is derived at compile time from its field bounds and must fit 32 KiB; the derived page bound covers the capture. |
-| Session change ring | 4,096 (Session, commit counter) entries, 57,368 bytes, fixed at Host start. Its size is a guess until #557 measures the commit rate. Overflow degrades `since` to `full`. |
+| Session change ring | 4,096 (Session, Workspace key, commit counter) entries, 90,136 bytes, mapped at Store open and faulted in as entries are recorded, so an idle Host keeps none of it resident. Its size is a guess until #557 measures the commit rate. Overflow degrades `since` to `full`. |
 | Clients | [Demand-scaled intake and control progress](#connection-capacity-and-control-headroom), independent of execution capacity. |
 | Exchange bounds | Request line+headers 16 KiB; derive short-control request, acknowledgment and error bounds separately from supported fields and their maximum encoded sizes. Reject oversized requests before mutation. |
 | Client deadlines | [Transport inactivity](#client-transport-and-observations) and [absolute discovery/header deadlines](#connection-capacity-and-control-headroom). |
