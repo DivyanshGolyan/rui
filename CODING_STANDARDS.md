@@ -42,6 +42,17 @@ Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) when implement
 
 Before changing the build graph or enabling experimental incremental compilation for speed, measure comparable edit-rebuild cycles with `--summary all`; preserve non-incremental, empty-cache evidence where required. Consult [build-latency research](research/build-times-sources.md) for measured costs and Zig 0.16 caveats. Gate cadence remains in Verification.
 
+#### Host stacks
+
+A Host thread keeps its stack's high-water pages for its life, and ReleaseSafe probes every page of a frame on entry. On Host threads:
+
+- A value larger than 1 KiB has one address. Its owner passes `*T` and the producer fills it; it is never returned or copied by value. A big type initializes in place with `fn init(self: *T, ...)`.
+- A frame holds at most 8 KiB. Larger storage belongs to the owner of the work: the exchange's heap objects for per-request work, the engine `Workspace` for recurring engine work, and `pages.Mapped` ([os/pages.zig](src/os/pages.zig)) for rare per-call work.
+- An explicit `= undefined` in a struct literal writes 0xAA over those bytes in ReleaseSafe. Declare a field an initializer leaves unset `= undefined` in the type and leave it out of the literal.
+- Rare work with scratch of its own (a trace, a diagnostic line, an error envelope, startup) is a `noinline` function, so the scratch stays off its caller's frame.
+
+`stack-frames` enforces the frame budget ([canonical gates](VERIFICATION.md#canonical-gates)).
+
 ## Review
 
 Run one independent correctness, design and complecting review on `main` after landing, using the [product tenets](VERIFICATION.md#product-tenets-at-stage-completion). Review signoff does not gate a coherent green change; [Landing](AGENTS.md#landing) owns the required proof and handling of known failed counterexamples.
