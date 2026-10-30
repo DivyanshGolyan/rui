@@ -104,7 +104,6 @@ pub const OutputMetadataWriter = struct {
 
     pub fn sealForRead(self: *OutputMetadataWriter) !void {
         if (self.sealed) return;
-        try self.file.sync(self.io);
         if (try self.file.length(self.io) != self.charged) return error.MetadataSealFailed;
         self.sealed = true;
     }

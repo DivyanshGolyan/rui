@@ -1728,7 +1728,6 @@ const ContentCapture = struct {
     fn seal(self: *ContentCapture) !ContentField {
         if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
         try self.sink.finish();
-        self.sink.file.sync(self.options.io) catch return error.ContentSyncFailed;
         if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
         self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
         self.sink.file.close(self.options.io);

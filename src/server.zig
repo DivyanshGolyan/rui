@@ -3350,7 +3350,7 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
 
 test "blocked ingress file work leaves controls discovery and shutdown responsive" {
     const Probe = struct {
-        const Phase = enum { write, sync, cleanup };
+        const Phase = enum { write, cleanup };
         var entered = std.atomic.Value(bool).init(false);
         var released = std.atomic.Value(bool).init(false);
         var phase: Phase = .write;
@@ -3363,11 +3363,6 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
             if (phase == .write and operation == .file_write_streaming) hold();
             return std.testing.io.vtable.operate(userdata, operation);
-        }
-
-        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
-            if (phase == .sync) hold();
-            return std.testing.io.vtable.fileSync(userdata, file);
         }
 
         fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
@@ -3432,7 +3427,6 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         Probe.released.store(false, .release);
         var vtable = std.testing.io.vtable.*;
         vtable.operate = Probe.operate;
-        vtable.fileSync = Probe.sync;
         vtable.dirDeleteFile = Probe.delete;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
         var lease: platform.StoreLease = undefined;

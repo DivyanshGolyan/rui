@@ -93,7 +93,6 @@ pub const EventData = struct {
     }
 
     fn seal(self: *EventData) !void {
-        self.window.file.sync(self.window.io) catch return error.EventDataSealFailed;
         const length = self.window.file.length(self.window.io) catch return error.EventDataSealFailed;
         if (length != self.length) return error.EventDataSealFailed;
     }

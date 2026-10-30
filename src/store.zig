@@ -1071,10 +1071,6 @@ const SessionReportCapture = struct {
     fn seal(self: *SessionReportCapture) !SessionReport {
         try self.flush();
         const writer = self.writer orelse unreachable;
-        writer.sync(self.io) catch |err| {
-            self.ordinary_failure = true;
-            return err;
-        };
         if (writer.length(self.io) catch |err| {
             self.ordinary_failure = true;
             return err;
