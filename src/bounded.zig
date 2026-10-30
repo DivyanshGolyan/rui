@@ -1,6 +1,9 @@
 const std = @import("std");
 
 /// Inline UTF-8 value storage, independent of protocol and resource owners.
+/// Write an empty one as `.{ .len = 0 }`, also inside an enclosing literal:
+/// a literal that names a field leaves `bytes` unwritten, while `.{}` or a
+/// field's default value stores all `capacity` bytes in ReleaseSafe.
 pub fn Bounded(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,

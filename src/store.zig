@@ -2223,7 +2223,7 @@ pub const Store = struct {
 
         // The current configuration is read into `next`, which the plan
         // then updates in place: one 4.6 KB value, not a copy of it.
-        var next: CurrentConfiguration = .{};
+        var next: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
         const found = try self.readSession(session, &next);
         if (!creating and !found) {
             return .{ .rejected = .unknown_session };
@@ -3055,7 +3055,7 @@ pub const Store = struct {
     }
 
     fn inspectSessionLocked(self: *Store, session_ref: []const u8, observation: *SessionObservation) !void {
-        var current: CurrentConfiguration = .{};
+        var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
         if (!try self.readSession(session_ref, &current)) {
             observation.* = .{};
             return;
@@ -3402,7 +3402,7 @@ pub const Store = struct {
     }
 
     fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
-        page.* = .{ .end = 0, .direction = request.direction };
+        page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
         const session = (try self.readSessionFacts(request.session.slice(), &page.work.workspace)) orelse return error.SessionNotFound;
         const end = request.end orelse session.next_position - 1;
         if (end >= session.next_position or request.position > end) return error.InvalidCursor;
@@ -3976,7 +3976,7 @@ pub const Store = struct {
     fn appendSessionRows(self: *Store, references: []const []const u8, capture: *SessionReportCapture) !void {
         const now_ms = try readUnixMilliseconds(self.io);
         try capture.appendShape(protocol.session_list_reply.head, .{});
-        var row: protocol.SessionRow = .{};
+        var row: protocol.SessionRow = .{ .reference = .{ .len = 0 }, .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
         for (references, 0..) |reference, index| {
             if (index != 0) try capture.append(",");
             try self.readSessionRowLocked(reference, now_ms, &row);
@@ -4073,7 +4073,7 @@ pub const Store = struct {
         execution: SessionReportExecution,
         capture: *SessionReportCapture,
     ) !void {
-        var current: CurrentConfiguration = .{};
+        var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
         const found = try self.readSession(session_ref, &current);
         try capture.append("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"");
         try capture.append(@tagName(profile));
@@ -8035,7 +8035,7 @@ pub const Store = struct {
 /// buffer lives in this call's frame only, never in the configure frame
 /// that holds the whole next configuration.
 noinline fn sameWorkspace(io: std.Io, supplied: []const u8, existing: []const u8) !bool {
-    var canonical: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    var canonical: protocol.Bounded(protocol.max_workspace_bytes) = .{ .len = 0 };
     try validateWorkspace(io, supplied, &canonical);
     return canonical.eql(existing);
 }
