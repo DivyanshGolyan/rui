@@ -16,6 +16,7 @@ import time
 from control_integration import RUI, command, configure, inspect_execution, message, observe, start_host, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources, provider_connections, request
 from model_fixture import sse_tool_calls
+import host_process
 from host_process import TestHTTPServer, stop_process
 from one_reply import one_reply
 import os_semantics
@@ -240,4 +241,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

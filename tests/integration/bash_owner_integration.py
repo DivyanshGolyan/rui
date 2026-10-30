@@ -9,6 +9,7 @@ import threading
 import bash_integration as bash_fixture
 import model_fixture as fixture
 from control_integration import raw_request
+import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process
 
 
@@ -367,4 +368,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

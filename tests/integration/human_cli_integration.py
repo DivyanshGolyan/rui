@@ -20,6 +20,7 @@ import termios
 import threading
 import time
 
+import host_process
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
 
 
@@ -6704,4 +6705,5 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else "all")

@@ -17,6 +17,7 @@ import tempfile
 import threading
 
 import human_cli_integration as cli
+import host_process
 from host_process import start_ready_process, stop_process
 from saved_request_resources import sample
 import os_semantics
@@ -159,4 +160,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

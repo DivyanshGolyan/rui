@@ -25,8 +25,7 @@ class Fixture:
     def __init__(self, binary, output):
         self.binary, self.output = str(binary), pathlib.Path(output)
         self.root = None
-        self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith(("RUI_", "XDG_")) and key not in ("TMUX", "TMUX_PANE")}
+        self.env = dict(os.environ)
         model.RUI = pathlib.Path(binary)
         self.host = self.endpoint = self.thread = self.proxy = self.tty = self.tmux = None
         self.gates = []

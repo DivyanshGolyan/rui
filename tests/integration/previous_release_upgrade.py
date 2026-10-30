@@ -16,6 +16,7 @@ import threading
 import time
 
 import model_fixture as fixture
+import host_process
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
@@ -270,4 +271,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

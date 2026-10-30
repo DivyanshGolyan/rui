@@ -25,6 +25,7 @@ import tempfile
 import termios
 import time
 
+import host_process
 from host_process import (canonical_fixture_root, start_ready_process, stop_process,
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
@@ -201,6 +202,8 @@ def instance(output, capacity):
 def matching_processes(store, *, descendants=False):
     """Test-cleanup discovery only; PIDs are never treated as Host authority."""
     expected = str(pathlib.Path(store).resolve())
+    # A Host is owned when it executes this RUI; its argv only says which Store it serves.
+    owned = os_semantics.processes_executing(RUI)
     matches = []
     candidates = []
     if pathlib.Path("/proc").is_dir():
@@ -223,7 +226,7 @@ def matching_processes(store, *, descendants=False):
             except (ValueError, IndexError):
                 continue
     for pid, text in candidates:
-        if len(text) >= 5 and pathlib.Path(text[0]).resolve() == RUI and text[1:4] == ["host", "serve", "--store"]:
+        if pid in owned and len(text) >= 5 and text[1:4] == ["host", "serve", "--store"]:
             try:
                 selected = str(pathlib.Path(text[4]).resolve())
             except OSError:
@@ -950,4 +953,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

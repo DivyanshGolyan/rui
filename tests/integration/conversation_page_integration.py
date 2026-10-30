@@ -25,6 +25,7 @@ from control_integration import (
     successful_sse,
     wait_for,
 )
+import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, stop_process
 
 
@@ -520,6 +521,7 @@ def missing_assistant_entries():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()
     projected_ranges()
     missing_assistant_entries()

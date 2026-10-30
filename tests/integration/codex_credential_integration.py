@@ -12,6 +12,7 @@ import tempfile
 import time
 
 import codex_integration as codex
+import host_process
 
 
 def run(actor):
@@ -123,4 +124,5 @@ def run(actor):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     run(pathlib.Path(sys.argv[1]).resolve())

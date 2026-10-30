@@ -12,6 +12,7 @@ import time
 from unittest.mock import patch
 
 from matrix import HERE, inventory, worker
+import host_process
 
 
 def absent(pid):
@@ -202,4 +203,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     sys.exit(main())

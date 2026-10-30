@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 
+import host_process
 from host_process import STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
@@ -2009,4 +2010,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

@@ -18,6 +18,7 @@ import time
 
 import control_integration as control
 import model_fixture as model
+import host_process
 from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process
 
 
@@ -289,6 +290,7 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     checkpoint_readers()
     # Keep tiny-fragment coverage above; the large cohort measures held readers,
     # not millions of flushed provider writes inside the same setup deadline.

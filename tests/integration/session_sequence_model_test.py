@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import host_process
 
 
 RUNNER = Path(__file__).with_name("session_sequence_model.py")
@@ -17,13 +18,13 @@ from pathlib import Path
 import signal
 import sys
 
-Path(os.environ["TD1_COMMAND_MARKER"]).write_text("launched")
+Path(CONTROLS["COMMAND_MARKER"]).write_text("launched")
 
 def drift(stage):
-    if os.environ.get("TD1_DRIFT_STAGE") != stage:
+    if CONTROLS["DRIFT_STAGE"] != stage:
         return
     path = Path.cwd() / "src/owner.zig"
-    kind = os.environ["TD1_DRIFT_KIND"]
+    kind = CONTROLS["DRIFT_KIND"]
     if kind == "bytes":
         path.write_bytes(b"altered executed source")
     elif kind == "mode":
@@ -35,24 +36,24 @@ def drift(stage):
     elif kind == "link":
         original = path.read_bytes()
         path.unlink()
-        target = Path(os.environ["TD1_LINK_TARGET"])
+        target = Path(CONTROLS["LINK_TARGET"])
         target.write_bytes(original)
         path.symlink_to(target)
 
 if Path(sys.argv[0]).name == "zig":
-    binary = Path(os.environ["TD1_BINARY"])
+    binary = Path(CONTROLS["BINARY"])
     binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_text("#!" + sys.executable + "\n" + os.environ["TD1_COMMAND"])
+    binary.write_text(Path(sys.argv[0]).read_text())
     binary.chmod(0o755)
     print(f"info(verbose): RUI_TEST_EXACT_INACTIVITY=0 {binary} --cache-dir=synthetic --listen=-", flush=True)
     drift("build")
-    code = int(os.environ.get("TD1_BUILD_EXIT", "0"))
+    code = CONTROLS["BUILD_EXIT"]
     if code < 0:
         os.kill(os.getpid(), signal.SIGKILL)
     raise SystemExit(code)
-Path(os.environ["TD1_DIRECT_MARKER"]).write_text("executed")
+Path(CONTROLS["DIRECT_MARKER"]).write_text("executed")
 drift("direct")
-code = int(os.environ.get("TD1_DIRECT_EXIT", "0"))
+code = CONTROLS["DIRECT_EXIT"]
 print("1/2 tests.test_0...OK")
 print("2/2 SessionFrontend.test.TD1 sequence model pages..." + ("FAIL (TestUnexpectedResult)" if code else "OK"))
 raise SystemExit(code)
@@ -113,19 +114,18 @@ class ProducerTests(unittest.TestCase):
                   for path in source.rglob("*") if path.relative_to(source).parts[0] != ".amp"}
         tools = root / "tools"
         tools.mkdir()
-        zig = tools / "zig"
-        zig.write_text("#!" + sys.executable + "\n" + COMMAND)
-        zig.chmod(0o755)
         marker = root / "direct-ran"
-        environment = {
-            **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
-            "TD1_BINARY": str(root / "artifact/test"), "TD1_COMMAND": COMMAND,
-            "TD1_DIRECT_MARKER": str(marker), "TD1_DRIFT_STAGE": stage,
-            "TD1_DRIFT_KIND": kind, "TD1_BUILD_EXIT": str(build_exit),
-            "TD1_DIRECT_EXIT": str(direct_exit),
-            "TD1_LINK_TARGET": str(root / "replacement"),
-            "TD1_COMMAND_MARKER": str(root / "command-ran"),
+        # The stub's controls are written into the stub itself, which the
+        # runner's fixture boundary cannot strip.
+        controls = {
+            "BINARY": str(root / "artifact/test"), "DIRECT_MARKER": str(marker), "DRIFT_STAGE": stage,
+            "DRIFT_KIND": kind, "BUILD_EXIT": build_exit, "DIRECT_EXIT": direct_exit,
+            "LINK_TARGET": str(root / "replacement"), "COMMAND_MARKER": str(root / "command-ran"),
         }
+        zig = tools / "zig"
+        zig.write_text(f"#!{sys.executable}\nCONTROLS = {controls!r}\n{COMMAND}")
+        zig.chmod(0o755)
+        environment = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
         result = subprocess.run(
             [sys.executable, str(RUNNER), "--source", str(source), "--output", str(output),
              "--cache", str(cache), "--selector", "pages"],
@@ -201,4 +201,5 @@ class ProducerTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     unittest.main()

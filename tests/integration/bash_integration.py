@@ -14,6 +14,7 @@ import threading
 from collections import Counter
 
 import model_fixture as fixture
+import host_process
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
 import os_semantics
 
@@ -2276,6 +2277,7 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     if sys.argv[2:] == ["--walkthrough"]:
         walkthrough()
     elif sys.argv[2:]:

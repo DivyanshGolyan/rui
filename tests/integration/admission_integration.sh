@@ -1,6 +1,11 @@
 set -eu
-# Enter through the shared fixture module, which admits every fixture process.
-[ "${RUI_FIXTURE_ENTERED:-}" = 1 ] || exec python3 "$(dirname -- "$0")/host_process.py" sh "$0" "$@"
+# Enter through the fixture boundary, which refuses root and builds this
+# fixture's environment, then run again with the argument it adds.
+if [ "${1:-}" = --entered ]; then
+    shift
+else
+    exec python3 "$(dirname -- "$0")/host_process.py" exec sh "$0" --entered "$@"
+fi
 
 rui=$1
 mode=${2:-full}

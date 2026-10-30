@@ -23,6 +23,7 @@ import h2.settings
 
 import control_integration as control
 import model_fixture as dispatch
+import host_process
 from host_process import HostDiagnostics, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
 
@@ -1374,4 +1375,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

@@ -23,6 +23,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import model_fixture as fixture
 import human_cli_integration as human
+import host_process
 from host_process import HostDiagnostics, HostStartError, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
 
@@ -3120,4 +3121,5 @@ def main(selected=None):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else None)

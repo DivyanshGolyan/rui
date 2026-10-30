@@ -16,6 +16,7 @@ import time
 
 import bash_integration as bash
 import model_fixture as fixture
+import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
 
 
@@ -640,6 +641,7 @@ def forced_refresh_journey():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     run()
     turn_state_journey()
     forced_refresh_journey()

@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 
+import host_process
 from host_process import dispose_all
 
 
@@ -338,6 +339,7 @@ test "TD1 sequence model {name}" {{
 
 
 if __name__ == "__main__":
+    host_process.enter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)

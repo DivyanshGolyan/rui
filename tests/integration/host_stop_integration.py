@@ -16,6 +16,7 @@ import time
 
 import bash_integration as bash_fixture
 import model_fixture as fixture
+import host_process
 from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
 from host_status_integration import socket_path, status
 import os_semantics
@@ -412,6 +413,7 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     from host_stop_integration_test import check_classification_oracle, check_missing_classification
     check_classification_oracle(actor_after_classification)
     check_missing_classification(actor_after_classification)

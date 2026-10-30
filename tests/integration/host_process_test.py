@@ -27,6 +27,7 @@ import h2.errors
 import h2.events
 import h2.settings
 
+import host_process
 from host_process import (
     READINESS_LIMIT,
     STDERR_TAIL_LIMIT,
@@ -2025,4 +2026,5 @@ def prove_one_reply():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

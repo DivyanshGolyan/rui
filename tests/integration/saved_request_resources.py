@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import human_cli_integration as cli
+import host_process
 from host_process import start_ready_process, stop_process
 import os_semantics
 
@@ -154,4 +155,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

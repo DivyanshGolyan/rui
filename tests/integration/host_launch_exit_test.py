@@ -109,8 +109,10 @@ def check_process_discovery(cleanup):
             unrelated: [sys.executable, "-c", "pass"],
             other_store: [*command[:-1], str(store.with_name("store-lookalike"))],
             nested: [*command[:-1], str(store / "not-created/nested-store")],
-            other_executable: [str(owner.RUI.with_name("other-rui")), *command[1:]],
+            # Named like RUI, but executing another image.
+            other_executable: command,
         }
+        owned = {int(path.name) for path in (vanished, selected, other_store, nested)}
         for descendants, failure in ((mode, error) for mode in (False, True) for error in (
                 FileNotFoundError(errno.ENOENT, "vanished"),
                 ProcessLookupError(errno.ESRCH, "vanished"),
@@ -133,7 +135,8 @@ def check_process_discovery(cleanup):
             # Keep a live match after it, plus unrelated process/Store controls.
             with patch.object(Path, "is_dir", return_value=True), \
                     patch.object(Path, "iterdir", return_value=[vanished, *arguments]), \
-                    patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill):
+                    patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill), \
+                    patch.object(owner.os_semantics, "processes_executing", return_value=owned):
                 if failure.errno == errno.EIO:
                     try:
                         cleanup(store, descendants=descendants)

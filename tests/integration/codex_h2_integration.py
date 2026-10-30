@@ -16,6 +16,7 @@ import time
 import codex_integration as codex
 import model_fixture as fixture
 import transport_h2_integration as h2_fixture
+import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
 import os_semantics
 
@@ -189,6 +190,7 @@ def run(*, observed=False, intake=100):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     run()
     run(observed=True)
     run(intake=10)

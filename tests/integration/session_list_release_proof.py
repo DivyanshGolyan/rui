@@ -278,4 +278,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()

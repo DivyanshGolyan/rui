@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 
-import host_process  # noqa: F401, admits this fixture and builds its environment
+import host_process
 
 
 def vectors():
@@ -85,4 +85,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     sys.exit(main())

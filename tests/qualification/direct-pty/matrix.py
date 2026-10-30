@@ -15,7 +15,8 @@ import threading
 import time
 import traceback
 
-import driver  # noqa: F401, admits this fixture through host_process before any worker starts
+import driver  # noqa: F401, puts tests/integration on sys.path
+import host_process
 
 HERE = pathlib.Path(__file__).resolve().parent
 STOP = threading.Event()
@@ -259,4 +260,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     sys.exit(main())

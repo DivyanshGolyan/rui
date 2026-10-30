@@ -17,6 +17,7 @@ import time
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources, provider_connections
 from model_fixture import sse_tool_calls
+import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
 from proposal_integration import digest
 from one_reply import one_reply
@@ -491,6 +492,7 @@ def performance_case(item_bytes):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     if "RUI_ACTIVITY_ITEM_BYTES" in os.environ:
         performance_case(int(os.environ["RUI_ACTIVITY_ITEM_BYTES"]))
     else:

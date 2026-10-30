@@ -29,6 +29,7 @@ import threading
 import time
 
 import model_fixture as fixture
+import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
@@ -778,6 +779,7 @@ def concurrent_peers():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     stdin_start_contract()
     for report_source in ("stdin", "file"):
         main(report_source)

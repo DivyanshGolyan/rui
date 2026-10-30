@@ -115,8 +115,9 @@ def processes_executing(executable):
                     pids.add(int(entry.name))
         return pids
     # Darwin has no procfs; lsof matches the file's text mappings by device and inode.
-    mapped = subprocess.run(["/usr/sbin/lsof", "-n", "-P", "-a", "-d", "txt", "-Fp", "--", str(executable)],
+    mapped = subprocess.run(["/usr/sbin/lsof", "-w", "-n", "-P", "-a", "-d", "txt", "-Fp", "--", str(executable)],
                             capture_output=True, text=True, timeout=10)
-    # lsof exits 1 when no process maps the file.
-    assert mapped.returncode in (0, 1), mapped
+    # lsof exits 1 both when no process maps the file and when it fails. With
+    # warnings off (-w), only a failure writes to stderr.
+    assert mapped.returncode == 0 or (mapped.returncode == 1 and not mapped.stderr), mapped
     return {int(field[1:]) for field in mapped.stdout.splitlines() if field.startswith("p")}

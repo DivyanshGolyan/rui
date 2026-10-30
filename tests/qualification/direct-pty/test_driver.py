@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from driver import DirectPty, ScreenCapture
 from matrix import run_one
+import host_process
 
 
 class DriverTests(unittest.TestCase):
@@ -115,4 +116,5 @@ sys.exit(status)
 
 
 if __name__ == "__main__":
+    host_process.enter()
     unittest.main()

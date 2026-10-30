@@ -625,11 +625,7 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const measure = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./configuration-admission",
-    });
-    measure.setCwd(b.path("tests/qualification"));
-    measure.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure = addMeasurement(b, &.{"./configuration-admission"});
     measure.addFileArg(ci.path(release));
     const measure_step = b.step(
         "measure-admission",
@@ -637,11 +633,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_step.dependOn(&measure.step);
 
-    const measure_messages = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./message-admission",
-    });
-    measure_messages.setCwd(b.path("tests/qualification"));
-    measure_messages.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_messages = addMeasurement(b, &.{"./message-admission"});
     measure_messages.addFileArg(ci.path(release));
     const measure_messages_step = b.step(
         "measure-message-admission",
@@ -649,11 +641,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_messages_step.dependOn(&measure_messages.step);
 
-    const measure_dispatch = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-dispatch",
-    });
-    measure_dispatch.setCwd(b.path("tests/qualification"));
-    measure_dispatch.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_dispatch = addMeasurement(b, &.{"./model-dispatch"});
     measure_dispatch.addFileArg(ci.path(release));
     const measure_dispatch_step = b.step(
         "measure-model-dispatch",
@@ -661,11 +649,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_dispatch_step.dependOn(&measure_dispatch.step);
 
-    const measure_output = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-output",
-    });
-    measure_output.setCwd(b.path("tests/qualification"));
-    measure_output.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_output = addMeasurement(b, &.{"./model-output"});
     measure_output.addPassthruArgs();
     measure_output.addFileArg(ci.path(release));
     const measure_output_step = b.step(
@@ -674,11 +658,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_output_step.dependOn(&measure_output.step);
 
-    const measure_repeat_work = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-output", "--repeat-work",
-    });
-    measure_repeat_work.setCwd(b.path("tests/qualification"));
-    measure_repeat_work.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_repeat_work = addMeasurement(b, &.{ "./model-output", "--repeat-work" });
     measure_repeat_work.addFileArg(ci.path(release));
     const measure_repeat_work_step = b.step(
         "measure-repeat-work",
@@ -686,11 +666,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_repeat_work_step.dependOn(&measure_repeat_work.step);
 
-    const measure_retry = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-retry",
-    });
-    measure_retry.setCwd(b.path("tests/qualification"));
-    measure_retry.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_retry = addMeasurement(b, &.{"./model-retry"});
     measure_retry.addFileArg(ci.path(release));
     const measure_retry_step = b.step(
         "measure-model-retry",
@@ -698,11 +674,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_retry_step.dependOn(&measure_retry.step);
 
-    const measure_queue = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-queue",
-    });
-    measure_queue.setCwd(b.path("tests/qualification"));
-    measure_queue.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_queue = addMeasurement(b, &.{"./model-queue"});
     if (model_queue_output) |output| {
         measure_queue.addArgs(&.{ "-output", output });
     }
@@ -714,11 +686,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_queue_step.dependOn(&measure_queue.step);
 
-    const measure_control = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./model-control",
-    });
-    measure_control.setCwd(b.path("tests/qualification"));
-    measure_control.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_control = addMeasurement(b, &.{"./model-control"});
     measure_control.addFileArg(ci.path(release));
     const measure_control_step = b.step(
         "measure-model-control",
@@ -726,11 +694,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_control_step.dependOn(&measure_control.step);
 
-    const measure_call_classification = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./call-classification",
-    });
-    measure_call_classification.setCwd(b.path("tests/qualification"));
-    measure_call_classification.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_call_classification = addMeasurement(b, &.{"./call-classification"});
     measure_call_classification.addPassthruArgs();
     measure_call_classification.addFileArg(ci.path(release));
     measure_call_classification.addFileArg(ci.path(sqlite_shell));
@@ -740,11 +704,7 @@ pub fn build(b: *std.Build) void {
     );
     measure_call_classification_step.dependOn(&measure_call_classification.step);
 
-    const measure_execution_service = b.addSystemCommand(&.{
-        "go", "run", "-mod=readonly", "./execution-service",
-    });
-    measure_execution_service.setCwd(b.path("tests/qualification"));
-    measure_execution_service.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    const measure_execution_service = addMeasurement(b, &.{"./execution-service"});
     measure_execution_service.addPassthruArgs();
     measure_execution_service.addFileArg(ci.path(release));
     const measure_execution_service_step = b.step(
@@ -836,6 +796,17 @@ const CiArtifacts = struct {
 
 /// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
 /// pass the harness's own options, including a fresh --output, after `--`.
+// A Go measurement launches Rui, so it enters the fixture boundary like every
+// fixture: root is refused and the environment is built there.
+fn addMeasurement(b: *std.Build, arguments: []const []const u8) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"python3"});
+    run.addFileArg(b.path("tests/integration/host_process.py"));
+    run.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "run", "-mod=readonly" });
+    run.addArgs(arguments);
+    run.setCwd(b.path("tests/qualification"));
+    return run;
+}
+
 fn addPtyHarness(b: *std.Build, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{"python3"});
     run.addFileArg(b.path(harness));

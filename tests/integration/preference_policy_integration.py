@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 
+import host_process
 from host_process import canonical_fixture_root
 
 
@@ -77,4 +78,5 @@ def main():
 
 
 if __name__ == "__main__":
+    host_process.enter()
     main()
