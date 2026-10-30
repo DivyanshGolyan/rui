@@ -566,7 +566,9 @@ pub const HistoricalView = struct {
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
     group_scan: GroupScan = .{},
-    output_check: OutputCheck = .{},
+    /// Readied by openHistoricalView: a `.{}` default here is one comptime
+    /// value, copied whole (71 KB) into every view.
+    output_check: OutputCheck = undefined,
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
     // Ordinary entries copied from one ranged read. Plain values, never a
@@ -606,7 +608,8 @@ pub const HistoricalView = struct {
         reader: ContentReader = undefined,
         reading: bool = false,
         hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-        item_check: provider_output.OutputItemCheck = .{},
+        /// Reset where the view opens and where each item's read starts.
+        item_check: provider_output.OutputItemCheck = undefined,
         /// The last item the grammar finished, kept until the next one starts.
         judged: ?struct { position: u64, verdict: ReplayVerdict } = null,
     };
@@ -952,7 +955,12 @@ const SessionReportCapture = struct {
     charged: u64 = 0,
     ordinary_failure: bool = false,
 
-    fn init(self: *SessionReportCapture, io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !void {
+    /// Creates the capture's unlinked scratch file. The capture is declared
+    /// with a literal of its io, budget and null writer, which leaves its
+    /// 4 KB buffer unwritten; `= undefined` would fill it with 0xAA first.
+    fn create(self: *SessionReportCapture, scratch_path: []const u8, request_number: u64, fail_unlink: bool) !void {
+        std.debug.assert(self.writer == null and self.charged == 0);
+        const io = self.io;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
@@ -965,11 +973,7 @@ const SessionReportCapture = struct {
         errdefer writer.close(io);
         if (fail_unlink) return error.ReportScratchCleanupFailed;
         scratch.deleteFile(io, name) catch return error.ReportScratchCleanupFailed;
-        self.* = .{
-            .io = io,
-            .writer = writer,
-            .budget = budget,
-        };
+        self.writer = writer;
     }
 
     pub fn append(self: *SessionReportCapture, bytes: []const u8) !void {
@@ -1153,7 +1157,6 @@ const SessionReportCapture = struct {
     fn deinit(self: *SessionReportCapture) void {
         if (self.writer) |writer| writer.close(self.io);
         self.budget.release(self.charged);
-        self.* = undefined;
     }
 };
 
@@ -1202,8 +1205,12 @@ pub const ContentReader = struct {
     // the SQLite cache even when their decoded value does not.
     fn prepareRead(self: *ContentReader) void {
         const extent = if (self.raw) self.reference.length else @max(self.reference.length, self.projection.encoded_end);
-        if (self.prefetch == null and extent > 1024 * 1024)
-            self.prefetch = self.allocator.alloc(u8, content_prefetch_bytes) catch null;
+        if (self.prefetch == null and extent > 1024 * 1024) {
+            // Raw: a read fills the window before any byte of it is used;
+            // alloc would first write 0xAA over all 128 KB in ReleaseSafe.
+            if (self.allocator.rawAlloc(content_prefetch_bytes, .of(u8), @returnAddress())) |bytes|
+                self.prefetch = bytes[0..content_prefetch_bytes];
+        }
     }
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
@@ -1232,7 +1239,8 @@ pub const ContentReader = struct {
 
     pub fn close(self: *ContentReader) void {
         std.debug.assert(self.active);
-        if (self.prefetch) |bytes| self.allocator.free(bytes);
+        // Raw, as allocated: free would write 0xAA over the window first.
+        if (self.prefetch) |bytes| self.allocator.rawFree(bytes, .of(u8), @returnAddress());
         self.prefetch = null;
         self.active = false;
         if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
@@ -3819,8 +3827,8 @@ pub const Store = struct {
             defer access.release();
             break :binding try access.finish(Ordinary.content, self.failedResponseBindingLocked(request.session.slice(), selection));
         };
-        var capture: SessionReportCapture = undefined;
-        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         try @import("failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
         return capture.seal();
@@ -3849,8 +3857,8 @@ pub const Store = struct {
         session_ref: []const u8,
         options: SessionReportOptions,
     ) !SessionReport {
-        var capture: SessionReportCapture = undefined;
-        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);
@@ -3864,8 +3872,8 @@ pub const Store = struct {
     /// The caller releases its scratch charge by deinitializing the report.
     pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
         try request.validate();
-        var capture: SessionReportCapture = undefined;
-        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);
@@ -3979,7 +3987,8 @@ pub const Store = struct {
     /// One list row: the Session's settings, then a fixed number of seeks
     /// into its own indexed rows, none of which grows with its history.
     fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, row: *protocol.SessionRow) !void {
-        row.* = .{};
+        // Every field of `row` is written below, so the previous row's
+        // values need no reset.
         {
             // The settings land straight in the row: no configuration copy.
             const statement = try self.cached("SELECT workspace,provider,model,tools_mask,permission_mode,label,created_at,revision,next_position FROM session WHERE session_ref=?1");
@@ -5982,6 +5991,9 @@ pub const Store = struct {
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
         try self.checkAttempt(binding);
         out.* = .{ .store = self, .binding = binding };
+        out.output_check.reading = false;
+        out.output_check.judged = null;
+        out.output_check.item_check.reset(null);
     }
 
     fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
@@ -6212,6 +6224,7 @@ pub const Store = struct {
         else
             try self.openProjectionLocked(content.content_id, identity);
         view.output_check = .{ .entry = entry.*, .reading = true };
+        view.output_check.item_check.reset(null);
         view.output_check.reader.open(location);
         // The next step reads it, after preparing the read outside Store access.
     }
@@ -7169,23 +7182,22 @@ pub const Store = struct {
         defer if (blob) |value| {
             _ = c.sqlite3_blob_close(value);
         };
-        var hash = protocol.contentHasher();
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
         var offset: u64 = 0;
         while (offset < length) {
-            const wanted: usize = @intCast(@min(length - offset, buffer.len));
-            const count = try file.readPositionalAll(self.io, buffer[0..wanted], start + offset);
+            const wanted: usize = @intCast(@min(length - offset, copy.window.len));
+            const count = try file.readPositionalAll(self.io, copy.window[0..wanted], start + offset);
             if (count != wanted or faults.output_read) return error.OutputSourceReadFailed;
-            hash.update(buffer[0..count]);
+            copy.hash.update(copy.window[0..count]);
             if (blob) |value| {
-                if (c.sqlite3_blob_write(value, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
+                if (c.sqlite3_blob_write(value, copy.window[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
                     return error.ContentWriteFailed;
                 }
             }
             if (faults.output_import) return error.InjectedOutputImportFailure;
             offset += count;
         }
-        if (!std.mem.eql(u8, &hash.finalResult(), digest)) return error.OutputSourceChanged;
+        if (!std.mem.eql(u8, &copy.hash.finalResult(), digest)) return error.OutputSourceChanged;
         return slot.id;
     }
 
@@ -7195,15 +7207,10 @@ pub const Store = struct {
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         metadata.offset = metadata_start;
         metadata.length = metadata_end;
-        // Decoded bytes reach the hash a batch at a time. The literal's
-        // runtime hash leaves the batch unwritten until decoded bytes fill
-        // it; an all-comptime `.{}` would zero it first.
-        var decoded: struct {
-            hash: @TypeOf(protocol.contentHasher()),
-            length: u64 = 0,
-            batch: [512]u8 = undefined,
-            count: usize = 0,
-        } = .{ .hash = protocol.contentHasher() };
+        // Decoded bytes reach the hash a batch at a time.
+        var decoded: HashedWindow(512) = .{ .hash = protocol.contentHasher() };
+        var decoded_length: u64 = 0;
+        var count: usize = 0;
         while (try metadata.next()) |record| {
             if (record.tag != .text) continue;
             if (owner.ordinal != record.ordinal or owner.kind != .message or record.start < owner.start or
@@ -7211,19 +7218,18 @@ pub const Store = struct {
                 return error.CorruptOutputMetadata;
             var text: output_format.EncodedStringReader = .{ .io = self.io, .file = output.source, .position = record.start, .end = try record.end() };
             while (try text.next()) |byte| {
-                decoded.batch[decoded.count] = byte;
-                decoded.count += 1;
-                if (decoded.count == decoded.batch.len) {
-                    decoded.hash.update(&decoded.batch);
-                    decoded.length = try std.math.add(u64, decoded.length, decoded.count);
-                    decoded.count = 0;
+                decoded.window[count] = byte;
+                count += 1;
+                if (count == decoded.window.len) {
+                    decoded.hash.update(&decoded.window);
+                    decoded_length = try std.math.add(u64, decoded_length, count);
+                    count = 0;
                 }
             }
-            decoded.hash.update(decoded.batch[0..decoded.count]);
-            decoded.length = try std.math.add(u64, decoded.length, decoded.count);
-            decoded.count = 0;
+            decoded.hash.update(decoded.window[0..count]);
+            decoded_length = try std.math.add(u64, decoded_length, count);
+            count = 0;
         }
-        const decoded_length = decoded.length;
         const digest = decoded.hash.finalResult();
         const find = try self.cached("SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
         defer resetCached(find);
@@ -7722,10 +7728,10 @@ pub const Store = struct {
         return @intCast(next_position);
     }
 
-    /// Fills `current` and answers whether the Session exists; a missing
-    /// one leaves the defaults a creation starts from.
+    /// Answers whether the Session exists and, when it does, writes every
+    /// field of `current`. A missing one leaves `current` as the caller
+    /// declared it: `.{}`, the defaults a creation starts from.
     fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
-        current.* = .{};
         const statement = try self.cached("SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
@@ -8070,6 +8076,18 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *protocol.Bo
     destination.len = length;
 }
 
+/// A content hash and one window of the bytes it hashes. Declared as
+/// `.{ .hash = protocol.contentHasher() }`: the runtime hash makes the
+/// literal store field by field, so the window stays unwritten until a read
+/// fills it, where `var window: [N]u8 = undefined` would first fill it with
+/// 0xAA in ReleaseSafe.
+fn HashedWindow(comptime window_bytes: usize) type {
+    return struct {
+        hash: @TypeOf(protocol.contentHasher()),
+        window: [window_bytes]u8 = undefined,
+    };
+}
+
 fn verifyExternalContent(
     io: std.Io,
     file: std.Io.File,
@@ -8078,18 +8096,17 @@ fn verifyExternalContent(
     destination: ?*c.sqlite3_blob,
     faults: Faults,
 ) !void {
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
     var offset: u64 = 0;
-    var hash = protocol.contentHasher();
     while (offset < expected_length) {
-        const wanted: usize = @intCast(@min(expected_length - offset, buffer.len));
-        const count = try file.readPositionalAll(io, buffer[0..wanted], offset);
+        const wanted: usize = @intCast(@min(expected_length - offset, copy.window.len));
+        const count = try file.readPositionalAll(io, copy.window[0..wanted], offset);
         if (count != wanted) return error.ContentReadFailed;
         if (faults.content_read) return error.InjectedContentReadFailure;
-        hash.update(buffer[0..count]);
+        copy.hash.update(copy.window[0..count]);
         if (destination) |blob| {
             if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
-            if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
+            if (c.sqlite3_blob_write(blob, copy.window[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
                 return error.ContentWriteFailed;
             }
             if (faults.content_import) return error.InjectedContentImportFailure;
@@ -8097,7 +8114,7 @@ fn verifyExternalContent(
         offset += count;
     }
     if (try file.length(io) != expected_length) return error.ContentChanged;
-    if (!std.mem.eql(u8, &hash.finalResult(), expected_digest)) return error.ContentChanged;
+    if (!std.mem.eql(u8, &copy.hash.finalResult(), expected_digest)) return error.ContentChanged;
 }
 
 // Large streaming readers own one bounded heap window, never an inline

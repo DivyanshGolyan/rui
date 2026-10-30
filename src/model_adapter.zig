@@ -843,7 +843,6 @@ const RequestWriter = struct {
     fn deinit(self: *RequestWriter) void {
         if (!self.closed) self.file.close(self.io);
         self.budget.release(self.charged);
-        self.* = undefined;
     }
 };
 
