@@ -436,26 +436,46 @@ class Handler:
 
 
 FIXTURE_DIRECTORIES = ("tests/integration", "tests/qualification/direct-pty")
-# Libraries and harness self-tests that launch no Rui and so need no fixture boundary.
-LAUNCH_NO_RUI = {"tests/integration/os_semantics.py", "tests/integration/product_defaults.py",
-                 "tests/integration/terminal_screen.py", "tests/integration/session_sequence_model_test.py"}
+REFUSAL = "must run as a non-root user"
+
+
+def fixture_entries():
+    """Every script a person or build step can launch: shell scripts, and Python
+    modules with a main block. Modules without one are libraries."""
+    for directory in FIXTURE_DIRECTORIES:
+        for path in sorted((ROOT / directory).glob("*.sh")):
+            yield path.relative_to(ROOT).as_posix()
+        for path in sorted((ROOT / directory).glob("*.py")):
+            if any(isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
+                   for node in ast.parse(path.read_text()).body):
+                yield path.relative_to(ROOT).as_posix()
 
 
 class FixtureEntryTest(unittest.TestCase):
+    def simulated_user(self, directory, euid):
+        """A PYTHONPATH under which Python reports `euid`, so these run alike as root or not."""
+        site = Path(directory) / f"simulated-{euid}"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(f"import os\nos.geteuid = lambda: {euid}\n")
+        return str(site)
+
     def test_every_fixture_entry_refuses_root_before_it_starts(self):
-        entries = sorted({path.relative_to(ROOT).as_posix() for directory in FIXTURE_DIRECTORIES
-                          for pattern in ("*.py", "*.sh") for path in (ROOT / directory).glob(pattern)} - LAUNCH_NO_RUI)
+        entries = list(fixture_entries())
+        self.assertIn("tests/integration/admission_integration.sh", entries)
+        self.assertIn("tests/integration/session_sequence_model_test.py", entries)
+        self.assertNotIn("tests/integration/model_fixture.py", entries)
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "simulated-root"
-            root.mkdir()
-            (root / "sitecustomize.py").write_text("import os\nos.geteuid = lambda: 0\n")
             scratch = Path(directory) / "tmp"
             scratch.mkdir()
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "TMPDIR": str(scratch),
-                           "PYTHONPATH": str(root)}
+                           "PYTHONPATH": self.simulated_user(directory, 0)}
+
+            # Launched as a build step would, with Rui and an actor binary, which
+            # some fixture modules read at import.
+            binaries = [str(Path(directory) / "absent-rui"), str(Path(directory) / "absent-actor")]
 
             def run(entry):
-                command = ["sh", entry] if entry.endswith(".sh") else [sys.executable, "-B", entry]
+                command = ["sh", entry, *binaries] if entry.endswith(".sh") else [sys.executable, "-B", entry, *binaries]
                 return entry, subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
                                              text=True, timeout=30)
 
@@ -463,29 +483,121 @@ class FixtureEntryTest(unittest.TestCase):
                 results = list(pool.map(run, entries))
             started = [(entry, result.returncode, result.stdout[-300:] + result.stderr[-300:])
                        for entry, result in results
-                       if result.returncode == 0 or "must run as a non-root user" not in result.stderr]
+                       if result.returncode == 0 or REFUSAL not in result.stderr]
             self.assertEqual(started, [], "fixture entries ran past the shared root refusal")
             self.assertEqual(list(scratch.iterdir()), [], "a refused fixture created state")
+
+    def test_importing_the_boundary_leaves_the_process_alone(self):
+        source = ("import json, os, sys\n"
+                  "sys.path.insert(0, sys.argv[1])\n"
+                  "import host_process\n"
+                  "print(json.dumps(dict(os.environ)))\n")
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
+                           "HTTPS_PROXY": "http://127.0.0.1:9", "PYTHONPATH": self.simulated_user(directory, 0)}
+            result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
+                                    env=environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), environment)
 
     def test_fixture_children_receive_only_the_fixture_environment(self):
         source = ("import json, subprocess, sys\n"
                   "sys.path.insert(0, sys.argv[1])\n"
                   "import host_process\n"
-                  "print(subprocess.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'],"
-                  " capture_output=True, text=True, check=True).stdout)\n")
+                  "network = host_process.enter()\n"
+                  "child = subprocess.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'],"
+                  " capture_output=True, text=True, check=True).stdout\n"
+                  "print(json.dumps({'network': network, 'child': json.loads(child)}))\n")
         with tempfile.TemporaryDirectory() as directory:
+            network = {"SSL_CERT_FILE": str(Path(directory) / "absent.pem"), "HTTPS_PROXY": "http://127.0.0.1:9"}
             planted = {"RUI_CODEX_CREDENTIAL_FILE": str(Path(directory) / "absent.json"),
                        "RUI_STORE": str(Path(directory) / "foreign-store"), "RUI_ADDRESS": "zzzzzz",
-                       "RUI_SENDER_HANDLE": "inherited", "SSL_CERT_FILE": str(Path(directory) / "absent.pem"),
-                       "HTTPS_PROXY": "http://127.0.0.1:9", "TERM": "dumb"}
+                       "RUI_SENDER_HANDLE": "inherited", "VIRTUAL_ENV": directory,
+                       **network}
             named = {"PATH": os.environ["PATH"], "HOME": directory, "TMPDIR": directory,
                      "RUI_FAILURE_ARTIFACTS": str(Path(directory) / "retained")}
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
-                                    env={**planted, **named}, capture_output=True, text=True, timeout=30)
+                                    env={**planted, **named, "TERM": "dumb",
+                                         "PYTHONPATH": self.simulated_user(directory, 30033)},
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
-            child = json.loads(result.stdout)
+            observed = json.loads(result.stdout)
+            self.assertEqual(observed["network"], network)
+            child = observed["child"]
             self.assertEqual({name: child.get(name) for name in planted}, dict.fromkeys(planted))
+            self.assertNotIn("PYTHONPATH", child)
             self.assertEqual({name: child.get(name) for name in named}, named)
+            self.assertEqual(child["TERM"], "xterm-256color")
+
+    def test_exec_entry_runs_its_command_only_inside_the_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ran = Path(directory) / "ran"
+            command = [sys.executable, "-B", str(ROOT / "tests/integration/host_process.py"), "exec",
+                       sys.executable, "-c",
+                       "import json, os, sys; open(sys.argv[1], 'w').write(json.dumps(dict(os.environ)))",
+                       str(ran)]
+            caller = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
+                      "GOFLAGS": "-mod=mod"}
+            refused = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 0)},
+                                     capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn(REFUSAL, refused.stderr)
+            self.assertFalse(ran.exists(), "a refused command ran")
+            admitted = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 30033)},
+                                      capture_output=True, text=True, timeout=30)
+            self.assertEqual(admitted.returncode, 0, admitted.stderr)
+            self.assertEqual(json.loads(ran.read_text()),
+                             {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color"})
+
+    def test_go_measurements_run_through_the_exec_entry(self):
+        build = (ROOT / "build.zig").read_text()
+        steps = re.findall(r'const (\w+)_step = b\.step\(\s*"measure-', build)
+        self.assertGreaterEqual(len(steps), 10)
+        for name in steps:
+            self.assertRegex(build, rf"const {name} = addMeasurement\(b, ", name)
+        helper = re.search(r"\nfn addMeasurement\(.*?\n\}\n", build, re.S).group(0)
+        self.assertIn('run.addFileArg(b.path("tests/integration/host_process.py"));\n'
+                      '    run.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "run", "-mod=readonly" });',
+                      helper)
+        self.assertEqual(build.count('"go", "run"'), 1, "a Go measurement launched outside the fixture boundary")
+
+
+class ProcessCensusTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests/integration"))
+        self.addCleanup(sys.path.remove, str(ROOT / "tests/integration"))
+        import os_semantics
+        self.semantics = os_semantics
+
+    def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "owned-sleep"
+            copy.write_bytes(Path("/bin/sleep").read_bytes())
+            copy.chmod(0o755)
+            owned = subprocess.Popen(["renamed", "30"], executable=copy)
+            named = subprocess.Popen([str(copy), "30"], executable="/bin/sleep")
+            try:
+                found = self.semantics.processes_executing(copy)
+                self.assertIn(owned.pid, found)
+                self.assertNotIn(named.pid, found)
+            finally:
+                for process in (owned, named):
+                    process.kill()
+                    process.wait()
+
+    def test_darwin_census_fails_loudly_when_lsof_fails(self):
+        def lsof(returncode, stdout="", stderr=""):
+            return patch.object(self.semantics.subprocess, "run",
+                                return_value=subprocess.CompletedProcess([], returncode, stdout, stderr))
+
+        with self.semantics.simulate("darwin"):
+            with lsof(0, "p12\np34\n"):
+                self.assertEqual(self.semantics.processes_executing("/bin/sh"), {12, 34})
+            with lsof(1):
+                self.assertEqual(self.semantics.processes_executing("/bin/sh"), set())
+            with lsof(1, stderr="lsof: status error on /bin/sh: Permission denied\n"), \
+                    self.assertRaises(AssertionError):
+                self.semantics.processes_executing("/bin/sh")
 
 
 class ImportSafetyTest(unittest.TestCase):
