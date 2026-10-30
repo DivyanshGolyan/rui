@@ -591,23 +591,22 @@ fn readInput(self: *Self, wait: i32) !?Next {
 }
 
 /// Gives the overview its own keys and the line editor everything else,
-/// then steps the core with what the editor made of it. A start borrows the
-/// draft, so the editor takes nothing until its answer.
+/// then steps the core with what the editor made of it. Every input is one
+/// event, whether or not it changed the draft. A start borrows the draft,
+/// so the editor takes nothing until its answer.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     const locked = self.state.starting();
     if (overviewKey(decoded, locked or self.composer.length == 0)) |key| return self.event(.{ .key = key });
-    if (locked) return null;
-    return switch (self.composer.apply(decoded)) {
-        .none, .page_up, .page_down, .latest, .expand => null,
-        .append, .redraw => self.event(.{ .composer = .edited }),
+    return self.event(if (locked) .{ .composer = .input } else switch (self.composer.apply(decoded)) {
+        .none, .page_up, .page_down, .latest, .expand, .append, .redraw => .{ .composer = .input },
         // Past the draft's first or last line, Up and Down select rows,
         // as they scroll a conversation.
-        .scroll_up => self.event(.{ .key = .up }),
-        .scroll_down => self.event(.{ .key = .down }),
-        .close_view => self.event(.{ .key = .escape }),
-        .interrupt => self.event(.{ .key = .ctrl_c }),
-        inline .submit, .eof, .invalid, .overflow, .edit_rejected, .unbound => |outcome| self.event(.{ .composer = @field(view.Composed, @tagName(outcome)) }),
-    };
+        .scroll_up => .{ .key = .up },
+        .scroll_down => .{ .key = .down },
+        .close_view => .{ .key = .escape },
+        .interrupt => .{ .key = .ctrl_c },
+        inline .submit, .eof, .invalid, .overflow, .edit_rejected, .unbound => |outcome| .{ .composer = @field(view.Composed, @tagName(outcome)) },
+    });
 }
 
 /// The overview's own key a decoded event names, if any. Ctrl-C leaves even
@@ -713,8 +712,10 @@ fn converse(self: *Self, session: view.Reference) ?Left {
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, then writes the guidance and the Detached
-/// notice once. The departure is whole before the restore result is read.
+/// `complete` as the loop does, then writes the ledger's guidance before
+/// anything that can return. The departure is whole before the restore
+/// result is read. A conversation's own guidance and the Detached notice
+/// follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
@@ -723,27 +724,24 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     var bytes: [view.max_requests * 512]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
     view.writeDeparture(&self.state, &guidance) catch unreachable;
-    var ending = ended catch |err| {
-        _ = stderr.write(guidance.buffered());
-        return err;
-    };
+    _ = stderr.write(guidance.buffered());
+    var ending = try ended;
     switch (ending) {
         .overview => {
-            _ = stderr.write(guidance.buffered());
             try restored;
             _ = try answered;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
             if (answered) |_| {} else |err| left.ended = err;
-            return self.leave(left.*, restored, guidance.buffered());
+            return self.leave(left.*, restored);
         },
     }
 }
 
 /// Lets the conversation the person left join its borrowers and write its
 /// guidance, then names the Session to resume.
-fn leave(self: *Self, left: Left, restored: anyerror!void, guidance: []const u8) !void {
+fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     const io = self.init.io;
     defer if (left.files) |files| inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
     defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
@@ -756,7 +754,6 @@ fn leave(self: *Self, left: Left, restored: anyerror!void, guidance: []const u8)
             break :run {};
         };
         const departure = frontend.leave(left.ended, restored);
-        _ = stderr.write(guidance);
         const end = departure.end catch |err| {
             if (departure.failure_notice) self.terminal.detached(store, session, departure.action) catch |notice_error|
                 TerminalText.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
@@ -1293,6 +1290,11 @@ test "a stop whose reply was lost names its request on departure" {
 /// Runs `finish` over a terminal whose restore failed, which writes nothing
 /// to stdout, and returns what it wrote to stderr.
 fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
+    return finishedWith(rig, .overview, error.TerminalRestoreFailed, buffer);
+}
+
+/// Runs `finish` on `ending` as `finishedGuidance` does, expecting `failure`.
+fn finishedWith(rig: *Rig, ending: Ending, failure: anyerror, buffer: []u8) ![]const u8 {
     rig.terminal.active = false;
     rig.terminal.result = error.TerminalRestoreFailed;
     var pipe: [2]c_int = undefined;
@@ -1302,10 +1304,10 @@ fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
     };
     const saved = std.c.dup(2);
     if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
-    const finished = rig.overview.finish(.overview);
+    const finished = rig.overview.finish(ending);
     _ = std.c.dup2(saved, 2);
     _ = std.c.close(saved);
-    try std.testing.expectError(error.TerminalRestoreFailed, finished);
+    try std.testing.expectError(failure, finished);
     const count = std.c.read(pipe[0], buffer.ptr, buffer.len);
     return if (count > 0) buffer[0..@intCast(count)] else "";
 }
@@ -1324,6 +1326,34 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expect(try rig.settle() == null);
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n", try finishedGuidance(rig, &buffer));
+}
+
+test "a conversation that fails to open still names the unconfirmed start on departure" {
+    var ops = fake_operations;
+    ops.start = struct {
+        fn start(_: *Self, _: client.Requests, _: client.MessageInput, reply: *Reply) !void {
+            reply.* = .unconfirmed("lost-handle");
+        }
+    }.start;
+    ops.converse = converse;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    rig.overview.hooks.scratch = struct {
+        fn scratch(_: std.process.Init) !std.Io.File {
+            return error.AccessDenied;
+        }
+    }.scratch;
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    const ending = (try rig.press("\x1b[H\n")).?;
+    try std.testing.expect(ending.conversation.frontend == null);
+    var buffer: [1024]u8 = undefined;
+    const written = try finishedWith(rig, ending, error.AccessDenied, &buffer);
+    try std.testing.expectEqualStrings("rui: A new Session's start was not confirmed; use rui request recover lost-handle. Do not start it again.\n" ++
+        "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
 }
 
 test "leaving while a start is queued or running says what became of it" {
@@ -1380,6 +1410,28 @@ test "leaving with a stop still queued says it was not sent" {
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: Stopping k7m2qx was not sent; stop it again from the overview.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
+}
+
+test "any input but Ctrl-X ends the stop prompt, whether or not it changed the draft" {
+    var cancellation: client.Cancellation = .{};
+    // On an empty composer Backspace, Left and PageUp change nothing; while
+    // a start holds the draft the editor takes nothing at all.
+    for ([_]struct { draft: []const u8 = "", key: []const u8 }{ .{ .key = "\x7f" }, .{ .key = "\x1b[D" }, .{ .key = "\x1b[5~" }, .{ .draft = "held\r", .key = "a" } }) |case| {
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        if (case.draft.len != 0) try std.testing.expect(try rig.press(case.draft) == null);
+        try std.testing.expect(try rig.press("\x1b[H\x18") == null);
+        try std.testing.expectEqualStrings("k7m2qx", &rig.overview.state.prompt.?.stop);
+        try std.testing.expect(try rig.press(case.key) == null);
+        try std.testing.expect(rig.overview.state.prompt == null);
+        // The next Ctrl-X asks afresh and stops nothing.
+        try std.testing.expect(try rig.press("\x18") == null);
+        try std.testing.expectEqualStrings("k7m2qx", &rig.overview.state.prompt.?.stop);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
+    }
 }
 
 /// Types `bytes` into a fresh overview and returns the first Message of the
