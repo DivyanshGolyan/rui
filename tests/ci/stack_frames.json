@@ -1,10 +1,21 @@
 {
   "budget_bytes": 8192,
   "threads": {
-    "intake worker": "server.Intake.Exchange.receive",
-    "engine": "execution_turn.admitWork",
-    "AuthWorker": "codex_credentials.exchangeRefresh"
+    "main thread": {"anchor": "server.serve", "chain_ceiling": 131072},
+    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 118784},
+    "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 61440},
+    "AuthWorker": {"anchor": "codex_credentials.exchangeRefresh", "chain_ceiling": 32768}
   },
+  "host_modules": [
+    "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",
+    "codex_auth", "codex_credential_policy", "codex_credentials", "codex_token_wire", "execution",
+    "execution_turn", "failed_responses", "history_memo", "model_adapter", "model_capability",
+    "named_scratch", "os.descriptor_limit", "os.pages", "output_format", "output_retention",
+    "platform", "preference_values", "preferences", "protocol", "provider", "provider_output",
+    "request_encoding", "server", "server_execution", "server_host", "session_work", "signal_stack",
+    "stderr", "store", "tools", "transport_policy", "h2", "Connection", "Engine", "Resolver",
+    "Stream", "proxy", "tls", "job"
+  ],
   "exceptions": [
     {"function": "server.prepareActivityPage", "frame_bytes": 65536, "cause": "row 5: activity page rendered into a stack buffer [64448]u8, then duplicated to the Reply heap"},
     {"function": "store.Store.activityPage", "frame_bytes": 49152, "cause": "row 7: ActivityFacts (11.4 KB) returned through Access.finish, two copies"},
@@ -29,6 +40,7 @@
     {"function": "store.Store.admitNextModelAttemptLocked", "frame_bytes": 12288, "cause": "compiler temporaries for admitted attempt values; no single local over 1 KiB"},
     {"function": "store.Store.appendInlineContent", "frame_bytes": 12288, "cause": "ContentReader (4.4 KB) and a [4096]u8 buffer"},
     {"function": "store.Store.observeCommand", "frame_bytes": 12288, "cause": "CurrentConfiguration (4.6 KB) from readMessageProgress"},
+    {"function": "preferences.save", "frame_bytes": 12288, "cause": "client-only writer (rui defaults, rui auth login) in a module the Host reads at startup: a [4096]u8 path and a [1024]u8 encoding buffer inlined from saveWithSync"},
     {"function": "HostDiagnostics.record", "frame_bytes": 12288, "cause": "write [4096]u8 and rotate's Dir.Iterator"},
     {"function": "h2.Client.addEndpoint", "frame_bytes": 12288, "cause": "tls.loadTrust path_z [4096]u8 twice"},
     {"function": "Io.Threaded.dirRenamePosix", "frame_bytes": 12288, "cause": "std old and new path buffers [4096]u8"},
