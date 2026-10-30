@@ -6,6 +6,7 @@ test {
     _ = @import("model_capability.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
+    _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");
     _ = @import("execution_turn.zig");

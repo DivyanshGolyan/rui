@@ -21,8 +21,9 @@ const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
-const mapZeroed = server_host.mapZeroed;
-const unmapZeroed = server_host.unmapZeroed;
+const pages = @import("os/pages.zig");
+const mapZeroed = pages.mapZeroed;
+const unmapZeroed = pages.unmapZeroed;
 const Limits = server_host.Limits;
 const SettlementTrace = server_host.SettlementTrace;
 const default_bash_path = server_host.default_bash_path;
@@ -340,14 +341,15 @@ const Workspace = struct {
 };
 
 pub fn executionMain(host: *Host) void {
-    const workspace = mapZeroed(Workspace, 1) catch |err| {
+    const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    defer unmapZeroed(workspace);
+    defer mapped_workspace.unmap();
+    const workspace = mapped_workspace.value;
     const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
-        workspace[0].auth_worker = .{ .io = host.io, .authentication = authentication };
-        break :worker &workspace[0].auth_worker;
+        workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
+        break :worker &workspace.auth_worker;
     } else null;
     const auth_thread: ?std.Thread = if (auth_worker) |worker|
         signal_stack.spawn(.{}, AuthWorker.run, .{worker}) catch |err| {
@@ -357,7 +359,7 @@ pub fn executionMain(host: *Host) void {
     else
         null;
     host.auth_worker = auth_worker;
-    host.item_check = &workspace[0].item_check;
+    host.item_check = &workspace.item_check;
     defer host.item_check = null;
     defer if (auth_thread) |thread| {
         host.auth_worker = null;
@@ -427,7 +429,7 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var bash_preparation: ?bash.Preparation = null;
-    const model_preparation = &workspace[0].model_preparation;
+    const model_preparation = &workspace.model_preparation;
     defer shutdownExecution(
         host,
         slots,
@@ -445,7 +447,7 @@ pub fn executionMain(host: *Host) void {
             .slots = slots,
             .bash_preparation = &bash_preparation,
             .model_preparation = model_preparation,
-            .bash_window = &workspace[0].bash_window,
+            .bash_window = &workspace.bash_window,
             .measurement = &measurement,
             .fenced = false,
         };

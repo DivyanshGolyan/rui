@@ -945,7 +945,7 @@ const SessionReportCapture = struct {
     charged: u64 = 0,
     ordinary_failure: bool = false,
 
-    fn init(io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !SessionReportCapture {
+    fn init(self: *SessionReportCapture, io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !void {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
@@ -958,7 +958,7 @@ const SessionReportCapture = struct {
         errdefer writer.close(io);
         if (fail_unlink) return error.ReportScratchCleanupFailed;
         scratch.deleteFile(io, name) catch return error.ReportScratchCleanupFailed;
-        return .{
+        self.* = .{
             .io = io,
             .writer = writer,
             .budget = budget,
@@ -3699,7 +3699,8 @@ pub const Store = struct {
             defer access.release();
             break :binding try access.finish(Ordinary.content, self.failedResponseBindingLocked(request.session.slice(), selection));
         };
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         try @import("failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
         return capture.seal();
@@ -3728,7 +3729,8 @@ pub const Store = struct {
         session_ref: []const u8,
         options: SessionReportOptions,
     ) !SessionReport {
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);
@@ -3742,7 +3744,8 @@ pub const Store = struct {
     /// The caller releases its scratch charge by deinitializing the report.
     pub fn captureSessionList(self: *Store, request: protocol.ListSessions, options: SessionListOptions) !SessionReport {
         try request.validate();
-        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        var capture: SessionReportCapture = undefined;
+        try capture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
             const access = try self.enter(.none);

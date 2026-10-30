@@ -47,7 +47,8 @@ pub fn write(bytes: []const u8) bool {
     return writeHeld(bytes);
 }
 
-pub fn print(comptime format: []const u8, args: anytype) void {
+/// Never inlined: the line buffer stays in this frame, off every caller's.
+pub noinline fn print(comptime format: []const u8, args: anytype) void {
     var buffer: [1024]u8 = undefined;
     const bytes = std.fmt.bufPrint(&buffer, format, args) catch return;
     _ = write(bytes);
