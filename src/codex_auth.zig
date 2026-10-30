@@ -32,13 +32,20 @@ pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
     return policy.localStatus(&record, now_seconds);
 }
 
+/// Selects on the lease it holds; a due refresh releases it, exchanges, and
+/// leases the replacement.
 pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *credentials.Lease) !void {
-    var record: credentials.Record = undefined;
-    try credentials.loadInto(path, &record);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (try policy.select(&record, fixture, nowSeconds(io)) == .refresh)
-        _ = try exchangeAt(io, path, fixture, record.generation);
     try credentials.leaseInto(path, destination);
+    const selection = policy.select(&destination.record, fixture, nowSeconds(io)) catch |err| {
+        destination.release();
+        return err;
+    };
+    if (selection == .refresh) {
+        const generation = destination.record.generation;
+        destination.release();
+        _ = try exchangeAt(io, path, fixture, generation);
+        try credentials.leaseInto(path, destination);
+    }
     errdefer destination.release();
     try policy.launchCheck(&destination.record, fixture, nowSeconds(io));
 }
