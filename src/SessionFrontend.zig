@@ -1147,14 +1147,13 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
     const screen = self.terminal.screen;
     const event = screen.applyChoice(choice_keys, decoded);
-    const refused = event == .invalid or event == .edit_rejected or event == .unbound or event == .overflow;
     if (event == .action) switch (event.action) {
         .conversation => |action| try self.perform(action),
         .refuse => screen.refuseChoice(),
     };
     if (!screen.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
-        if (refused) self.notice = choiceRejection(event == .unbound, false);
+        if (event == .refused) self.notice = choiceRejection(event.refused, false);
         // Only a slash command survives, or any text while the Action is
         // unread: reading its last row clears it, so neither can decide.
         const text = screen.choiceText();
@@ -1166,13 +1165,12 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         if (ChoiceLine.end(event.endsLine(), text, reading, stream.pending() != .none)) screen.restartChoice();
         return;
     }
-    if (refused) {
-        screen.restartChoice();
-        screen.invalidateChoice();
-        self.notice = choiceRejection(event == .unbound, self.decisionShown() and !self.commandActive());
-        return;
-    }
     switch (event) {
+        .refused => |why| {
+            screen.restartChoice();
+            screen.invalidateChoice();
+            self.notice = choiceRejection(why, self.decisionShown() and !self.commandActive());
+        },
         .submit => {
             const text = screen.choiceText();
             // Probe current geometry, command and selection; never the
@@ -1204,9 +1202,9 @@ fn decisionNotice(self: *const Self) []const u8 {
 
 /// Only a choice ready to decide can ask for a or d; until then the
 /// status line names what the Action needs first, such as reading it.
-fn choiceRejection(unbound: bool, ready: bool) []const u8 {
-    if (!ready) return if (unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
-    return if (unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
+fn choiceRejection(why: keymap.Refusal, ready: bool) []const u8 {
+    if (!ready) return if (why == .unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
+    return if (why == .unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
 }
 
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
@@ -1230,9 +1228,11 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
-            .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
-            .unbound => self.notice = "! Key combination not recognized; ignored. Draft unchanged.",
-            .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+            .refused => |why| self.notice = switch (why) {
+                .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
+                .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+                .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+            },
             .none, .append, .redraw, .submit => {},
         },
     }

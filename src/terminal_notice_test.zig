@@ -59,6 +59,7 @@ fn replay(io: std.Io, terminal: *Terminal) !void {
             };
             const name = switch (outcome) {
                 .action => |key| @tagName(key),
+                .refused => |why| @tagName(why),
                 else => @tagName(outcome),
             };
             std.debug.print("event {s} {d} {d} {} {s} {x} {d}\n", .{

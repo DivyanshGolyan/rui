@@ -54,7 +54,7 @@ pub fn feed(self: *Self, byte: u8) Event(keymap.Key) {
 
 pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput.Decoded, selected: bool) Event(@TypeOf(keys).Action) {
     const outcome = self.editors[self.active].apply(keys, decoded);
-    if (outcome == .invalid or outcome == .overflow) self.clear();
+    if (outcome == .refused and outcome.refused.endsLine()) self.clear();
     if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;
     if (bytes.len == 0) return .{ .editor = .none };
@@ -146,14 +146,14 @@ test "SessionInput malformed rejection resets only the active composition" {
     for ("original") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("\xff") |byte| _ = input.feed(byte);
-    try std.testing.expect(input.feed('\r').editor == .invalid);
+    try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
     for ([_][]const u8{ "\x1b\n", "\x1b\r", "\x1b[20\n", "\x1b[201\r" }) |sequence| {
         for ("\x1b[200~left") |byte| _ = input.feed(byte);
         for (sequence) |byte| _ = input.feed(byte);
         try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
         for ("a\r") |byte| try std.testing.expect(input.feed(byte).editor == .none);
         for ("\x1b[201~") |byte| _ = input.feed(byte);
-        try std.testing.expect(input.feed('\r').editor == .invalid);
+        try std.testing.expect(std.meta.eql(input.feed('\r').editor, .{ .refused = .invalid }));
         try std.testing.expectEqual(Editor.Pending.none, input.pending());
         try std.testing.expectEqualStrings("original", try input.message(ticket));
     }
@@ -193,6 +193,6 @@ test "one stream survives draft resets and replacement editors" {
     var choice: Editor = .{ .buffer = &storage, .allow_paste = false };
     for ("a\x1b[201~") |byte| _ = choice.feed(&input.stream, byte);
     try std.testing.expectEqualStrings("", storage[0..choice.length]);
-    try std.testing.expect(choice.feed(&input.stream, '\r') == .invalid);
+    try std.testing.expect(std.meta.eql(choice.feed(&input.stream, '\r'), .{ .refused = .invalid }));
     try std.testing.expectEqual(Editor.Pending.none, input.pending());
 }

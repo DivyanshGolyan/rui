@@ -94,13 +94,13 @@ const cases = [_]Case{
     .{ .name = "Alt-Right", .before = "one two three", .after = "one two three", .event = .redraw, .cursor = 7, .wires = .{ bytes("\x1b[1;3C"), bytes("\x1b[1;3C"), no_case27, no_raw } },
     .{ .name = "Backspace grapheme", .before = "aéZ", .caret = 3, .after = "aZ", .cursor = 1, .event = .redraw, .wires = .{ no_alt, bytes("\x1b[127u"), bytes("\x1b[27;1;127~"), bytes("\x7f") } },
     .{ .name = "Alt-Enter newline", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ bytes("\x1b\r"), bytes("\x1b[13;3u"), bytes("\x1b[27;3;13~"), no_raw } },
-    .{ .name = "Alt-period unbound", .event = .unbound, .wires = .{ bytes("\x1b."), bytes("\x1b[46;3u"), bytes("\x1b[27;3;46~"), no_raw } },
-    .{ .name = "Alt-Ctrl-R unbound", .event = .unbound, .wires = .{ bytes("\x1b\x12"), bytes("\x1b[114;7u"), bytes("\x1b[27;7;114~"), no_raw } },
+    .{ .name = "Alt-period unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1b."), bytes("\x1b[46;3u"), bytes("\x1b[27;3;46~"), no_raw } },
+    .{ .name = "Alt-Ctrl-R unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1b\x12"), bytes("\x1b[114;7u"), bytes("\x1b[27;7;114~"), no_raw } },
     // Ghostty's legacy modifier table names bit 8 Super, matching Kitty.
     // Separate Hyper/Meta exist in Kitty, not in that case27 modifier table.
-    .{ .name = "Super-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;9u"), bytes("\x1b[27;9;46~"), no_raw } },
-    .{ .name = "Hyper-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;17u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
-    .{ .name = "Meta-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;33u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
+    .{ .name = "Super-period unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;9u"), bytes("\x1b[27;9;46~"), no_raw } },
+    .{ .name = "Hyper-period unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;17u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
+    .{ .name = "Meta-period unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;33u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
 };
 
 const Outcome = struct {
@@ -290,7 +290,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         try std.testing.expectEqual(Input.Pending.incomplete, input.pending());
         try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
         feed(&editor, &input, "\x1b[201~\r", &outcome);
-        try std.testing.expectEqual(Fed.invalid, outcome.event);
+        try std.testing.expectEqual(Fed{ .refused = .invalid }, outcome.event);
         try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
     }
@@ -312,7 +312,7 @@ test "TD2 Ghostty modified control chords cannot turn retained choice text into 
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
             feed(&editor, &input, "\r", &outcome);
-            try std.testing.expectEqual(Fed.invalid, outcome.event);
+            try std.testing.expectEqual(Fed{ .refused = .invalid }, outcome.event);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
         };

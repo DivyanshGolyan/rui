@@ -177,7 +177,7 @@ pub fn stale(self: *const Self) bool {
 pub fn applyChoice(self: *Self, comptime keys: anytype, decoded: TerminalInput.Decoded) keymap.Outcome(@TypeOf(keys).Action) {
     const outcome = self.choice.apply(keys, decoded);
     // Typed, rejected or dropped input begins a line.
-    const began = self.choice.length != 0 or self.choice.rejected != null or outcome == .unbound or outcome == .edit_rejected;
+    const began = self.choice.length != 0 or self.choice.rejected != null or outcome == .refused;
     self.choice_line.apply(began, outcome.endsLine());
     return outcome;
 }

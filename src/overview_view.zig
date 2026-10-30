@@ -1134,20 +1134,20 @@ fn codepointStart(bytes: []const u8, at: usize) usize {
     return start;
 }
 
+/// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
+/// the prompt and Esc only cancels it.
 fn compose(state: *State, value: Typed, effects: *Effects) void {
-    const action: ?Action = switch (value.outcome) {
-        .action => |action| action,
-        else => null,
-    };
-    if (dismissed(state, action, effects)) return;
+    state.notice = null;
+    const prompt = state.prompt;
+    state.prompt = null;
     switch (value.outcome) {
         .action => |pressed| switch (pressed) {
             .previous, .next, .first, .last => move(state, pressed),
-            .clear => if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
+            .clear => if (prompt != null) {} else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
-            .stop => {
+            .stop => if (prompt) |asked| confirmStop(state, asked.stop, effects) else {
                 const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session first.", .{});
                 if (rules.get(shownKind(state, row)).stoppable) {
                     state.prompt = .{ .stop = row.reference };
@@ -1156,30 +1156,16 @@ fn compose(state: *State, value: Typed, effects: *Effects) void {
         },
         .none, .append, .redraw => {},
         .submit => enter(state, value.draft.bytes, effects),
-        .invalid => {
-            effects.add(.clear_draft);
-            state.say(.attention, "! That text had bytes that are not text, so it was not sent.", .{});
+        .refused => |why| {
+            if (why.endsLine()) effects.add(.clear_draft);
+            switch (why) {
+                .invalid => state.say(.attention, "! That text had bytes that are not text, so it was not sent.", .{}),
+                .overflow => state.say(.attention, "! That's too long to send.", .{}),
+                .edit_rejected => state.say(.attention, "! That character cannot stand alone, so it was not added.", .{}),
+                .unbound => state.say(.attention, "! That key combination does nothing here.", .{}),
+            }
         },
-        .overflow => {
-            effects.add(.clear_draft);
-            state.say(.attention, "! That's too long to send.", .{});
-        },
-        .edit_rejected => state.say(.attention, "! That character cannot stand alone, so it was not added.", .{}),
-        .unbound => state.say(.attention, "! That key combination does nothing here.", .{}),
     }
-}
-
-/// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
-/// the prompt and Esc only cancels it; true when that was all it did.
-fn dismissed(state: *State, action: ?Action, effects: *Effects) bool {
-    state.notice = null;
-    const prompt = state.prompt orelse return false;
-    state.prompt = null;
-    if (action == .stop) {
-        confirmStop(state, prompt.stop, effects);
-        return true;
-    }
-    return action == .clear;
 }
 
 fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
@@ -3078,10 +3064,10 @@ test "end of input, ctrl-c and /exit leave" {
 test "a line the editor rejects says why once; text it could not take clears" {
     var draft: Draft = .{};
     for ([_]struct { keymap.Outcome(Action), []const u8, bool }{
-        .{ .invalid, "! That text had bytes that are not text, so it was not sent.", true },
-        .{ .overflow, "! That's too long to send.", true },
-        .{ .edit_rejected, "! That character cannot stand alone, so it was not added.", false },
-        .{ .unbound, "! That key combination does nothing here.", false },
+        .{ .{ .refused = .invalid }, "! That text had bytes that are not text, so it was not sent.", true },
+        .{ .{ .refused = .overflow }, "! That's too long to send.", true },
+        .{ .{ .refused = .edit_rejected }, "! That character cannot stand alone, so it was not added.", false },
+        .{ .{ .refused = .unbound }, "! That key combination does nothing here.", false },
     }) |case| {
         var state = try opened(&mixed);
         defer state.deinit();

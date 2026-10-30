@@ -49,6 +49,23 @@ pub fn Keymap(comptime A: type) type {
     };
 }
 
+/// Why the editor refused input.
+pub const Refusal = enum {
+    /// Enter on a line rejected earlier because it held input that is not
+    /// text. The caller drops the line.
+    invalid,
+    /// Enter on a line rejected earlier for its length.
+    overflow,
+    /// A refused edit; the draft stands as it was.
+    edit_rejected,
+    /// An Alt, Super, Hyper or Meta chord nothing binds, dropped whole.
+    unbound,
+
+    pub fn endsLine(self: Refusal) bool {
+        return self == .invalid or self == .overflow;
+    }
+};
+
 /// What one input did on a screen whose keys mean `A`s: an edit of the
 /// draft, or the screen's action for a key the editor had no use for.
 pub fn Outcome(comptime A: type) type {
@@ -61,22 +78,15 @@ pub fn Outcome(comptime A: type) type {
         redraw,
         /// Enter: the draft is a line.
         submit,
-        /// Enter on a line rejected earlier because it held input that is
-        /// not text. The caller drops the line.
-        invalid,
-        /// Enter on a line rejected earlier for its length.
-        overflow,
-        /// A refused edit; the draft stands as it was.
-        edit_rejected,
-        /// An Alt, Super, Hyper or Meta chord nothing binds, dropped whole.
-        unbound,
+        refused: Refusal,
         action: A,
 
         /// Enter ended the line, sent or refused. A screen's own keys end
         /// whatever that screen says they end.
         pub fn endsLine(self: @This()) bool {
             return switch (self) {
-                .submit, .invalid, .overflow => true,
+                .submit => true,
+                .refused => |why| why.endsLine(),
                 else => false,
             };
         }
