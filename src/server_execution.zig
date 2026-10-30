@@ -199,11 +199,21 @@ fn attachSlot(
 /// Every later transition of an occupied slot, keeping its token. Custody
 /// moves with the arm: leaving the attached arms detaches it and freeing
 /// the slot completes its cleanup. Custody never returns to attached.
-fn moveSlot(host: *Host, slot: *ExecutionSlot, next: ExecutionSlot) void {
+/// Moves `slot` to its `arm` holding `payload`, written straight into the
+/// slot: a whole ExecutionSlot value is the size of its largest arm, a
+/// provider Transfer, and every move built one in its caller's frame.
+fn moveSlot(
+    host: *Host,
+    slot: *ExecutionSlot,
+    comptime arm: std.meta.Tag(ExecutionSlot),
+    payload: @FieldType(ExecutionSlot, @tagName(arm)),
+) void {
     const token = slotToken(slot).?;
-    if (slotToken(&next)) |kept| std.debug.assert(std.meta.eql(kept, token));
     const from = slotCustody(slot);
-    const to = slotCustody(&next);
+    slot.* = @unionInit(ExecutionSlot, @tagName(arm), payload);
+    host.slot_changes +%= 1;
+    if (slotToken(slot)) |kept| std.debug.assert(std.meta.eql(kept, token));
+    const to = slotCustody(slot);
     if (from == .attached and to != .attached) {
         // An Action leaves custody unsettled only once dispatch is fenced or
         // the Host is shutting down, and neither admits work again, so
@@ -217,8 +227,6 @@ fn moveSlot(host: *Host, slot: *ExecutionSlot, next: ExecutionSlot) void {
         .detached => {},
         .free => host.custody.cleanupComplete(token) catch unreachable,
     }
-    slot.* = next;
-    host.slot_changes +%= 1;
 }
 
 test "execution slots change only through attachSlot and moveSlot" {
@@ -349,6 +357,12 @@ const Workspace = struct {
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
     bash_outcome: bash.Outcome,
+    /// One transfer's response import: the decoded event data, the
+    /// interpretation and the settled output, live from a completed transfer
+    /// to its settlement.
+    event_data: model_adapter.Output.EventData,
+    interpretation: model_adapter.OutputInterpretation,
+    settlement: store_module.ValidatedOutput,
 };
 
 pub fn executionMain(host: *Host) void {
@@ -370,8 +384,6 @@ pub fn executionMain(host: *Host) void {
     else
         null;
     host.auth_worker = auth_worker;
-    host.item_check = &workspace.item_check;
-    defer host.item_check = null;
     defer if (auth_thread) |thread| {
         host.auth_worker = null;
         auth_worker.?.stop(thread);
@@ -698,7 +710,7 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots);
+        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace);
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -729,7 +741,7 @@ const slotsHaveBash = hasBash;
 
 /// One finished transfer per call, found by address: a Transfer lives
 /// inside exactly one slot.
-fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, workspace: *Workspace) bool {
     const active_reactor = reactor orelse return false;
     const completion = active_reactor.nextCompletion(host.hooks.fails(.response_seal)) catch |err| {
         fenceDispatch(host, "transport completion", err);
@@ -739,7 +751,7 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
         fenceDispatch(host, "transport completion", error.UnknownTransportCompletion);
         return false;
     };
-    completeTransfer(host, slot, completion);
+    completeTransfer(host, workspace, slot, completion);
     return true;
 }
 
@@ -1119,18 +1131,19 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
-    var launched: ?bash.Execution = null;
+    // The Execution launches straight into its custody record's entry.
+    const work = &host.bash_work[token.index];
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
-        .launched = &launched,
+        .work = work,
     }, struct {
         fn handoff(context: anytype) !void {
             try context.host.withEffectLaunch(context, launch);
         }
 
         fn launch(context: anytype) !void {
-            context.launched.* = try context.prepared.launch(context.host.bash_environment);
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -1143,13 +1156,11 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
-    const work = &host.bash_work[token.index];
-    work.* = .{ .execution = launched.? };
-    moveSlot(host, slot, .{ .bash = .{
+    moveSlot(host, slot, .bash, .{
         .token = token,
         .binding = action_binding,
         .execution = &work.execution,
-    } });
+    });
     traceAction(host, "bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
     traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
@@ -1244,7 +1255,7 @@ fn closeBashDelivery(host: *Host, slot: *ExecutionSlot) void {
     var closed = slot.bash;
     std.debug.assert(closed.delivery == .open);
     closed.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
-    moveSlot(host, slot, .{ .bash = closed });
+    moveSlot(host, slot, .bash, closed);
     traceAction(host, "cleanup_started", closed.binding);
 }
 
@@ -1264,7 +1275,7 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
         return first_failure;
     };
     const binding = active.binding;
-    moveSlot(host, slot, .free);
+    moveSlot(host, slot, .free, {});
     traceAction(host, "cleanup_completed", binding);
     return true;
 }
@@ -1279,10 +1290,10 @@ fn retainBashPreparedCleanup(
     const token = slotToken(slot).?;
     const work = &host.bash_work[token.index];
     work.* = .{ .prepared_cleanup = cleanup };
-    moveSlot(host, slot, .{ .bash_prepared_cleanup = .{
+    moveSlot(host, slot, .bash_prepared_cleanup, .{
         .token = token,
         .cleanup = &work.prepared_cleanup,
-    } });
+    });
 }
 
 fn settleActionFailure(
@@ -1417,7 +1428,7 @@ fn advanceModelPreparation(
             var request = value;
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
                 .authenticate => {
-                    moveSlot(host, slot, .{ .model_authenticating = .{ .owner = owner, .request = request } });
+                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner, .request = request });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
                 },
                 .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
@@ -1493,11 +1504,11 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
     };
     if (!claimed) return false;
     slot.provider.transfer.deinit();
-    moveSlot(host, slot, .{ .model_refreshing = .{
+    moveSlot(host, slot, .model_refreshing, .{
         .owner = owner,
         .rejected_generation = rejected_generation,
         .request_id = answered.request_id,
-    } });
+    });
     return true;
 }
 
@@ -1540,7 +1551,7 @@ fn finishModelPreparationFailure(
         .superseded = err == error.SupersededByControl,
     } })) {
         .retain_cleanup => {
-            moveSlot(host, slot, .{ .named_scratch = .{ .token = owner.token, .owner = retained_scratch.? } });
+            moveSlot(host, slot, .named_scratch, .{ .token = owner.token, .owner = retained_scratch.? });
             retainDispatchFence(host, "request scratch unlink", err);
             return;
         },
@@ -1585,11 +1596,10 @@ fn launchPreparedRequest(
     }
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
-    moveSlot(host, slot, .{ .provider = .{
+    moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
-        .transfer = undefined,
-    } });
+    });
     const active = &slot.provider;
     active.transfer.start(reactor, request.*, binding, .{
         .fields = headers.fields(),
@@ -1599,10 +1609,10 @@ fn launchPreparedRequest(
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
-            moveSlot(host, slot, .{ .named_scratch = .{
+            moveSlot(host, slot, .named_scratch, .{
                 .token = token,
                 .owner = retained,
-            } });
+            });
             retainDispatchFence(host, "response scratch unlink", err);
             return;
         }
@@ -1662,6 +1672,7 @@ fn launchPreparedRequest(
 
 fn completeTransfer(
     host: *Host,
+    workspace: *Workspace,
     slot: *ExecutionSlot,
     completion: provider.Completion,
 ) void {
@@ -1706,13 +1717,13 @@ fn completeTransfer(
     }
     switch (decision) {
         .interpret_output => {
-            switch (completeSuccessfulTransfer(host, active, http_status.?)) {
+            switch (completeSuccessfulTransfer(host, workspace, active, http_status.?)) {
                 .cleanup => finishCustodyNow(host, slot),
                 .named_scratch => |scratch| {
-                    moveSlot(host, slot, .{ .named_scratch = .{
+                    moveSlot(host, slot, .named_scratch, .{
                         .token = owner.token,
                         .owner = scratch,
-                    } });
+                    });
                 },
             }
             return;
@@ -1770,7 +1781,7 @@ const SuccessfulCompletion = union(enum) {
     named_scratch: named_scratch.Owner,
 };
 
-fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
+fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
     const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -1822,7 +1833,8 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     var data_name_buffer: [96]u8 = undefined;
     const data_name = named_scratch.NumericName.response.format(&data_name_buffer, owner.binding.operation_id, owner.binding.attempt_ordinal) catch unreachable;
     var retained_data: ?named_scratch.Owner = null;
-    var event_data = model_adapter.Output.EventData.init(host.io, host.lease.paths.scratch.slice(), data_name, metadata_budget, false, &retained_data) catch |err| {
+    const event_data = &workspace.event_data;
+    event_data.init(host.io, host.lease.paths.scratch.slice(), data_name, metadata_budget, false, &retained_data) catch |err| {
         if (retained_data) |retained| {
             retainDispatchFence(host, "response data unlink", err);
             return .{ .named_scratch = retained };
@@ -1838,14 +1850,15 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, &event_data, operation, .{
+    model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, host.item_check.?, .{
+    }, &workspace.item_check, .{
         .metadata = host.hooks.fails(.response_metadata),
-    })) {
-        .accepted => |value| value,
-        .rejected => |rejection| {
+    }, &workspace.interpretation);
+    const accepted = switch (workspace.interpretation) {
+        .accepted => |*value| value,
+        .rejected => |*rejection| {
             traceOperation(host, "validation_failed", owner.binding);
             stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
             var detail: [512]u8 = undefined;
@@ -1855,12 +1868,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
             return .cleanup;
         },
     };
-    const validated = accepted.output;
+    const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
-    host.store.settleModelSuccess(owner.binding, &.{
+    workspace.settlement = .{
         .source = validated.source,
         .source_length = validated.source_length,
         .metadata = metadata.file,
@@ -1872,7 +1885,8 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         .response_id = validated.evidence.response_id,
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
-    }, host.hooks.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
+    };
+    host.store.settleModelSuccess(owner.binding, &workspace.settlement, host.hooks.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
@@ -1906,12 +1920,12 @@ fn advanceRetainedCleanup(
     for (slots) |*slot| switch (slot.*) {
         .bash_prepared_cleanup => |*retained| {
             retained.cleanup.cleanup(bashScratch(host)) catch continue;
-            moveSlot(host, slot, .free);
+            moveSlot(host, slot, .free, {});
             made_progress = true;
         },
         .named_scratch => |*retained| {
             _ = retained.owner.reclaim(host.lease.paths.scratch.slice()) catch continue;
-            moveSlot(host, slot, .free);
+            moveSlot(host, slot, .free, {});
             made_progress = true;
         },
         else => {},
@@ -2081,7 +2095,7 @@ fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
     const traced = if (host.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
-    moveSlot(host, slot, .free);
+    moveSlot(host, slot, .free, {});
     if (traced) |binding| switch (binding) {
         .model => |model| traceOperation(host, "cleanup_completed", model),
         .action => |action| traceAction(host, "cleanup_completed", action),
@@ -2242,6 +2256,8 @@ test "HTTP error capture retires before execution custody" {
     vtable.fileClose = Boundary.close;
     vtable.now = Boundary.now;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const workspace = try pages.Mapped(Workspace).map();
+    defer workspace.unmap();
     for (0..3) |kind| {
         var used: std.atomic.Value(u64) = .init(17);
         const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
@@ -2252,7 +2268,6 @@ test "HTTP error capture retires before execution custody" {
             .lease = undefined,
             .store = undefined,
             .hooks = .{ .phase_trace = true },
-            .item_check = model_adapter.Output.testingItemCheck(),
             .custody = execution.CustodyPool.initialize(&records),
         };
         const token = host.custody.reserve().?;
@@ -2308,7 +2323,7 @@ test "HTTP error capture retires before execution custody" {
             response.length += 1;
             try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
         }
-        completeTransfer(&host, &slot, .{
+        completeTransfer(&host, workspace.value, &slot, .{
             .transfer = &slot.provider.transfer,
             .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } },
             .queued_after = 0,
