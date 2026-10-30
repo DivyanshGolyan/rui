@@ -1,10 +1,10 @@
 {
   "budget_bytes": 8192,
   "threads": {
-    "main thread": {"anchor": "server.serve", "chain_ceiling": 53248},
-    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 45056},
-    "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 53248},
-    "AuthWorker": {"anchor": "codex_credentials.exchangeRefresh", "chain_ceiling": 32768}
+    "main thread": {"anchor": "server.serve", "chain_ceiling": 49152},
+    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 40960},
+    "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
+    "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
   },
   "host_modules": [
     "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",
@@ -17,9 +17,7 @@
     "Stream", "proxy", "tls", "job"
   ],
   "exceptions": [
-    {"function": "fmt.parse_float.convert_slow.convertSlow", "frame_bytes": 24576, "cause": "std slow float parse Decimal; reached from json parses of TestObservation and failed-response headers"},
     {"function": "posix.openat", "frame_bytes": 16384, "cause": "std toPosixPath [4095:0]u8 path buffers"},
-    {"function": "preferences.save", "frame_bytes": 12288, "cause": "client-only writer (rui defaults, rui auth login) in a module the Host reads at startup: a [4096]u8 path and a [1024]u8 encoding buffer inlined from saveWithSync"},
     {"function": "Io.Threaded.dirRenamePosix", "frame_bytes": 12288, "cause": "std old and new path buffers [4096]u8"},
     {"function": "EVP_read_pw_string_min", "frame_bytes": 12288, "cause": "OpenSSL password prompt buffer; reached through SSL_CTX_new"}
   ]

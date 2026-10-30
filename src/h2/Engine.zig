@@ -26,9 +26,9 @@ io: std.Io,
 options: h2.Options,
 callbacks: *c.nghttp2_session_callbacks,
 session_options: *c.nghttp2_option,
-origins: [h2.max_endpoints]Origin,
+origins: [h2.max_endpoints]Origin = undefined,
 origin_count: u8,
-endpoints: [h2.max_endpoints]Endpoint,
+endpoints: [h2.max_endpoints]Endpoint = undefined,
 endpoint_count: u8,
 /// Never moved: open streams name theirs by index + 1. Sized for the
 /// worst case, but each drive walks only the first `connections_len`
@@ -198,8 +198,8 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
     // connects. Unwritten until connections need it.
     const pollfds = try allocUnwritten(allocator, std.c.pollfd, policy.max_attempts * capacity + 1);
     errdefer freeUnwritten(allocator, std.c.pollfd, pollfds);
-    const scratch = try allocator.create(Scratch);
-    errdefer allocator.destroy(scratch);
+    const scratch = &(try allocUnwritten(allocator, Scratch, 1))[0];
+    errdefer freeUnwritten(allocator, Scratch, scratch[0..1]);
     scratch.chunk_count = 0;
     var waker = try Waker.init();
     errdefer waker.deinit();
@@ -215,9 +215,7 @@ pub fn init(self: *Engine, allocator: std.mem.Allocator, io: std.Io, options: h2
         },
         .callbacks = callbacks.?,
         .session_options = session_options.?,
-        .origins = undefined,
         .origin_count = 0,
-        .endpoints = undefined,
         .endpoint_count = 0,
         .connections = connections,
         .connections_len = 0,
@@ -249,7 +247,7 @@ fn trimTable(self: *Engine) void {
         self.connections_len -= 1;
 }
 
-/// Allocator.alloc and Allocator.free fill the memory with `undefined`
+/// Allocator.alloc, create and free fill the memory with `undefined`
 /// (0xAA) in safe builds, which writes, and so makes resident, every page
 /// of a table sized for the worst case: 566 pages at 10,000 entries in
 /// the test below. The raw calls skip that fill. Whether untouched pages
@@ -279,7 +277,7 @@ pub fn deinit(self: *Engine) void {
     for (self.endpoints[0..self.endpoint_count]) |endpoint| self.allocator.free(endpoint.url);
     if (self.tls_context) |*context| context.deinit();
     if (self.proxy_route) |*via| via.deinit(self.allocator);
-    self.allocator.destroy(self.scratch);
+    freeUnwritten(self.allocator, Scratch, self.scratch[0..1]);
     freeUnwritten(self.allocator, std.c.pollfd, self.pollfds);
     freeUnwritten(self.allocator, policy.ConnectionView, self.views);
     freeUnwritten(self.allocator, Connection, self.connections);

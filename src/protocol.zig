@@ -1255,7 +1255,7 @@ const Parser = struct {
             .host_info => out.* = .{ .host_info = .{ .store = store } },
             .host_stop => out.* = .{ .host_stop = .{ .store = store } },
             .configure => {
-                out.* = .{ .configure = .{ .store = store } };
+                out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
                 try self.parseConfigure(&out.configure);
             },
             .message => {
@@ -1435,7 +1435,7 @@ const Parser = struct {
         try self.expectByte(',');
         if (out.session.len == 0) {
             try self.expectKey("configuration");
-            out.configuration = .{};
+            out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
             try self.parseConfiguration(false, &out.configuration.?);
             try self.expectByte(',');
         }
@@ -1561,7 +1561,7 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("workspace");
         if (!try self.consumeIf('n')) {
-            out.workspace = .{};
+            out.workspace = .{ .len = 0 };
             try self.readSmallString(&out.workspace.?);
         } else {
             try self.expectByte('u');

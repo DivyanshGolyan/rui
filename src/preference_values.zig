@@ -10,8 +10,17 @@ pub const Values = struct {
 
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {
     try validateHome(home);
-    return std.fmt.bufPrint(buffer, "{s}/.config/rui", .{home}) catch error.PreferencePathTooLong;
+    return std.fmt.bufPrint(buffer, directory_format, .{home}) catch error.PreferencePathTooLong;
 }
+
+/// directoryPath's checks, for a writer that opens the directory relative to
+/// `home` and needs no path buffer.
+pub fn validateDirectoryPath(home: []const u8) !void {
+    try validateHome(home);
+    if (std.fmt.count(directory_format, .{home}) > std.Io.Dir.max_path_bytes) return error.PreferencePathTooLong;
+}
+
+const directory_format = "{s}/.config/rui";
 
 pub fn defaultStore(home: []const u8, buffer: []u8) ![]const u8 {
     try validateHome(home);

@@ -10,6 +10,7 @@ const max_file_bytes = 1024;
 
 pub const Values = @import("preference_values.zig").Values;
 pub const directoryPath = @import("preference_values.zig").directoryPath;
+const validateDirectoryPath = @import("preference_values.zig").validateDirectoryPath;
 pub const defaultStore = @import("preference_values.zig").defaultStore;
 
 pub const Change = union(enum) { keep, set: []const u8 };
@@ -126,8 +127,7 @@ const NativeDirectorySync = struct {
 };
 
 fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool, directory_sync: anytype) !?Values {
-    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    _ = try directoryPath(home, &path);
+    try validateDirectoryPath(home);
     if (edit.provider == .set) {
         if (!std.mem.eql(u8, edit.provider.set, "codex")) return error.UnsupportedPreferenceProvider;
     }
