@@ -27,6 +27,13 @@ from model_fixture import (
 )
 
 
+def content_reference(text):
+    data = text.encode()
+    domain = b"rui/content/v1"
+    digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).hexdigest()
+    return {"bytes": str(len(data)), "sha256": digest}
+
+
 def failed_response_records(store):
     """Read back failed-response records in retention order, checking each
     private body against its metadata's length and digest."""
@@ -553,7 +560,7 @@ def http_quota_cases(state, processes, endpoints):
     for index, provider_code in enumerate(("usage_limit_reached", "insufficient_quota", "usage_not_included")):
         reset = 1_800_000_123 + index
         body = json.dumps({"error": {"code": provider_code, "resets_at": reset,
-                                    "message": "private provider prose must not be copied"}}).encode()
+                                    "message": "Provider prose\nstays out of the diagnostic."}}).encode()
         request_id = f"quota-request-{index}"
         endpoint = SuccessEndpoint([
             ResponseSpec(body, {"X-Request-Id": request_id, "Retry-After": "0"}, 429)
@@ -588,6 +595,9 @@ def http_quota_cases(state, processes, endpoints):
         assert operation["resolution"]["code"] == code, operation
         diagnostic = operation["resolution"]["content"]["text"]
         assert json.loads(diagnostic) == {"provider_code": provider_code, "resets_at": reset}, diagnostic
+        # The Turn keeps the provider's words as its report instead.
+        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(
+            f"{provider_code}: Provider prose stays out of the diagnostic."), report
         assert observe(store, key)["result"] == result["result"]
         stop_host(reopened)
         processes.remove(reopened)
@@ -616,7 +626,36 @@ def http_quota_cases(state, processes, endpoints):
     processes.remove(host)
     assert len(endpoint.requests) == 2, endpoint.requests
     stop_endpoint(endpoint, endpoints)
-    print("HTTP 429 quota: distinct permanent codes, one Attempt and exact resets_at through reopen")
+    # A known refusal code is permanent at any status; any other code keeps
+    # its status code. Either way the Turn keeps the provider's words.
+    for status, error, code, words in (
+        (404, {"code": "model_not_found", "message": "The model `gpt-x` does not exist."},
+         "provider_model_not_found", "model_not_found: The model `gpt-x` does not exist."),
+        (503, {"code": "cyber_policy", "message": "Flagged."}, "provider_cyber_policy", "cyber_policy: Flagged."),
+        (400, {"code": None, "type": "invalid_request_error", "message": "Unsupported parameter."},
+         "provider_http_400", "invalid_request_error: Unsupported parameter."),
+    ):
+        endpoint = SuccessEndpoint([ResponseSpec(json.dumps({"error": error}).encode(), {}, status) for _ in range(4)])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / f"refusal-{status}"
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                          "--test-retry-waits-ms", "1,1,1")
+        processes.append(host)
+        session = configure(state, store, f"refusal-{status}-config", None, "gpt-6-sol")
+        message(state, store, f"refusal-{status}", session, "refused")
+        result = wait_for(lambda: (value := observe(store, f"refusal-{status}")).get("result") and value,
+                          "permanent HTTP refusal")
+        assert result["result"] == {"status": "failed", "code": code}, result
+        assert result["processing"]["attempt"] == "1", result
+        report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(words), report
+        stop_host(host)
+        processes.remove(host)
+        assert len(endpoint.requests) == 1, endpoint.requests
+        stop_endpoint(endpoint, endpoints)
+    print("HTTP refusals: distinct permanent codes, one Attempt, exact resets_at and the provider's words through reopen")
 
 
 def failure_correlation_cases(state, processes, endpoints, selected="all"):
@@ -762,11 +801,12 @@ def stream_failure_cases(state, processes, endpoints):
     for event_type in ("error", "response.failed"):
         for code, temporary in (("server_is_overloaded", True), ("rate_limit_exceeded", True),
                                 ("future_error", True), ("insufficient_quota", False), ("bio_policy", False)):
-            event = {"type": event_type, "code": code} if event_type == "error" else {
-                "type": event_type, "response": {"status": "failed", "error": {"code": code}}}
+            failure = {"code": code, "message": f"Words for\n{code}."}
+            event = {"type": event_type, **failure} if event_type == "error" else {
+                "type": event_type, "response": {"status": "failed", "error": failure}}
             body = partial + encode_sse([event])
             cases.append((event_type + "-" + code, [body, answer] if temporary else [body],
-                          "completed" if temporary else "provider_permanent_error", 2 if temporary else 1))
+                          "completed" if temporary else "provider_" + code, 2 if temporary else 1))
     overloaded = encode_sse([{"type": "response.failed", "response": {
         "status": "failed", "error": {"code": "server_is_overloaded"}}}])
     nullable = answer.replace(b'"model":"model-a-served"', b'"model":null').replace(
@@ -804,6 +844,13 @@ def stream_failure_cases(state, processes, endpoints):
         if label == "exhausted":
             detail = json.loads(operation["resolution"]["content"]["text"])
             assert detail == {"reason": "TemporaryProviderFailure", "stage": "event", "byte_offset": "6", "output_index": None}, detail
+        # A failed Turn keeps the provider's own words as its report.
+        outcome = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["turns"][0]["outcome"]
+        if code.startswith("provider_"):
+            provider_code = code.removeprefix("provider_")
+            assert outcome["content"] == content_reference(f"{provider_code}: Words for {provider_code}."), (label, outcome)
+        elif code == "retry_exhausted":
+            assert outcome["content"] == content_reference("server_is_overloaded"), (label, outcome)
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:

@@ -16,7 +16,7 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 40;
+pub const schema_version: u32 = 41;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -468,6 +468,9 @@ pub const ModelFailure = union(enum) {
         code: []const u8,
         /// The provider's own correlation; empty when it sent none.
         request_id: protocol.Bounded(256),
+        /// The provider's own words, `code: message`; empty when it sent
+        /// none. A terminal failure keeps it as its outcome's report.
+        report: []const u8,
     };
 
     pub const Rejected = struct {
@@ -475,6 +478,7 @@ pub const ModelFailure = union(enum) {
         // Borrowed for settlement only; never Turn output or model continuation.
         diagnostic: []const u8,
         request_id: protocol.Bounded(256),
+        report: []const u8,
     };
 
     fn code(self: *const ModelFailure) []const u8 {
@@ -489,6 +493,14 @@ pub const ModelFailure = union(enum) {
         return switch (self.*) {
             .rejected => |value| value.diagnostic,
             .uncorrelated, .correlated => null,
+        };
+    }
+
+    fn report(self: *const ModelFailure) []const u8 {
+        return switch (self.*) {
+            .uncorrelated => "",
+            .correlated => |value| value.report,
+            .rejected => |value| value.report,
         };
     }
 
@@ -1515,17 +1527,21 @@ pub const SqliteDiagnostic = struct {
     journal_mode: ?protocol.Bounded(16) = null,
 };
 
-/// How a Turn ended. `turn.outcome_code` saves `code()`; a completed Turn
-/// also saves its answer's content. Readers `decode` the saved pair once
-/// and switch on the result, so a new outcome is handled at every reader.
+/// How a Turn ended. `turn.outcome_code` saves `code()` and
+/// `turn.outcome_content_id` saves `content()`: a completed Turn's answer,
+/// or a failed one's report, the provider's own words for why. Readers
+/// `decode` the saved pair once and switch on the result, so a new outcome
+/// is handled at every reader.
 const TurnOutcome = union(enum) {
     completed: i64,
     cancelled,
-    retry_exhausted,
+    /// The settling Attempt's report, when the provider sent one.
+    retry_exhausted: ?i64,
     resource_exceeded,
     /// A terminal model failure, saved under its own failure code.
-    failed: []const u8,
+    failed: Failed,
 
+    const Failed = struct { code: []const u8, report: ?i64 };
     const Tag = std.meta.Tag(TurnOutcome);
 
     /// The saved code of every outcome but a failure, which saves its own.
@@ -1540,21 +1556,30 @@ const TurnOutcome = union(enum) {
     }
 
     fn code(outcome: TurnOutcome) []const u8 {
-        return fixedCode(outcome) orelse outcome.failed;
+        return fixedCode(outcome) orelse outcome.failed.code;
     }
 
-    /// The inverse of `code()` with the content `closeTurn` saved beside
-    /// it. A `failed` result borrows `saved`.
+    fn content(outcome: TurnOutcome) ?i64 {
+        return switch (outcome) {
+            .completed => |answer| answer,
+            .retry_exhausted => |report| report,
+            .failed => |failed| failed.report,
+            .cancelled, .resource_exceeded => null,
+        };
+    }
+
+    /// The inverse of `code()` and `content()`. A `failed` result borrows
+    /// `saved`.
     fn decode(saved: []const u8, content_id: ?i64) error{CorruptStore}!TurnOutcome {
         if (saved.len == 0) return error.CorruptStore;
         const tag: Tag = for (std.enums.values(Tag)) |candidate| {
             if (fixedCode(candidate)) |fixed| if (std.mem.eql(u8, fixed, saved)) break candidate;
         } else .failed;
-        if ((tag == .completed) != (content_id != null)) return error.CorruptStore;
         return switch (tag) {
-            .completed => .{ .completed = content_id.? },
-            .failed => .{ .failed = saved },
-            inline .cancelled, .retry_exhausted, .resource_exceeded => |fixed| fixed,
+            .completed => .{ .completed = content_id orelse return error.CorruptStore },
+            .retry_exhausted => .{ .retry_exhausted = content_id },
+            .failed => .{ .failed = .{ .code = saved, .report = content_id } },
+            inline .cancelled, .resource_exceeded => |fixed| if (content_id == null) fixed else error.CorruptStore,
         };
     }
 };
@@ -6677,6 +6702,8 @@ pub const Store = struct {
         if (failure.diagnostic()) |detail| {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
+        const report = failure.report();
+        std.debug.assert(report.len <= provider_output.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const access = try self.enter(.none);
         defer access.release();
         return access.finishTransaction(Ordinary.attempt_binding, faults, self.settleModelAttemptFailureLocked(binding, failure, disposition, faults));
@@ -6698,7 +6725,6 @@ pub const Store = struct {
             .ordinary, .context_overflow => {
                 const compact = disposition == .context_overflow and try self.overflowCanCompact(binding);
                 const resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code;
-                const outcome: TurnOutcome = if (disposition == .context_overflow) .resource_exceeded else .{ .failed = code };
                 const diagnostic_id = if (failure.diagnostic()) |detail|
                     try self.importBytesContent(detail, false, faults.content_import)
                 else
@@ -6725,6 +6751,10 @@ pub const Store = struct {
                     return;
                 }
 
+                const outcome: TurnOutcome = if (disposition == .context_overflow) .resource_exceeded else .{ .failed = .{
+                    .code = code,
+                    .report = try self.importReport(failure, faults),
+                } };
                 if (!try self.closeTurn(binding.turn_id, binding.operation_id, outcome)) return error.StaleAttemptBinding;
             },
             .refreshed => {
@@ -6774,12 +6804,19 @@ pub const Store = struct {
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
 
-                    if (!try self.closeTurn(binding.turn_id, binding.operation_id, .retry_exhausted)) return error.StaleAttemptBinding;
+                    if (!try self.closeTurn(binding.turn_id, binding.operation_id, .{ .retry_exhausted = try self.importReport(failure, faults) })) return error.StaleAttemptBinding;
                 },
             },
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try self.execute("COMMIT");
+    }
+
+    /// A failure's report as public content, for its Turn's outcome.
+    fn importReport(self: *Store, failure: ModelFailure, faults: Faults) !?i64 {
+        const report = failure.report();
+        if (report.len == 0) return null;
+        return try self.importBytesContent(report, false, faults.content_import);
     }
 
     pub fn recoverOneExhaustedModelAttempt(
@@ -6835,7 +6872,7 @@ pub const Store = struct {
             try expectDone(update_operation);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
-        if (!try self.closeTurn(@intCast(binding.turn_id), @intCast(binding.operation_id), .retry_exhausted)) return error.SelectionChanged;
+        if (!try self.closeTurn(@intCast(binding.turn_id), @intCast(binding.operation_id), .{ .retry_exhausted = null })) return error.SelectionChanged;
         try self.execute("COMMIT");
         return true;
     }
@@ -7958,7 +7995,7 @@ pub const Store = struct {
         try readText(select, 0, &session);
         resetCached(select);
         const position = try self.claimSessionPosition(session.slice());
-        const content_id: ?i64 = if (outcome == .completed) outcome.completed else null;
+        const content_id = outcome.content();
         // A failure code spelling a fixed outcome would read back as that outcome.
         std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
         const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=unixepoch() WHERE turn_id=?1 AND outcome_code IS NULL");
@@ -10952,7 +10989,7 @@ test "Current, activity pages and Message progress report one work in each state
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     var diagnostic: [512]u8 = undefined;
     const quota: @import("transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
-    try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{} } }, .ordinary, .{});
+    try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
     try std.testing.expectEqual(try queryU64(storage.database, "SELECT outcome_at FROM turn"), try expectOneWork(&storage, &tmp, session.slice(), "failed"));
     {
         var request: protocol.ActivityPage = .{};
@@ -11048,7 +11085,7 @@ test "a quota reset is read from a saved record and never fences" {
         const session = try configureTestSession(&storage, key);
         try submitTestMessage(&storage, &tmp, message, message, session.slice(), "q");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        const failure: ModelFailure = if (case.diagnostic) |detail| .{ .rejected = .{ .code = case.code, .diagnostic = detail, .request_id = .{} } } else .{ .uncorrelated = case.code };
+        const failure: ModelFailure = if (case.diagnostic) |detail| .{ .rejected = .{ .code = case.code, .diagnostic = detail, .request_id = .{}, .report = "" } } else .{ .uncorrelated = case.code };
         try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
@@ -13180,7 +13217,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
         var rejection: @import("provider_output.zig").Rejection = .{};
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, provider_output.testingItemCheck(), .{});
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, &provider_output.testing_provider_failure, provider_output.testingItemCheck(), .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");
@@ -18124,7 +18161,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
         defer tmp.cleanup();
         const detail = "{\"reason\":\"UnsupportedMessagePhase\",\"stage\":\"item\",\"byte_offset\":\"37\",\"output_index\":1}";
         const request_id = if (fault == .import) "" else "request-\"quoted\"\\path";
-        var failure: ModelFailure = .{ .rejected = .{ .code = "unsupported_provider_output", .diagnostic = detail, .request_id = .{} } };
+        var failure: ModelFailure = .{ .rejected = .{ .code = "unsupported_provider_output", .diagnostic = detail, .request_id = .{}, .report = "" } };
         try failure.rejected.request_id.set(request_id);
         var binding: AttemptBinding = undefined;
         var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -18198,6 +18235,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
             .code = "unsupported_provider_output",
             .diagnostic = "{\"reason\":\"UnsupportedMessagePhase\"}",
             .request_id = .{},
+            .report = "",
         } }, .ordinary, .{});
         const healthy = try storage.publicConversationPageForTesting(.{ .session = session });
         try std.testing.expectEqual(@as(usize, 1), healthy.count);
@@ -18334,7 +18372,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     const request_ids = [_][]const u8{ "attempt-1", "", "attempt-3", "attempt-\"4\"" };
     for (request_ids, 1..) |request_id, ordinal| {
         try std.testing.expectEqual(@as(u64, ordinal), binding.attempt_ordinal);
-        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{} } };
+        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .report = "" } };
         try failure.correlated.request_id.set(request_id);
         try storage.settleModelAttemptFailure(binding, failure, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
         var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -18364,7 +18402,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     // a copied union payload which expires before the SQLite step.
     try submitTestMessage(&storage, &tmp, "correlated-input", "correlated-message", session.slice(), "fail with correlation");
     const correlated = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{} } };
+    var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{}, .report = "" } };
     try ordinary.correlated.request_id.set("terminal-\"request\"-é");
     try storage.settleModelAttemptFailure(correlated, ordinary, .ordinary, .{});
     {
@@ -18380,8 +18418,36 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     // A provider answer without correlation records none.
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", session.slice(), "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } }, .ordinary, .{});
+    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } }, .ordinary, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'"));
+}
+
+test "a failed Turn's activity outcome references the provider's report" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "report-config");
+    const report = "cyber_policy: This request has been flagged.";
+    for ([_][]const u8{ report, "" }, 0..) |words, index| {
+        var key: [16]u8 = undefined;
+        const message = try std.fmt.bufPrint(&key, "report-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, message, message, session.slice(), "work");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_cyber_policy", .request_id = .{}, .report = words } }, .ordinary, .{});
+        try expectActivityOutcome(&storage, session.slice(), binding, "provider_cyber_policy");
+        var request: protocol.ActivityPage = .{ .direction = .backward };
+        try request.session.set(session.slice());
+        const outcome = (try storage.activityPageForTesting(request)).items[0].value.outcome;
+        if (words.len == 0) {
+            // No words, no report: never an empty one.
+            try std.testing.expect(outcome.content == null);
+        } else {
+            try std.testing.expectEqual(@as(u64, words.len), outcome.content.?.length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(words), &outcome.content.?.digest);
+        }
+    }
 }
 
 test "retryable stream rejections retain only the settling Attempt diagnostic through reopen" {
@@ -18404,6 +18470,7 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
                 .code = "provider_temporary_error",
                 .diagnostic = if (ordinal == 4) diagnostic else "earlier diagnostic",
                 .request_id = request_id,
+                .report = if (ordinal == 4) "server_is_overloaded: Try again later." else "earlier words",
             } }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
             if (ordinal < 4) {
                 try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_content_id IS NOT NULL OR request_id IS NOT NULL"));
@@ -18424,6 +18491,13 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
     const resolution = operation.get("resolution").?.object;
     try std.testing.expectEqualStrings("retry_exhausted", resolution.get("code").?.string);
     try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
+    // The Turn keeps the settling Attempt's report, the provider's own words.
+    const outcome = parsed.value.object.get("full").?.object.get("turns").?.array.items[0].object.get("outcome").?.object;
+    try std.testing.expectEqualStrings("retry_exhausted", outcome.get("code").?.string);
+    const words = "server_is_overloaded: Try again later.";
+    const reference = outcome.get("content").?.object;
+    try std.testing.expectEqualStrings(std.fmt.comptimePrint("{d}", .{words.len}), reference.get("bytes").?.string);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest(words), .lower), reference.get("sha256").?.string);
 }
 
 test "retry settlement adds actual entropy after the provider deadline" {
@@ -18978,7 +19052,7 @@ test "retry due index excludes future population and preserves age ordering" {
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.operation_id);
 }
 
-const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } };
+const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } };
 
 fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptBinding {
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_503" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
@@ -19490,7 +19564,7 @@ test "queued input is pending from the newer of its admission and the latest out
                 try submitTestMessage(&storage, &tmp, "stepped-queue-input", "stepped-queue-input", session.slice(), "queued");
                 var diagnostic: [512]u8 = undefined;
                 const quota: @import("transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
-                try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{} } }, .ordinary, .{});
+                try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
                 try exec(storage.database, "UPDATE message_admission SET admitted_at=200 WHERE command_key='stepped-queue-input';UPDATE turn SET outcome_at=100");
             },
             // Admitted after the outcome: pending from the admission, though
@@ -19726,7 +19800,7 @@ test "compaction overflow admits a new Operation without losing applied input" {
     try submitTestMessage(&storage, &tmp, "compact-input", "input", session.slice(), "keep all input");
     const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const detail = "{\"reason\":\"ContextOverflow\",\"stage\":\"response\",\"byte_offset\":\"0\",\"output_index\":null}";
-    var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{} } };
+    var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{}, .report = "" } };
     try failure.rejected.request_id.set("compact-overflow-request");
     try storage.settleModelAttemptFailure(original, failure, .context_overflow, .{});
     const next = (try storage.admitNextModelAttempt(.{})) orelse return error.MissingCompaction;
@@ -20896,17 +20970,21 @@ test "saved Turn outcomes read back as the outcome that closed the Turn" {
         .{ .code = "cancelled", .content_id = null, .tag = .cancelled },
         .{ .code = "retry_exhausted", .content_id = null, .tag = .retry_exhausted },
         .{ .code = "ResourceExceeded", .content_id = null, .tag = .resource_exceeded },
+        .{ .code = "retry_exhausted", .content_id = 8, .tag = .retry_exhausted },
         .{ .code = "provider_http_401", .content_id = null, .tag = .failed },
+        .{ .code = "provider_cyber_policy", .content_id = 9, .tag = .failed },
     };
     for (saved) |row| {
         const outcome = try TurnOutcome.decode(row.code, row.content_id);
         try std.testing.expectEqual(row.tag, std.meta.activeTag(outcome));
         try std.testing.expectEqualStrings(row.code, outcome.code());
+        try std.testing.expectEqual(row.content_id, outcome.content());
     }
     try std.testing.expectEqual(@as(i64, 7), (try TurnOutcome.decode("completed", 7)).completed);
-    // Only a completed Turn saves content, and every outcome saves a code.
+    // A completed Turn saves its answer and a failure may save its report;
+    // nothing else saves content, and every outcome saves a code.
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("completed", null));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("cancelled", 7));
-    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("provider_http_401", 7));
+    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("ResourceExceeded", 7));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("", null));
 }

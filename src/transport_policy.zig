@@ -36,6 +36,50 @@ pub const Evidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
+/// Provider error codes that resending the same request cannot fix, from
+/// Codex 970111f6 codex-api/src/sse/responses_error.rs. Each saves its own
+/// failure code whether it arrived in a stream event or an HTTP error body.
+pub const Refusal = enum {
+    insufficient_quota,
+    credit_balance_exhausted,
+    organization_spend_limit_exceeded,
+    project_spend_limit_exceeded,
+    usage_not_included,
+    usage_limit_reached,
+    cyber_policy,
+    bio_policy,
+    misalignment_policy_violation,
+    invalid_prompt,
+    model_not_found,
+
+    /// What the person can do about it: each class has one next step.
+    pub const Class = enum { quota, policy, model };
+
+    pub fn class(self: Refusal) Class {
+        return switch (self) {
+            .insufficient_quota, .credit_balance_exhausted, .organization_spend_limit_exceeded, .project_spend_limit_exceeded, .usage_not_included, .usage_limit_reached => .quota,
+            .cyber_policy, .bio_policy, .misalignment_policy_violation, .invalid_prompt => .policy,
+            .model_not_found => .model,
+        };
+    }
+
+    pub fn ofProviderCode(code: []const u8) ?Refusal {
+        return std.meta.stringToEnum(Refusal, code);
+    }
+
+    pub fn failureCode(self: Refusal) []const u8 {
+        return switch (self) {
+            inline else => |refusal| "provider_" ++ @tagName(refusal),
+        };
+    }
+
+    /// The refusal a saved failure code names, if any.
+    pub fn ofFailureCode(code: []const u8) ?Refusal {
+        if (!std.mem.startsWith(u8, code, "provider_")) return null;
+        return ofProviderCode(code["provider_".len..]);
+    }
+};
+
 /// Recognized HTTP 429 refusals, not temporary rate limits. Only this closed
 /// code and a valid reset timestamp may enter the saved diagnostic.
 pub const Quota = struct {
@@ -52,11 +96,10 @@ pub const Quota = struct {
         return null;
     }
 
+    /// The same code as the stream refusal it names.
     pub fn failureCode(self: Quota) []const u8 {
         return switch (self.code) {
-            .usage_limit_reached => "provider_usage_limit_reached",
-            .insufficient_quota => "provider_insufficient_quota",
-            .usage_not_included => "provider_usage_not_included",
+            inline else => |code| @field(Refusal, @tagName(code)).failureCode(),
         };
     }
 
@@ -311,6 +354,21 @@ fn monthOf(text: []const u8) ?u4 {
 fn digits(comptime T: type, text: []const u8) ?T {
     for (text) |byte| if (!std.ascii.isDigit(byte)) return null;
     return std.fmt.parseInt(T, text, 10) catch null;
+}
+
+test "every refusal saves one provider code that reads back to it" {
+    for (std.enums.values(Refusal)) |refusal| {
+        try std.testing.expectEqual(refusal, Refusal.ofFailureCode(refusal.failureCode()).?);
+        try std.testing.expectEqual(refusal, Refusal.ofProviderCode(@tagName(refusal)).?);
+    }
+    // A quota refusal saves the same code from an HTTP 429 as from a stream.
+    for (std.enums.values(Quota.Code)) |code| {
+        const refusal = Refusal.ofFailureCode((Quota{ .code = code }).failureCode()).?;
+        try std.testing.expectEqual(.quota, refusal.class());
+    }
+    try std.testing.expect(Refusal.ofFailureCode("cyber_policy") == null);
+    try std.testing.expect(Refusal.ofFailureCode("provider_http_403") == null);
+    try std.testing.expect(Refusal.ofProviderCode("server_is_overloaded") == null);
 }
 
 test "a saved quota record reads back exactly what was written" {
