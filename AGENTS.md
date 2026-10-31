@@ -14,7 +14,7 @@ Load applicable guidance before acting; routes combine:
 - **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance).
 - **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
 - **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). `select_tests.py` decides; no reviewer acceptance.
-- **Diagnose red CI:** use [`rui-ci-triage`](.cursor/skills/rui-ci-triage/SKILL.md).
+- **Diagnose red CI:** use [`rui-ci-triage`](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
@@ -52,7 +52,8 @@ Standing grant: land each small, coherent green change without further stage app
 - Before landing on `main`, the exact tip must pass the Linux Selected aggregate, including mapped recovery checks. Strict paths add no Mac or upgrade gate to main. Missing, pending or red Mac checks delay only `stable`.
 - [Auto-land](.github/workflows/auto-land.yml) fast-forwards `main` non-force. Its always-run promotion phase first dispatches any genuinely missing Mac or upgrade qualification for current main, including after an interrupted landing. Existing pending, offline, failed or cancelled runs are not absence and are never automatically retried. Agents assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so those tips require an explicitly authorized agent or user bootstrap after exact-tip Linux CI passes.
 - Separately, Auto-land fast-forwards `stable` to the newest main commit whose Mac Selected and Linux/macOS upgrade workflows passed on that exact SHA. Every stable candidate runs real Mac checks, full Debug admission recovery and upgrades even when its changed paths would select none. Missing or failed checks never qualify descendants; older completions never rewind stable. An open `stable-red` issue holds every promotion ([Landing cadence](VERIFICATION.md#landing-cadence)). Both writers share one serialized job.
-- Run independent design and complecting reviews on `main` after landing under [Review](CODING_STANDARDS.md#review); they do not block green changes.
+- Run the independent review when [Review](CODING_STANDARDS.md#review) says; its signoff does not block green changes.
+- For work published as PRs, start a PR that depends on another after its base lands on `main`, on a fresh branch from `origin/main`. Changes that join `wip/land-N` stack as above.
 - Mac and upgrade qualification run after main advances; daily full runs remain backstops. Fix Mac reds forward on main; revert only if the fix is slow. Keep the previous stable until a newer main SHA qualifies.
 - A red is fixed only when a commit between it and a later green changed its failing fixture or owner; a green without one leaves it open. A fixture-and-assertion signature that recurs on SHAs that did not touch its code has no culprit to revert: the agent that finds it updates or files one issue keyed by that signature and owns the race fix without weakening the assertion. Later green candidates do not close that issue; the fixing commit says `Fixes #N`, and a recurrence reopens it.
 - After ready, at most one rerun per item. New coherent green items may join the open stack; fixes for red CI retain the failure evidence.

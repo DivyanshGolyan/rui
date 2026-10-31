@@ -4,7 +4,7 @@ The maintained source for verifying Rui's full-screen interactive terminal. Read
 
 ## Baseline preconditions
 
-- A pinned build exists: `$V build FULLSHA --source CLEAN_WORKTREE` (`V=.cursor/skills/verify-rui/scripts/verify-rui`).
+- A pinned build exists: `$V build FULLSHA --source CLEAN_WORKTREE` (`V=.claude/skills/verify-rui/scripts/verify-rui`).
 - Each experiment has its own `RUN=$($V new FULLSHA --seed 3 --label NAME)`, and `$V doctor "$RUN" --expect-sha FULLSHA` prints `PASS`.
 - Session `demo` is bypass with three seeded answers. Session `approve` is ask with no history.
 - Never drive a Store, Host or tmux server this run did not start.
@@ -23,7 +23,7 @@ The maintained source for verifying Rui's full-screen interactive terminal. Read
 
 ## Features
 
-- [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer and capture correlation.
+- [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer, capture correlation, and the input matrix every editor-hosting surface must pass.
 - [Consent](./consent.md): approval prompt reading, allow `a` and deny `d`, and pasted choices.
 - [Status and navigation](./status-navigation.md): `/status`, `/details`, PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
 - [Exit and terminal restoration](./exit-restore.md): `/exit`, Ctrl-C and SIGTERM restore termios and the screen.
