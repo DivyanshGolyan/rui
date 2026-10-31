@@ -93,6 +93,21 @@ allocates.
 - Size and idle memory: build `zig build -Doptimize=ReleaseSafe` on main and
   on this branch, compare `size` and `strip` output, run `sync`, then
   `python3 -I research/codec-runtime/idle.py MAIN_RUI BRANCH_RUI`.
-- Cost once linked: `git apply research/codec-runtime/link-probe.patch`,
-  which makes `rui` call the sandbox when `RUI_CODEC_RUNTIME_PROBE` is set,
-  then build and strip as above.
+- Cost once linked: in `addRui` add
+  `executable.root_module.addImport("codec_runtime", addCodecRuntime(b, target, optimize, true));`,
+  make `main` in `src/cli.zig` call the function below when
+  `RUI_CODEC_RUNTIME_PROBE` is set, then build and strip as above.
+
+```zig
+fn codecRuntimeProbe() void {
+    const cr = @import("codec_runtime");
+    var bytes = "\x00asm\x01\x00\x00\x00".*;
+    var module = cr.Module.load(&bytes) catch return;
+    defer module.unload();
+    var job = cr.Job.begin(&module, .{ .memory_pages = 1 }) catch return;
+    defer job.end();
+    const f = job.function("f", 0) orelse return;
+    _ = job.call(f, &.{}, 1) catch return;
+    _ = job.memory();
+}
+```
