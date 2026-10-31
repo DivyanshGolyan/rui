@@ -22,12 +22,11 @@ You need an Apple Silicon Mac with macOS 15 or newer, or x86-64 Linux with glibc
 
 ```sh
 curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Add the `export` line to your shell profile if `~/.local/bin` is not already on your `PATH`. To update, run the `curl` command again.
+The installer puts `rui` in `~/.local/bin` and checks the download's SHA-256 digest. If `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell profile.
 
-The installer checks the download's SHA-256 digest and keeps your Stores, credentials and earlier builds. Release versions look like `0.35.2`. The middle number is the Store format. An update that keeps it opens your existing saved work, and an update that changes it needs a [fresh Store](docs/store-reset.md). Run `rui --version` to see what you have.
+To update, run the `curl` command again. Updates keep your saved work, sign-in and earlier builds. Release versions look like `0.35.2`. The middle number is the Store format: the format of the database where your saved work lives. An update that keeps it opens your existing saved work. When it changes, the installer names a build that still opens your work and the [fresh Store](docs/store-reset.md) steps. It also tells you when an older background Host is still running and how to stop it. Run `rui --version` to see what you have.
 
 ## Start a conversation
 

@@ -34,7 +34,7 @@ Set `RUI` to the full `bin/rui` path of a compatible build, and use `"$RUI"` in 
 	"$RUI" host status --store "$STORE"
 	```
 
-	Wait until status reports `Host: unavailable`. The stop acknowledgment alone is not enough.
+	If the installer said that this version cannot stop the Host, use the `host stop` command it printed instead, which runs your previous build. Wait until status reports `"status":"unavailable"`. The stop acknowledgment alone is not enough.
 
 4. Copy the whole stopped Store into a new private directory. Never copy `rui.sqlite3` alone, because committed work can still be only in `rui.sqlite3-wal` after a crash.
 
