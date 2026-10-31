@@ -17,13 +17,28 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
+MODEL_CONTEXT_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
+
+
 def model_instructions(workspace, baseline="", *, store, session):
     """Shared prose with independently encoded, caller-supplied fixture facts."""
-    parts = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
+    parts = MODEL_CONTEXT_PARTS
     workspace = json.dumps(str(workspace), ensure_ascii=False)[1:-1]
     assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), session
     prefix, address, suffix = parts
     return prefix + workspace + address + session + suffix + baseline
+
+
+def instructions_session(instructions):
+    """The Session ID in the slot after the escaped Workspace, located by the
+    prompt file's own parts rather than its wording."""
+    return instructions.split(MODEL_CONTEXT_PARTS[1], 1)[1][:6]
+
+
+def instructions_workspace(instructions):
+    """The decoded Workspace slot, located by the prompt file's own parts."""
+    quoted = instructions.split(MODEL_CONTEXT_PARTS[0], 1)[1].split(MODEL_CONTEXT_PARTS[1], 1)[0]
+    return json.loads('"' + quoted + '"')
 
 
 class FailureEndpoint(TestHTTPServer):

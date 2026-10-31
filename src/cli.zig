@@ -650,7 +650,7 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     else
         try exchange(init.io, struct {
             fn display(code: []const u8) !void {
-                std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance, .{code});
+                std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance ++ "Waiting for you to approve in the browser...\n", .{code});
             }
         }.display, loginInterrupted, &room.tokens);
     const tokens = &room.tokens;
@@ -666,16 +666,19 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     // The preference attempt must run even if the terminal receipt cannot be
     // written. Installation and future defaults have independent outcomes.
     const default_outcome = preferences.fillProviderAfterLogin(home);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex credential installed. Remote model acceptance is not established. Current Session unchanged.\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Signed in to Codex.\n");
     const added = default_outcome catch |err| {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex may not be saved as the default for new Sessions (");
         try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
-        return std.Io.File.stdout().writeStreamingAll(init.io, "). Use rui defaults inspect; active Session unchanged.\n");
+        return std.Io.File.stdout().writeStreamingAll(init.io, "). Check with: rui defaults inspect\n");
     };
     try std.Io.File.stdout().writeStreamingAll(init.io, if (added)
-        "Rui: No provider default existed; Codex selected for future Sessions; model recommendation remains unpinned.\n"
+        "Rui: New Sessions will use Codex.\n"
     else
-        "Rui: Existing provider default unchanged.\n");
+        "Rui: Your default provider for new Sessions is unchanged.\n");
+    // Guided login continues into a conversation; only the explicit command
+    // leaves the user at a shell.
+    if (!interactive) try std.Io.File.stdout().writeStreamingAll(init.io, "Start a conversation with: rui\n");
 }
 
 // OpenAI shows a disabled device-code setting only after sign-in and MFA, so
@@ -918,9 +921,9 @@ test "login owner preserves interruption, publication and independent defaults" 
             try std.testing.expectEqualStrings(codex_auth.fixture_account_id, record.account_id.slice());
             try std.testing.expectEqualStrings("new-synthetic-refresh", record.refresh_token.slice());
             try std.testing.expectEqual(@as(u64, if (existing) 2 else 1), record.generation);
-            if (case != .receipt_failure) try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Codex credential installed") != null);
+            if (case != .receipt_failure) try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Signed in to Codex.") != null);
             if (case == .missing_home or case == .preference_failure) {
-                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "future defaults were not saved or durability is uncertain") != null);
+                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Codex may not be saved as the default for new Sessions") != null);
                 try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, if (case == .missing_home) "InvalidHome" else "UnsupportedPreferencesVersion") != null);
             }
         }
@@ -1536,6 +1539,7 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
 /// capture's attention rows.
 pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
+    try writeSafeFieldTo(out, "Label: ", if (work.settings.label) |label| label.slice() else "not set");
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
     try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));

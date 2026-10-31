@@ -253,8 +253,9 @@ class LandingTest(unittest.TestCase):
                     conclusion=None, macos=None, display_title=title)
                 return ''
 
-            with mock.patch.object(auto_land, 'latest',
-                                   lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                    mock.patch.object(auto_land, 'latest',
+                                      lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
                     mock.patch.object(auto_land, 'aggregate', lambda run, name: run.get(name)), \
                     mock.patch.object(auto_land, 'gh', dispatch), \
                     mock.patch.object(auto_land, 'open_stable_reds', lambda: list(reds)), \
@@ -424,16 +425,144 @@ class LandingTest(unittest.TestCase):
             self.assertEqual(args[args.index(flag) + 1], value)
         # The reporter labels stable reds with the label promotion reads.
         self.assertIn(f'--label {auto_land.STABLE_RED}', workflow('check.yml'))
-        self.assertIn('issues: read', workflow('auto-land.yml').split('\njobs:', 1)[0])
+        # Promotion closes the issues landed commits fix.
+        self.assertIn('issues: write', workflow('auto-land.yml').split('\njobs:', 1)[0])
 
         def broken(*args):
             raise subprocess.CalledProcessError(1, ['gh', *args])
+
+        def git(*args):
+            if args[0] != 'log':
+                raise AssertionError('no promotion')
+            return ''
         with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', broken), \
                 mock.patch.object(auto_land, 'qualify_main', lambda: ('a', 'b')), \
                 mock.patch.object(auto_land, 'contains', lambda *_: True), \
-                mock.patch.object(auto_land, 'git', mock.Mock(side_effect=AssertionError('no promotion'))):
+                mock.patch.object(auto_land, 'git', git):
             with self.assertRaises(subprocess.CalledProcessError):
                 auto_land.promote_stable()
+
+    def test_closing_keywords_close_each_open_issue_in_this_repository_once(self):
+        with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
+            def git(*args):
+                return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def commit(message):
+                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', message)
+                return git('rev-parse', 'HEAD')
+            git('init', '-q', '-b', 'main')
+            base = commit('Base\n\nFixes #20')
+            first = commit('Fix a race\n\nFixes #1, closes #2\nRefs #3; a hotfix #3 is not a keyword')
+            commit('Retry a dispatch\n\nRESOLVED: #4\nFixed O/R#5, fixes other/r#6')
+            third = commit('Close a gap\n\nresolves #7 and fixes #8\nFixes #9\nFixes #10\nFixes #11')
+            issues = {number: dict(state='open') for number in (1, 2, 4, 5, 9, 10, 11)}
+            issues[7] = dict(state='closed')
+            issues[8] = dict(state='open', pull_request={})
+            # #9 was closed by hand after its fix's push and #11 by GitHub from
+            # a user push; a recurrence reopened both. #10's comment was posted
+            # by a close that then failed.
+            issues[9]['timeline'] = [dict(event='referenced', commit_id=third), dict(event='closed'),
+                                     dict(event='reopened')]
+            issues[11]['timeline'] = [dict(event='closed', commit_id=third), dict(event='reopened')]
+            issues[10]['timeline'] = [dict(event='closed'), dict(event='reopened'),
+                                      dict(event='commented', body=f'Fixed by {third} (Close a gap), landed on main.')]
+            queried, closes = set(), []
+
+            def gh(*args):
+                if args[0] == 'api':
+                    path = args[1].split('?', 1)[0]
+                    self.assertTrue(path.startswith('repos/o/r/issues/'), path)
+                    number = int(path.split('/')[4])
+                    queried.add(number)
+                    if path.endswith('/timeline'):
+                        return json.dumps([issues[number].get('timeline', [])])
+                    return json.dumps({key: value for key, value in issues[number].items() if key != 'timeline'})
+                self.assertEqual(args[:2], ('issue', 'close'))
+                self.assertEqual(args[3:7], ('--repo', 'o/r', '--reason', 'completed'))
+                issues[int(args[2])]['state'] = 'closed'
+                closes.append((int(args[2]), *args[7:]))
+                return ''
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                auto_land.close_fixed_issues(f'{base}..HEAD')
+            self.assertEqual(queried, {1, 2, 4, 5, 7, 8, 9, 10, 11}, 'other repositories and base are not read')
+            self.assertEqual(closes[0], (1, '--comment', f'Fixed by {first} (Fix a race), landed on main.'))
+            self.assertEqual([close[0] for close in closes], [1, 2, 4, 5, 10])
+            self.assertEqual(closes[-1], (10,), 'a posted comment is not repeated')
+            self.assertEqual([issues[number]['state'] for number in (8, 9, 11)], ['open'] * 3)
+            self.assertIn('#9 reopened after', out.getvalue())
+            self.assertIn('#11 reopened after', out.getvalue())
+            before = len(closes)
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                auto_land.close_fixed_issues(f'{base}..HEAD')
+            self.assertEqual(len(closes), before, 'a repeated pass closes nothing')
+
+    def test_landing_job_closes_a_fixed_stable_red_before_promotion_reads_the_hold(self):
+        with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
+            def git(*args):
+                return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def refs():
+                return tuple(git('ls-remote', 'origin', f'refs/heads/{name}').split()[0] for name in ('main', 'stable'))
+            git('init', '-q', '--bare', '-b', 'main', 'remote.git')
+            git('clone', '-q', 'remote.git', 'work')
+            os.chdir('work')
+            for message in ('base', 'Fix a fixture race\n\nFixes #7'):
+                Path('README.md').write_text(message)
+                git('add', '-A')
+                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', message)
+            base, fix = git('rev-parse', 'HEAD~1'), git('rev-parse', 'HEAD')
+            git('push', '-q', 'origin', f'{base}:refs/heads/main', f'{base}:refs/heads/stable',
+                f'{fix}:refs/heads/wip/land-1')
+            green = dict(status='completed', conclusion='success', html_url='u', event='push',
+                         linux='success', macos='success')
+            runs = {('check.yml', fix, 'wip/land-1'): green, (auto_land.UPGRADE, fix, 'main'): green,
+                    ('check.yml', fix, 'main'): dict(green, event='workflow_dispatch',
+                                                     display_title='Stable qualification from base ' + base)}
+            issues = {7: 'open'}
+            refusal = 'HTTP 403: Resource not accessible by integration'
+            releases = []
+
+            def gh(*args):
+                if args[0] == 'workflow':
+                    releases.append(args)
+                    return ''
+                if args[:2] == ('issue', 'list'):
+                    return json.dumps([dict(number=number, title='CI red: x')
+                                       for number, state in issues.items() if state == 'open'])
+                if args[:2] == ('issue', 'close'):
+                    if refusal:
+                        raise subprocess.CalledProcessError(1, ['gh', *args], stderr=refusal)
+                    issues[int(args[2])] = 'closed'
+                    return ''
+                if args[1].split('?', 1)[0].endswith('/timeline'):
+                    return '[[]]'
+                return json.dumps(dict(state=issues[int(args[1].rsplit('/', 1)[1])]))
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                    mock.patch.object(auto_land, 'latest',
+                                      lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
+                    mock.patch.object(auto_land, 'aggregate', lambda run, name: run.get(name)), \
+                    mock.patch.object(auto_land, 'gh', gh), \
+                    mock.patch.object(sys, 'argv', ['auto_land.py']):
+                # A refused close leaves the landing done and the promotion
+                # step successful, loudly, still held on the open issue.
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    auto_land.main()
+                    auto_land.promote_stable()
+                self.assertEqual(refs(), (fix, base))
+                self.assertEqual(issues[7], 'open')
+                self.assertIn(f'::warning::Could not close #7, fixed by {fix}', out.getvalue())
+                self.assertIn(refusal, out.getvalue())
+                self.assertIn(f'Open stable-red issues hold stable at {base}: #7', out.getvalue())
+                self.assertEqual(releases, [])
+                # The next pass closes the stranded fix before it reads the hold.
+                refusal = None
+                with contextlib.redirect_stdout(io.StringIO()):
+                    auto_land.promote_stable()
+                self.assertEqual(issues[7], 'closed')
+                self.assertEqual(refs(), (fix, fix))
+                self.assertEqual(releases[-1][-1], f'sha={fix}')
 
     def test_preflight_allows_one_open_landing_stack(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):

@@ -473,6 +473,37 @@ def forget_terminal(master):
     _captures.pop(master, None)
 
 
+def draining(master, observe):
+    """`observe`, after reading what the terminal holds: a fixture waiting on
+    the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
+    a screen that stopped being read blocks mid-frame and runs no new work."""
+    capture = terminal_capture(master)
+
+    def drained():
+        while select.select([master], [], [], 0)[0]:
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            capture.feed(chunk)
+        return observe()
+    return drained
+
+
+def discard_terminal(master):
+    """Drop a reaped writer's queued output and its screen, so the next
+    caller's capture starts at that caller's first byte. A writer killed while
+    the PTY was full leaves a frame begun and never ended; it is no later
+    frame's start."""
+    discarded = 0
+    while select.select([master], [], [], 0)[0]:
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        discarded += len(chunk)
+        assert discarded < 1024 * 1024, "unbounded output from a reaped writer"
+    forget_terminal(master)
+
+
 def current_screen(master):
     """The latest committed frame: what the user sees now."""
     return terminal_capture(master).completed
@@ -1177,7 +1208,7 @@ def overview_cases():
         assert configuration["label"] == {"state": "value", "value": "lane four"}, saved
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
-        assert "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
+        assert "Label: lane four\n" in status and "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1208,12 +1239,13 @@ def overview_cases():
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"captured then killed\n")
-        fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "overview start captured")
+        fixture.wait_for(draining(master, lambda: pathlib.Path(f"{gate}.ready").exists()), "overview start captured")
         killed, = set(records.glob("*.json")) - before
         assert json.loads(killed.read_bytes())["require_model"] is True
         caller.kill()
         caller.wait(timeout=5)
         caller.stderr.close()
+        discard_terminal(master)
         recovered = json.loads(run(home, "request", "recover", killed.stem))
         assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
         allocated = recovered["answer"]["session"]
@@ -1222,12 +1254,11 @@ def overview_cases():
         # Ctrl-X asks, a second Ctrl-X stops the selected working Session, and
         # its row turns stopped without leaving the overview.
         before = set(records.glob("*.json"))
-        forget_terminal(master)
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"Hold for a stop\n")
-        fixture.wait_for(lambda: len(endpoint.requests) == 3, "held Turn sent")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == 3), "held Turn sent")
         record, = set(records.glob("*.json")) - before
         held = fixture.observe(store, record.stem)["target"]
         overview_frame(master, lambda frame: re.search(r"[●*] Hold for a stop", frame), keys=b"\x1b")
@@ -1337,7 +1368,7 @@ def command_entry_cases():
             coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
             status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {initial_session}\n" in status, status
+            assert f"Session: {initial_session}\nLabel: not set\n" in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
