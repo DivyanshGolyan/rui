@@ -73,7 +73,9 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
     var start: usize = 0;
     var end: usize = 0;
     var cells: u16 = 0;
-    // Cells of spaces hanging past the edge.
+    // Cells of spaces hanging past the edge. Any count past the edge puts
+    // a caret there on a row of its own, so these sums saturate: a draft
+    // of the editor's full capacity in spaces must not overflow them.
     var hanging: u16 = 0;
     var caret: ?u16 = null;
     // Where the line may break: after its last space, and, for a word too
@@ -86,9 +88,9 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
         defer offset += piece.len;
         if (piece.kind != .newline and cells > 0 and @as(u32, cells) + hanging + piece.cells > width) {
             if (piece.kind == .space) {
-                if (offset == cursor) caret = cells + hanging;
-                hanging += piece.cells;
-                soft = .{ .at = offset + piece.len, .end = end, .cells = cells, .columns = cells + hanging };
+                if (offset == cursor) caret = cells +| hanging;
+                hanging +|= piece.cells;
+                soft = .{ .at = offset + piece.len, .end = end, .cells = cells, .columns = cells +| hanging };
                 continue;
             }
             // A joint breaks only a word still too wide after the space.
@@ -118,7 +120,7 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
                 joint = null;
             }
         }
-        if (offset == cursor) caret = cells + hanging;
+        if (offset == cursor) caret = cells +| hanging;
         if (piece.kind == .newline) {
             if (!sink.line(.{ .start = start, .end = end, .cells = cells }, caret)) return;
             caret = null;
@@ -141,7 +143,7 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
             .newline, .other => {},
         }
     }
-    if (offset == cursor) caret = cells + hanging;
+    if (offset == cursor) caret = cells +| hanging;
     _ = sink.line(.{ .start = start, .end = end, .cells = cells }, caret);
 }
 
@@ -335,6 +337,19 @@ test "spaces past the edge hang there and never start a line" {
     try std.testing.expectEqual(Shape{ .lines = 3, .caret_line = 1, .caret_column = 0, .caret_follows_line = 0 }, before);
     const after = shape(Bytes{ .bytes = "abcd ef" }, 4, 5, 0);
     try std.testing.expectEqual(Shape{ .lines = 2, .caret_line = 1, .caret_column = 0 }, after);
+}
+
+test "a draft of the editor's full capacity in spaces lays out without overflow" {
+    const spaces: [65536]u8 = @splat(' ');
+    var storage: [max_rows]Line = undefined;
+    for ([_]usize{ 0, 5, 9, 10, 11, 30000, spaces.len }) |cursor| {
+        const got = shape(Bytes{ .bytes = &spaces }, 10, cursor, 0);
+        // Ten spaces fill the line; the rest hang past its edge.
+        try std.testing.expectEqual(@as(usize, if (cursor >= 10) 2 else 1), got.lines);
+        try std.testing.expectEqual(@as(u16, if (cursor >= 10) 0 else @intCast(cursor)), got.caret_column);
+        const shown = fit(Bytes{ .bytes = &spaces }, 10, cursor, got, 10, &storage);
+        try std.testing.expectEqual(got.lines, shown.rows);
+    }
 }
 
 test "wide clusters never split and never overflow" {

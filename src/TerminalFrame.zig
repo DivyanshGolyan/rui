@@ -240,6 +240,16 @@ test "the rule shows once four rows remain under the status, and the draft keeps
     };
 }
 
+test "a full-capacity draft of spaces keeps the caret on screen" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    const spaces: [65536]u8 = @splat(' ');
+    try frame.plan(&document, .{ .width = 80, .height = 24, .draft = &spaces, .cursor = spaces.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+    try std.testing.expectEqual(@as(u16, 2), frame.draft.rows);
+    try std.testing.expectEqual(@as(u16, 23), frame.caret_row);
+    try std.testing.expectEqual(@as(u16, 2), frame.caret_column);
+}
+
 test "an exactly filled draft row puts the caret on the next row" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;

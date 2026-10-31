@@ -4446,6 +4446,15 @@ test "the composer needs six rows and six columns, and shows nothing smaller" {
     };
 }
 
+test "a full-capacity draft of spaces keeps the composer's caret on screen" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const spaces: [65536]u8 = @splat(' ');
+    var screen = try render(std.testing.allocator, &state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
+    defer screen.deinit();
+    try std.testing.expectEqual(@as(?Screen.Cursor, .{ .row = 22, .column = 3 }), screen.cursor);
+}
+
 fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
     comptime {
         var bytes: [text.len * count]u8 = undefined;
