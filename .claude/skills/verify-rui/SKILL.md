@@ -7,7 +7,7 @@ description: Drive Rui's full-screen interactive terminal (the renderer) the way
 
 Drives the real `rui session resume` terminal. You never touch the user's default Store, credentials or tmux server: every run gets a fresh synthetic HOME, a private Store under it, an owned fixture provider, an owned Host and a private tmux socket. Every Rui call passes `--store` explicitly. `request list` is the one exception: it takes no `--store` and lists captures under the run's synthetic HOME.
 
-The helper is `scripts/verify-rui`. Set `V=.cursor/skills/verify-rui/scripts/verify-rui` from the repo root. Every subcommand has `--help`. Read the [feature map](features/README.md) before driving a feature.
+The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/verify-rui` from the repo root. Every subcommand has `--help`. Read the [feature map](features/README.md) before driving a feature.
 
 ## Launch
 

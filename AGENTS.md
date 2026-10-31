@@ -14,7 +14,7 @@ Load applicable guidance before acting; routes combine:
 - **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance).
 - **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
 - **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). `select_tests.py` decides; no reviewer acceptance.
-- **Diagnose red CI:** use [`rui-ci-triage`](.cursor/skills/rui-ci-triage/SKILL.md).
+- **Diagnose red CI:** use [`rui-ci-triage`](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
