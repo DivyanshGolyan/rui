@@ -34,6 +34,15 @@ def content_reference(text):
     return {"bytes": str(len(data)), "sha256": digest}
 
 
+def stored_message_parts(database):
+    """The first message item's saved parts: kind, text and bag bytes."""
+    return [(kind, bytes(text), bytes(bag)) for kind, text, bag in database.execute(
+        "SELECT p.part_kind,t.payload,b.payload FROM model_output_part p "
+        "JOIN content t ON t.content_id=p.text_content_id JOIN content b ON b.content_id=p.extras_content_id "
+        "WHERE (p.operation_id,p.item_ordinal)=(SELECT operation_id,item_ordinal FROM model_output_item "
+        "WHERE item_kind=2 ORDER BY operation_id,item_ordinal LIMIT 1) ORDER BY p.part_ordinal")]
+
+
 def failed_response_records(store):
     """Read back failed-response records in retention order, checking each
     private body against its metadata's length and digest."""
@@ -929,12 +938,13 @@ def refusal_cases(state, processes, endpoints):
         assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
         stop_host(host)
         processes.remove(host)
-        # Public reads are projections; canonical raw bytes retain refusal kind,
-        # unknown metadata and created_by independently of replay filtering.
+        # Public reads are projections; the saved parts keep the refusal kind
+        # and each block's unknown members in its bag.
         with sqlite3.connect(store / "rui.sqlite3") as database:
-            raw = database.execute("SELECT c.payload FROM model_output_item i JOIN content c "
-                "ON c.content_id=i.content_id WHERE i.item_kind=2 ORDER BY i.operation_id LIMIT 1").fetchone()
-            assert raw is not None and bytes(raw[0]) == json.dumps(item, separators=(",", ":")).encode(), raw
+            parts = stored_message_parts(database)
+        refusal_part = (2, refusal.encode(), b'"future":{"retained":true}')
+        want = [(1, b"Before. ", b""), refusal_part, (1, b"After.", b"")] if phased else [refusal_part]
+        assert parts == want, parts
         assert not failed_response_records(store), "accepted refusal became failed-response diagnostics"
         stop_endpoint(endpoint, endpoints)
     print("Refusal: public result/conversation, crash recovery and exact typed replay passed")
@@ -2506,11 +2516,11 @@ def main(mode="all", correlation_case="all"):
             0, "answer", "contradictory-response",
             ("model-body", "model-openai-header", "model-x-openai-header"), contradictory_request_id,
         ), saved
-        raw_items = database.execute(
-            "SELECT c.payload FROM model_output_item i JOIN content c ON c.content_id=i.content_id ORDER BY i.item_ordinal"
-        ).fetchall()
-        assert raw_items == [(json.dumps(item, separators=(",", ":")).encode(),)
-                             for item in (contradictory_reasoning, contradictory_item)], raw_items
+        assert database.execute(
+            "SELECT item_kind FROM model_output_item ORDER BY item_ordinal"
+        ).fetchall() == [(1,), (2,)]
+        saved_parts = stored_message_parts(database)
+        assert saved_parts == [(1, b"preserved model evidence", b'"annotations":[],"extension":{"kept":true}')], saved_parts
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
         ).fetchone()[0] == 1
