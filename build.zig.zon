@@ -24,6 +24,10 @@
             .url = "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz",
             .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
         },
+        .wamr = .{
+            .url = "https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-2.4.5.tar.gz",
+            .hash = "N-V-__8AAHJNOAE7jGLuvkzFw3E5VF3HMtQT2Yi7ow-liyzH",
+        },
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#d4c3b3666e0c090e2b5092ca09893c6db15e0b79",
             .hash = "vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM",

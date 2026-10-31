@@ -241,6 +241,21 @@ charge, to use, copy, modify, merge, publish, distribute, sublicense and/or
 sell copies under the conditions in `COPYING`. The software is provided
 without warranty.
 
+## WebAssembly Micro Runtime (WAMR) 2.4.5
+
+The codec sandbox (`src/codec_runtime.zig`) builds WAMR's fast interpreter
+from the pinned source, without AOT, JIT, WASI or threads. Its tests and
+benchmark link it; the shipped `rui` binary does not yet.
+
+- Source: `https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-2.4.5.tar.gz`
+- Zig package content hash: `N-V-__8AAHJNOAE7jGLuvkzFw3E5VF3HMtQT2Yi7ow-liyzH`
+- License: Apache License 2.0 with LLVM Exceptions, reproduced in the source
+  archive's `LICENSE` file
+
+Copyright (c) 2019 Intel Corporation and the WAMR contributors. Licensed
+under the Apache License, Version 2.0, with LLVM Exceptions. The software is
+provided on an "AS IS" basis, without warranties or conditions of any kind.
+
 ## OpenSSL 3.6.3
 
 Rui builds pinned static OpenSSL 3.6.3 as its HTTP/2 client's TLS implementation.
