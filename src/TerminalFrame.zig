@@ -20,6 +20,8 @@ pub fn validateGeometry(width: u16, height: u16) !void {
 }
 
 status: Viewport.Sized(status_capacity, false),
+/// A notice, shown in the rows under the input until the next key.
+notice: Viewport.Sized(status_capacity, false),
 calls: [3]Call,
 call_heights: [3]u16,
 heading: Viewport.Sized(128, false),
@@ -36,6 +38,10 @@ status_height: u16,
 status_row: u16,
 /// The rule above the input; its row is `draft_top - 1` when this is one.
 rule_height: u16,
+/// The rows under the input, from `height - line_height`: the notice's rows
+/// when there is one, else one row for the Session line once three rows
+/// remain under the status.
+line_height: u16,
 /// The draft lines shown, `draft.rows` of `draft_lines` from the top, and
 /// the lines the rule says are hidden.
 draft: draft_layout.View,
@@ -55,6 +61,7 @@ pub const Input = struct {
     /// The byte that started the previous frame's first draft line.
     draft_anchor: usize = 0,
     status: []const u8,
+    notice: []const u8 = "",
     approval: bool,
     calls: []const []const u8,
     total_calls: u64,
@@ -78,6 +85,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     const layout: Viewport.Layout = .{ .width = input.width, .method = input.method };
     self.* = .{
         .status = .{ .width_method = input.method },
+        .notice = .{ .width_method = input.method },
         .calls = .{ .{ .width_method = input.method }, .{ .width_method = input.method }, .{ .width_method = input.method } },
         .call_heights = .{ 0, 0, 0 },
         .heading = .{ .width_method = input.method },
@@ -91,6 +99,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .status_height = 0,
         .status_row = 0,
         .rule_height = 0,
+        .line_height = 0,
         .draft = .{ .first = 0, .rows = 0, .hidden_above = 0, .hidden_below = 0 },
         .draft_top = 0,
         .caret_row = 0,
@@ -107,16 +116,19 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         status_rows = try rows(&self.status, layout);
     }
     self.status_height = status_rows;
-    if (self.status_height > input.height - reserve) return error.TerminalTooSmall;
+    try self.notice.append(input.notice);
+    self.line_height = if (input.notice.len != 0) try rows(&self.notice, layout) else @intFromBool(input.height -| self.status_height >= 3);
+    if (@as(u32, self.status_height) + self.line_height > input.height - reserve) return error.TerminalTooSmall;
     const pieces: Viewport.DraftPieces = .{ .bytes = input.draft, .method = input.method };
     const shape = draft_layout.shape(pieces, input.width - 2, input.cursor, input.draft_anchor);
     // The rows the draft asks for, up to its cap.
     const needed: u16 = @intCast(@min(shape.lines, draft_layout.cap(input.height)));
+    const footer = self.status_height + self.line_height;
     // A rule separates the input once the terminal has room for one.
-    self.rule_height = @intFromBool(input.height - self.status_height >= 4);
+    self.rule_height = @intFromBool(input.height - footer >= 4);
     // Fit required footer and navigation rows with one draft row first;
     // the draft can then grow up to its cap.
-    var available: u16 = input.height - 1 - self.rule_height - self.status_height;
+    var available: u16 = input.height - 1 - self.rule_height - footer;
     try document.prepare();
     for (input.calls, 0..) |line, index| {
         try self.calls[index].append(line);
@@ -156,9 +168,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     }
     // A selected page needs a readable row so browsing can still advance.
     const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and available > heading_height + call_rows);
-    const room = input.height - self.rule_height - self.status_height - heading_height - call_rows - document_reserve;
+    const room = input.height - self.rule_height - footer - heading_height - call_rows - document_reserve;
     self.draft = draft_layout.fit(pieces, input.width - 2, input.cursor, shape, @min(draft_layout.cap(input.height), room), &self.draft_lines);
-    available = input.height - self.draft.rows - self.rule_height - self.status_height;
+    available = input.height - self.draft.rows - self.rule_height - footer;
     self.height = available - heading_height - call_rows;
     self.browsing_height = available - @intFromBool(available > 1);
     self.first = document.first(layout, self.height);
@@ -174,12 +186,13 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         }
     }
     try self.heading.prepare();
+    try self.notice.prepare();
     self.overflow_height = if (!input.selected and input.total_calls > self.used) heading_height else 0;
     self.navigation_height = heading_height - self.overflow_height;
-    // The input keeps the bottom rows: status, calls and the rule stack
-    // above it, and the document starts at the top, so a short conversation
-    // leaves the gap between them.
-    self.draft_top = input.height - self.draft.rows;
+    // The input keeps the bottom rows above the line under it: status,
+    // calls and the rule stack above it, and the document starts at the
+    // top, so a short conversation leaves the gap between them.
+    self.draft_top = input.height - self.line_height - self.draft.rows;
     self.status_row = self.draft_top - self.rule_height - self.overflow_height - call_rows - self.status_height;
     self.caret_row = self.draft_top + @as(u16, @intCast(shape.caret_line - self.draft.first));
     self.caret_column = @min(shape.caret_column + 2, input.width - 1);
@@ -192,25 +205,35 @@ test "geometry is bounded before the shell allocates cells" {
     try std.testing.expectError(error.TerminalTooLarge, validateGeometry(480, 135));
 }
 
-test "the draft keeps the bottom rows under a rule and the transcript fills the rows above" {
+test "the draft keeps the bottom rows under a rule and over the Session line, and the transcript fills the rows above" {
     var document: Viewport.Document = .{};
     try document.append("› inspect\n  Done.\n");
     var frame: Self = undefined;
     var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.rule_height);
-    try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
-    try std.testing.expectEqual(@as(u16, 23), frame.caret_row);
+    try std.testing.expectEqual(@as(u16, 1), frame.line_height);
+    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 22), frame.caret_row);
     try std.testing.expectEqual(@as(u16, 6), frame.caret_column);
-    // Twenty-two rows sit above the rule and a one-row draft.
+    // Twenty-one rows sit above the rule, a one-row draft and the line.
     document.clear();
     for (0..24) |_| try document.append("row\n");
     input.draft = "";
     input.cursor = 0;
     try frame.plan(&document, input);
-    try std.testing.expectEqual(Position{ .offset = 8 }, frame.first);
-    try std.testing.expectEqual(@as(u16, 22), frame.height);
-    try std.testing.expectEqual(@as(u16, 23), frame.draft_top);
+    try std.testing.expectEqual(Position{ .offset = 12 }, frame.first);
+    try std.testing.expectEqual(@as(u16, 21), frame.height);
+    try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
+    input.notice = "! Unknown command /x · /help";
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 1), frame.line_height);
+    try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
+    input.width = 20;
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 2), frame.line_height);
+    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 20), frame.height);
 }
 
 test "status and calls stack directly above the rule whatever the transcript's length" {
@@ -221,22 +244,29 @@ test "status and calls stack directly above the rule whatever the transcript's l
         document.clear();
         try document.append(text);
         try frame.plan(&document, input);
-        try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
-        try std.testing.expectEqual(@as(u16, 19), frame.status_row);
+        try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
+        try std.testing.expectEqual(@as(u16, 18), frame.status_row);
     }
 }
 
-test "the rule shows once four rows remain under the status, and the draft keeps the last row" {
+test "the Session line shows once three rows remain under the status, then the rule once four remain above the line" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    for ([_][]const u8{ "", "! notice" }, [_]u16{ 0, 1 }) |status, status_rows| for (2..9) |h| {
+    for ([_][]const u8{ "", "Working…" }, [_]u16{ 0, 1 }) |status, status_rows| for ([_][]const u8{ "", "! notice" }) |notice| for (2..10) |h| {
         const height: u16 = @intCast(h);
-        if (height < status_rows + 2) continue;
-        try frame.plan(&document, .{ .width = 20, .height = height, .draft = "draft", .cursor = 5, .status = status, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
-        try std.testing.expectEqual(@as(u16, @intFromBool(height - status_rows >= 4)), frame.rule_height);
-        try std.testing.expectEqual(height - 1, frame.draft_top);
-        try std.testing.expectEqual(height - 1, frame.caret_row);
-        try std.testing.expectEqual(height - 1 - frame.rule_height - status_rows, frame.status_row);
+        const notice_rows: u16 = @intFromBool(notice.len != 0);
+        const input: Input = .{ .width = 20, .height = height, .draft = "draft", .cursor = 5, .status = status, .notice = notice, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+        if (height < status_rows + notice_rows + 1) {
+            try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
+            continue;
+        }
+        try frame.plan(&document, input);
+        const line: u16 = if (notice_rows != 0) 1 else @intFromBool(height - status_rows >= 3);
+        try std.testing.expectEqual(line, frame.line_height);
+        try std.testing.expectEqual(@as(u16, @intFromBool(height - status_rows - line >= 4)), frame.rule_height);
+        try std.testing.expectEqual(height - line - 1, frame.draft_top);
+        try std.testing.expectEqual(height - line - 1, frame.caret_row);
+        try std.testing.expectEqual(height - line - 1 - frame.rule_height - status_rows, frame.status_row);
     };
 }
 
@@ -246,7 +276,7 @@ test "a full-capacity draft of spaces keeps the caret on screen" {
     const spaces: [65536]u8 = @splat(' ');
     try frame.plan(&document, .{ .width = 80, .height = 24, .draft = &spaces, .cursor = spaces.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(u16, 2), frame.draft.rows);
-    try std.testing.expectEqual(@as(u16, 23), frame.caret_row);
+    try std.testing.expectEqual(@as(u16, 22), frame.caret_row);
     try std.testing.expectEqual(@as(u16, 2), frame.caret_column);
 }
 
@@ -277,20 +307,20 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
             try std.testing.expectEqual(first, frame.draft.hidden_above);
             try std.testing.expectEqual(13 - cap - first, frame.draft.hidden_below);
             try std.testing.expectEqual(Position{}, frame.first);
-            try std.testing.expectEqual(height - cap, frame.draft_top);
+            try std.testing.expectEqual(height - 1 - cap, frame.draft_top);
         }
     }
     // Under status, calls and an overflow row, a short terminal still gives
     // the draft what remains, up to its cap.
     var tall: [200]u8 = undefined;
     for (0..40) |index| @memcpy(tall[index * 5 ..][0..5], "line\n");
-    for ([_]u16{ 8, 24 }, [_]u16{ 2, 8 }) |height, draft_rows| {
+    for ([_]u16{ 8, 24 }, [_]u16{ 1, 8 }) |height, draft_rows| {
         try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = "Working…", .approval = false, .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.used);
         try std.testing.expectEqualStrings("+1 more calls · /status", frame.heading.text());
         try std.testing.expectEqual(draft_rows, frame.draft.rows);
         try std.testing.expectEqual(@as(usize, 41) - draft_rows, frame.draft.first);
-        try std.testing.expectEqual(height - 1, frame.caret_row);
+        try std.testing.expectEqual(height - 2, frame.caret_row);
     }
     // A capped draft leaves browsing and Action pages their rows: this short
     // page shows whole, so an Action on it is read.

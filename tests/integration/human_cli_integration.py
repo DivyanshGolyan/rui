@@ -1208,7 +1208,8 @@ def overview_cases():
         assert configuration["label"] == {"state": "value", "value": "lane four"}, saved
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
-        assert "Label: lane four\n" in status and "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
+        # The Session line under the input names the label, model and ask mode.
+        assert "Label: lane four\n" in status and "lane four · gpt-6-luna" in status and "asks before Bash" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1622,11 +1623,12 @@ def scroll_return_case():
             capture = terminal_capture(master)
             assert not shown.startswith("Browsing"), (context, "still browsing", shown)
             assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The draft keeps the bottom row under the rule, and the latest
-            # text is the last written row above it; a notice may sit between.
-            rows = shown.rstrip("\n").split("\n")
-            written = [row for row in rows[:-2] if row.strip()]
-            assert rows[-1] == "› keep" and set(rows[-2]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
+            # The draft keeps the row over the Session line, under the rule,
+            # and the latest text is the last written row above it.
+            rows = shown.split("\n")
+            y = capture.screen.cursor.y
+            written = [row for row in rows[:y - 1] if row.strip()]
+            assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
 
         def leave(saved):
             records_before, requests = saved
@@ -1720,6 +1722,10 @@ def persistent_opening_case():
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ", composer=True)
         output = current_screen(master)
+        # The last row is the Session line, which names this unlabelled
+        # Session by its first Message.
+        assert output.rsplit("\n", 1)[1].startswith("literal **user** é · "), output
+        output = output.rsplit("\n", 1)[0]
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
         assert "\nSaved heading\n" in output and "# Saved heading" not in output, output
@@ -1764,7 +1770,9 @@ def persistent_opening_case():
         assert not drawn.count(b"\x1b[?1049h") or drawn.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in drawn, drawn
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "late opening error left terminal configuration changed"
-        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 2, "opening error retried or caused work"
+        # Three content reads: the Session line's first Message (this Session
+        # has no Label), the User row and the truncated answer.
+        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 3, "opening error retried or caused work"
         proxy.close()
         proxy = None
         os.close(master)
@@ -1843,7 +1851,13 @@ def persistent_opening_case():
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        # Each frame's last row is the Session line, named by this unlabelled
+        # Session's first Message; the checks below are about the rows above.
+        def above_line(frames):
+            return "\n".join(row for row in frames.split("\n") if not row.startswith("literal **user** é · "))
         output = read_terminal(master, "› ")
+        assert "\nliteral **user** é · " in output, output
+        output = above_line(output)
         assert "saved user 09" in output and "literal **user** é" not in output, output
         assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
         message = admit(home, "session", "send", "--to", session, input="late input")
@@ -1857,7 +1871,7 @@ def persistent_opening_case():
             assert current_screen(master).startswith("Browsing · Esc returns"), ("details paging left browsing", details)
             os.write(master, b"\x1b[6~")
             details += read_terminal(master, "Browsing · Esc returns")
-        assert "literal **user** é" not in details, details
+        assert "literal **user** é" not in above_line(details), details
         return_to_live(master)
 
         history_held = threading.Event()
@@ -1882,10 +1896,10 @@ def persistent_opening_case():
         # Rows the held page would add must not appear before it is verified.
         staged = ("literal **user**", "Historical item omitted", "saved user 01", "saved user 02")
         composing = read_terminal(master, "› next cafXé!", timeout=5)
-        assert not history_release.is_set() and not any(row in composing for row in staged), composing
+        assert not history_release.is_set() and not any(row in above_line(composing) for row in staged), composing
         history_release.set()
         failed = read_terminal(master, "! Earlier messages unavailable; scroll up to retry. Draft retained.")
-        assert not any(row in failed for row in staged), "failed history exposed a staged prefix"
+        assert not any(row in above_line(failed) for row in staged), "failed history exposed a staged prefix"
         if "› next cafXé!" not in current_screen(master):
             read_terminal(master, "› next cafXé!")
         os.write(master, b"\x1b[CZ")
@@ -1895,7 +1909,7 @@ def persistent_opening_case():
         os.write(master, b"\x05\x15")
         read_terminal(master, "› ", composer=True)
         scroll_until(master, b"\x1b[5~", "Start of conversation")
-        recovered = current_screen(master)
+        recovered = above_line(current_screen(master))
         assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
         assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
         assert recovered.index("Start of conversation") < recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
@@ -2310,7 +2324,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         opening = read_terminal(master, "› ")
-        assert all(noise not in opening for noise in ("gpt-6-sol", "Workspace:", "Session:", "Store:", "/help commands")), opening
+        assert all(noise not in opening for noise in ("Workspace:", "Session:", "Store:", "/help commands")), opening
+        # The model shows once, on the Session line, with the ask mode.
+        assert f"{reference} · gpt-6-sol · " in opening and "asks before Bash" in opening, opening
         def hold_arguments(response):
             if not arguments_held.is_set():
                 arguments_held.set()
@@ -2363,7 +2379,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     pass
                 narrow = current_screen(master)
                 shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                assert len(narrow.split("\n")) == rows and narrow.split("\n")[-1].startswith(">"), narrow
+                # The choice keeps the last row, or the row over the Session line.
+                assert len(narrow.split("\n")) == rows and any(row.startswith(">") for row in narrow.split("\n")[-2:]), narrow
                 # A clipped Action never offers the choice: it says to read on.
                 choice = any(text in shown for text in ("Type a + Enter to allow once · d + Enter to deny", "a Allow / d Deny Enter"))
                 assert choice or "PgDn reads the rest · then a/d + Enter" in shown, narrow
@@ -3439,7 +3456,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
-        assert permission_row(binding, "bypass") and "Provider: codex" in binding and "Model: gpt-6-sol" in binding, binding
+        assert permission_row(binding, "bypass") and "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" not in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -4332,8 +4349,8 @@ def renderer_cases():
             frames = tty.every_frame()
             sent = len(proxy.mutations)
             def accepted():
-                rows = tty.capture.completed.rstrip("\n").split("\n")
-                return len(proxy.mutations) > sent and rows[-1].strip() == "›" and "Sending…" not in rows
+                rows = tty.capture.completed.split("\n")
+                return len(proxy.mutations) > sent and rows[tty.capture.screen.cursor.y].strip() == "›" and "Sending…" not in rows
             tty.send("BBB\n", predicate=accepted)
             gates[b"AAA"].set()
             tty.wait(predicate=lambda: holding[b"BBB"].is_set() and "› AAA" in tty.capture.completed)
@@ -4430,7 +4447,7 @@ def renderer_cases():
             # command once the held command has returned to the choice.
             tty.wait(predicate=lambda: "then a/d + Enter" in tty.capture.completed)
             tty.send("/requests\n", "! Command still running. Try again when it finishes.")
-            partial = [frame for frame in frames if "/result" in frame.rstrip("\n").split("\n")[-1]]
+            partial = [frame for frame in frames if any("/result" in row for row in frame.rstrip("\n").split("\n")[-2:])]
             assert len(partial) <= 1, (len(partial), partial[:2])
             release_read.set()
             tty.wait(predicate=lambda: "Command still running" not in tty.capture.completed, timeout=10)
@@ -4649,7 +4666,7 @@ def renderer_cases():
             release_reply.set()
             tty.wait(predicate=lambda: "Sending…" not in tty.capture.completed, timeout=10)
             time.sleep(1)
-            tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-3:], timeout=5)
+            tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-4:], timeout=5)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -4921,7 +4938,9 @@ def renderer_cases():
                 tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
                 if "Start of conversation" in tty.capture.completed:
                     break
-            return tty.capture.completed
+            # The last row is the Session line, which can name an unlabelled
+            # Session by its first Message.
+            return tty.capture.completed.rsplit("\n", 1)[0]
 
         def reachable(shown, before, reply="REPLY-00000"):
             # Older pages reach the Message exactly once, after what preceded
@@ -5948,7 +5967,7 @@ def main(selected="all"):
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # The composer's capture fails before any send: the draft stays.
             overview_frame(master, overview_title)
-            refused = overview_frame(master, lambda frame: "Could not start the Session. (NotDir)" in frame, keys=b"never captured\n")
+            refused = overview_frame(master, lambda frame: "Not started: NotDir" in frame, keys=b"never captured\n")
             assert "never captured" in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
@@ -6076,13 +6095,13 @@ def main(selected="all"):
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
-            assert "Provider: codex" in binding and "Model: gpt-6-sol" in binding and "Permission: ask" in binding, binding
+            assert "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" in binding and "Permission: ask" in binding, binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "/status shows whether Bash asks first" in help_text, help_text
+            assert "without approval" not in help_text and "\nThat line ends with asks before Bash when Bash asks first\n" in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)

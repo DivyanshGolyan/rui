@@ -1560,10 +1560,13 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
     {
         const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
         var buffer: [160]u8 = undefined;
-        const policy = if (work.settings.compaction_trigger) |tokens|
-            try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {s} tokens ({s})", .{ tokens.slice(), origin })
-        else
-            try std.fmt.bufPrint(&buffer, "no automatic threshold ({s})", .{origin});
+        const policy = policy: {
+            const tokens = work.settings.compaction_trigger orelse
+                break :policy try std.fmt.bufPrint(&buffer, "no automatic threshold ({s})", .{origin});
+            const estimate = (work.settings.context_estimate.value orelse null) orelse
+                break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s})", .{ tokens.value, origin });
+            break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s}); now {d}", .{ tokens.value, origin, estimate.value });
+        };
         try writeSafeFieldTo(out, "Automatic compaction: ", policy);
         if (work.settings.compaction_trigger == null)
             try out.writeAll("Use /configure --compaction-trigger TOKENS to enable a threshold. Provider context-overflow recovery still applies.\n");
@@ -1571,7 +1574,7 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
     {
         const origin = if (work.settings.output_reservation_override != null) "Session override" else "model default";
         var buffer: [160]u8 = undefined;
-        try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{s} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.slice(), origin }));
+        try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{d} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.value, origin }));
     }
     try writeSafeFieldTo(out, "Work: ", @tagName(work.work.state.value));
     if (work.selected_message) |selected|

@@ -446,7 +446,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     if binding:
                         # An unconfirmed start stays recoverable: the overview
                         # says so and Ctrl-D still leaves.
-                        human.read_terminal(master, "! Not sure the Session started. Details when you leave.")
+                        human.read_terminal(master, "! Start unsure; details on exit")
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
@@ -723,8 +723,12 @@ def permission_read_cases(state):
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"/details\n")
-            output = human.read_terminal(master,
-                "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", timeout=10)
+            human.read_terminal(master, "host_busy", timeout=10)
+            output = human.current_screen(master)
+            # The transcript keeps the whole diagnostic, wrapped at the width;
+            # the notice under the input names only what failed.
+            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)
