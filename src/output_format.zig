@@ -9,7 +9,7 @@ pub const OutputRecordTag = enum(u8) {
     item = 1,
     // 2 was a message text record; a message's text is its parts.
     usage = 3,
-    item_id = 4,
+    // 4 was a call's provider item id; the id is in the item bag.
     name = 5,
     call_id = 6,
     arguments = 7,
@@ -192,7 +192,6 @@ pub const OutputMetadataReader = struct {
             .tag = switch (bytes[0]) {
                 1 => .item,
                 3 => .usage,
-                4 => .item_id,
                 5 => .name,
                 6 => .call_id,
                 7 => .arguments,
@@ -347,7 +346,7 @@ pub const JsonStringSource = struct {
 test "a metadata record's replay-rule byte is set only on a reasoning item record" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for (0..256) |flag| for ([_]OutputRecordTag{ .item, .member, .item_id }) |tag| for ([_]OutputItemKind{ .reasoning, .message, .function_call, .compaction }) |kind| {
+    for (0..256) |flag| for ([_]OutputRecordTag{ .item, .member, .name }) |tag| for ([_]OutputItemKind{ .reasoning, .message, .function_call, .compaction }) |kind| {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(tag);
         bytes[1] = @backingInt(kind);

@@ -883,8 +883,9 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     switch (kind) {
         .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest, .omit_reasoning_text = omit_reasoning_text },
         .function_call => {
-            const tags = .{ output_format.OutputRecordTag.item_id, .name, .call_id, .arguments };
-            inline for (tags, item_check.decoded_fields, item_check.encoded_spans) |tag, decoded, span| {
+            const tags = .{ output_format.OutputRecordTag.name, .call_id, .arguments };
+            // Index 0 is the provider item id, kept in the item bag.
+            inline for (tags, item_check.decoded_fields[1..], item_check.encoded_spans[1..]) |tag, decoded, span| {
                 const encoded = try stringContents(window, item, span);
                 try response.metadata.append(.{
                     .tag = tag,
@@ -1171,9 +1172,9 @@ pub const OutputItemCheck = struct {
     token_overflow: bool = false,
     token_hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
     /// The item's decoded top-level `id`, `name`, `call_id` and `arguments`
-    /// strings, in ProposalMetadata order. Every kind has an `id`; only a
-    /// call has the other three.
-    decoded_fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined,
+    /// strings. Every kind has an `id`; only a call has the other three,
+    /// which are its certificate in ProposalMetadata order.
+    decoded_fields: [decoded_names.len]DecodedField = undefined,
     decoded_fields_seen: u4 = 0,
     /// The kind the item declares, once its type names a known kind.
     item_kind: ?output_format.OutputItemKind = null,
@@ -1186,6 +1187,7 @@ pub const OutputItemCheck = struct {
 
     /// From the end of a value's key to its closing quote.
     pub const Span = struct { after_key: u64, end: u64 };
+    pub const DecodedField = struct { length: u64, digest: [32]u8 };
 
     /// How the grammar judged one complete item.
     pub const Verdict = union(enum) {
@@ -2097,7 +2099,7 @@ test "a call's four decoded fields stream with fixed storage" {
         }
     };
     const source = Source{ .bytes = "{\"arguments\":\"a\\u0000\\ud83d\\ude80\",\"future\":{\"id\":\"not the item\"},\"call_id\":\"c\\u0061ll\",\"name\":\"ba\\u0073h\",\"id\":\"\\u0069tem\",\"type\":\"function_call\"}" };
-    var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
+    var expected: [4]OutputItemCheck.DecodedField = undefined;
     for ([_][]const u8{ "item", "bash", "call", "a\x00🚀" }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
     var item_check: OutputItemCheck = .{ .operation = .assistant_response };
@@ -2159,7 +2161,7 @@ test "long strings decode and locate exactly across read windows" {
         .{ text[0..200], text, text, text, text },
     );
     defer std.testing.allocator.free(item);
-    var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
+    var expected: [4]OutputItemCheck.DecodedField = undefined;
     for ([_][]const u8{ decoded.written(), "bash", decoded.written(), decoded.written() }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
     for ([_]usize{ 1, 7, protocol.content_window_bytes - 1, protocol.content_window_bytes, protocol.content_window_bytes + 1 }) |allowance| {
@@ -3400,9 +3402,9 @@ test "provider preserves ordered trustworthy function call envelopes" {
     try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
     try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
     try std.testing.expectEqual(@as(u64, 0), accepted.output.answer_length);
-    // Per call: the item, four call fields, and an item bag of `id` and
+    // Per call: the item, three call fields, and an item bag of `id` and
     // `status` with its trailer.
-    try std.testing.expectEqual(@as(u64, 2 * 8 * 104), accepted.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, 2 * 7 * 104), accepted.metadata_bytes);
 
     const invalid_second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"edit\",\"call_id\":\"call-B\",\"arguments\":\"{}\"}";
     const late_invalid = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
@@ -3455,7 +3457,7 @@ test "function call argument stream events are scratch and completed items remai
     defer valid_tmp.cleanup();
     const accepted = try validateTestingSse(&valid_tmp, stream, 64 * 1024);
     try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
-    try std.testing.expectEqual(@as(u64, 8 * 104), accepted.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, 7 * 104), accepted.metadata_bytes);
 
     const malformed = "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\"}";
     const malformed_stream = "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n" ++
@@ -3574,10 +3576,10 @@ test "Bash proposal metadata growth is linear and disk-backed" {
     const validated = try validateTestingSse(
         &tmp,
         writer.buffered(),
-        action_count * 8 * 104,
+        action_count * 7 * 104,
     );
     try std.testing.expectEqual(@as(u64, action_count), validated.output.call_count);
-    try std.testing.expectEqual(@as(u64, action_count * 8 * 104), validated.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, action_count * 7 * 104), validated.metadata_bytes);
     try std.testing.expect(@sizeOf(Validated) < protocol.content_window_bytes);
 }
 

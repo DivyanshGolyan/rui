@@ -189,18 +189,18 @@ func TestOperationPhaseTimestampRequiresOneExactRecord(t *testing.T) {
 }
 
 func TestOrderedRawRequestBodies(t *testing.T) {
-	inspection, err := json.Marshal(inspectRequest{Version: "1", Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
+	inspection, err := json.Marshal(inspectRequest{Version: "2", Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(inspection), `{"version":"1","kind":"inspect_session","store":"store","session":"k7m2qx"}`; got != want {
+	if got, want := string(inspection), `{"version":"2","kind":"inspect_session","store":"store","session":"k7m2qx"}`; got != want {
 		t.Fatalf("inspection = %s, want %s", got, want)
 	}
-	result, err := json.Marshal(readResultRequest{Version: "1", Kind: "read_result", Store: "store", Key: "key"})
+	result, err := json.Marshal(readResultRequest{Version: "2", Kind: "read_result", Store: "store", Key: "key"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(result), `{"version":"1","kind":"read_result","store":"store","key":"key"}`; got != want {
+	if got, want := string(result), `{"version":"2","kind":"read_result","store":"store","key":"key"}`; got != want {
 		t.Fatalf("read result = %s, want %s", got, want)
 	}
 }

@@ -2373,7 +2373,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     var body_buffer: [2048]u8 = undefined;
     const body = try std.fmt.bufPrint(
         &body_buffer,
-        "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
+        "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
         .{session.slice()},
     );
     var used: std.atomic.Value(u64) = .init(0);

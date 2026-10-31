@@ -335,7 +335,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         }
         fn exchange(fds: []const std.posix.fd_t) !void {
             // Independent Python hashlib oracle for domain-prefixed "first".
-            const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"admitted_at\":\"1\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
+            const metadata = "{\"version\":\"2\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"admitted_at\":\"1\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
             const bodies = [_][]const u8{ metadata, "first" };
             for (fds, 0..) |fd, index| {
                 const normal_body = bodies[index];
@@ -364,7 +364,7 @@ test "history preparation binds wire and staged bytes before exposure" {
                     @memcpy(wrong_metadata[digest_start..][0..64], "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e");
                 }
                 const body = if (index == 0 and mode == .wrong_domain) &wrong_metadata else if (index == 1 and mode == .short_wire) "firs" else normal_body;
-                const response = try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nX-Rui-Wire-Version: 1\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\n\r\n", .{ content_type, body.len, body.len, body.len });
+                const response = try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nX-Rui-Wire-Version: 2\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\n\r\n", .{ content_type, body.len, body.len, body.len });
                 @memcpy(buffer[response.len..][0..body.len], body);
                 var length = response.len + body.len;
                 if (index == 1 and mode == .extra_wire) {

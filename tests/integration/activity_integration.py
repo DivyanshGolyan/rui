@@ -66,7 +66,7 @@ def mock_reply(path, store, mode, body, advertised=None, ok=False):
     headers = b"" if mode == "page" else f"X-Rui-Content-Bytes: {size}\r\nX-Rui-Next-Offset: {size}\r\n".encode()
     content_type = b"application/json" if mode == "page" else b"application/octet-stream"
     response = (b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type + f"\r\nContent-Length: {size}\r\n".encode() +
-        headers + b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + body)
+        headers + b"X-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n" + body)
     with one_reply(path, response) as deadline:
         args = ("null", 0, "null", "forward") if mode == "page" else (1, 0)
         return caller(store, mode, *args, ok=ok, timeout=max(0, deadline - time.monotonic()))
@@ -130,7 +130,7 @@ def main():
             assert live["entries"][0]["presentation"]["description"] == "Exit with success", live
             assert history(store, calls[1]["position"])[1][-1] == calls[1], "interior end changed immutable rejection classification"
             for i, row in enumerate(calls):
-                for field, reference, expected in zip(("item_id", "name", "call_id", "arguments"), row["value"]["call"]["fields"], (f"activity-item-{i}", *CALLS[i])):
+                for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
                     data = expected.encode()
                     assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
                     assert caller(store, "field", row["position"], field) == data
@@ -218,7 +218,7 @@ def main():
                     stop_process(process)
                     process = None
             saved.close()
-            valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
+            valid = {"version": "2", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
@@ -283,7 +283,7 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
-            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "1"', b'"version":"1","version":"1"'))
+            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "2"', b'"version":"2","version":"2"'))
             assert mock_reply(fields["socket"], store, "content", b"abc", 9) == b""
             assert mock_reply(fields["socket"], store, "content", b"p" * 4096 + b"abc", 4105) == b"p" * 4096
             print("activity typed native: seven kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
