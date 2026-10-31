@@ -6,11 +6,11 @@ Load sections through [AGENTS.md](AGENTS.md#before-work). These standards own en
 
 Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research. Implementation slices link accepted contracts and define proof.
 
-Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate. Then edit the owning section and affected verification cases; keep rationale beside the contract. Identify conflicts with accepted behavior explicitly. Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Keep [Research](research/README.md) a compact index of reproducible evidence.
+Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate. Accepted behavior changes only by the user's decision: when an implementation departs from it, raise the conflict and change the code or ask, keeping the contract text as accepted. Then edit the owning section and affected verification cases; keep rationale beside the contract. Identify conflicts with accepted behavior explicitly. Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Keep [Research](research/README.md) a compact index of reproducible evidence.
 
 ## Engineering
 
-Ground design in concrete caller behavior. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Obtain independent opinions on material design questions.
+Ground design in concrete caller behavior. Before work from a design, mock or multi-PR plan starts, map every requirement, every "reuse X" and every element of the referenced design to a PR or task, or to a "left out" list the user sees before approving. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Obtain independent opinions on material design questions.
 
 ### Ownership and transitions
 
@@ -18,7 +18,7 @@ Keep state, validation and transitions with their owner. Express lifecycle decis
 
 Expose semantic intent and opaque, pointer-stable handles rather than storage rows, internal lifecycle state or generic command buses. Use closed typed variants for different authorities. Do not copy or abstract resource handles merely to make code functional.
 
-Reuse an existing owner whole. A new surface that takes the same input or renders the same thing as an existing component calls that component; when a boundary keeps a core from importing it, the shell owns the component and passes its outcomes in. Before sharing any part of a copy, list every behavior of the original. A second implementation of an owned behavior is a review finding.
+Reuse an existing owner whole. A new surface that does the same job as an existing component calls that component; when a boundary keeps a core from importing it, the shell owns the component and passes its outcomes in.
 
 Before correcting a failure, identify its owner, invariant and earliest violating transition. Correct that transition or replace the owning model, not a downstream observer. From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it. When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions. Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.
 
@@ -58,14 +58,14 @@ A Host thread keeps its stack's high-water pages for its life, and ReleaseSafe p
 
 ## Review
 
-Before opening a PR, and again on each review-fix round that touches the same lifecycle, run one independent correctness, design and complecting review in a fresh context (a subagent, or another thread when none is available), using the [product tenets](VERIFICATION.md#product-tenets-at-stage-completion). Fix or justify each finding before publishing. Review signoff does not gate a coherent green change; [Landing](AGENTS.md#landing) owns the required proof and handling of known failed counterexamples.
+Before opening a PR, and again on each review-fix round, run one independent correctness, design and complecting review in a fresh context (a subagent, or another thread when none is available), using the [product tenets](VERIFICATION.md#product-tenets). The author fixes each finding before opening the PR, or records in the PR why it stays, and fixes it at its class ([Ownership and transitions](#ownership-and-transitions)). Review signoff does not gate landing a coherent green change; [Landing](AGENTS.md#landing) owns the required proof and handling of known failed counterexamples.
 
 Review parity and failure paths as well as the diff:
 
-- **Parity.** List what the change re-implements, replaces or drops: each sibling component, previous version and contract line it touches. Confirm each keeps its behavior.
+- **Parity.** List what the change re-implements, replaces or drops: each sibling component, previous version and contract line it touches. Confirm each keeps its behavior. A second implementation of a behavior an existing component owns is a finding.
 - **Discarded failures.** List every error a secondary path (after commit, on cancel or return, in a worker, during setup or teardown, a catch-all switch arm) discards, turns into `null` or treats as unreachable. Route each to the main path's failure boundary, or justify it beside the code.
-- **In-flight effects.** Each effect the change emits has one record from emission to a definite answer, and one exit path reports every open record.
-- **Design.** Check the change against the approved design, not only the issue derived from it. When the change edits a contract document, compare that edit with the approved design; a "by design" that cites text the same change added is a finding.
+- **In-flight effects.** Each effect the change emits has one record from emission to a definite answer. On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
+- **Design.** Check the change against the approved design, not only the issue derived from it. An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
 Trace beyond changed lines to owning state/control flow and existing causes of workarounds. Identify duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; connect findings to the change. Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost.
 
@@ -73,7 +73,7 @@ Validate findings against the contract and owner. For each actionable finding, g
 
 ## Evidence
 
-Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`. Broaden/repeat checks only for changes or unresolved concerns. Live provider checks remain opt-in.
+Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`. During review-fix rounds, run the `select_tests.py --phase development` targets, the touched owners' focused tests and a mutation that reverts each fix and shows its new test fails; the PR's Selected run executes the review-phase set on the pushed head. Broaden/repeat checks only for changes or unresolved concerns. Live provider checks remain opt-in.
 
 Test meaningful failures and recovery against independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. A concurrent test peer records what it observed before it replies or exits, so cancelling or joining it once the code under test returns cannot change the result; check this by temporarily delaying each peer read, reply and exit. Order test actors with a gate or event, never a sleep. Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 

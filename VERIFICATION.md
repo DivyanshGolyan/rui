@@ -17,8 +17,6 @@ Run fixtures as a non-root user. Root bypasses the file and socket permission de
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their mappings, not an unconditional per-PR gate.
 
-During review-fix rounds, run `--phase development` targets, the touched owners' focused tests and each fix's red-without mutation locally; the PR's Selected run executes the review-phase set on the pushed head.
-
 | Subsystem | Landing-tip minimum | Exceptions and notes |
 | --- | --- | --- |
 | Portable turn, request encoding, answer rendering | `test-logic` | Value transitions do not change native adapters |
@@ -145,15 +143,15 @@ Releases add no gate. [Release](.github/workflows/release.yml) publishes only co
 Measurement runners use Go 1.27.1 and modules pinned in `tests/qualification/go.mod` and `go.sum`; Go is measurement-only. Before `zig build measure-*`, run `GOTOOLCHAIN=local go -C tests/qualification mod download`, then `zig build measurement-check`. Record Go and gopsutil versions, `go.sum` and binary hashes, platform, Git revision and dirty state. Measurement provenance reports a revision only when `git -C` resolves the measurement root as its top level; otherwise both fields are unavailable.
 
 Release evidence includes deterministic Session, model, tool, permission, context, compaction, workflow and server fixtures; hard-termination recovery at each acknowledgement and effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those owners. Classify unused, conditional and test declarations and remove obsolete interfaces. Never label interrupted or unrun checks passed.
-### Product tenets at stage completion
+### Product tenets
 
-Before each PR, the independent review under [Review](CODING_STANDARDS.md#review) checks the change's completed caller flow against the following tenets. This design review is not a landing gate. Required behavior, recovery and resource proof remains in the [canonical gates](#canonical-gates).
+The [Review](CODING_STANDARDS.md#review) checks the change's completed caller flow against the following tenets. This design review is not a landing gate. Required behavior, recovery and resource proof remains in the [canonical gates](#canonical-gates).
 
 - **Simplicity:** explain the required behavior or demonstrated cost that justifies each added module, durable fact, cache or queue. Check for duplicate authority and caller-owned coordination that belongs inside an existing owner; compare a simpler approach where one could preserve the required behavior. Identify dependencies introduced or removed on another owner's representation, call order or lifetime, and justify each retained one by required behavior. Passing tests establish tested behavior, not design simplicity.
-- **Explainability:** walk ordinary work, failure and recovery in plain language using the stage's normal results and inspection. A reader can tell what happened, what remains uncertain and what can happen next. Explanations follow owning facts and do not treat optional diagnostics as recovery authority. Check this as each caller path appears, before final presentation work.
+- **Explainability:** walk ordinary work, failure and recovery in plain language using the change's normal results and inspection. A reader can tell what happened, what remains uncertain and what can happen next. Explanations follow owning facts and do not treat optional diagnostics as recovery authority. Check this as each caller path appears, before final presentation work.
 - **Memory footprint:** rerun comparable fixtures as resource owners are added, recording aggregate peak and retained-idle footprint, including native libraries and Rui helpers. At fixed capacity, vary payload and durable-history populations independently and exercise fill and drain with delayed cleanup or failure. Explain changes from the preceding measurement and resolve unexplained growth before dependent work builds on it. Use the [resource targets](#resources-and-accepted-host-qualification-targets); stage checks do not replace qualification of the complete simultaneous workload or introduce per-module quotas.
 
-Record these with the stage's existing evidence.
+Record these in the review's findings.
 
 ## Platform qualification
 
