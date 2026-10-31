@@ -6,6 +6,7 @@ const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
 const Position = Viewport.Position;
 const Frame = @import("TerminalFrame.zig");
+const draft_layout = @import("draft_layout.zig");
 const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const ChoiceLine = @import("ChoiceLine.zig");
@@ -56,6 +57,10 @@ newer_trimmed: bool = false,
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
 browsing_height: u16 = 0,
+// The byte the draft's first shown line started at in the latest frame,
+// kept first by the next one so the input scrolls only when its caret
+// leaves view. The choice field never moves it.
+draft_anchor: usize = 0,
 preview_complete: bool = true,
 // The first Action row no delivered frame has shown in this layout.
 action_seen: Position = .{},
@@ -583,6 +588,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .method = self.vx.caps.unicode,
         .draft = draft,
         .cursor = cursor,
+        .draft_anchor = if (approval) 0 else self.draft_anchor,
         .status = status,
         .approval = approval,
         .calls = calls[0..if (selected) 0 else live.count],
@@ -594,6 +600,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .preview_complete = self.preview_complete,
     });
     self.height = layout.height;
+    if (!approval) self.draft_anchor = layout.draft_lines[0].start;
     self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
@@ -608,10 +615,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         call_row += layout.call_heights[index];
     }
     _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
-    // Continuation rows align under the text; only the first row has a glyph.
-    for (0..layout.draft_height) |line| _ = window.child(.{ .y_off = layout.draft_top + @as(u16, @intCast(line)), .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "  ", .style = self.style(if (approval) .attention else .user) }, .{});
-    const draft_window = window.child(.{ .x_off = 2, .y_off = layout.draft_top, .height = layout.draft_height });
-    _ = draft_window.child(.{ .y_off = -@as(i17, layout.draft_first) }).print(&.{.{ .text = draft }}, .{ .wrap = .grapheme });
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
+    // Continuation rows align under the text; only the draft's first line
+    // has a glyph. Each shown line is printed whole: draft_layout already
+    // broke it to fit.
+    for (layout.draft_lines[0..layout.draft.rows], 0..) |line, index| {
+        const row = layout.draft_top + @as(u16, @intCast(index));
+        const first = layout.draft.first + index == 0;
+        _ = window.child(.{ .y_off = row, .height = 1, .width = 2 }).printSegment(.{ .text = if (first) prompt else "  ", .style = self.style(if (approval) .attention else .user) }, .{});
+        _ = window.child(.{ .x_off = 2, .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
+    }
     window.showCursor(layout.caret_column, layout.caret_row);
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
@@ -635,6 +648,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     try out.writeAll(frame.written());
     try out.flush();
     return .{ .frame = self.frames };
+}
+
+/// The rule above the input. It names the draft lines hidden above or
+/// below the input when there are any.
+fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View) !void {
+    var buffer: [64]u8 = undefined;
+    const label = draft_layout.label(&buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
+    window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
+    const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
+    _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});
 }
 
 fn style(self: *const Self, value: View.Style) vaxis.Style {
@@ -758,7 +781,7 @@ test "a transcript's front is taken after escaping, which can grow live text pas
     try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
 }
 
-test "compact conversation keeps the composer beside content without persistent chrome" {
+test "the input keeps the bottom rows under a rule while content starts at the top" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
@@ -770,22 +793,58 @@ test "compact conversation keeps the composer beside content without persistent 
     const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     _ = try screen.render(&out.writer, size, "", 0, "", &.{});
     const window = screen.vx.window();
-    try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(79, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 23).?.char.grapheme);
     try screen.append("› inspect\n  Done.\n");
     _ = try screen.render(&out.writer, size, "next\nline", 9, "", &.{});
     try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 3).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", window.readCell(0, 2).?.char.grapheme);
+    // The draft grows upward: the rule moves up, the last row stays.
+    try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
     // A draft continuation has no glyph; its text aligns under the first row.
-    try std.testing.expectEqualStrings(" ", window.readCell(0, 4).?.char.grapheme);
-    try std.testing.expectEqualStrings("l", window.readCell(2, 4).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", window.readCell(0, 23).?.char.grapheme);
+    try std.testing.expectEqualStrings("l", window.readCell(2, 23).?.char.grapheme);
+    // Status sits directly above the rule.
     _ = try screen.render(&out.writer, size, "next", 4, "Working…", &.{});
-    try std.testing.expectEqualStrings("W", window.readCell(0, 3).?.char.grapheme);
-    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 3).?.style.fg);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 4).?.char.grapheme);
+    try std.testing.expectEqualStrings("W", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 21).?.style.fg);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 23).?.char.grapheme);
 }
 
-test "optional spacing yields before exact-fit transcript rows" {
+test "a draft past its cap scrolls inside the input and the rule counts what it hides" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 40, .col = 40, .xpixel = 0, .ypixel = 0 };
+    // Thirteen lines: ten show, three hide above the caret at the end.
+    const draft = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
+    _ = try screen.render(&out.writer, size, draft, draft.len, "", &.{});
+    var storage: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("──────────── ↑ 3 more lines ────────────", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("  4", rowText(screen, 30, &storage));
+    try std.testing.expectEqualStrings("  13", rowText(screen, 39, &storage));
+    // Moving the caret up inside the shown lines keeps them; above them,
+    // the input scrolls by one row and the rule counts both sides.
+    _ = try screen.render(&out.writer, size, draft, 6, "", &.{});
+    try std.testing.expectEqualStrings("  4", rowText(screen, 30, &storage));
+    _ = try screen.render(&out.writer, size, draft, 4, "", &.{});
+    try std.testing.expectEqualStrings("───────── ↑ 2 · ↓ 1 more lines ─────────", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("  3", rowText(screen, 30, &storage));
+    _ = try screen.render(&out.writer, size, draft, 0, "", &.{});
+    try std.testing.expectEqualStrings("──────────── ↓ 3 more lines ────────────", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("› 1", rowText(screen, 30, &storage));
+}
+
+test "the transcript fills every row above the rule" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
@@ -805,7 +864,8 @@ test "optional spacing yields before exact-fit transcript rows" {
             }
             _ = try screen.render(&out.writer, size, "", 0, "", &.{});
             const window = screen.vx.window();
-            const first = if (rows == 24) 1 else @as(usize, 0);
+            // Twenty-two rows sit above the rule and the input row.
+            const first = rows -| 22;
             for (first..rows, 0..) |row, y| {
                 var bytes: [16]u8 = undefined;
                 const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
@@ -846,20 +906,23 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     var live: View.Live = .{};
     _ = try screen.render(&out.writer, size, "", 0, "1234567中Z", &live);
     const window = screen.vx.window();
-    try std.testing.expectEqualStrings("7", window.readCell(6, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(0, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(2, 1).?.char.grapheme);
+    // Two status rows sit right above the rule on row 10.
+    try std.testing.expectEqualStrings("7", window.readCell(6, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(2, 9).?.char.grapheme);
     live.count = 1;
     live.total = 1;
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try live.entries[0].presentation.description.?.set("12345中Z");
     _ = try screen.render(&out.writer, size, "", 0, "Idle", &live);
-    // The continuation aligns under the call's text, after its glyph.
-    try std.testing.expectEqualStrings("5", window.readCell(6, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(4, 2).?.char.grapheme);
+    // Status, then the call, sit right above the rule on row 10. The
+    // continuation aligns under the call's text, after its glyph.
+    try std.testing.expectEqualStrings("5", window.readCell(6, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(2, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(4, 9).?.char.grapheme);
     _ = try screen.render(&out.writer, size, "", 0, "́Z", &live);
-    try std.testing.expectEqualStrings("\\", window.readCell(0, 0).?.char.grapheme);
+    // The status row sits above the call's two rows.
+    try std.testing.expectEqualStrings("\\", window.readCell(0, 7).?.char.grapheme);
 }
 
 test "actual overflow yields wording before clipping required status" {
@@ -963,8 +1026,10 @@ test "prepared Action preserves selected inspection until explicit return" {
             _ = try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, Frame.approval_choice, &.{});
             const window = screen.vx.window();
             try std.testing.expectEqualStrings("R", window.readCell(0, 0).?.char.grapheme);
-            try std.testing.expectEqualStrings("T", window.readCell(0, 2).?.char.grapheme);
-            try std.testing.expectEqualStrings(">", window.readCell(0, 3).?.char.grapheme);
+            // The choice keeps the bottom row, its instructions above the rule.
+            try std.testing.expectEqualStrings("T", window.readCell(0, 9).?.char.grapheme);
+            try std.testing.expectEqualStrings("─", window.readCell(0, 10).?.char.grapheme);
+            try std.testing.expectEqualStrings(">", window.readCell(0, 11).?.char.grapheme);
         }
         screen.releaseAction();
         screen.consent = .{};
