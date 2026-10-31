@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const execution = @import("execution.zig");
@@ -925,8 +926,11 @@ const RequestItem = union(enum) {
     history_memo,
     /// A User Message or an instruction update.
     message: store.HistoricalEntry,
-    /// One accepted output item, judged compatible and replayed.
-    replayed_output: Replayed,
+    /// One accepted output item in Rui's own form: its opening, each part,
+    /// and its close, which writes the item's provider bag.
+    output_open: store.HistoricalOutput,
+    output_part: store.HistoricalPart,
+    output_close,
     tool_result: store.HistoricalToolResult,
     compaction_trigger,
     tools,
@@ -947,13 +951,45 @@ const Piece = union(enum) {
     escaped_content: store.HistoricalContent,
     /// Canonical JSON, copied.
     verbatim_content: store.HistoricalContent,
-    /// Accepted output the grammar judged compatible, replayed.
-    replay: Replayed,
     history_memo,
 };
 
-/// A replayed output item. Private reasoning text is never replay input.
-const Replayed = struct { content: store.HistoricalContent, omit_reasoning_text: bool };
+const OutputOracle = struct { raw: store.HistoricalContent, start: u64 };
+
+const OracleWriter = struct {
+    bytes: std.ArrayList(u8) = .empty,
+
+    pub fn write(self: *OracleWriter, bytes: []const u8) !void {
+        try self.bytes.appendSlice(std.testing.allocator, bytes);
+    }
+};
+
+/// Parsed JSON equality: the same values, objects compared by key.
+fn jsonEqual(a: std.json.Value, b: std.json.Value) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .object => |object| object.count() == b.object.count() and for (object.keys(), object.values()) |key, value| {
+            const other = b.object.get(key) orelse break false;
+            if (!jsonEqual(value, other)) break false;
+        } else true,
+        .array => |array| array.items.len == b.array.items.len and for (array.items, b.array.items) |x, y| {
+            if (!jsonEqual(x, y)) break false;
+        } else true,
+        .string => |text| std.mem.eql(u8, text, b.string),
+        .number_string => |text| std.mem.eql(u8, text, b.number_string),
+        .integer => |value| value == b.integer,
+        .float => |value| value == b.float,
+        .bool => |value| value == b.bool,
+        .null => true,
+    };
+}
+
+/// What the writer of one output item carries between its items: the item
+/// itself and the part array it has open.
+const OutputWriting = struct {
+    output: store.HistoricalOutput = undefined,
+    array: output_format.PartArray = .none,
+};
 
 /// One item's pieces, written in order.
 const Pieces = struct {
@@ -990,9 +1026,9 @@ fn separateInput(pieces: *Pieces, input_comma: *bool) void {
 }
 
 /// Fill `pieces` with the Codex Responses encoding of one item. Its pieces
-/// borrow from `item` and `settings`. `input_comma` is the only syntax state
-/// carried between items.
-fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, pieces: *Pieces) void {
+/// borrow from `item`, `settings` and `output`. `input_comma` and `output`
+/// are the only syntax state carried between items.
+fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, output: *OutputWriting, pieces: *Pieces) void {
     pieces.* = .{};
     switch (item.*) {
         .settings => {
@@ -1034,9 +1070,68 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .escaped_content = entry.content.? });
             pieces.add(.{ .syntax = "\"}]}" });
         },
-        .replayed_output => |replayed| {
+        // An output item is rebuilt from Rui's form and its provider bags,
+        // written canonically: the model receives what it sent.
+        .output_open => |*head| {
             separateInput(pieces, input_comma);
-            pieces.add(.{ .replay = replayed });
+            output.* = .{ .output = head.* };
+            switch (head.kind) {
+                .reasoning => pieces.add(.{ .syntax = "{\"type\":\"reasoning\"" }),
+                .compaction => pieces.add(.{ .syntax = "{\"type\":\"compaction\"" }),
+                .message => pieces.add(.{ .syntax = switch (head.phase) {
+                    .unphased => "{\"type\":\"message\",\"role\":\"assistant\"",
+                    .commentary => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\"",
+                    .final_answer => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\"",
+                } }),
+                .function_call => {
+                    const call = &(head.call orelse unreachable);
+                    pieces.add(.{ .syntax = "{\"type\":\"function_call\",\"name\":\"" });
+                    pieces.add(.{ .escaped_content = call[0] });
+                    pieces.add(.{ .syntax = "\",\"call_id\":\"" });
+                    pieces.add(.{ .escaped_content = call[1] });
+                    pieces.add(.{ .syntax = "\",\"arguments\":\"" });
+                    pieces.add(.{ .escaped_content = call[2] });
+                    pieces.add(.{ .syntax = "\"" });
+                },
+            }
+        },
+        .output_part => |*part| {
+            // Private reasoning text is never replay input.
+            if (output.output.omit_reasoning_text and part.array == .content) return;
+            if (output.array == part.array) {
+                pieces.add(.{ .syntax = "," });
+            } else {
+                if (output.array != .none) pieces.add(.{ .syntax = "]" });
+                pieces.add(.{ .syntax = if (part.array == .content) ",\"content\":[" else ",\"summary\":[" });
+                output.array = part.array;
+            }
+            if (part.text) |text| {
+                pieces.add(.{ .syntax = switch (part.kind) {
+                    .output_text => "{\"type\":\"output_text\",\"text\":\"",
+                    .refusal => "{\"type\":\"refusal\",\"refusal\":\"",
+                    .summary_text => "{\"type\":\"summary_text\",\"text\":\"",
+                    .reasoning_text => "{\"type\":\"reasoning_text\",\"text\":\"",
+                    .opaque_block => unreachable,
+                } });
+                pieces.add(.{ .escaped_content = text });
+                if (part.bag) |bag| {
+                    pieces.add(.{ .syntax = "\"," });
+                    pieces.add(.{ .verbatim_content = bag });
+                    pieces.add(.{ .syntax = "}" });
+                } else pieces.add(.{ .syntax = "\"}" });
+            } else {
+                pieces.add(.{ .syntax = "{" });
+                pieces.add(.{ .verbatim_content = part.bag.? });
+                pieces.add(.{ .syntax = "}" });
+            }
+        },
+        .output_close => {
+            if (output.array != .none) pieces.add(.{ .syntax = "]" });
+            if (output.output.bag) |bag| {
+                pieces.add(.{ .syntax = "," });
+                pieces.add(.{ .verbatim_content = bag });
+            }
+            pieces.add(.{ .syntax = "}" });
         },
         .tool_result => |result| {
             separateInput(pieces, input_comma);
@@ -1097,6 +1192,10 @@ pub const Preparation = struct {
         pieces: Pieces = .{},
         emission: Emission = .none,
         input_comma: bool = false,
+        output: OutputWriting = .{},
+        /// Tests only: the raw item behind the output item being written,
+        /// and where it starts in the request.
+        oracle: if (builtin.is_test) ?OutputOracle else void = if (builtin.is_test) null else {},
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -1134,6 +1233,11 @@ pub const Preparation = struct {
         instructions,
         history_start,
         history,
+        /// The parts of the output item being written, then its close.
+        output_parts,
+        /// After an output item's close: tests check it against the raw
+        /// item it came from.
+        output_checked,
         tool_results,
         covered_tool_results,
         compaction_trigger,
@@ -1163,7 +1267,6 @@ pub const Preparation = struct {
         fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: request_encoding.RawCursor,
-        replay: request_encoding.ReplayCursor,
         history_memo,
 
         /// Whether the emission reads the preparation's content reader.
@@ -1171,7 +1274,7 @@ pub const Preparation = struct {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
                 .json => |*json| json.bytes == null,
-                .raw, .replay => true,
+                .raw => true,
             };
         }
     };
@@ -1267,7 +1370,7 @@ pub const Preparation = struct {
             switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
                 .pending => {},
                 .item => switch (self.settings.provider) {
-                    .codex => codexPieces(&self.state.item, &self.settings, &self.state.input_comma, &self.state.pieces),
+                    .codex => codexPieces(&self.state.item, &self.settings, &self.state.input_comma, &self.state.output, &self.state.pieces),
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1338,13 +1441,25 @@ pub const Preparation = struct {
                         // Unusable output stays private; no partial request
                         // can seal.
                         if (self.state.continuation_unavailable) return .pending;
-                        self.state.item = .{ .replayed_output = .{
-                            .content = entry.content.?,
-                            .omit_reasoning_text = entry.content.?.item_identity.?.omit_reasoning_text,
-                        } };
+                        if (builtin.is_test) self.state.oracle = .{ .raw = entry.content.?, .start = self.writer.offset };
+                        self.state.item = .{ .output_open = try self.view.openOutput(entry.position) };
+                        self.state.stage = .output_parts;
                         return .item;
                     },
                 }
+            },
+            .output_parts => {
+                if (try self.view.nextOutputPart()) |part| {
+                    self.state.item = .{ .output_part = part };
+                } else {
+                    self.state.item = .output_close;
+                    self.state.stage = .output_checked;
+                }
+                return .item;
+            },
+            .output_checked => {
+                if (builtin.is_test) try self.checkOutputOracle();
+                self.state.stage = .history;
             },
             .tool_results => {
                 const result = try self.view.nextToolResult() orelse {
@@ -1495,6 +1610,41 @@ pub const Preparation = struct {
         return self.state.last_advance;
     }
 
+    /// Tests only: the output item just written parses equal to the raw
+    /// item it was accepted as, replayed the way format 41 replayed it.
+    /// Every request test is thereby a proof that Rui's form loses nothing
+    /// the model saw.
+    noinline fn checkOutputOracle(self: *Preparation) !void {
+        const oracle = self.state.oracle orelse return;
+        self.state.oracle = null;
+        try self.writer.flush();
+        const allocator = std.testing.allocator;
+        const written = try allocator.alloc(u8, @intCast(self.writer.offset - oracle.start));
+        defer allocator.free(written);
+        _ = try self.readonly.readPositionalAll(self.writer.io, written, oracle.start);
+        // The input array's comma belongs to the item before.
+        const rebuilt = if (written.len != 0 and written[0] == ',') written[1..] else written;
+        var replayed: OracleWriter = .{};
+        defer replayed.bytes.deinit(allocator);
+        var reader: store.HistoricalReader = undefined;
+        try self.view.openContent(oracle.raw, &reader);
+        defer reader.close();
+        var cursor: request_encoding.ReplayCursor = .{ .omit_content = oracle.raw.item_identity.?.omit_reasoning_text };
+        var bytes_left: usize = std.math.maxInt(usize);
+        var items_left: usize = std.math.maxInt(usize);
+        _ = try cursor.advance(HistoricalSource{ .reader = &reader, .ranged = true }, &replayed, &bytes_left, &items_left);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        // Both sides carry the provider's own members, duplicates included.
+        const options: std.json.ParseOptions = .{ .duplicate_field_behavior = .use_last };
+        const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), replayed.bytes.items, options);
+        const actual = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), rebuilt, options);
+        if (!jsonEqual(expected, actual)) {
+            std.debug.print("output item differs from its raw replay\n raw:     {s}\n rebuilt: {s}\n", .{ replayed.bytes.items, rebuilt });
+            return error.TestExpectedEqual;
+        }
+    }
+
     fn startPiece(self: *Preparation, piece: Piece) !void {
         switch (piece) {
             .syntax => |bytes| self.state.emission = .{ .fixed = .{ .bytes = bytes } },
@@ -1507,10 +1657,6 @@ pub const Preparation = struct {
             .verbatim_content => |content| {
                 try self.view.openContent(content, &self.reader);
                 self.state.emission = .{ .raw = .{} };
-            },
-            .replay => |replayed| {
-                try self.view.openContent(replayed.content, &self.reader);
-                self.state.emission = .{ .replay = .{ .omit_content = replayed.omit_reasoning_text } };
             },
             .history_memo => self.state.emission = .{ .history_memo = {} },
         }
@@ -1529,22 +1675,6 @@ pub const Preparation = struct {
             .raw => |*cursor| {
                 const source = HistoricalSource{ .reader = &self.reader };
                 if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
-                self.reader.close();
-            },
-            .replay => |*cursor| {
-                const source = HistoricalSource{ .reader = &self.reader, .ranged = true };
-                // Acceptance parsed this item, so syntax the cursor refuses
-                // means the saved bytes changed.
-                const progress = cursor.advance(source, &self.writer, bytes_left, items_left) catch |err| switch (err) {
-                    error.UnexpectedJsonEnd,
-                    error.UnexpectedJsonDelimiter,
-                    error.TrailingJson,
-                    error.InvalidJsonEscape,
-                    error.InvalidJsonString,
-                    => return self.reader.corrupt(),
-                    else => return err,
-                };
-                if (progress == .pending) return false;
                 self.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
@@ -2152,113 +2282,42 @@ fn settleComposedForTesting(
     item_id: []const u8,
     calls: []const ComposedCall,
 ) !void {
-    const decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
+    _ = item_id;
     const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}";
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     try source_writer.writeAll(item_json);
-    var metadata_used: std.atomic.Value(u64) = .init(0);
-    var retained_metadata: ?named_scratch.Owner = null;
-    var metadata = try output_format.OutputMetadataWriter.init(
-        std.testing.io,
-        setup.root,
-        file_prefix,
-        .{ .used = &metadata_used, .limit = (1 + 5 * calls.len) * 104 },
-        false,
-        &retained_metadata,
-    );
-    defer metadata.deinit();
-    try metadata.append(.{
-        .tag = .item,
-        .kind = item_kind,
-        .ordinal = 0,
-        .start = 0,
-        .length = item_json.len,
-        .id_digest = protocol.contentDigest(item_id),
-        .content_digest = protocol.contentDigest(item_json),
-        .omit_reasoning_text = switch (try Output.judgeForTesting(item_json, if (item_kind == .compaction) .compaction else .assistant_response)) {
-            .compatible => |compatible| compatible.omit_reasoning_text,
-            .incompatible => |reason| return reason,
-        },
-    });
-    var offset: u64 = item_json.len;
-    for (calls, 0..) |call, index| {
-        const ordinal = index + 1;
-        const item_start: usize = @intCast(offset);
-        // Full item JSON; string ranges address inner bytes (no quotes)
-        // with digests over the decoded values.
-        try source_writer.writeAll("{\"type\":\"function_call\",\"id\":\"");
-        const id_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(call.item_id);
-        const id_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"status\":\"completed\",\"name\":\"");
-        const name_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("bash");
-        const name_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"call_id\":\"");
-        const call_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(call.call_id);
-        const call_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"arguments\":\"");
-        const args_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(encoded_arguments);
-        const args_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\"}");
-        offset += @as(u64, @intCast(source_writer.buffered().len - item_start));
-        const item_bytes = source_writer.buffered()[item_start..];
-        try metadata.append(.{
-            .tag = .item_id,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = id_start,
-            .length = id_end - id_start,
-            .decoded_length = call.item_id.len,
-            .content_digest = protocol.contentDigest(call.item_id),
-        });
-        try metadata.append(.{
-            .tag = .name,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = name_start,
-            .length = name_end - name_start,
-            .decoded_length = "bash".len,
-            .content_digest = protocol.contentDigest("bash"),
-        });
-        try metadata.append(.{
-            .tag = .call_id,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = call_start,
-            .length = call_end - call_start,
-            .decoded_length = call.call_id.len,
-            .content_digest = protocol.contentDigest(call.call_id),
-        });
-        try metadata.append(.{
-            .tag = .arguments,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = args_start,
-            .length = args_end - args_start,
-            .decoded_length = decoded_arguments.len,
-            .content_digest = protocol.contentDigest(decoded_arguments),
-        });
-        try metadata.append(.{
-            .tag = .item,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = item_start,
-            .length = item_bytes.len,
-            .id_digest = protocol.contentDigest(call.item_id),
-            .content_digest = protocol.contentDigest(item_bytes),
-        });
+    var ranges: [16][2]u64 = undefined;
+    std.debug.assert(calls.len < ranges.len);
+    ranges[0] = .{ 0, item_json.len };
+    for (calls, 1..) |call, ordinal| {
+        const item_start = source_writer.end;
+        try source_writer.print("{{\"type\":\"function_call\",\"id\":\"{s}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"{s}\",\"arguments\":\"{s}\"}}", .{ call.item_id, call.call_id, encoded_arguments });
+        ranges[ordinal] = .{ item_start, source_writer.end - item_start };
     }
-    try metadata.sealForRead();
     const source_bytes = source_writer.buffered();
     var source_name: [64]u8 = undefined;
     const source = try setup.tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&source_name, "{s}-source", .{file_prefix}), .{ .read = true });
     defer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, source_bytes);
     try source.sync(std.testing.io);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(
+        std.testing.io,
+        setup.root,
+        file_prefix,
+        .{ .used = &metadata_used, .limit = 1 << 20 },
+        false,
+        &retained_metadata,
+    );
+    defer metadata.deinit();
+    const operation: output_format.ModelOperationKind = if (item_kind == .compaction) .compaction else .assistant_response;
+    for (ranges[0 .. 1 + calls.len], 0..) |range, ordinal| {
+        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
+        if (ordinal == 0 and record.kind != item_kind) return error.TestUnexpectedItemKind;
+    }
+    try metadata.sealForRead();
     try setup.storage.settleModelSuccess(binding, &.{
         .source = source,
         .source_length = source_bytes.len,
@@ -2329,11 +2388,12 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
 
 const composed_replayed = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"opaque\"}";
 
-// Replayed call items appear verbatim: they carry no top-level
-// response-only fields. Written separately from the settle helper so the
-// golden does not share its construction.
-const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-item-a\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
-const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
+// Replayed call items are rebuilt from Rui's form: the type and call fields
+// first, then the provider bag (`id`, `status`) as received. Written
+// separately from the settle helper so the golden does not share its
+// construction.
+const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-a\",\"status\":\"completed\"}";
+const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
 const composed_expected =
     "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
@@ -3221,19 +3281,23 @@ test "request preparation replays a large private reasoning item within each adv
         try setup.submit("large-next", "large-next-key", session.slice(), "next");
         var item_buffer: [64 * 1024]u8 = undefined;
         var item = std.Io.Writer.fixed(&item_buffer);
-        // The replayed item is the saved one without its reasoning text.
+        // The replayed item is the saved one without its reasoning text,
+        // rebuilt from Rui's form: type and parts first, then the provider
+        // bag in the order received.
         var replayed_buffer: [64 * 1024]u8 = undefined;
         var replayed = std.Io.Writer.fixed(&replayed_buffer);
+        const window: [protocol.content_window_bytes]u8 = @splat('x');
+        const summary = "\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}]";
+        try item.writeAll("{\"encrypted_content\":\"");
+        try replayed.writeAll("{\"type\":\"reasoning\"," ++ summary ++ ",\"encrypted_content\":\"");
         for ([_]*std.Io.Writer{ &item, &replayed }) |writer| {
-            try writer.writeAll("{\"encrypted_content\":\"");
-            const window: [protocol.content_window_bytes]u8 = @splat('x');
             for (0..5) |_| try writer.writeAll(&window);
             try writer.writeAll("\",");
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
-            if (writer == &item) try writer.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
-            try writer.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
-            try writer.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         }
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
+        try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
+        try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
@@ -3342,7 +3406,8 @@ test "request preparation replays reasoning continuation without its private rea
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
             .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
-            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            // Rebuilt from Rui's form: parts first, then the provider bag.
+            .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
             .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
@@ -3390,7 +3455,7 @@ test "request preparation replays reasoning continuation without its private rea
     };
 }
 
-test "request preparation cancellation yields inside canonical proposal authentication" {
+test "request preparation cancellation yields inside history discovery" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
@@ -3412,10 +3477,10 @@ test "request preparation cancellation yields inside canonical proposal authenti
         try preparation.checkIntegrity(binding);
         if (preparation.state.stage == .history and preparation.state.pieces.done() and preparation.writer.offset == before) {
             pending_turns += 1;
-            if (pending_turns == 12) break;
+            if (pending_turns == 10) break;
         }
     }
-    try std.testing.expectEqual(@as(usize, 12), pending_turns);
+    try std.testing.expectEqual(@as(usize, 10), pending_turns);
     preparation.cancel();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());

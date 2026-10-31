@@ -835,6 +835,9 @@ const ItemValidation = struct {
     omit_reasoning_text: bool = false,
     non_whitespace: bool = false,
     phase: enum { unphased, commentary, final_answer } = .unphased,
+    /// The phase Rui's form holds: only an exact `commentary` or
+    /// `final_answer` literal.
+    neutral_phase: output_format.NeutralPhase = .unphased,
 };
 
 /// One output item's bytes inside an event, read the way replay reads a
@@ -871,6 +874,7 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     };
     const kind = item_check.item_kind.?;
     const id_digest = item_check.idDigest();
+    const neutral = try splitNeutral(response, window, item, ordinal, kind);
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
@@ -911,9 +915,222 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
                     .decoded_length = text.decoded_length,
                 });
             }
-            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = item_check.messagePhase() };
+            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = item_check.messagePhase(), .neutral_phase = neutral.phase };
         },
     }
+}
+
+/// One object's members in order, each with its raw `"key":value` bytes.
+const Members = struct {
+    source: FileSource,
+    done: bool = false,
+    first: bool = true,
+
+    const Member = struct { whole: Range, value: Range };
+
+    fn init(window: *Window, object: Range) !Members {
+        var source = try FileSource.init(window, object);
+        try source.expect('{');
+        return .{ .source = source };
+    }
+
+    /// The next member, its decoded key in `key` (empty when it does not
+    /// fit, which no neutral name does).
+    fn next(self: *Members, key: *protocol.Bounded(max_evidence_bytes)) !?Member {
+        if (self.done) return null;
+        try self.source.space();
+        if (self.first and try self.source.peek() == '}') {
+            _ = try self.source.take();
+            try self.source.expectEnd();
+            self.done = true;
+            return null;
+        }
+        self.first = false;
+        try self.source.space();
+        const start = self.source.offset();
+        try keyName(&self.source, key);
+        try self.source.expect(':');
+        try self.source.space();
+        const value_start = self.source.offset();
+        try skipValue(&self.source, 1);
+        const end = self.source.offset();
+        try self.source.space();
+        switch (try self.source.take()) {
+            '}' => {
+                try self.source.expectEnd();
+                self.done = true;
+            },
+            ',' => {},
+            else => return error.UnexpectedJsonDelimiter,
+        }
+        return .{ .whole = .{ .start = start, .length = end - start }, .value = .{ .start = value_start, .length = end - value_start } };
+    }
+};
+
+/// Accumulates one provider bag: its members' raw bytes joined by commas,
+/// `m1,m2,...`, so a writer splices it into the object it rebuilds. Hashed
+/// as the members are recorded.
+const Bag = struct {
+    scope: output_format.BagScope,
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    length: u64 = 0,
+    members: u64 = 0,
+
+    fn add(self: *Bag, response: *Response, window: *Window, ordinal: u64, kind: output_format.OutputItemKind, member: Range) !void {
+        if (self.members != 0) {
+            self.hash.update(",");
+            self.length += 1;
+        }
+        var offset = member.start;
+        const end = member.start + member.length;
+        while (offset < end) {
+            const bytes = try window.bytesAt(offset, end);
+            self.hash.update(bytes);
+            offset += bytes.len;
+        }
+        self.length = try std.math.add(u64, self.length, member.length);
+        self.members += 1;
+        try response.metadata.append(.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = member.start, .length = member.length, .scope = self.scope });
+    }
+
+    /// Records the trailer when the bag holds anything.
+    fn close(self: *Bag, response: *Response, ordinal: u64, kind: output_format.OutputItemKind) !void {
+        if (self.members == 0) return;
+        try response.metadata.append(.{
+            .tag = .extras,
+            .kind = kind,
+            .ordinal = ordinal,
+            .start = 0,
+            .length = 0,
+            .decoded_length = self.length,
+            .content_digest = self.hash.finalResult(),
+            .scope = self.scope,
+        });
+    }
+};
+
+fn isNonemptyArray(window: *Window, value: Range) !bool {
+    var array = try Array.init(window, value);
+    return try array.next() != null;
+}
+
+fn stringIs(window: *Window, value: Range, expected: []const u8) !bool {
+    var source = try FileSource.init(window, value);
+    if (try source.peek() != '"') return false;
+    var text: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = readString(window, value, &text) catch return false;
+    return text.eql(expected);
+}
+
+/// Splits an accepted item into Rui's own form and the provider bags: every
+/// part of a recognised array becomes a `part` record (decoded text plus
+/// its block's other members as the part bag), and every top-level member
+/// Rui's form does not hold goes, as received, into the item bag. A member
+/// becomes neutral only in exactly the expected shape, so the bags keep
+/// everything else the model saw. `created_by` is dropped, as replay drops
+/// it.
+fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind) !NeutralItem {
+    var result: NeutralItem = .{};
+    var bag: Bag = .{ .scope = .item };
+    var members = try Members.init(window, item);
+    var key: protocol.Bounded(max_evidence_bytes) = .{};
+    while (try members.next(&key)) |member| {
+        const neutral = if (key.eql("type") or key.eql("created_by"))
+            true
+        else switch (kind) {
+            .message => if (key.eql("role"))
+                try stringIs(window, member.value, "assistant")
+            else if (key.eql("phase")) phase: {
+                if (try stringIs(window, member.value, "commentary")) {
+                    result.phase = .commentary;
+                    break :phase true;
+                }
+                if (try stringIs(window, member.value, "final_answer")) {
+                    result.phase = .final_answer;
+                    break :phase true;
+                }
+                break :phase false;
+            } else if (key.eql("content"))
+                try splitParts(response, window, member.value, ordinal, kind, .content)
+            else
+                false,
+            .reasoning => if (key.eql("summary"))
+                try splitParts(response, window, member.value, ordinal, kind, .summary)
+            else if (key.eql("content"))
+                try splitParts(response, window, member.value, ordinal, kind, .content)
+            else
+                false,
+            .function_call => key.eql("name") or key.eql("call_id") or key.eql("arguments"),
+            .compaction => false,
+        };
+        if (!neutral) try bag.add(response, window, ordinal, kind, member.whole);
+    }
+    try bag.close(response, ordinal, kind);
+    return result;
+}
+
+const NeutralItem = struct { phase: output_format.NeutralPhase = .unphased };
+
+
+/// Records each block of a nonempty array as a part, or returns false (the
+/// whole array stays in the item bag) for any other value.
+fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, kind: output_format.OutputItemKind, array_kind: output_format.PartArray) !bool {
+    var source = try FileSource.init(window, value);
+    if (try source.peek() != '[' or !try isNonemptyArray(window, value)) return false;
+    var array = try Array.init(window, value);
+    while (try array.next()) |block| {
+        const block_fields = readFields(window, block, &.{ "type", "text", "refusal" }) catch null;
+        var part_kind: output_format.PartKind = .opaque_block;
+        var text_key: []const u8 = "";
+        if (block_fields) |fields| known: {
+            const type_value = (fields.get("type") catch break :known) orelse break :known;
+            const candidates: []const struct { []const u8, output_format.PartKind, []const u8 } = switch (array_kind) {
+                .summary => &.{.{ "summary_text", .summary_text, "text" }},
+                .content => if (kind == .message)
+                    &.{ .{ "output_text", .output_text, "text" }, .{ "refusal", .refusal, "refusal" } }
+                else
+                    &.{.{ "reasoning_text", .reasoning_text, "text" }},
+                .none => unreachable,
+            };
+            for (candidates) |candidate| if (try stringIs(window, type_value, candidate[0])) {
+                const text = (if (std.mem.eql(u8, candidate[2], "text")) fields.get("text") else fields.get("refusal")) catch break :known;
+                const text_value = text orelse break :known;
+                var probe = try FileSource.init(window, text_value);
+                if (try probe.peek() != '"') break :known;
+                part_kind = candidate[1];
+                text_key = candidate[2];
+            };
+        }
+        var part_bag: Bag = .{ .scope = .part };
+        if (part_kind == .opaque_block) {
+            try response.metadata.append(.{ .tag = .part, .kind = kind, .ordinal = ordinal, .start = block.start, .length = 0, .part_kind = .opaque_block, .part_array = array_kind });
+        } else {
+            const text_value = (if (std.mem.eql(u8, text_key, "text")) block_fields.?.get("text") else block_fields.?.get("refusal")) catch unreachable;
+            var hash = protocol.contentHasher();
+            var decoded = Decoded{ .hash = &hash };
+            var text_source = try FileSource.init(window, text_value.?);
+            const text = try parseString(&text_source, &decoded);
+            try response.metadata.append(.{
+                .tag = .part,
+                .kind = kind,
+                .ordinal = ordinal,
+                .start = text.encoded.start,
+                .length = text.encoded.length,
+                .decoded_length = text.decoded_length,
+                .content_digest = hash.finalResult(),
+                .part_kind = part_kind,
+                .part_array = array_kind,
+            });
+        }
+        var members = try Members.init(window, block);
+        var key: protocol.Bounded(max_evidence_bytes) = .{};
+        while (try members.next(&key)) |member| {
+            if (part_kind != .opaque_block and (key.eql("type") or key.eql(text_key))) continue;
+            try part_bag.add(response, window, ordinal, kind, member.whole);
+        }
+        try part_bag.close(response, ordinal, kind);
+    }
+    return true;
 }
 
 /// The encoded contents of a top-level string value inside `item`, between
@@ -2181,6 +2398,39 @@ pub fn judgeForTesting(item: []const u8, operation: output_format.ModelOperation
     return (try item_check.advance(Source{ .bytes = item }, &bytes, &items)).?;
 }
 
+/// Record one complete item already in `source` at `start` the way
+/// acceptance records it: its call fields, Rui's form, its bags and then
+/// the item record. Tests that save output without a provider stream use
+/// it so their metadata is what acceptance would write.
+pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, source: std.Io.File, start: u64, length: u64, ordinal: u64, operation: output_format.ModelOperationKind) !output_format.OutputMetadataRecord {
+    var window: Window = .{ .io = metadata.io, .file = source };
+    var rejection: Rejection = .{};
+    var response: Response = .{
+        .metadata = metadata,
+        .operation = operation,
+        .rejection = &rejection,
+        .provider_failure = testingProviderFailure(),
+        .answer = .{ .digest = protocol.contentDigest("") },
+        .item_check = testingItemCheck(),
+    };
+    const item: Range = .{ .start = start, .length = length };
+    var message_hash = protocol.contentHasher();
+    const validation = try validateItem(&response, &window, item, ordinal, &message_hash);
+    const record: output_format.OutputMetadataRecord = .{
+        .tag = .item,
+        .kind = validation.kind,
+        .ordinal = ordinal,
+        .start = start,
+        .length = length,
+        .id_digest = validation.id_digest,
+        .content_digest = try contentDigestRange(&window, item),
+        .omit_reasoning_text = validation.omit_reasoning_text,
+        .phase = validation.neutral_phase,
+    };
+    try metadata.append(record);
+    return record;
+}
+
 /// Tests' provider failure, the last validation's.
 var testing_provider_failure: ProviderFailure = undefined;
 
@@ -2254,6 +2504,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
             .id_digest = validation.id_digest,
             .content_digest = try contentDigestRange(window, item),
             .omit_reasoning_text = validation.omit_reasoning_text,
+            .phase = validation.neutral_phase,
         });
         response.item_count += 1;
         return;
@@ -2728,7 +2979,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var root_buffer: [protocol.max_store_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var used: std.atomic.Value(u64) = .init(raw.len);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 2 * output_format.output_metadata_record_bytes - shortfall };
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 5 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
@@ -2746,7 +2997,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
             try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
-            try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
+            try std.testing.expectEqual(raw.len + done.len + 5 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
         try std.testing.expectEqual(raw.len, try source.readPositionalAll(std.testing.io, &buffer, 0));
@@ -3158,7 +3409,9 @@ test "provider preserves ordered trustworthy function call envelopes" {
     try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
     try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
     try std.testing.expectEqual(@as(u64, 0), accepted.output.answer_length);
-    try std.testing.expectEqual(@as(u64, 2 * 5 * 104), accepted.metadata_bytes);
+    // Per call: the item, four call fields, and an item bag of `id` and
+    // `status` with its trailer.
+    try std.testing.expectEqual(@as(u64, 2 * 8 * 104), accepted.metadata_bytes);
 
     const invalid_second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"edit\",\"call_id\":\"call-B\",\"arguments\":\"{}\"}";
     const late_invalid = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
@@ -3211,7 +3464,7 @@ test "function call argument stream events are scratch and completed items remai
     defer valid_tmp.cleanup();
     const accepted = try validateTestingSse(&valid_tmp, stream, 64 * 1024);
     try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
-    try std.testing.expectEqual(@as(u64, 5 * 104), accepted.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, 8 * 104), accepted.metadata_bytes);
 
     const malformed = "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\"}";
     const malformed_stream = "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n" ++
@@ -3330,10 +3583,10 @@ test "Bash proposal metadata growth is linear and disk-backed" {
     const validated = try validateTestingSse(
         &tmp,
         writer.buffered(),
-        action_count * 5 * 104,
+        action_count * 8 * 104,
     );
     try std.testing.expectEqual(@as(u64, action_count), validated.output.call_count);
-    try std.testing.expectEqual(@as(u64, action_count * 5 * 104), validated.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, action_count * 8 * 104), validated.metadata_bytes);
     try std.testing.expect(@sizeOf(Validated) < protocol.content_window_bytes);
 }
 
@@ -3611,5 +3864,157 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
         stream = .fixed(&stream_buffer);
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
         try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
+    }
+}
+
+/// Test reference for Rui's form: rebuilds every accepted item from its
+/// `part`, bag and call records alone, the way a request writer does, so a
+/// test can check the rebuilt item parses equal to what the provider sent.
+const NeutralRoundTrip = struct {
+    source: []u8,
+    records: []output_format.OutputMetadataRecord,
+
+    fn decoded(self: *const NeutralRoundTrip, allocator: std.mem.Allocator, record: output_format.OutputMetadataRecord) ![]u8 {
+        const quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{self.source[record.start..][0..record.length]});
+        defer allocator.free(quoted);
+        return std.json.parseFromSliceLeaky([]u8, allocator, quoted, .{});
+    }
+
+    fn string(out: *std.Io.Writer, text: []const u8) !void {
+        try std.json.Stringify.encodeJsonString(text, .{}, out);
+    }
+
+    fn bag(self: *const NeutralRoundTrip, out: *std.Io.Writer, members: []const output_format.OutputMetadataRecord, scope: output_format.BagScope, comma: *bool) !void {
+        for (members) |member| if (member.tag == .member and member.scope == scope) {
+            if (comma.*) try out.writeAll(",");
+            comma.* = true;
+            try out.writeAll(self.source[member.start..][0..member.length]);
+        };
+    }
+
+    /// The item at `ordinal`, rebuilt into `out`.
+    fn render(self: *const NeutralRoundTrip, allocator: std.mem.Allocator, ordinal: u64, out: *std.Io.Writer) !void {
+        var first: usize = 0;
+        while (self.records[first].ordinal != ordinal or self.records[first].tag == .usage) first += 1;
+        var end = first;
+        while (self.records[end].tag != .item) end += 1;
+        const item = self.records[end];
+        const records = self.records[first..end];
+        try out.print("{{\"type\":\"{s}\"", .{@tagName(item.kind)});
+        if (item.kind == .message) try out.writeAll(",\"role\":\"assistant\"");
+        if (item.phase != .unphased) try out.print(",\"phase\":\"{s}\"", .{@tagName(item.phase)});
+        for (records) |record| switch (record.tag) {
+            .name, .call_id, .arguments => {
+                try out.print(",\"{s}\":", .{@tagName(record.tag)});
+                try string(out, try self.decoded(allocator, record));
+            },
+            else => {},
+        };
+        for ([_]output_format.PartArray{ .content, .summary }) |array| {
+            var opened = false;
+            for (records, 0..) |record, index| {
+                if (record.tag != .part or record.part_array != array) continue;
+                try out.writeAll(if (opened) "," else if (array == .content) ",\"content\":[" else ",\"summary\":[");
+                opened = true;
+                try out.writeAll("{");
+                var comma = false;
+                if (record.part_kind != .opaque_block) {
+                    const text_key = if (record.part_kind == .refusal) "refusal" else "text";
+                    try out.print("\"type\":\"{s}\",\"{s}\":", .{ @tagName(record.part_kind), text_key });
+                    try string(out, try self.decoded(allocator, record));
+                    comma = true;
+                }
+                var part_end = index + 1;
+                while (part_end < records.len and records[part_end].tag != .part) part_end += 1;
+                try self.bag(out, records[index + 1 .. part_end], .part, &comma);
+                try out.writeAll("}");
+            }
+            if (opened) try out.writeAll("]");
+        }
+        var comma = true;
+        try self.bag(out, records, .item, &comma);
+        try out.writeAll("}");
+    }
+};
+
+fn jsonEqual(a: std.json.Value, b: std.json.Value) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .object => |object| object.count() == b.object.count() and for (object.keys(), object.values()) |key, value| {
+            const other = b.object.get(key) orelse break false;
+            if (!jsonEqual(value, other)) break false;
+        } else true,
+        .array => |array| array.items.len == b.array.items.len and for (array.items, b.array.items) |x, y| {
+            if (!jsonEqual(x, y)) break false;
+        } else true,
+        .string => |text| std.mem.eql(u8, text, b.string),
+        .number_string => |text| std.mem.eql(u8, text, b.number_string),
+        .integer => |value| value == b.integer,
+        .float => |value| value == b.float,
+        .bool => |value| value == b.bool,
+        .null => true,
+    };
+}
+
+test "an accepted item rebuilt from Rui's form and its bags parses equal to what the provider sent" {
+    const items = [_][]const u8{
+        // Reasoning: summary parts, private reasoning text, the opaque
+        // encrypted continuation, an open field and a dropped `created_by`.
+        "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"created_by\":\"x\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9\\/\"},{\"type\":\"summary_text\",\"text\":\"\"}]," ++
+            "\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\\nthought\"}],\"encrypted_content\":\"gAAA==\",\"status\":\"completed\"}",
+        // Reasoning with an empty summary, which stays in the item bag.
+        "{\"type\":\"reasoning\",\"id\":\"rs_2\",\"summary\":[],\"encrypted_content\":\"e\"}",
+        // A message: annotations stay with their block; an unmapped phase
+        // literal stays in the item bag.
+        "{\"type\":\"message\",\"id\":\"m_1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"partial_answer\"," ++
+            "\"content\":[{\"type\":\"output_text\",\"text\":\"see \\\"this\\\"\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"u\"}]},{\"type\":\"refusal\",\"refusal\":\"no\"}]}",
+        "{\"type\":\"message\",\"id\":\"m_2\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}",
+        "{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call\\nA\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}",
+    };
+    comptime var sse: []const u8 = "";
+    inline for (items, 0..) |item, index| sse = sse ++ std.fmt.comptimePrint("data: {{\"type\":\"response.output_item.done\",\"output_index\":{d},\"item\":", .{index}) ++ item ++ "}\n\n";
+    sse = sse ++ "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n";
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, sse);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root_path, "metadata", .{ .used = &used, .limit = 1 << 20 }, false, &retained);
+    defer metadata.deinit();
+    var data_used: std.atomic.Value(u64) = .init(0);
+    var event_data: EventData = undefined;
+    try event_data.init(std.testing.io, root_path, "data", .{ .used = &data_used, .limit = sse.len }, false, &retained);
+    defer event_data.deinit();
+    var rejection: Rejection = .{};
+    const validated = try validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{});
+
+    const decoded_source = try arena.alloc(u8, validated.source_length);
+    _ = try validated.source.readPositionalAll(std.testing.io, decoded_source, 0);
+    var records: std.ArrayList(output_format.OutputMetadataRecord) = .empty;
+    var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
+    while (try reader.next()) |record| try records.append(arena, record);
+    const round_trip: NeutralRoundTrip = .{ .source = decoded_source, .records = records.items };
+
+    for (items, 0..) |item, ordinal| {
+        var rebuilt: std.Io.Writer.Allocating = .init(arena);
+        try round_trip.render(arena, ordinal, &rebuilt.writer);
+        var expected = try std.json.parseFromSliceLeaky(std.json.Value, arena, item, .{});
+        _ = expected.object.orderedRemove("created_by");
+        const actual = std.json.parseFromSliceLeaky(std.json.Value, arena, rebuilt.written(), .{}) catch |err| {
+            std.debug.print("unparseable rebuild of item {d}: {s}\n", .{ ordinal, rebuilt.written() });
+            return err;
+        };
+        if (!jsonEqual(expected, actual)) {
+            std.debug.print("item {d}\n sent:    {s}\n rebuilt: {s}\n", .{ ordinal, item, rebuilt.written() });
+            return error.TestExpectedEqual;
+        }
     }
 }

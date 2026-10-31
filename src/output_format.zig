@@ -13,7 +13,27 @@ pub const OutputRecordTag = enum(u8) {
     name = 5,
     call_id = 6,
     arguments = 7,
+    /// One part of an item in Rui's own form, in item order: the encoded
+    /// range of its text in the source, with the decoded length and digest
+    /// (empty for an opaque block).
+    part = 8,
+    /// Closes one provider bag: its total length and digest. The bag is the
+    /// `member` records of its scope since the previous trailer of that
+    /// scope, joined by commas.
+    extras = 9,
+    /// One raw `"key":value` member of a provider bag, as received.
+    member = 10,
 };
+
+/// What a part holds. `opaque_block` is a block Rui does not read: its
+/// whole object lives in its part bag.
+pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
+/// A message's phase in Rui's form; any other literal stays in the item bag.
+pub const NeutralPhase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };
+/// The item array a part belongs to.
+pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
+/// Whether a bag record belongs to the item or to the latest part.
+pub const BagScope = enum(u8) { item = 0, part = 1 };
 
 pub const OutputMetadataRecord = struct {
     tag: OutputRecordTag,
@@ -29,6 +49,13 @@ pub const OutputMetadataRecord = struct {
     /// item whose nonempty `content` holds only reasoning_text blocks, which
     /// replay leaves out.
     omit_reasoning_text: bool = false,
+    /// A part record's kind and array.
+    part_kind: PartKind = .opaque_block,
+    part_array: PartArray = .none,
+    /// A bag record's owner.
+    scope: BagScope = .item,
+    /// A message item record's phase in Rui's form.
+    phase: NeutralPhase = .unphased,
 
     /// One past the record's last encoded byte.
     pub fn end(self: *const OutputMetadataRecord) !u64 {
@@ -99,6 +126,14 @@ pub const OutputMetadataWriter = struct {
         bytes[2] = @intFromBool(record.usage_tokens != null);
         std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
         bytes[3] = @intFromBool(record.omit_reasoning_text);
+        std.debug.assert(record.tag == .part or (record.part_kind == .opaque_block and record.part_array == .none));
+        std.debug.assert(record.tag != .part or record.part_array != .none);
+        std.debug.assert(record.scope == .item or record.tag == .extras or record.tag == .member);
+        bytes[4] = @backingInt(record.part_kind);
+        bytes[5] = @backingInt(record.scope);
+        bytes[6] = @backingInt(record.part_array);
+        std.debug.assert(record.phase == .unphased or (record.tag == .item and record.kind == .message));
+        bytes[7] = @backingInt(record.phase);
         // Usage has no item ordinal; this slot holds its certified pressure.
         std.mem.writeInt(u64, bytes[8..16], record.usage_tokens orelse record.ordinal, .little);
         std.mem.writeInt(u64, bytes[16..24], record.start, .little);
@@ -147,6 +182,12 @@ pub const OutputMetadataReader = struct {
         if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
         if (bytes[3] > 1 or (bytes[3] == 1 and (bytes[0] != @backingInt(OutputRecordTag.item) or
             bytes[1] != @backingInt(OutputItemKind.reasoning)))) return error.CorruptOutputMetadata;
+        const is_part = bytes[0] == @backingInt(OutputRecordTag.part);
+        const is_bag = bytes[0] == @backingInt(OutputRecordTag.extras) or bytes[0] == @backingInt(OutputRecordTag.member);
+        if (bytes[4] > 4 or bytes[5] > 1 or bytes[6] > 2 or (!is_part and (bytes[4] != 0 or bytes[6] != 0)) or
+            (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
+        if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
+            bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
         return .{
             .tag = switch (bytes[0]) {
                 1 => .item,
@@ -156,6 +197,9 @@ pub const OutputMetadataReader = struct {
                 5 => .name,
                 6 => .call_id,
                 7 => .arguments,
+                8 => .part,
+                9 => .extras,
+                10 => .member,
                 else => return error.CorruptOutputMetadata,
             },
             .kind = switch (bytes[1]) {
@@ -173,6 +217,10 @@ pub const OutputMetadataReader = struct {
             .content_digest = bytes[72..104].*,
             .usage_tokens = if (bytes[2] == 1) std.mem.readInt(u64, bytes[8..16], .little) else null,
             .omit_reasoning_text = bytes[3] == 1,
+            .part_kind = @enumFromInt(bytes[4]),
+            .scope = @enumFromInt(bytes[5]),
+            .part_array = @enumFromInt(bytes[6]),
+            .phase = @enumFromInt(bytes[7]),
         };
     }
 
