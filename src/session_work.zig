@@ -75,10 +75,9 @@ pub const WorkState = union(Kind) {
         };
     }
 
-    /// Whether queued input waits behind work under way: a model Attempt,
-    /// a retry not yet due, running Bash, a Permission Decision or a stop
-    /// settling. A pending Session is starting its next step now, so nothing
-    /// holds a queued Message back; idle and ended work hold no queue.
+    /// Whether queued input waits behind work under way: any progress but
+    /// `runnable`. A pending Session acts at once, and idle or ended work
+    /// holds nothing back.
     pub fn holdsQueue(self: WorkState) bool {
         const progress_ = self.progress() orelse return false;
         return progress_ != .runnable;
