@@ -39,7 +39,7 @@ Preconditions:
 
 ## Input matrix
 
-Run each case on `--session demo` and on `--session overview`, at `--size 80x24` and `--size 40x24`, once from an empty composer and once after `--text 'x '` is already in the draft. Note the provider count and `request list` before each case. Unit tests own the full width range and every encoding; this lane proves the real terminal path on both surfaces.
+Run each case on `--session demo` and on `--session overview`, at `--size 80x24` and `--size 40x24`, once from an empty composer and once after `--text 'x '` is already in the draft. Note the provider count and `request list` before each case. The Expected column is for the empty composer. From the `x ` draft, every expected draft line and `user_text` starts with `x ` (for example draft lines `x a` and `b`, and `user_text` `x   indented`), since the editor inserts into the existing draft. Unit tests own the full width range and every encoding; this lane proves the real terminal path on both surfaces.
 
 | Case | Send | Expected |
 | --- | --- | --- |
