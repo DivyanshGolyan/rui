@@ -19,6 +19,8 @@ input: c_int = 0,
 screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},
+/// When leaving stops waiting for output credit; `finish` sets it.
+release_deadline_ms: i64 = 0,
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
 /// Set only after the terminal reported mode 1007 reset and Rui enabled it.
 alternate_scroll: bool = false,
@@ -59,21 +61,30 @@ pub fn begin(screen: *Screen) !Self {
     return self;
 }
 
-/// Restore before cancelling or joining any Client borrower. No output-credit
-/// dependency or drain here; SessionFrontend owns fresh exact approval input.
+/// How long leaving waits, in all, for the terminal to take restoration and
+/// the Detached notice. A key that leaves while a frame fills the terminal
+/// (Darwin's PTY holds 1 KiB) restores once a reading terminal drains; one
+/// that does not read fails after this, as before.
+pub const release_wait_ms = 1000;
+
+/// Restore before cancelling or joining any Client borrower. Output waits at
+/// most `release_wait_ms` for credit, never for a drain; SessionFrontend owns
+/// fresh exact approval input.
 pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
+    self.release_deadline_ms = monotonicMs() + release_wait_ms;
+    const ops: NativeOutput = .{ .fd = self.output };
     // The UI owns emitted style, even if a renderer's next window was cancelled.
-    // Attempt controls independently; neither may hold restoration on output credit.
-    const synchronized = std.c.write(self.output, "\x1b[?2026l", 8) == 8;
-    const reset = std.c.write(self.output, "\x1b[0m", 4) == 4;
+    // Attempt controls independently within one shared wait.
+    const synchronized = writeWithin(ops, "\x1b[?2026l", self.release_deadline_ms);
+    const reset = writeWithin(ops, "\x1b[0m", self.release_deadline_ms);
     // Each owned mode is reset even when an earlier reset fails.
-    const paste_disabled = std.c.write(self.output, "\x1b[?2004l", 8) == 8;
-    const scroll_reset = !self.alternate_scroll or std.c.write(self.output, "\x1b[?1007l", 8) == 8;
+    const paste_disabled = writeWithin(ops, "\x1b[?2004l", self.release_deadline_ms);
+    const scroll_reset = !self.alternate_scroll or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
-        if (std.c.write(self.output, sequence.ptr, sequence.len) != @as(isize, @intCast(sequence.len))) screen_ok = false;
+        if (!writeWithin(ops, sequence, self.release_deadline_ms)) screen_ok = false;
     }
     // Input discard is independent of output credit. TCSAFLUSH can drain the
     // same terminal's output and keep it raw while an output peer is absent.
@@ -89,8 +100,9 @@ pub fn finish(self: *Self) !void {
     return self.result;
 }
 
-/// Optional exit notice cannot hold a restored caller on stdout backpressure.
-/// Without a Session it names the overview instead.
+/// Optional exit notice holds a restored caller on stdout backpressure only
+/// until restoration's deadline. Without a Session it names the overview
+/// instead.
 pub fn detached(self: *Self, store: []const u8, session: ?[]const u8, action: ?u64) !void {
     return self.detachedWithOps(store, session, action, NativeNoticeOps{});
 }
@@ -99,10 +111,58 @@ const NativeNoticeOps = struct {
     fn setFlags(_: @This(), flags: c_int) c_int {
         return std.c.fcntl(1, std.c.F.SETFL, flags);
     }
-    fn writeNotice(_: @This(), bytes: []const u8) isize {
-        return std.c.write(1, bytes.ptr, bytes.len);
+    fn writeNotice(_: @This(), bytes: []const u8) error{ WouldBlock, Failed }!usize {
+        return (NativeOutput{ .fd = 1 }).write(bytes);
+    }
+    fn waitWritable(_: @This(), milliseconds: i32) void {
+        (NativeOutput{ .fd = 1 }).waitWritable(milliseconds);
     }
 };
+
+/// One nonblocking output descriptor, as `writeWithin` drives it.
+const NativeOutput = struct {
+    fd: c_int,
+
+    fn write(self: NativeOutput, bytes: []const u8) error{ WouldBlock, Failed }!usize {
+        while (true) {
+            const n = std.c.write(self.fd, bytes.ptr, bytes.len);
+            if (n >= 0) return @intCast(n);
+            switch (std.posix.errno(n)) {
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => return error.Failed,
+            }
+        }
+    }
+    fn waitWritable(self: NativeOutput, milliseconds: i32) void {
+        var fds = [_]std.posix.pollfd{.{ .fd = self.fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+        // A failed or interrupted wait is one more attempt before the deadline.
+        _ = std.posix.poll(&fds, milliseconds) catch {};
+    }
+};
+
+/// Writes all of `bytes` before `deadline_ms`, waiting for credit between
+/// partial writes; false when the terminal refused them or did not take them
+/// in time. An expired deadline still makes one attempt.
+fn writeWithin(ops: anytype, bytes: []const u8, deadline_ms: i64) bool {
+    var offset: usize = 0;
+    while (true) {
+        offset += ops.write(bytes[offset..]) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            error.Failed => return false,
+        };
+        if (offset == bytes.len) return true;
+        const left = deadline_ms - monotonicMs();
+        if (left <= 0) return false;
+        ops.waitWritable(@intCast(@min(left, std.math.maxInt(i32))));
+    }
+}
+
+fn monotonicMs() i64 {
+    var now: std.c.timespec = undefined;
+    std.debug.assert(std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &now) == 0);
+    return @as(i64, now.sec) * std.time.ms_per_s + @divFloor(now.nsec, std.time.ns_per_ms);
+}
 
 fn detachedWithOps(self: *Self, store: []const u8, opened: ?[]const u8, action: ?u64, ops: anytype) !void {
     std.debug.assert(!self.active);
@@ -135,10 +195,19 @@ fn detachedWithOps(self: *Self, store: []const u8, opened: ?[]const u8, action: 
 fn noticeWithOps(self: *Self, bytes: []const u8, ops: anytype) !void {
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     const enabled = ops.setFlags(self.flags[1] | nonblock) == 0;
-    const written = if (enabled) ops.writeNotice(bytes) else -1;
+    const Output = struct {
+        ops: @TypeOf(ops),
+        fn write(output: @This(), part: []const u8) error{ WouldBlock, Failed }!usize {
+            return output.ops.writeNotice(part);
+        }
+        fn waitWritable(output: @This(), milliseconds: i32) void {
+            output.ops.waitWritable(milliseconds);
+        }
+    };
+    const written = enabled and writeWithin(Output{ .ops = ops }, bytes, self.release_deadline_ms);
     // Restore every attempted enable, without writing after a failed attempt.
     if (ops.setFlags(self.flags[1]) < 0) return error.TerminalCleanupFailed;
-    if (written != @as(isize, @intCast(bytes.len))) return error.TerminalCleanupFailed;
+    if (!written) return error.TerminalCleanupFailed;
 }
 
 test "detached notice restores flags and requires one complete nonblocking write" {
@@ -150,6 +219,7 @@ test "detached notice restores flags and requires one complete nonblocking write
         sets: usize = 0,
         writes: usize = 0,
         blocking_write: bool = false,
+        waits: usize = 0,
         bytes: [1024]u8 = undefined,
         len: usize = 0,
 
@@ -164,18 +234,21 @@ test "detached notice restores flags and requires one complete nonblocking write
             self.flags = flags;
             return 0;
         }
-        fn writeNotice(self: *@This(), bytes: []const u8) isize {
+        fn writeNotice(self: *@This(), bytes: []const u8) error{ WouldBlock, Failed }!usize {
             self.writes += 1;
             const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
             self.blocking_write = self.blocking_write or self.flags & nonblock == 0;
             @memcpy(self.bytes[0..bytes.len], bytes);
             self.len = bytes.len;
             return switch (self.delivery) {
-                .failed => -1,
+                .failed => error.Failed,
                 .zero => 0,
-                .short => @intCast(bytes.len - 1),
-                .full => @intCast(bytes.len),
+                .short => bytes.len - 1,
+                .full => bytes.len,
             };
+        }
+        fn waitWritable(self: *@This(), _: i32) void {
+            self.waits += 1;
         }
     };
     for ([_]bool{ false, true }) |enable_failed| {
@@ -208,6 +281,39 @@ test "detached notice restores flags and requires one complete nonblocking write
         "rui action inspect --store $'/tmp/store' --session 09azvw --action 913\n" ++
         "rui action allow --store $'/tmp/store' --session 09azvw --action 913\n" ++
         "rui action deny --store $'/tmp/store' --session 09azvw --action 913\n", output.bytes[0..output.len]);
+}
+
+test "leaving writes the rest once a full terminal drains, until its deadline" {
+    // A terminal full of a frame cut short takes part of the bytes now and
+    // the rest after it reads.
+    const Draining = struct {
+        credit: []const usize,
+        taken: std.ArrayList(u8) = .empty,
+        writes: usize = 0,
+        waits: usize = 0,
+
+        fn write(self: *@This(), bytes: []const u8) error{ WouldBlock, Failed }!usize {
+            defer self.writes += 1;
+            const room = if (self.writes < self.credit.len) self.credit[self.writes] else 0;
+            if (room == 0) return error.WouldBlock;
+            const n = @min(room, bytes.len);
+            self.taken.appendSliceAssumeCapacity(bytes[0..n]);
+            return n;
+        }
+        fn waitWritable(self: *@This(), _: i32) void {
+            self.waits += 1;
+        }
+    };
+    var storage: [64]u8 = undefined;
+    var drained: Draining = .{ .credit = &.{ 0, 3, 0, 64 }, .taken = .initBuffer(&storage) };
+    try std.testing.expect(writeWithin(&drained, "\x1b[?1049l", monotonicMs() + release_wait_ms));
+    try std.testing.expectEqualStrings("\x1b[?1049l", drained.taken.items);
+    try std.testing.expectEqual(@as(usize, 3), drained.waits);
+    // A terminal that never drains fails once the deadline passes.
+    var stuck: Draining = .{ .credit = &.{}, .taken = .initBuffer(&storage) };
+    const started = monotonicMs();
+    try std.testing.expect(!writeWithin(&stuck, "\x1b[?1049l", started + 20));
+    try std.testing.expect(monotonicMs() - started >= 20 and stuck.waits >= 1);
 }
 
 pub const Read = struct { byte: u8, at: i96 };
