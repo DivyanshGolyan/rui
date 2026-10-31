@@ -1537,7 +1537,7 @@ const TurnOutcome = union(enum) {
     cancelled,
     /// The settling Attempt's report, when the provider sent one.
     retry_exhausted: ?i64,
-    resource_exceeded,
+    resource_exceeded: ?i64,
     /// A terminal model failure, saved under its own failure code.
     failed: Failed,
 
@@ -1562,9 +1562,9 @@ const TurnOutcome = union(enum) {
     fn content(outcome: TurnOutcome) ?i64 {
         return switch (outcome) {
             .completed => |answer| answer,
-            .retry_exhausted => |report| report,
+            .retry_exhausted, .resource_exceeded => |report| report,
             .failed => |failed| failed.report,
-            .cancelled, .resource_exceeded => null,
+            .cancelled => null,
         };
     }
 
@@ -1578,8 +1578,9 @@ const TurnOutcome = union(enum) {
         return switch (tag) {
             .completed => .{ .completed = content_id orelse return error.CorruptStore },
             .retry_exhausted => .{ .retry_exhausted = content_id },
+            .resource_exceeded => .{ .resource_exceeded = content_id },
             .failed => .{ .failed = .{ .code = saved, .report = content_id } },
-            inline .cancelled, .resource_exceeded => |fixed| if (content_id == null) fixed else error.CorruptStore,
+            .cancelled => if (content_id == null) .cancelled else error.CorruptStore,
         };
     }
 };
@@ -6751,9 +6752,10 @@ pub const Store = struct {
                     return;
                 }
 
-                const outcome: TurnOutcome = if (disposition == .context_overflow) .resource_exceeded else .{ .failed = .{
+                const report = try self.importReport(&failure, faults);
+                const outcome: TurnOutcome = if (disposition == .context_overflow) .{ .resource_exceeded = report } else .{ .failed = .{
                     .code = code,
-                    .report = try self.importReport(failure, faults),
+                    .report = report,
                 } };
                 if (!try self.closeTurn(binding.turn_id, binding.operation_id, outcome)) return error.StaleAttemptBinding;
             },
@@ -6804,7 +6806,7 @@ pub const Store = struct {
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
 
-                    if (!try self.closeTurn(binding.turn_id, binding.operation_id, .{ .retry_exhausted = try self.importReport(failure, faults) })) return error.StaleAttemptBinding;
+                    if (!try self.closeTurn(binding.turn_id, binding.operation_id, .{ .retry_exhausted = try self.importReport(&failure, faults) })) return error.StaleAttemptBinding;
                 },
             },
         }
@@ -6813,7 +6815,7 @@ pub const Store = struct {
     }
 
     /// A failure's report as public content, for its Turn's outcome.
-    fn importReport(self: *Store, failure: ModelFailure, faults: Faults) !?i64 {
+    fn importReport(self: *Store, failure: *const ModelFailure, faults: Faults) !?i64 {
         const report = failure.report();
         if (report.len == 0) return null;
         return try self.importBytesContent(report, false, faults.content_import);
@@ -13217,7 +13219,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
         var rejection: @import("provider_output.zig").Rejection = .{};
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, &provider_output.testing_provider_failure, provider_output.testingItemCheck(), .{});
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, provider_output.testingProviderFailure(), provider_output.testingItemCheck(), .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");
@@ -20970,6 +20972,7 @@ test "saved Turn outcomes read back as the outcome that closed the Turn" {
         .{ .code = "cancelled", .content_id = null, .tag = .cancelled },
         .{ .code = "retry_exhausted", .content_id = null, .tag = .retry_exhausted },
         .{ .code = "ResourceExceeded", .content_id = null, .tag = .resource_exceeded },
+        .{ .code = "ResourceExceeded", .content_id = 10, .tag = .resource_exceeded },
         .{ .code = "retry_exhausted", .content_id = 8, .tag = .retry_exhausted },
         .{ .code = "provider_http_401", .content_id = null, .tag = .failed },
         .{ .code = "provider_cyber_policy", .content_id = 9, .tag = .failed },
@@ -20982,9 +20985,8 @@ test "saved Turn outcomes read back as the outcome that closed the Turn" {
     }
     try std.testing.expectEqual(@as(i64, 7), (try TurnOutcome.decode("completed", 7)).completed);
     // A completed Turn saves its answer and a failure may save its report;
-    // nothing else saves content, and every outcome saves a code.
+    // a cancelled one saves no content, and every outcome saves a code.
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("completed", null));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("cancelled", 7));
-    try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("ResourceExceeded", 7));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("", null));
 }

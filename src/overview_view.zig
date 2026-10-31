@@ -15,12 +15,12 @@ const Bounded = @import("bounded.zig").Bounded;
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
+const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
-const transport_policy = @import("transport_policy.zig");
 
 const Allocator = std.mem.Allocator;
 pub const Kind = session_work.Kind;
@@ -1345,12 +1345,14 @@ const band_rules = [_]BandRule{
 };
 
 fn signInCode(code: []const u8) bool {
-    return codex_credential_policy.requiresLogin(code);
+    return failure_class.of(code) == .sign_in;
 }
 
 fn quotaCode(code: []const u8) bool {
-    const refusal = transport_policy.Refusal.ofFailureCode(code) orelse return false;
-    return refusal.class() == .quota;
+    return switch (failure_class.of(code)) {
+        .quota, .plan => true,
+        else => false,
+    };
 }
 
 fn rateLimitCode(code: []const u8) bool {

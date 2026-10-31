@@ -83,24 +83,27 @@ pub const Refusal = enum {
 /// Recognized HTTP 429 refusals, not temporary rate limits. Only this closed
 /// code and a valid reset timestamp may enter the saved diagnostic.
 pub const Quota = struct {
-    code: Code,
+    /// One of `codes`.
+    code: Refusal,
     resets_at: ?u64 = null,
 
-    pub const Code = enum { usage_limit_reached, insufficient_quota, usage_not_included };
+    pub const codes = [_]Refusal{ .usage_limit_reached, .insufficient_quota, .usage_not_included };
 
-    /// The quota refusal a saved failure code names, if any.
-    pub fn ofFailureCode(code: []const u8) ?Code {
-        inline for (comptime std.enums.values(Code)) |candidate| {
-            if (std.mem.eql(u8, code, (Quota{ .code = candidate }).failureCode())) return candidate;
-        }
-        return null;
+    /// The HTTP 429 quota refusal this provider code names, if any.
+    pub fn ofProviderCode(code: []const u8) ?Refusal {
+        const refusal = Refusal.ofProviderCode(code) orelse return null;
+        return if (std.mem.indexOfScalar(Refusal, &codes, refusal) != null) refusal else null;
     }
 
-    /// The same code as the stream refusal it names.
+    /// The quota refusal a saved failure code names, if any.
+    pub fn ofFailureCode(code: []const u8) ?Refusal {
+        if (!std.mem.startsWith(u8, code, "provider_")) return null;
+        return ofProviderCode(code["provider_".len..]);
+    }
+
+    /// The same code as the stream refusal it is.
     pub fn failureCode(self: Quota) []const u8 {
-        return switch (self.code) {
-            inline else => |code| @field(Refusal, @tagName(code)).failureCode(),
-        };
+        return self.code.failureCode();
     }
 
     pub fn format(self: Quota, buffer: *[512]u8) []const u8 {
@@ -117,7 +120,7 @@ pub const Quota = struct {
         if (!std.mem.startsWith(u8, bytes, head) or !std.mem.endsWith(u8, bytes, "}")) return null;
         const rest = bytes[head.len .. bytes.len - 1];
         const split = std.mem.indexOf(u8, rest, middle) orelse return null;
-        const code = std.meta.stringToEnum(Code, rest[0..split]) orelse return null;
+        const code = ofProviderCode(rest[0..split]) orelse return null;
         const reset = rest[split + middle.len ..];
         if (std.mem.eql(u8, reset, "null")) return .{ .code = code };
         if (reset.len == 0 or (reset.len > 1 and reset[0] == '0')) return null;
@@ -362,7 +365,7 @@ test "every refusal saves one provider code that reads back to it" {
         try std.testing.expectEqual(refusal, Refusal.ofProviderCode(@tagName(refusal)).?);
     }
     // A quota refusal saves the same code from an HTTP 429 as from a stream.
-    for (std.enums.values(Quota.Code)) |code| {
+    for (Quota.codes) |code| {
         const refusal = Refusal.ofFailureCode((Quota{ .code = code }).failureCode()).?;
         try std.testing.expectEqual(.quota, refusal.class());
     }
@@ -383,7 +386,9 @@ test "a saved quota record reads back exactly what was written" {
         try std.testing.expectEqual(quota.code, parsed.code);
         try std.testing.expectEqual(quota.resets_at, parsed.resets_at);
     }
-    for (std.enums.values(Quota.Code)) |code| try std.testing.expectEqual(code, Quota.ofFailureCode((Quota{ .code = code }).failureCode()).?);
+    for (Quota.codes) |code| try std.testing.expectEqual(code, Quota.ofFailureCode((Quota{ .code = code }).failureCode()).?);
+    // A stream-only refusal is no HTTP 429 quota record.
+    try std.testing.expect(Quota.ofFailureCode("provider_credit_balance_exhausted") == null);
     try std.testing.expect(Quota.ofFailureCode("usage_limit_reached") == null);
     try std.testing.expect(Quota.ofFailureCode("provider_temporary_http_429") == null);
     for ([_][]const u8{

@@ -119,7 +119,7 @@ test "HTTP quota refusal overrides rate limit retry evidence and retains reset d
         "{\"provider_code\":\"insufficient_quota\",\"resets_at\":1800000123}",
         "{\"provider_code\":\"usage_not_included\",\"resets_at\":1800000123}",
     };
-    for (std.enums.values(transport_policy.Quota.Code), codes, details) |code, expected, detail| {
+    for (transport_policy.Quota.codes, codes, details) |code, expected, detail| {
         const quota: transport_policy.Quota = .{ .code = code, .resets_at = 1_800_000_123 };
         const refusal: ErrorResponse = .{ .quota = quota };
         const decision = transferDecision(.{ .transport_finished = .{

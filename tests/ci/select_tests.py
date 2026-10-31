@@ -53,6 +53,8 @@ RULES = (
      "Terminal layout and input values retain their separate logic root and native wiring"),
     (("src/overview_view.zig",), ("test-logic",), ("test-logic",),
      "Overview decisions and screen over values; its shell's owner selects native checks"),
+    (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
+     "What a saved failure code lets the person do; the conversation view renders it"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
     (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
      "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),

@@ -126,11 +126,12 @@ pub noinline fn interpretOutput(
 
 /// Also fills `provider_failure` with what the body said, for every answer.
 pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16, provider_failure: *Output.ProviderFailure) execution.ErrorResponse {
-    Output.httpFailure(io, source, length, status, provider_failure);
-    if (Output.httpQuota(io, source, length, status) catch |err| return .{ .unreadable = err }) |quota| return .{ .quota = quota };
-    const overflow = Output.contextOverflow(io, source, length, status) catch |err| return .{ .unreadable = err };
-    if (overflow) return .context_overflow;
-    return if (provider_failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
+    return switch (Output.httpError(io, source, length, status, provider_failure) catch |err| return .{ .unreadable = err }) {
+        .ordinary => .ordinary,
+        .context_overflow => .context_overflow,
+        .quota => |quota| .{ .quota = quota },
+        .refusal => |refusal| .{ .refusal = refusal },
+    };
 }
 
 test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
@@ -142,7 +143,7 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
-        const response = interpretErrorResponse(std.testing.io, file, bytes.len, 429, &Output.testing_provider_failure);
+        const response = interpretErrorResponse(std.testing.io, file, bytes.len, 429, Output.testingProviderFailure());
         const decision = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
@@ -182,14 +183,14 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         const file = try tmp.dir.createFile(std.testing.io, "quota-authority", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, case.bytes);
-        const response = interpretErrorResponse(std.testing.io, file, case.bytes.len, 429, &Output.testing_provider_failure);
+        const response = interpretErrorResponse(std.testing.io, file, case.bytes.len, 429, Output.testingProviderFailure());
         const failure = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
         } }, response).fail;
         try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
         if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
-        try std.testing.expect(interpretErrorResponse(std.testing.io, file, case.bytes.len, 200, &Output.testing_provider_failure) == .ordinary);
+        try std.testing.expect(interpretErrorResponse(std.testing.io, file, case.bytes.len, 200, Output.testingProviderFailure()) == .ordinary);
     }
 }
 
@@ -236,7 +237,7 @@ test "provider interpretation preserves independently reported model evidence" {
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
         var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{}, &Output.testing_provider_failure, &interpreted);
+        interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -276,9 +277,9 @@ test "provider interpretation closes failure variants without granting settlemen
     const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, overflow);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 400, &Output.testing_provider_failure) == .context_overflow);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 200, &Output.testing_provider_failure) == .ordinary);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len + 1, 503, &Output.testing_provider_failure) == .unreadable);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 400, Output.testingProviderFailure()) == .context_overflow);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 200, Output.testingProviderFailure()) == .ordinary);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len + 1, 503, Output.testingProviderFailure()) == .unreadable);
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
@@ -302,7 +303,7 @@ test "provider interpretation closes failure variants without granting settlemen
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
         var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault }, &Output.testing_provider_failure, &interpreted);
+        interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault }, Output.testingProviderFailure(), &interpreted);
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -325,7 +326,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
     var result: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{}, &Output.testing_provider_failure, &result);
+    interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &result);
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -3508,7 +3509,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try event_data.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
     var interpreted: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{}, &Output.testing_provider_failure, &interpreted);
+    interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
     const accepted = switch (interpreted) {
         .accepted => |*value| value,
         .rejected => return error.UnexpectedOutputRejection,
