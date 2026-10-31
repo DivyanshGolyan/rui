@@ -293,7 +293,10 @@ pub const ActivityPage = struct {
                     fact.value = .{ .call = value };
                 },
                 .outcome => |outcome| {
-                    if (outcome.code.slice().len == 0 or (outcome.code.eql("completed") != (outcome.content != null))) return error.InvalidActivityPage;
+                    // A completed Turn has its answer and a failed one may
+                    // have its report; a cancelled one has neither.
+                    if (outcome.code.slice().len == 0 or (outcome.code.eql("completed") and outcome.content == null) or
+                        (outcome.code.eql("cancelled") and outcome.content != null)) return error.InvalidActivityPage;
                     fact.value = .{ .outcome = .{ .turn = try id(outcome.turn, false), .operation = try id(outcome.operation, false), .code = outcome.code.value, .content = if (outcome.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {

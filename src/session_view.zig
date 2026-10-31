@@ -7,6 +7,7 @@ const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
+const failure_class = @import("failure_class.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -1314,23 +1315,91 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     }
 }
 
-fn workEnded(sink: anytype, code: []const u8) !void {
-    try print(sink, "\n! Work ended: {s}. Send a message to continue.\n", .{code});
+/// Why a Turn ended, in the person's terms, and the one step that helps.
+/// A reason of null shows the saved code itself.
+const Ending = struct { reason: ?[]const u8, next: []const u8 };
+
+fn ending(code: []const u8) Ending {
+    const again = "Send a message to continue.";
+    return switch (failure_class.of(code)) {
+        .policy => .{ .reason = "OpenAI refused this request", .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
+        .quota => .{ .reason = "the OpenAI account is out of quota", .next = "Add credit or wait for the limit to reset, then send a message to continue." },
+        .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
+        .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
+        .sign_in => .{ .reason = "sign-in expired", .next = "Run rui auth login codex, then send a message to continue." },
+        .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
+        .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
+        .unreachable_provider => .{ .reason = "OpenAI could not be reached", .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
+        .retries_exhausted => .{ .reason = "retries ran out", .next = again },
+        .interrupted => .{ .reason = "it was interrupted", .next = again },
+        .other => .{ .reason = null, .next = again },
+    };
 }
 
-test "an ended Turn says what happened and what to do next where it ended" {
-    var buffer: [128]u8 = undefined;
-    var out = std.Io.Writer.fixed(&buffer);
+/// `report` is the provider's own words, escaped: never trusted as
+/// terminal text.
+fn workEnded(sink: anytype, code: []const u8, report: ?[]const u8) !void {
+    const end = ending(code);
+    try sink.feed("\n! Work ended: ");
+    try sink.feed(end.reason orelse code);
+    if (report) |words| {
+        try sink.feed(" (");
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+        try escaped.feed(words);
+        try escaped.finish();
+        try sink.feed(")");
+    }
+    try sink.feed(".\n  ");
+    try sink.feed(end.next);
+    try sink.feed("\n");
+}
+
+/// A failed outcome's report, read whole before its line is drawn. A
+/// longer one than the Store keeps shows its prefix.
+const ReportBytes = struct {
+    bytes: [protocol.max_report_bytes]u8,
+    len: usize,
+
+    pub fn feed(self: *ReportBytes, bytes: []const u8) !void {
+        const kept = @min(bytes.len, self.bytes.len - self.len);
+        @memcpy(self.bytes[self.len..][0..kept], bytes[0..kept]);
+        self.len += kept;
+    }
+};
+
+test "an ended Turn says why and the one next step that helps, where it ended" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
     };
-    var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "retry_exhausted");
-    // /status only repeats the code, so the line itself carries the next step.
-    try std.testing.expectEqualStrings("\n! Work ended: retry_exhausted. Send a message to continue.\n", out.buffered());
+    const cases = [_]struct { code: []const u8, report: ?[]const u8, shown: []const u8 }{
+        // The captured cyber_policy refusal: resending is no next step.
+        .{ .code = "provider_cyber_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
+        .{ .code = "provider_invalid_prompt", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
+        .{ .code = "provider_insufficient_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
+        .{ .code = "provider_model_not_found", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
+        .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
+        // Retries keep the last Attempt's words.
+        .{ .code = "retry_exhausted", .report = "server_is_overloaded: Try again later.", .shown = "\n! Work ended: retries ran out (server_is_overloaded: Try again later.).\n  Send a message to continue.\n" },
+        .{ .code = "cancelled", .report = null, .shown = "\n! Work ended: it was interrupted.\n  Send a message to continue.\n" },
+        // Any other code shows itself, beside whatever the provider said.
+        .{ .code = "provider_http_400", .report = "invalid_request_error: Unsupported \"x\"\x1b[2J", .shown = "\n! Work ended: provider_http_400 (invalid_request_error: Unsupported \"x\"\\x1b[2J).\n  Sending this again will likely fail the same way; change what the error names, or start a new Session.\n" },
+        .{ .code = "provider_usage_not_included", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_tls_verification_failed", .report = null, .shown = "\n! Work ended: OpenAI could not be reached.\n  Check the network, proxy or provider endpoint, then send a message to continue.\n" },
+        // The provider's words for an overflow say how far over it went.
+        .{ .code = "ResourceExceeded", .report = "context_length_exceeded: Your input exceeds the context window.", .shown = "\n! Work ended: the conversation no longer fits the model's context (context_length_exceeded: Your input exceeds the context window.).\n  Start a new Session; more here will not fit either.\n" },
+        .{ .code = "malformed_provider_output", .report = null, .shown = "\n! Work ended: malformed_provider_output.\n  Send a message to continue.\n" },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        var sink: Sink = .{ .out = &out };
+        try workEnded(&sink, case.code, case.report);
+        try std.testing.expectEqualStrings(case.shown, out.buffered());
+    }
 }
 
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
@@ -1383,7 +1452,11 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
                 compact_tools.* = false;
-                try workEnded(sink, outcome.code.slice());
+                // A failed outcome's content is its report.
+                var report: ReportBytes = undefined;
+                report.len = 0;
+                if (outcome.content) |reference| try content(requests, store, session, item, reference, &report);
+                try workEnded(sink, outcome.code.slice(), if (outcome.content != null) report.bytes[0..report.len] else null);
             },
             .stop => {
                 compact_tools.* = false;

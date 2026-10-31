@@ -568,21 +568,38 @@ fn malformedEnvelope(err: anyerror) !bool {
 pub noinline fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
     if (http_status < 400 or http_status >= 600) return false;
     var envelope: Window = .{ .io = io, .file = file };
-    const fields = readFields(&envelope, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedEnvelope(err);
-    const failure = (fields.get("error") catch return false) orelse return false;
-    return errorOverflow(&envelope, failure) catch |err| malformedEnvelope(err);
+    return overflowEnvelope(&envelope, .{ .start = 0, .length = length });
 }
 
-/// Only an exact code in a valid HTTP 429 error envelope establishes a quota
-/// refusal. Reset metadata is optional and cannot make that refusal retryable.
-/// Never inlined: its 4 KB envelope window stays in this frame.
-pub noinline fn httpQuota(io: std.Io, file: std.Io.File, length: u64, http_status: u16) !?transport_policy.Quota {
-    if (http_status != 429) return null;
+fn overflowEnvelope(window: *Window, range: Range) !bool {
+    const fields = readFields(window, range, &.{"error"}) catch |err| return malformedEnvelope(err);
+    const failure = (fields.get("error") catch return false) orelse return false;
+    return errorOverflow(window, failure) catch |err| malformedEnvelope(err);
+}
+
+/// What an HTTP error body establishes, in precedence order.
+pub const HttpError = union(enum) { ordinary, context_overflow, quota: transport_policy.Quota, refusal: transport_policy.Refusal };
+
+/// One HTTP error body through one envelope window: only an exact code in a
+/// valid HTTP 429 envelope establishes a quota refusal, whose reset metadata
+/// is optional and cannot make it retryable; then context overflow; then a
+/// known refusal at any status. Fills `out` with the body's refusal and
+/// report. Never inlined: its 4 KB envelope window stays in this frame.
+pub noinline fn httpError(io: std.Io, file: std.Io.File, length: u64, http_status: u16, out: *ProviderFailure) !HttpError {
+    out.clear();
+    if (http_status < 400 or http_status >= 600) return .ordinary;
     var envelope: Window = .{ .io = io, .file = file };
-    return quotaEnvelope(&envelope, .{ .start = 0, .length = length }) catch |err| {
-        _ = try malformedEnvelope(err);
-        return null;
-    };
+    const whole: Range = .{ .start = 0, .length = length };
+    readHttpReport(&envelope, whole, out);
+    if (http_status == 429) {
+        const quota = quotaEnvelope(&envelope, whole) catch |err| quota: {
+            _ = try malformedEnvelope(err);
+            break :quota null;
+        };
+        if (quota) |value| return .{ .quota = value };
+    }
+    if (try overflowEnvelope(&envelope, whole)) return .context_overflow;
+    return if (out.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
 }
 
 fn quotaEnvelope(window: *Window, range: Range) !?transport_policy.Quota {
@@ -592,7 +609,7 @@ fn quotaEnvelope(window: *Window, range: Range) !?transport_policy.Quota {
     var code: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(window, try detail.required("code"), &code);
     var quota = transport_policy.Quota{
-        .code = std.meta.stringToEnum(transport_policy.Quota.Code, code.slice()) orelse return null,
+        .code = transport_policy.Quota.ofProviderCode(code.slice()) orelse return null,
     };
     if (detail.get("resets_at") catch null) |reset| {
         quota.resets_at = readIndex(window, reset) catch |err| switch (err) {
@@ -603,7 +620,104 @@ fn quotaEnvelope(window: *Window, range: Range) !?transport_policy.Quota {
     return quota;
 }
 
-fn streamError(window: *Window, event: Range, failed_response: bool) !void {
+/// The provider's own words for a failure it reported, `code: message`,
+/// for the person to read beside the saved failure code. It is display text
+/// only: classification and retries never read it.
+pub const max_report_bytes = protocol.max_report_bytes;
+comptime {
+    std.debug.assert(max_report_bytes == 2 * max_evidence_bytes + ": ".len + 2 * shortened_mark.len);
+}
+pub const Report = protocol.Bounded(max_report_bytes);
+const shortened_mark = "…";
+
+/// What a provider error envelope said: the refusal its exact code names,
+/// if any, and its report. Callers clear it with `clear`, which leaves the
+/// report's bytes unwritten.
+pub const ProviderFailure = struct {
+    refusal: ?transport_policy.Refusal,
+    report: Report,
+
+    pub fn clear(self: *ProviderFailure) void {
+        self.refusal = null;
+        self.report.len = 0;
+    }
+};
+
+/// The fields a report reads, from an error object or the envelope around
+/// it, which may hold the `error` object itself.
+const report_fields: []const []const u8 = &.{ "code", "type", "message", "detail", "error" };
+
+/// Whether an error object's `type` may stand in for its missing code. An
+/// event's own `type` is only the event's name.
+const Typed = enum { typed, untyped };
+
+/// Writes `code` (else, when typed, the object's `type`) and its `message`
+/// (else a bare `detail`) into `report`. Best effort: a field that is
+/// absent, null or malformed is left out, and nothing here fails.
+fn writeReport(window: *Window, fields: Fields(report_fields), code: *const Prefix, typed: Typed, report: *Report) void {
+    report.len = 0;
+    var name: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
+    if (code.text.len == 0 and typed == .typed) name.read(window, fields.get("type") catch null) else name = code.*;
+    var message: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
+    message.read(window, (fields.get("message") catch null) orelse (fields.get("detail") catch null));
+    const mark = struct {
+        fn of(prefix: *const Prefix) []const u8 {
+            return if (prefix.shortened) shortened_mark else "";
+        }
+    }.of;
+    const separator: []const u8 = if (name.text.len != 0 and message.text.len != 0) ": " else "";
+    for ([_][]const u8{ name.text.slice(), mark(&name), separator, message.text.slice(), mark(&message) }) |part| {
+        @memcpy(report.bytes[report.len..][0..part.len], part);
+        report.len += part.len;
+    }
+    // One line: line breaks, tabs and other controls read as spaces.
+    for (report.bytes[0..report.len]) |*byte| if (byte.* < 0x20 or byte.* == 0x7f) {
+        byte.* = ' ';
+    };
+}
+
+/// A string's first `max_evidence_bytes`, cut back to whole UTF-8 scalars.
+const Prefix = struct {
+    text: protocol.Bounded(max_evidence_bytes),
+    shortened: bool,
+
+    /// An absent or malformed value leaves it empty.
+    fn read(self: *Prefix, window: *Window, value: ?Range) void {
+        self.text.len = 0;
+        self.shortened = false;
+        const range = value orelse return;
+        var decoded = Decoded{ .bounded = &self.text };
+        var source = FileSource.init(window, range) catch return;
+        _ = parseString(&source, &decoded) catch {
+            self.text.len = 0;
+            return;
+        };
+        source.expectEnd() catch {
+            self.text.len = 0;
+            return;
+        };
+        if (!decoded.overflow) return;
+        while (!std.unicode.utf8ValidateSlice(self.text.slice())) self.text.len -= 1;
+        self.shortened = true;
+    }
+};
+
+/// An HTTP error body's refusal and report, from its `error` object or the
+/// managed route's bare `detail`. Best effort, like `writeReport`.
+fn readHttpReport(window: *Window, whole: Range, out: *ProviderFailure) void {
+    const envelope = readFields(window, whole, report_fields) catch return;
+    var code: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
+    const failure = (envelope.get("error") catch return) orelse {
+        writeReport(window, envelope, &code, .untyped, &out.report);
+        return;
+    };
+    const fields = readFields(window, failure, report_fields) catch return;
+    code.read(window, fields.get("code") catch null);
+    if (!code.shortened) out.refusal = .ofProviderCode(code.text.slice());
+    writeReport(window, fields, &code, .typed, &out.report);
+}
+
+fn streamError(window: *Window, event: Range, failed_response: bool, provider_failure: *ProviderFailure) !void {
     var failure = event;
     if (failed_response) {
         const fields = try readFields(window, event, &.{"response"});
@@ -621,18 +735,17 @@ fn streamError(window: *Window, event: Range, failed_response: bool) !void {
         }
     }
     if (try rangeEquals(window, failure, "null")) return error.TemporaryProviderFailure;
-    const fields = try readFields(window, failure, &.{"code"});
-    var code: protocol.Bounded(max_evidence_bytes) = .{};
+    const fields = try readFields(window, failure, report_fields);
+    var code: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
     if (try fields.get("code")) |value| {
-        if (!try rangeEquals(window, value, "null")) _ = try readString(window, value, &code);
+        if (!try rangeEquals(window, value, "null")) _ = try readString(window, value, &code.text);
     }
-    if (code.eql("context_length_exceeded")) return error.ContextOverflow;
-    // Codex 970111f6 codex-api/src/sse/responses_error.rs. Known terminal
-    // quota/request/policy codes do not become retryable unknown failures.
-    for ([_][]const u8{ "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included", "usage_limit_reached", "cyber_policy", "bio_policy", "misalignment_policy_violation", "invalid_prompt", "model_not_found" }) |permanent| {
-        if (code.eql(permanent)) return error.PermanentProviderFailure;
-    }
-    return error.TemporaryProviderFailure;
+    writeReport(window, fields, &code, if (failure.start == event.start) .untyped else .typed, &provider_failure.report);
+    if (code.text.eql("context_length_exceeded")) return error.ContextOverflow;
+    // Known terminal quota/request/policy codes do not become retryable
+    // unknown failures.
+    provider_failure.refusal = .ofProviderCode(code.text.slice());
+    return if (provider_failure.refusal != null) error.PermanentProviderFailure else error.TemporaryProviderFailure;
 }
 
 fn incompleteOverflow(window: *Window, event: Range) !bool {
@@ -2081,11 +2194,20 @@ pub fn testingItemCheck() *OutputItemCheck {
     return &testing_item_check;
 }
 
+/// Tests' provider failure, the last validation's.
+var testing_provider_failure: ProviderFailure = undefined;
+
+pub fn testingProviderFailure() *ProviderFailure {
+    comptime std.debug.assert(@import("builtin").is_test);
+    return &testing_provider_failure;
+}
+
 /// One response's validation, from its first event to its last.
 const Response = struct {
     metadata: *output_format.OutputMetadataWriter,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
+    provider_failure: *ProviderFailure,
     added: Added = .{},
     completed: bool = false,
     item_count: u64 = 0,
@@ -2162,7 +2284,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
         response.completed = true;
         return;
     }
-    if (kind.eql("error") or kind.eql("response.failed")) return streamError(window, event, kind.eql("response.failed"));
+    if (kind.eql("error") or kind.eql("response.failed")) return streamError(window, event, kind.eql("response.failed"), response.provider_failure);
     if (kind.eql("response.incomplete")) {
         if (incompleteOverflow(window, event) catch |err| try malformedEnvelope(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
@@ -2198,6 +2320,8 @@ pub fn validate(
     event_data: *EventData,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
+    /// What a provider error event said, when validation fails on one.
+    provider_failure: *ProviderFailure,
     /// The item grammar's storage, larger than most frames. A caller keeps
     /// it off the stack: a frame that holds it makes all of its pages
     /// resident, while one item touches only a few.
@@ -2210,7 +2334,8 @@ pub fn validate(
     var data: ?Range = null;
     var raw_start: u64 = 0;
     var done_marker = false;
-    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .item_check = item_check, .answer = .{ .digest = protocol.contentDigest("") } };
+    provider_failure.clear();
+    var response: Response = .{ .metadata = metadata, .operation = operation, .rejection = rejection, .provider_failure = provider_failure, .item_check = item_check, .answer = .{ .digest = protocol.contentDigest("") } };
     if (source_length >= 3 and try rangeEquals(&capture, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
@@ -2283,7 +2408,6 @@ pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.ContextOverflow => "provider_context_overflow",
         error.TemporaryProviderFailure => "provider_temporary_error",
-        error.PermanentProviderFailure => "provider_permanent_error",
         error.ProviderConnectionClosed => "provider_transport_failure",
         error.EventDataScratchExhausted => "response_data_exhausted",
         error.EventDataWriteFailed, error.EventDataSealFailed => "response_data_failed",
@@ -2352,13 +2476,94 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var event_data: EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingItemCheck(), .{});
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingProviderFailure(), testingItemCheck(), .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
     metadata.deinit();
     source.close(std.testing.io);
     return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item };
+}
+
+fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (0..count) |_| out = out ++ text;
+    return out;
+}
+
+test "a provider error event keeps its refusal and the provider's own words" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const long = comptime repeat("é", 200);
+    const cases = [_]struct { event: []const u8, err: anyerror, refusal: ?transport_policy.Refusal, report: []const u8 }{
+        // The refusal that ended the bug-swarm Sessions, as a stream event.
+        .{ .event = "{\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"This request has been flagged for potentially high-risk cyber activity.\",\"param\":null}", .err = error.PermanentProviderFailure, .refusal = .cyber_policy, .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity." },
+        .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"No such model.\"}}}", .err = error.PermanentProviderFailure, .refusal = .model_not_found, .report = "model_not_found: No such model." },
+        // A retryable failure keeps its words too; an object's type stands in
+        // for a missing code, and line breaks read as spaces.
+        .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Overloaded,\\ntry\\tlater.\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "server_error: Overloaded, try later." },
+        // An event's own type is only its name.
+        .{ .event = "{\"type\":\"error\",\"code\":null,\"message\":\"Something failed.\"}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "Something failed." },
+        // A malformed message is left out; the code still decides.
+        .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .insufficient_quota, .report = "insufficient_quota" },
+        // A long message keeps its first 256 bytes, cut at a whole scalar.
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .bio_policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .bio_policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
+        .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "" },
+        // An overflow keeps its words too; DEL reads as a space.
+        .{ .event = "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"Too\\u007flong.\"}", .err = error.ContextOverflow, .refusal = null, .report = "context_length_exceeded: Too long." },
+    };
+    for (cases) |case| {
+        const sse = try std.mem.concat(std.testing.allocator, u8, &.{ "data: ", case.event, "\n\n" });
+        defer std.testing.allocator.free(sse);
+        try std.testing.expectError(case.err, validateTestingSse(&tmp, sse, 4096));
+        try std.testing.expectEqual(case.refusal, testingProviderFailure().refusal);
+        try std.testing.expectEqualStrings(case.report, testingProviderFailure().report.slice());
+        try std.testing.expect(testingProviderFailure().report.len <= max_report_bytes);
+    }
+}
+
+test "an HTTP error body keeps its refusal and the provider's own words" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { body: []const u8, status: u16, refusal: ?transport_policy.Refusal, report: []const u8 }{
+        .{ .body = "{\"error\":{\"message\":\"The model `gpt-x` does not exist.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"}}", .status = 404, .refusal = .model_not_found, .report = "model_not_found: The model `gpt-x` does not exist." },
+        .{ .body = "{\"error\":{\"message\":\"Unsupported parameter.\",\"type\":\"invalid_request_error\",\"code\":null}}", .status = 400, .refusal = null, .report = "invalid_request_error: Unsupported parameter." },
+        // The managed route's bare detail.
+        .{ .body = "{\"detail\":\"Unsupported model\"}", .status = 400, .refusal = null, .report = "Unsupported model" },
+        // A duplicate code names no refusal.
+        .{ .body = "{\"error\":{\"code\":\"cyber_policy\",\"co\\u0064e\":\"x\"}}", .status = 403, .refusal = null, .report = "" },
+        .{ .body = "{\"error\":{\"code\":\"cyber_policy\"},\"late\":[1,]}", .status = 403, .refusal = null, .report = "" },
+        .{ .body = "not json", .status = 502, .refusal = null, .report = "" },
+        .{ .body = "{\"error\":{\"code\":\"cyber_policy\"}}", .status = 200, .refusal = null, .report = "" },
+        // A code too long to be a refusal is shortened, not dropped.
+        .{ .body = "{\"error\":{\"code\":\"" ++ comptime repeat("c", 300) ++ "\",\"message\":\"m\"}}", .status = 400, .refusal = null, .report = comptime repeat("c", 256) ++ "…: m" },
+    };
+    for (cases) |case| {
+        const file = try tmp.dir.createFile(std.testing.io, "error-body", .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, case.body);
+        var failure: ProviderFailure = undefined;
+        const kind = try httpError(std.testing.io, file, case.body.len, case.status, &failure);
+        try std.testing.expectEqual(case.refusal, failure.refusal);
+        if (case.refusal) |refusal| try std.testing.expectEqual(HttpError{ .refusal = refusal }, kind);
+        try std.testing.expectEqualStrings(case.report, failure.report.slice());
+    }
+    // Quota, then overflow, then a refusal decide; each keeps its words.
+    const ordered = [_]struct { body: []const u8, status: u16, kind: std.meta.Tag(HttpError), report: []const u8 }{
+        .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 429, .kind = .quota, .report = "insufficient_quota: Out." },
+        .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 403, .kind = .refusal, .report = "insufficient_quota: Out." },
+        .{ .body = "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Too long.\"}}", .status = 400, .kind = .context_overflow, .report = "context_length_exceeded: Too long." },
+        .{ .body = "{\"error\":{\"code\":\"rate_limit_exceeded\"}}", .status = 429, .kind = .ordinary, .report = "rate_limit_exceeded" },
+    };
+    for (ordered) |case| {
+        const file = try tmp.dir.createFile(std.testing.io, "error-body", .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, case.body);
+        var failure: ProviderFailure = undefined;
+        try std.testing.expectEqual(case.kind, std.meta.activeTag(try httpError(std.testing.io, file, case.body.len, case.status, &failure)));
+        try std.testing.expectEqualStrings(case.report, failure.report.slice());
+    }
 }
 
 test "provider refusal preserves text and rejects malformed or incomplete candidates" {
@@ -2550,13 +2755,13 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         var rejection: Rejection = .{};
         if (shortfall == 0) {
-            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{});
+            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{});
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{}));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
             try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -2851,7 +3056,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
         try data.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
         var rejection: Rejection = .{};
-        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, testingItemCheck(), .{});
+        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{});
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);

@@ -362,6 +362,9 @@ const Workspace = struct {
     /// to its settlement.
     event_data: model_adapter.Output.EventData,
     interpretation: model_adapter.OutputInterpretation,
+    /// What the provider said of a failure, from its HTTP error body or
+    /// error event, live from interpretation to settlement.
+    provider_failure: model_adapter.Output.ProviderFailure,
     settlement: store_module.ValidatedOutput,
 };
 
@@ -1480,7 +1483,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     const result = host.auth_worker.?.take() orelse return false;
     const active = slot.model_refreshing;
     if (!active.cancelled) {
-        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id } };
+        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
         switch (result) {
             .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
             .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, model_adapter.authenticationFailureCode(err), .ordinary),
@@ -1692,7 +1695,7 @@ fn completeTransfer(
                 // borrows it; this owner still disposes it before settlement.
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
-                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
                 if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             }
         },
@@ -1738,9 +1741,9 @@ fn completeTransfer(
                     if (beginForcedRefresh(host, slot, &answered, generation)) return;
                 };
                 if (diagnostic) |detail| {
-                    answered.reject(code, detail, disposition);
+                    answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
                 } else {
-                    answered.fail(code, disposition);
+                    answered.fail(code, workspace.provider_failure.report.slice(), disposition);
                 }
             } else {
                 // Writes are synchronous, so the unsealed capture holds every
@@ -1797,7 +1800,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         var detail: [512]u8 = undefined;
         const diagnostic = rejection.format(&detail);
         retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-        answered.reject(rejection.code, diagnostic, .ordinary);
+        answered.reject(rejection.code, diagnostic, "", .ordinary);
         return .cleanup;
     }
 
@@ -1823,7 +1826,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(host, rejected, answered.retention("response_metadata_exhausted", null, http_status));
-        answered.fail("response_metadata_exhausted", .ordinary);
+        answered.fail("response_metadata_exhausted", "", .ordinary);
         return .cleanup;
     };
     defer metadata.deinit();
@@ -1841,7 +1844,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         }
         stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(host, rejected, answered.retention("response_data_exhausted", null, http_status));
-        answered.fail("response_data_exhausted", .ordinary);
+        answered.fail("response_data_exhausted", "", .ordinary);
         return .cleanup;
     };
     defer event_data.deinit();
@@ -1855,7 +1858,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         .alternate = x_openai_model.slice(),
     }, &workspace.item_check, .{
         .metadata = host.hooks.fails(.response_metadata),
-    }, &workspace.interpretation);
+    }, &workspace.provider_failure, &workspace.interpretation);
     const accepted = switch (workspace.interpretation) {
         .accepted => |*value| value,
         .rejected => |*rejection| {
@@ -1864,7 +1867,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(&detail);
             retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-            answered.reject(rejection.code, diagnostic, failureClass(host, rejection.kind, null, null));
+            answered.reject(rejection.code, diagnostic, workspace.provider_failure.report.slice(), failureClass(host, rejection.kind, null, null));
             return .cleanup;
         },
     };
@@ -1897,6 +1900,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
                 diagnostic,
+                "",
             ), .ordinary, host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
@@ -2003,20 +2007,23 @@ const AnsweredAttempt = struct {
         return .{ .host = host, .owner = owner, .request_id = request_id };
     }
 
-    fn fail(self: *const AnsweredAttempt, code: []const u8, disposition: store_module.ModelFailureClass) void {
+    /// `report` is the provider's own words for the failure; empty when it
+    /// sent none.
+    fn fail(self: *const AnsweredAttempt, code: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
+            .report = report,
         } }, disposition);
     }
 
-    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, disposition: store_module.ModelFailureClass) void {
-        settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic), disposition);
+    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
+        settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition);
     }
 
     /// For a settlement whose terminal delivery is already claimed.
-    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8) store_module.ModelFailure {
-        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id } };
+    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8) store_module.ModelFailure {
+        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = report } };
     }
 
     /// The same failure facts for its optional failed-response record.

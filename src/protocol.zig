@@ -15,6 +15,9 @@ pub const max_sender_handle_bytes = 32;
 pub const max_model_bytes = model_capability.max_model_bytes;
 // Resolution, rejection and failure codes.
 pub const max_code_bytes = 96;
+/// A failed Turn outcome's report: the provider's code and message, each
+/// at most 256 bytes plus a shortened mark, and their separator.
+pub const max_report_bytes = 2 * 256 + ": ".len + 2 * "…".len;
 pub const max_tool_description_bytes = 100;
 /// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = max_tool_description_bytes;

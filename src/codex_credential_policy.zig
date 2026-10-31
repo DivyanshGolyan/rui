@@ -199,6 +199,23 @@ pub fn failureCode(err: anyerror) []const u8 {
     return "provider_authentication_backend_failed";
 }
 
+/// Failure codes a new `rui auth login` resolves.
+pub const login_codes = codes: {
+    var codes: []const []const u8 = &.{"provider_http_401"};
+    for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
+        const code = failureCode(@field(anyerror, name));
+        for (codes) |known| {
+            if (std.mem.eql(u8, known, code)) break;
+        } else codes = codes ++ .{code};
+    }
+    break :codes codes;
+};
+
+pub fn requiresLogin(code: []const u8) bool {
+    for (login_codes) |known| if (std.mem.eql(u8, known, code)) return true;
+    return false;
+}
+
 /// Credential failures that only a new login resolves.
 pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry };
 

@@ -15,12 +15,12 @@ const Bounded = @import("bounded.zig").Bounded;
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
+const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
-const transport_policy = @import("transport_policy.zig");
 
 const Allocator = std.mem.Allocator;
 pub const Kind = session_work.Kind;
@@ -1344,25 +1344,15 @@ const band_rules = [_]BandRule{
     .{ .trouble = .rate_limit, .kind = .retrying, .matches = rateLimitCode },
 };
 
-/// Failure codes a new `rui auth login` resolves.
-const sign_in_codes = codes: {
-    var codes: []const []const u8 = &.{"provider_http_401"};
-    for (@typeInfo(codex_credential_policy.LoginRequired).error_set.error_names.?) |name| {
-        const code = codex_credential_policy.failureCode(@field(anyerror, name));
-        for (codes) |known| {
-            if (std.mem.eql(u8, known, code)) break;
-        } else codes = codes ++ .{code};
-    }
-    break :codes codes;
-};
-
 fn signInCode(code: []const u8) bool {
-    for (sign_in_codes) |known| if (std.mem.eql(u8, known, code)) return true;
-    return false;
+    return failure_class.of(code) == .sign_in;
 }
 
 fn quotaCode(code: []const u8) bool {
-    return transport_policy.Quota.ofFailureCode(code) != null;
+    return switch (failure_class.of(code)) {
+        .quota, .plan => true,
+        else => false,
+    };
 }
 
 fn rateLimitCode(code: []const u8) bool {
@@ -3523,7 +3513,7 @@ fn bandOf(rows: []const Listed, login_at: ?u64) !?Band {
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     // Sign-in: an authentication failure newer than the newest completion.
-    for (sign_in_codes) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
+    for (codex_credential_policy.login_codes) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
     try std.testing.expect(signInCode("provider_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_authentication_failed"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     // A later completion clears it; a login in this terminal hides it until a newer failure.

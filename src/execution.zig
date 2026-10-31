@@ -9,7 +9,7 @@ const TransferOutcome = transport_policy.TransferOutcome;
 pub const FailureKind = enum { permanent, temporary, context_overflow };
 
 /// A sealed HTTP error answer, interpreted before settlement.
-pub const ErrorResponse = union(enum) { ordinary, context_overflow, quota: transport_policy.Quota, unreadable: anyerror };
+pub const ErrorResponse = union(enum) { ordinary, context_overflow, quota: transport_policy.Quota, refusal: transport_policy.Refusal, unreadable: anyerror };
 
 pub const TransferFailure = struct {
     code: union(enum) { named: []const u8, http: u16, temporary_http: u16 },
@@ -62,6 +62,11 @@ pub fn transferDecision(
             .answered = true,
             .quota = quota,
         } },
+        // The code decides, whatever the status: resending cannot fix it.
+        .refusal => |refusal| return .{ .fail = .{
+            .code = .{ .named = refusal.failureCode() },
+            .answered = true,
+        } },
         .unreadable => return .{ .fail = .{
             .code = .{ .named = "response_read_failed" },
             .answered = true,
@@ -105,7 +110,7 @@ test "only an answered model 401 can claim a forced credential refresh" {
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.temporary_http, 503), .ordinary).fail));
 }
 
-const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .unreadable = error.TestUnreadable } };
+const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .refusal = .model_not_found }, .{ .unreadable = error.TestUnreadable } };
 
 test "HTTP quota refusal overrides rate limit retry evidence and retains reset detail" {
     const codes = [_][]const u8{ "provider_usage_limit_reached", "provider_insufficient_quota", "provider_usage_not_included" };
@@ -114,7 +119,7 @@ test "HTTP quota refusal overrides rate limit retry evidence and retains reset d
         "{\"provider_code\":\"insufficient_quota\",\"resets_at\":1800000123}",
         "{\"provider_code\":\"usage_not_included\",\"resets_at\":1800000123}",
     };
-    for (std.enums.values(transport_policy.Quota.Code), codes, details) |code, expected, detail| {
+    for (transport_policy.Quota.codes, codes, details) |code, expected, detail| {
         const quota: transport_policy.Quota = .{ .code = code, .resets_at = 1_800_000_123 };
         const refusal: ErrorResponse = .{ .quota = quota };
         const decision = transferDecision(.{ .transport_finished = .{
@@ -173,8 +178,9 @@ test "transfer decisions exhaust transport dispositions and error response prece
             var buffer: [96]u8 = undefined;
             const overflow = case.answered and response == .context_overflow;
             const unreadable = case.answered and response == .unreadable;
-            const temporary = case.temporary and !overflow and !unreadable;
-            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else case.code;
+            const refused = case.answered and response == .refusal;
+            const temporary = case.temporary and !overflow and !unreadable and !refused;
+            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else if (refused) "provider_model_not_found" else case.code;
             try std.testing.expectEqualStrings(expected_code, failure.codeText(&buffer));
             try std.testing.expectEqual(case.answered, failure.answered);
             try std.testing.expectEqual(overflow, failure.kind == .context_overflow);
