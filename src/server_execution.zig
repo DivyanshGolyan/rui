@@ -1737,14 +1737,13 @@ fn completeTransfer(
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
-                const report = workspace.provider_failure.report.slice();
                 if (execution.rejectsCredential(failure)) if (active.credential_generation) |generation| {
                     if (beginForcedRefresh(host, slot, &answered, generation)) return;
                 };
                 if (diagnostic) |detail| {
-                    answered.reject(code, detail, report, disposition);
+                    answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
                 } else {
-                    answered.fail(code, report, disposition);
+                    answered.fail(code, workspace.provider_failure.report.slice(), disposition);
                 }
             } else {
                 // Writes are synchronous, so the unsealed capture holds every
