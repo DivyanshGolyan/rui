@@ -1177,7 +1177,7 @@ def overview_cases():
         assert configuration["label"] == {"state": "value", "value": "lane four"}, saved
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
-        assert "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
+        assert "Label: lane four\n" in status and "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1337,7 +1337,7 @@ def command_entry_cases():
             coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
             status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {initial_session}\n" in status, status
+            assert f"Session: {initial_session}\nLabel: none\n" in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
