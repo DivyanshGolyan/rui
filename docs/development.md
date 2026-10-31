@@ -10,14 +10,13 @@ To build the same source that releases use, install from `stable` in a clean che
 git fetch origin stable
 git switch --detach origin/stable
 ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
-To update, run the same commands again. `main` gets changes after Linux CI passes, before Mac and upgrade checks, so it can be ahead of `stable`.
+If `~/.local/bin` is not on your `PATH`, the installer prints the line to add to your shell profile. To update, run the same commands again. `main` gets changes after Linux CI passes, before Mac and upgrade checks, so it can be ahead of `stable`.
 
 `./install.sh` builds the current checkout, including local changes. It never fetches or switches branches. It pins native dependencies, builds into a new directory under `~/.local/lib/rui`, checks the result and then points `~/.local/bin/rui` at it. A failed build leaves the previous installation unchanged.
 
-Installation keeps Stores, credentials, shell profiles and earlier builds, because a running Host may still use an earlier build. It reports the selected Store's Host status without starting or stopping anything. A running Host keeps its old executable. To use the new one, let the Host's work finish, run `rui host stop`, wait for `rui host status` to report unavailable, then start `rui` again.
+Installation keeps Stores, credentials, shell profiles and earlier builds, because a running Host may still use an earlier build. It starts and stops nothing. It reports only what needs action: a running Host and the command that can stop it, a Store format the new build cannot open, and a `PATH` that does not select the new command. A running Host keeps its old executable. To use the new one, let the Host's work finish, run the `host stop` command the installer printed, wait for `rui host status` to report unavailable, then start `rui` again.
 
 If your shell still runs an older `rui`, check `type -a rui`, then run `rehash` in Zsh or `hash -r` in Bash.
 

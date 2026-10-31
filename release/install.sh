@@ -50,11 +50,9 @@ if [ -d "$prefix/bin/rui" ]; then
 fi
 mkdir -p "$prefix/lib/rui" "$prefix/bin"
 release=$(mktemp -d "$prefix/lib/rui/install.XXXXXX")
-links=
 published=0
 cleanup() {
     status=$?
-    if [ -n "$links" ]; then rm -rf "$links"; fi
     if [ "$published" = 0 ] && ! rm -rf "$release"; then
         printf 'Could not remove unfinished installation: %s\n' "$release" >&2
         if [ "$status" = 0 ]; then status=1; fi
@@ -85,23 +83,8 @@ case $reported in
 esac
 test -f "$release/THIRD_PARTY_NOTICES.md"
 
+@PUBLISH@
 # Keep each complete build: running processes may still use its files.
-# Publish with rename rather than modifying an executable already in use.
 published=1
-links=$(mktemp -d "$prefix/bin/.rui-install.XXXXXX")
-ln -s "$release/bin/rui" "$links/rui"
-mv -f "$links/rui" "$prefix/bin/rui"
-printf '\nInstalled %s at %s/bin/rui.\n' "$reported" "$prefix"
-printf 'Previous builds, Stores and credentials were preserved.\n'
-resolved=$(command -v rui || true)
-if [ "$resolved" != "$prefix/bin/rui" ]; then
-    printf 'Your PATH currently selects: %s\n' "${resolved:-no rui command}"
-    printf 'For this shell, run: export PATH="$HOME/.local/bin:$PATH"\n'
-fi
-printf 'If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).\n'
-printf '\nSelected Store status (read only):\n'
-if ! "$prefix/bin/rui" host status; then
-    printf 'Host status could not be checked; the installation succeeded.\n' >&2
-fi
-printf 'A running Host keeps its old executable. After its work finishes, use rui host stop.\n'
-printf 'Start with: "%s/bin/rui"\n' "$prefix"
+format=${version#0.}
+rui_publish "$prefix" "$release" "${format%%.*}"

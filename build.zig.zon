@@ -33,6 +33,7 @@
         "build.zig",
         "build.zig.zon",
         "install.sh",
+        "release/publish.sh",
         "src",
         "tests",
         "README.md",
