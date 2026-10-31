@@ -75,7 +75,7 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 To list this release's supported model IDs, run `rui session configure --help`. The list is compiled into Rui and needs no Host or credentials. It does not mean that your account can use every listed model.
 
-Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6-luna`.
+Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6.1-sol`.
 
 If Host startup warns that a saved model default is unsupported, pick a listed ID:
 
