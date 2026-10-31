@@ -29,6 +29,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
+          publish-caches: 'false'
           targets: '["host-launch-integration"]'
       - name: Normal detached startup under the default soft limit
         env:

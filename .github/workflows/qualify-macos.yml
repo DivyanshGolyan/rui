@@ -83,6 +83,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
+          publish-caches: 'false'
           targets: ${{ needs.plan.outputs.targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
@@ -149,6 +150,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: 'false'
           targets: ${{ needs.plan.outputs.targets }}
           compiled: 'true'
       - name: Verify the successful producer's compiled artifact

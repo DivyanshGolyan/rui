@@ -601,6 +601,27 @@ class SelectionTest(unittest.TestCase):
                                  workflow.count('uses: actions/checkout@'))
                 if name == 'qualify-macos.yml':
                     self.assertIn('workflow_call:', workflow)
+                # A save the token refuses only warns; restore-only setup is quiet.
+                self.assertEqual(workflow.count("publish-caches: 'false'"),
+                                 workflow.count('uses: ./.github/actions/setup'))
+        for path in Path('.github/workflows').glob('*.yml'):
+            if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+                self.assertNotIn('publish-caches', path.read_text(), f'{path.name} must keep publishing')
+        setup = Path('.github/actions/setup/action.yml').read_text()
+        self.assertNotIn('actions/cache/save@', setup)
+        steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)
+        def guard(body):
+            return re.search(r'(?m)^      if: \$\{\{ (.*) \}\}$', body).group(1)
+        def contents(body):
+            return re.sub(r'(?m)^      (?:if|id): .*\n', '', body)
+        saves = [body for restore, body in steps if not restore]
+        restores = [body for restore, body in steps if restore]
+        self.assertEqual(len(saves), setup.count('uses: actions/cache@'))
+        self.assertEqual(len(saves), len(restores))
+        for save, restore in zip(saves, restores):
+            self.assertRegex(guard(save), r"^inputs\.publish-caches == 'true'(?: && [^|]*)?$")
+            self.assertEqual(guard(restore), guard(save).replace("publish-caches == 'true'", "publish-caches != 'true'", 1))
+            self.assertEqual(contents(restore), contents(save))
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
