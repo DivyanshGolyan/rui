@@ -1039,15 +1039,27 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     # reap and caller pipe EOF must not authorize root deletion.
                     peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
                     held = int(peers["dispatch_integration.py.release"])
-                    census = run(["ps", "-axo", "pid=,pgid="], capture_output=True,
-                                 text=True, check=True, timeout=5)
-                    for row in census.stdout.splitlines():
-                        pid, member_group = map(int, row.split())
-                        if member_group == group and pid != held:
+
+                    # A census misses members forked while it ran, such as a
+                    # peer that waits forever for a start the killed driver
+                    # never makes (#638). Signal each census until the held
+                    # descendant is the only live member; killed members
+                    # fork no more.
+                    def signal_others():
+                        census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
+                                     text=True, check=True, timeout=5)
+                        others = [int(pid) for pid, member_group, state in
+                                  (row.split() for row in census.stdout.splitlines())
+                                  if int(member_group) == group and int(pid) != held
+                                  and not state.startswith("Z")]
+                        for pid in others:
                             try:
                                 os.kill(pid, sig)
                             except ProcessLookupError:
                                 pass
+                        return others
+                    wait_for(signal_others, f"driver group {group} to keep only its held descendant",
+                             interval=.005, timeout=5, ready=lambda others: not others)
 
                 def census_then_deliver(*args, **kwargs):
                     nonlocal observed_live
