@@ -1966,10 +1966,10 @@ def persistent_pending_case():
         opening_release.set()
         read_terminal(master, "› ")
         output = current_screen(master)
-        assert "24 queued messages" in output, ("opening counted only its newest page or fresh Current", output)
+        assert "24 messages are queued behind the current work." in output, ("opening counted only its newest page or fresh Current", output)
         # The newest page shows its queued Messages whole and labelled; older
         # ones are listed where a transcript reaches them, never previewed.
-        assert "Queued: " not in output and output.count("! Queued") == 16, output
+        assert "Queued: " not in output and output.count("Queued") == 16, output
         assert all(f"queued-{i:02d} é" in output for i in range(9, 25)) and not any(f"queued-{i:02d} é" in output for i in range(1, 9)), output
         assert len(endpoint.requests) == 1, "opening dispatched queued work"
         os.write(master, b"\x03")
@@ -5163,7 +5163,7 @@ def renderer_cases():
                 assert "Start of conversation" in shown and "Earlier rows left this view." in shown, shown
                 listed = shown.split("Earlier rows left this view.", 1)[1]
                 assert shown.index("DRIVER-QUESTION") < shown.index("Earlier rows left this view."), shown
-                assert listed.count("! Queued") == 3 and listed.count("EQUAL-CONTENT") == 2, shown
+                assert listed.count("Queued") == 3 and listed.count("EQUAL-CONTENT") == 2, shown
                 assert shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-START") == 1 and shown.count(big_size) == 1, shown
                 assert big_whole(shown), shown
                 assert "LONG-00000" not in shown, "the copy started before the front"
@@ -5172,7 +5172,7 @@ def renderer_cases():
                 tty.wait("LISTED-DONE", timeout=30)
                 shown = traverse(tty)
                 # Now rows: each once, never also listed as queued.
-                assert "! Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count(big_size) == 1, shown
+                assert "Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count(big_size) == 1, shown
                 assert shown.count("BIG-START") == 1 and big_whole(shown), shown
                 assert shown.index("DRIVER-QUESTION") < shown.index("EQUAL-CONTENT") < shown.index("BIG-START"), shown
                 tty.caller.send_signal(signal.SIGINT)
@@ -5204,14 +5204,14 @@ def renderer_cases():
                 tty.wait("Held call", timeout=30)
                 shown = traverse(tty, 80)
                 assert all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
-                assert "Start of conversation" in shown and shown.count("! Queued") == 66, shown
+                assert "Start of conversation" in shown and shown.count("Queued") == 66, shown
                 order = [shown.index(f"DROPPED-QUEUED-{index:02d}") for index in range(66)]
                 assert order == sorted(order) and shown.index("DRIVER-QUESTION") < order[0], shown
                 tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
                 (workspace / "dropped-release").write_text("")
                 tty.wait("DROPPED-DONE", timeout=30)
                 shown = traverse(tty)
-                assert "! Queued" not in shown and all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
+                assert "Queued" not in shown and all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
@@ -5321,9 +5321,9 @@ def renderer_cases():
                 shown = traverse(tty)
                 assert all(shown.count(f"OPENING-QUEUED-{index:02d}") == 1 for index in range(24)), shown
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count("! Queued") == 24 and shown.count("ACTIVE-ORIGINAL") == 1, shown
-                assert "Rui: 24 queued messages." in opened and "Queued: " not in opened, opened
-                assert opened.count("! Queued") == 16 and "OPENING-QUEUED-07" not in opened and "OPENING-QUEUED-08" in opened, opened
+                assert shown.count("Queued") == 24 and shown.count("ACTIVE-ORIGINAL") == 1, shown
+                assert "24 messages are queued behind the current work." in opened and "Queued: " not in opened, opened
+                assert opened.count("Queued") == 16 and "OPENING-QUEUED-07" not in opened and "OPENING-QUEUED-08" in opened, opened
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:

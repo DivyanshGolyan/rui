@@ -46,6 +46,9 @@ pub const Job = struct {
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
     message_target: ?View.Collapsed = null,
+    // The latest live work held queued input: a listed echo, whose read
+    // was earlier, is labelled by it.
+    held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
     transcript: u64 = 0,
@@ -185,7 +188,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(&output);
+        try pending.render(page.facts.work.work.state.holdsQueue(), &output);
         job.result.lowest = pending.lowest;
         // A queued Message older than the page shows only in a transcript's
         // listing, at the opening's seam. No later boundary may precede its
@@ -255,7 +258,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
-            try View.message(requests, job.store, job.session, item, echo.message, true, &output, job.colour);
+            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour);
             job.result.listing = null;
         },
         .range => |range| {
@@ -272,7 +275,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                         else => continue,
                     };
                     if (!range.all and value.state == .applied) continue;
-                    try View.message(requests, job.store, job.session, item, value, true, &output, job.colour);
+                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
