@@ -4151,6 +4151,12 @@ pub const Store = struct {
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         try capture.append(",\"compaction_trigger\":");
         if (policy.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.append(",\"context_estimate\":");
+        const pressure = if (policy.compaction_trigger != null)
+            turn_policy.comparedPressure(try self.compactionFacts(session_ref, null, current.next_position, current.provider, current.model.slice(), policy))
+        else
+            null;
+        if (pressure) |value| try capture.appendFmt("\"{d}\"", .{@min(value, std.math.maxInt(i64))}) else try capture.append("null");
         try capture.appendFmt(",\"output_reservation\":\"{d}\",\"compaction_trigger_override\":", .{policy.output_reservation});
         if (current.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
         try capture.append(",\"output_reservation_override\":");
@@ -4177,6 +4183,8 @@ pub const Store = struct {
         try self.appendCurrentWork(session_ref, current.created_at, capture);
         try capture.append(",\"peers\":");
         try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{try self.readPeerFactsLocked(session_ref)});
+        try capture.append(",\"first_message\":");
+        try capture.appendShape(.{protocol.Hole{ .optional_json = protocol.FirstMessage }}, .{try self.readFirstMessageLocked(session_ref)});
         try capture.append(",\"selected_message\":");
         try self.appendSelectedMessage(session_ref, capture);
         try capture.append(",\"recent_messages\":[");
@@ -5602,44 +5610,80 @@ pub const Store = struct {
     }
 
     fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const SessionFacts, policy: model_capability.CompactionPolicy) !ModelOperationKind {
-        const last = try self.cached("SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
-            "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
-            "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
-        defer resetCached(last);
-        try bindText(last, 1, session_ref);
-        const result = c.sqlite3_step(last);
-        if (result == c.SQLITE_DONE) return .assistant_response;
-        if (result != c.SQLITE_ROW) return error.CorruptStore;
-        _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
-        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
-        try readText(last, 1, &resolution);
-        const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
+        return turn_policy.nextPurpose(try self.compactionFacts(session_ref, first_admission, current.next_position, current.provider, current.model.slice(), policy));
+    }
+
+    /// The facts the next model call's purpose rests on, read only as far as
+    /// `turn_policy` needs them. Admission and the Current report's
+    /// `context_estimate` both read them here. `first_admission` starts the
+    /// next Turn; null reads the Session's first runnable Message, which
+    /// admission would select.
+    fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?i64, next_position: u64, provider: protocol.Provider, model: []const u8, policy: model_capability.CompactionPolicy) !turn_policy.CompactionFacts {
         var facts: turn_policy.CompactionFacts = .{
-            .previous = .{
-                .purpose = switch (c.sqlite3_column_int(last, 0)) {
-                    0 => .assistant_response,
-                    1 => .compaction,
-                    else => return error.CorruptStore,
-                },
-                .context_overflow = turn_policy.Resolution.parse(resolution.slice()) == .context_overflow,
-                .turn_active = active,
-                .same_input_prefix = (try readNullablePositiveI64(last, 4) orelse return error.CorruptStore) == first_admission,
-            },
             .trigger = policy.compaction_trigger,
             .context_changed = false,
             .usage_tokens = null,
             .uncovered_bytes = 0,
             .output_reservation = policy.output_reservation,
         };
-        if (turn_policy.forcedPurpose(facts.previous, facts.trigger)) |purpose| return purpose;
-        facts.context_changed = try self.contextChangedSinceBase(session_ref, current.next_position);
-        if (!facts.context_changed) return turn_policy.nextPurpose(facts);
+        const last = try self.cached("SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
+            "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
+            "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
+        defer resetCached(last);
+        try bindText(last, 1, session_ref);
+        const result = c.sqlite3_step(last);
+        if (result == c.SQLITE_DONE) return facts;
+        if (result != c.SQLITE_ROW) return error.CorruptStore;
+        _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
+        var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
+        try readText(last, 1, &resolution);
+        const purpose: turn_policy.Purpose = switch (c.sqlite3_column_int(last, 0)) {
+            0 => .assistant_response,
+            1 => .compaction,
+            else => return error.CorruptStore,
+        };
+        const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
+        const latest_first = try readNullablePositiveI64(last, 4) orelse return error.CorruptStore;
+        facts.previous = .{
+            .purpose = purpose,
+            .context_overflow = turn_policy.Resolution.parse(resolution.slice()) == .context_overflow,
+            .turn_active = active,
+            // Only an ended compaction's Turn asks which input comes next.
+            .same_input_prefix = purpose == .compaction and !active and
+                (first_admission orelse try self.firstRunnableAdmission(session_ref)) == latest_first,
+        };
+        if (turn_policy.forcedPurpose(facts.previous, facts.trigger) != null) return facts;
+        facts.context_changed = try self.contextChangedSinceBase(session_ref, next_position);
+        if (!facts.context_changed) return facts;
+        const estimate = try self.contextEstimate(session_ref, next_position, provider, model);
+        facts.usage_tokens = estimate.usage_tokens;
+        facts.uncovered_bytes = estimate.uncovered_bytes;
+        return facts;
+    }
+
+    /// The first Message admission would select for this Session's next
+    /// Turn, or 0 when none is runnable: a later Message has a new admission.
+    fn firstRunnableAdmission(self: *Store, session_ref: []const u8) !i64 {
+        const statement = try self.cached("SELECT coalesce(min(m.admission_id),0) FROM message_admission m WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql);
+        defer resetCached(statement);
+        try bindText(statement, 1, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return c.sqlite3_column_int64(statement, 0);
+    }
+
+    const ContextEstimate = struct { usage_tokens: ?u64, uncovered_bytes: u64 };
+
+    /// What the next model call would start from, before the Session position
+    /// `next_position`: the newest accepted usage on this model since the
+    /// last compaction, and the bytes it does not cover. Automatic compaction
+    /// and the Current report read this one estimate.
+    fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, provider: protocol.Provider, model: []const u8) !ContextEstimate {
         var usage_tokens: ?u64 = null;
         const base = try self.cached("SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
             "WHERE session_ref=?1 AND purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
         defer resetCached(base);
         try bindText(base, 1, session_ref);
-        try bindU64(base, 2, current.next_position);
+        try bindU64(base, 2, next_position);
         if (c.sqlite3_step(base) != c.SQLITE_ROW) return error.CorruptStore;
         const frontier = try readNullableTokens(base, 0, true) orelse return error.CorruptStore;
         // Without a usage anchor, all retained host input still contributes.
@@ -5653,8 +5697,8 @@ pub const Store = struct {
         defer resetCached(usage);
         try bindText(usage, 1, session_ref);
         try bindU64(usage, 2, frontier);
-        try bindText(usage, 3, @tagName(current.provider));
-        try bindText(usage, 4, current.model.slice());
+        try bindText(usage, 3, @tagName(provider));
+        try bindText(usage, 4, model);
         switch (c.sqlite3_step(usage)) {
             c.SQLITE_ROW => {
                 if (try readNullableTokens(usage, 0, true)) |uncached| {
@@ -5710,9 +5754,7 @@ pub const Store = struct {
         if (c.sqlite3_step(estimate) != c.SQLITE_ROW) return error.CorruptStore;
         const bytes = c.sqlite3_column_int64(estimate, 0);
         if (bytes < 0) return error.CorruptStore;
-        facts.usage_tokens = usage_tokens;
-        facts.uncovered_bytes = @intCast(bytes);
-        return turn_policy.nextPurpose(facts);
+        return .{ .usage_tokens = usage_tokens, .uncovered_bytes = @intCast(bytes) };
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
@@ -13537,9 +13579,9 @@ test "Full Message projection work does not multiply Messages by stops" {
 
             for (1..message_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                        "VALUES({0},'{1s}','message-{0}',1,NULL,1)",
-                    .{ index, session.slice() },
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
+                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2})",
+                    .{ index, session.slice(), 1000 + index },
                     0,
                 );
                 defer std.testing.allocator.free(insert);
@@ -19766,6 +19808,17 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
     }
 }
 
+/// The Current report's `context_estimate`, or null.
+fn testingContextEstimate(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !?u64 {
+    const report = try testingSessionReport(storage, tmp, session, 1024 * 1024);
+    defer std.testing.allocator.free(report);
+    const key = "\"context_estimate\":";
+    const at = (std.mem.indexOf(u8, report, key) orelse return error.TestUnexpectedResult) + key.len;
+    if (std.mem.startsWith(u8, report[at..], "null,")) return null;
+    const end = std.mem.indexOfScalarPos(u8, report, at + 1, '"') orelse return error.TestUnexpectedResult;
+    return try std.fmt.parseInt(u64, report[at + 1 .. end], 10);
+}
+
 test "compaction exact threshold zero reservation and integer usage fallback" {
     for ([_][]const u8{
         "{\"input_tokens\":999,\"output_tokens\":0}",
@@ -19798,6 +19851,8 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
         try patch.configuration.output_reservation.value.set("0");
         try std.testing.expect(storage.configure(&patch, true, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "original");
+        // A Session's first call never compacts, so nothing is compared.
+        try std.testing.expectEqual(@as(?u64, null), try testingContextEstimate(&storage, &tmp, session.slice()));
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, usage);
@@ -19810,8 +19865,22 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
             try std.testing.expectEqual(@as(u64, 400), try queryU64(storage.database, "SELECT usage_uncached_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
             try std.testing.expectEqual(@as(u64, 600), try queryU64(storage.database, "SELECT usage_cache_read_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
         }
+        // The Current report's estimate is the pressure the next admission
+        // compares: at or past the trigger exactly when it compacts, and
+        // absent without a trigger.
+        const compacts = index == 1 or index >= 8;
+        const estimate = try testingContextEstimate(&storage, &tmp, session.slice());
+        if (index == 7) {
+            try std.testing.expectEqual(@as(?u64, null), estimate);
+        } else {
+            try std.testing.expectEqual(compacts, estimate.? >= 1000);
+            if (index == 0) try std.testing.expectEqual(@as(?u64, 999), estimate);
+        }
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try std.testing.expectEqual(if (index == 1 or index >= 8) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+        try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+        // The call after a compaction answers whatever the pressure, so
+        // nothing is compared while one runs.
+        if (compacts) try std.testing.expectEqual(@as(?u64, null), try testingContextEstimate(&storage, &tmp, session.slice()));
     }
 }
 
@@ -19956,7 +20025,8 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expectEqual(@as(u64, 8), observed.output_reservation);
     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
     defer std.testing.allocator.free(report);
-    try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"999\",\"output_reservation\":\"8\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"999\",\"context_estimate\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\",\"output_reservation\":\"8\"") != null);
     for ([_][]const u8{ "0", "", "-1", "9223372036854775808", "+1", "1.5", "1_000", " 1", "١" }, 0..) |invalid, index| {
         var invalid_patch: protocol.ConfigureCommand = .{};
         var key: [32]u8 = undefined;

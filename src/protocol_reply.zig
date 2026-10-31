@@ -611,10 +611,15 @@ pub const Current = struct {
         permission_mode: JsonEnum(enum { ask, bypass }),
         instructions: Reference,
         output_schema: ?Reference,
-        compaction_trigger: ?PolicyNumber(false),
-        output_reservation: PolicyNumber(true),
-        compaction_trigger_override: ?PolicyNumber(false),
-        output_reservation_override: ?PolicyNumber(true),
+        compaction_trigger: ?Id,
+        /// The estimated tokens the next model call starts from, when
+        /// automatic compaction decides that call by comparing them with
+        /// `compaction_trigger`; null without a trigger or when the call's
+        /// purpose does not depend on them. Omitted by Hosts that predate it.
+        context_estimate: OmittableJson(?Count) = .{},
+        output_reservation: Count,
+        compaction_trigger_override: ?Id,
+        output_reservation_override: ?Count,
         reasoning_effort: ?JsonEnum(protocol.ReasoningEffort),
         reasoning_effort_override: ?JsonEnum(protocol.ReasoningEffort),
         label: ?JsonString(protocol.max_label_bytes),
@@ -706,6 +711,8 @@ pub const Current = struct {
     pending_messages: u64,
     work: Work,
     peers: Peers,
+    /// Omitted by Hosts that predate it.
+    first_message: OmittableJson(?JsonFirstMessage) = .{},
     selected_message: ?JsonString(protocol.max_key_bytes),
     recent: [10]Recent,
     recent_count: usize,
@@ -745,6 +752,10 @@ pub const Current = struct {
         try std.json.Stringify.value(self.work, .{}, writer);
         try writer.writeAll(",\"peers\":");
         try std.json.Stringify.value(self.peers, .{}, writer);
+        if (self.first_message.value) |first| {
+            try writer.writeAll(",\"first_message\":");
+            try std.json.Stringify.value(first, .{}, writer);
+        }
         try writer.writeAll(",\"selected_message\":");
         try std.json.Stringify.value(self.selected_message, .{}, writer);
         try writer.writeAll(",\"recent_messages\":");
@@ -810,6 +821,7 @@ pub const Current = struct {
             pending_messages: Count,
             work: OmittableJson(Work) = .{},
             peers: OmittableJson(Peers) = .{},
+            first_message: OmittableJson(?JsonFirstMessage) = .{},
             selected_message: OmittableJson(?JsonString(protocol.max_key_bytes)) = .{},
             recent_messages: OmittableJson(RecentRows) = .{},
             actions: OmittableJson(struct { count: Count, unresolved: AttentionRows(.unresolved), resolved: AttentionRows(.resolved) }) = .{},
@@ -836,12 +848,13 @@ pub const Current = struct {
         const settings = wire.session orelse {
             if (wire.pending_messages.value != 0 or execution.status.value != .unavailable or execution.reason.value == null or
                 execution.dispatch_fenced.value != null or execution.custody_occupied.value != null or execution.scratch_used_bytes.value != null or execution.unavailable.value != null or
-                wire.work.value != null or wire.peers.value != null or wire.selected_message.value != null or wire.recent_messages.value != null or wire.actions.value != null or
+                wire.work.value != null or wire.peers.value != null or wire.first_message.value != null or wire.selected_message.value != null or wire.recent_messages.value != null or wire.actions.value != null or
                 wire.rejected_calls.value != null or wire.actionable_permissions.value != null) return error.InvalidObservation;
             return .unconfigured;
         };
         if (!protocol.validSessionId(settings.reference.slice()) or !settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
             (if (settings.label) |label| !protocol.validLabel(label.slice()) else false) or
+            (if (settings.context_estimate.value) |estimate| estimate != null and settings.compaction_trigger == null else false) or
             settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
@@ -862,6 +875,7 @@ pub const Current = struct {
             .pending_messages = wire.pending_messages.value,
             .work = work,
             .peers = peers,
+            .first_message = wire.first_message,
             .selected_message = wire.selected_message.value orelse return error.InvalidObservation,
             .recent = recent.rows,
             .recent_count = recent.count,
@@ -880,24 +894,6 @@ pub const Current = struct {
 const NoAttention = struct {
     fn visit(_: @This(), _: Current.Attention) !void {}
 };
-
-fn PolicyNumber(comptime allow_zero: bool) type {
-    return struct {
-        text: JsonString(20),
-        pub fn slice(self: *const @This()) []const u8 {
-            return self.text.slice();
-        }
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            const text = try JsonString(20).jsonParse(allocator, source, options);
-            const value = try mutationId(text, allow_zero);
-            if (value > std.math.maxInt(i64)) return error.InvalidObservation;
-            return .{ .text = text };
-        }
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(self.text);
-        }
-    };
-}
 
 fn ReportNumber(comptime allow_zero: bool) type {
     return struct {
@@ -1078,7 +1074,6 @@ pub const SessionListPage = struct {
         value: Row,
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonRow {
-            const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
             const Wire = struct {
                 reference: JsonString(protocol.max_session_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
@@ -1090,7 +1085,7 @@ pub const SessionListPage = struct {
                 created_at: JsonString(20),
                 revision: JsonString(20),
                 end: JsonString(20),
-                first_message: ?struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref },
+                first_message: ?JsonFirstMessage,
                 work: struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20) },
                 peers: struct { from_person_at: ?JsonString(20) },
             };
@@ -1120,13 +1115,7 @@ pub const SessionListPage = struct {
                 },
                 .peers = .{ .from_person_at = if (wire.peers.from_person_at) |at| try ActivityPage.id(at, false) else null },
             };
-            if (wire.first_message) |first| row.first_message = .{
-                .position = try ActivityPage.id(first.position, false),
-                .admission = try ActivityPage.id(first.admission, false),
-                .admitted_at = try ActivityPage.id(first.admitted_at, false),
-                .sender = if (first.sender) |sender| try sender.peer() else null,
-                .content = try ActivityPage.content(first.content),
-            };
+            if (wire.first_message) |first| row.first_message = first.value;
             const work = row.work;
             if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidCharacter;
             // A person's Message is a Message, and the first one is either a
@@ -1597,6 +1586,32 @@ pub const JsonAddress = struct {
 };
 
 /// Pages expose only canonical Session IDs as peer labels.
+/// A Session's first Message as list rows and Current reports write it
+/// (`protocol.FirstMessage`).
+pub const JsonFirstMessage = struct {
+    value: protocol.FirstMessage,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+        const Wire = struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
+        const wire = try std.json.innerParse(Wire, allocator, source, options);
+        return .{ .value = .{
+            .position = ActivityPage.id(wire.position, false) catch return error.InvalidCharacter,
+            .admission = ActivityPage.id(wire.admission, false) catch return error.InvalidCharacter,
+            .admitted_at = ActivityPage.id(wire.admitted_at, false) catch return error.InvalidCharacter,
+            .sender = if (wire.sender) |sender| sender.peer() catch return error.InvalidCharacter else null,
+            .content = ActivityPage.content(wire.content) catch return error.InvalidCharacter,
+        } };
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        var buffer: [protocol.FirstMessage.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        self.value.writeJson(&out) catch unreachable;
+        try jw.print("{s}", .{out.buffered()});
+    }
+};
+
 pub const JsonPeer = struct {
     session: JsonString(protocol.max_session_bytes),
 
@@ -2984,8 +2999,8 @@ test "Current settings preserve decimal token heuristics in projections" {
     const report = "{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
-    try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
-    try std.testing.expectEqualStrings("16384", reply.current.settings.output_reservation.slice());
+    try std.testing.expectEqual(@as(u64, 100000), reply.current.settings.compaction_trigger.?.value);
+    try std.testing.expectEqual(@as(u64, 16384), reply.current.settings.output_reservation.value);
     try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort.?.value);
     try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort_override.?.value);
     var buffer: [2048]u8 = undefined;
@@ -3035,6 +3050,14 @@ test "Current settings preserve decimal token heuristics in projections" {
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":\"-1\",\"label\":null,\"created_at\":\"1\"}", .valid = false },
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"01\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = false },
         .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":1,\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = false },
+        // An estimate needs a trigger, which compares it only for some
+        // calls; a Host that predates it omits it.
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":\"50\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":\"0\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":null,\"context_estimate\":\"5\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"context_estimate\":\"-1\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\",\"label\":null,\"created_at\":\"1\"}", .valid = false },
     };
     for (cases) |case| {
         var settings_buffer: [4096]u8 = undefined;
@@ -3048,6 +3071,11 @@ test "Current settings preserve decimal token heuristics in projections" {
             try parsed.current.writeJson(io, file, &projection);
             if (parsed.current.settings.compaction_trigger == null)
                 try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), "\"compaction_trigger\":null") != null);
+            // The projection keeps the estimate as the report gave it.
+            if (std.mem.indexOf(u8, case.suffix, "\"context_estimate\":")) |at| {
+                const end = std.mem.indexOfScalarPos(u8, case.suffix, at, ',').?;
+                try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), case.suffix[at..end]) != null);
+            } else try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), "context_estimate") == null);
         } else {
             try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = settings_json.len } }));
         }
@@ -3064,7 +3092,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -3084,6 +3112,8 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqualStrings("Review PR 412", facts.settings.label.?.slice());
     try std.testing.expectEqual(@as(u64, 1792925000), facts.settings.created_at.value);
     try std.testing.expectEqual(@as(u64, 1792925300), facts.peers.from_person_at.?.value);
+    try std.testing.expectEqual(@as(u64, 1), facts.first_message.value.?.?.value.position);
+    try std.testing.expectEqual(@as(u64, 4), facts.first_message.value.?.?.value.admission);
     try std.testing.expectEqual(@as(usize, 10), facts.recent_count);
     for (facts.recent[0..10], 0..) |row, i| try std.testing.expectEqual(@as(u64, 30 - i), row.turn.value);
     try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "09azvw", .{ .report = .{ .bytes = bytes } }));
@@ -3096,6 +3126,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"selected_message\":\"\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"peers\":{\"from_person_at\":\"1792925300\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "}") != null);
     try file.writePositionalAll(io, "x", 0);
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
 }

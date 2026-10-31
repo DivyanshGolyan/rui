@@ -24,6 +24,7 @@ const TerminalText = @import("TerminalText.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
+const session_line = @import("session_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -149,11 +150,27 @@ action_summary: View.ActionSummary = .{},
 dirty: bool = true,
 /// How the person is leaving, once they asked to.
 leaving: ?Outcome = null,
+/// Shown under the input until the next key, in place of the Session line.
 notice: ?[]const u8 = null,
-notice_buffer: [1536]u8 = undefined,
+notice_buffer: [notice_capacity]u8 = undefined,
+/// The Session line's facts from the latest read that took them, the
+/// unlabelled Session's name, and the line as last written.
+line: reads.Line = .{},
+hint: reads.Hint = .unread,
+shown: session_line.Shown = .{},
 
-fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted };
+/// A short command result shows as a notice up to this size.
+const short_result_bytes = 256;
+const rejection_suffix = " · /discard clears it";
+/// The longest built notice: a rejection with its code escaped (four bytes
+/// per byte at most), or a short result with a failure mark on each line.
+const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len, short_result_bytes + 2 * "! ".len);
+
+/// Fills the reader's job in place; the caller may add to it before launch.
+fn freeze(self: *Self, phase: ReadPhase) *Job {
+    std.debug.assert(self.reader.thread == null);
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.inspection.status_page and self.terminal.screen.view == .inspection;
@@ -165,9 +182,9 @@ fn freeze(self: *const Self, phase: ReadPhase) Job {
     return job;
 }
 
-fn launch(self: *Self, job: Job, worker: Task.Run) !void {
-    std.debug.assert(self.reader.thread == null);
-    self.job = job;
+/// Starts the job `freeze` filled.
+fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
+    std.debug.assert(self.reader.thread == null and job == &self.job);
     self.reading.phase = job.phase;
     self.reading.output_started = false;
     try self.reader.start(self.init.io, &self.job, worker);
@@ -630,7 +647,7 @@ fn driveActive(self: *Self) !void {
             try self.terminal.screen.latest();
             self.inspection.kind = kind;
             // The worker borrows its own copy; the editor may queue another.
-            var job = self.freeze(.inspection);
+            const job = self.freeze(.inspection);
             @memcpy(job.command_text[0..text.len], text);
             job.command_text_length = text.len;
             job.inspection_submission = self.submission.view();
@@ -665,7 +682,7 @@ fn driveActive(self: *Self) !void {
             if (self.reader.thread == null) if (self.expansion.requested) |request| {
                 self.expansion.requested = null;
                 self.expansion.reading = request;
-                var job = self.freeze(.message);
+                const job = self.freeze(.message);
                 job.message_target = request.target;
                 try self.launch(job, reads.fullMessage);
             };
@@ -759,51 +776,48 @@ fn drawFrame(self: *Self) !void {
     else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
-    const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
+    const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, status, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null }, &self.live.view));
 }
 
-// Every notice and instruction line fits beside a shortened context line.
+// A notice fits the rows under the input as the status fits above it.
 comptime {
-    std.debug.assert(@typeInfo(@FieldType(Self, "notice_buffer")).array.len + 256 + "\n\n…".len <= Frame.status_capacity);
+    std.debug.assert(@typeInfo(@FieldType(Self, "notice_buffer")).array.len <= Frame.status_capacity);
 }
 
-/// The notice and instructions always fit; a long context line is shortened,
-/// on a UTF-8 boundary, rather than pushing them out of the status region.
-/// Bypass is the default and stays quiet: /status shows Permission.
-fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: []const u8, base: []const u8) []const u8 {
+/// The instructions always fit; a long context line is shortened, on a
+/// UTF-8 boundary, rather than pushing them out of the status region.
+fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []const u8) []const u8 {
     std.debug.assert(base.len <= 256);
     var status = std.Io.Writer.fixed(buffer);
-    const room = buffer.len - notice.len - base.len - "\n\n…".len;
+    const room = buffer.len - base.len - "\n…".len;
     var context_line = context;
     if (context_line.len > room) {
         var end = room;
         while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
         context_line = context_line[0..end];
     }
-    for ([_][]const u8{ notice, context_line, base }, 0..) |line, index| {
+    for ([_][]const u8{ context_line, base }, 0..) |line, index| {
         if (line.len == 0) continue;
         if (status.buffered().len != 0) status.writeAll("\n") catch unreachable;
         status.writeAll(line) catch unreachable;
-        if (index == 1 and line.len < context.len) status.writeAll("…") catch unreachable;
+        if (index == 0 and line.len < context.len) status.writeAll("…") catch unreachable;
     }
     return status.buffered();
 }
 
-test "status lines keep the notice and instructions beside an oversized context" {
+test "status lines keep the instructions beside an oversized context" {
     var buffer: [Frame.status_capacity]u8 = undefined;
-    const notice: [1536]u8 = @splat('n');
     // A context whose cut falls inside a two-byte scalar.
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
-    const lines = statusLines(&buffer, &notice, &context, "Type a + Enter");
-    try std.testing.expect(std.mem.startsWith(u8, lines, &notice));
+    const lines = statusLines(&buffer, &context, "Type a + Enter");
     try std.testing.expect(std.mem.endsWith(u8, lines, "…\nType a + Enter"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
-    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "", "Sent"));
-    try std.testing.expectEqualStrings("! x\nWorkspace: /w\nSent", statusLines(&buffer, "! x", "Workspace: /w", "Sent"));
+    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "Sent"));
+    try std.testing.expectEqualStrings("Workspace: /w\nSent", statusLines(&buffer, "Workspace: /w", "Sent"));
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
@@ -1258,7 +1272,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
             try writer.writeAll(if (rejected.kind == .decision) "! Decision rejected: " else "! Input rejected: ");
             try text.feed(&writer, rejected.code.slice());
             try text.finish(&writer);
-            try writer.writeAll(". /discard clears it; the next draft is safe.");
+            try writer.writeAll(rejection_suffix);
             self.notice = writer.buffered();
         },
         .absent, .failed => {},
@@ -1438,19 +1452,21 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     self.live.compact_tools = false;
     var bytes: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
-    try out.writeAll(switch (pending.phase) {
-        .details => "! Details unavailable; draft retained. ",
-        .inspection => "! Inspection unavailable; draft retained. ",
-        else => "! Earlier messages unavailable; scroll up to retry. Draft retained. ",
-    });
+    const summary = switch (pending.phase) {
+        .details => "! Details unavailable; draft retained.",
+        .inspection => "! Inspection unavailable; draft retained.",
+        else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
+    };
+    try out.writeAll(summary);
+    try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
     try sink.permanent("\n");
     try sink.permanent(View.Style.failure.code(self.colour));
     try sink.permanent(out.buffered());
     try sink.permanent(View.Style.normal.code(self.colour));
     try sink.permanent("\n");
-    @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
-    self.notice = self.notice_buffer[0..out.buffered().len];
+    // The transcript keeps the details; the notice stays one terse row.
+    self.notice = summary;
     self.reading.pending_diagnostic = null;
     self.dirty = true;
 }
@@ -1508,8 +1524,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try std.testing.expect(self.reading.pending_diagnostic == null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
-            // The status region repeats it while the transcript holds the record.
-            try std.testing.expect(std.mem.indexOf(u8, self.notice.?, out.buffered()) != null);
+            try std.testing.expectEqualStrings(if (phase == .details) "! Details unavailable; draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.", self.notice.?);
         }
     }
 }
@@ -1542,6 +1557,14 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
+        if (result.line) |*line| {
+            self.line = line.*;
+            self.shown.width = null;
+        }
+        if (result.hint) |*hint| {
+            self.hint = hint.*;
+            self.shown.width = null;
+        }
         self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
@@ -1601,8 +1624,8 @@ fn showInspection(self: *Self) !void {
     // A short command result is a notice, not a page. Inside the Session the
     // speaker is known: CLI "Rui: " text loses its prefix and "rui: "
     // diagnostics become failure notices.
-    if (self.reading.phase == .inspection and self.inspection.kind == .command and size <= 256) {
-        var bytes: [256]u8 = undefined;
+    if (self.reading.phase == .inspection and self.inspection.kind == .command and size <= short_result_bytes) {
+        var bytes: [short_result_bytes]u8 = undefined;
         const text = std.mem.trimEnd(u8, bytes[0..try self.files.inspection.readPositionalAll(self.init.io, bytes[0..@intCast(size)], 0)], "\n");
         if (std.mem.count(u8, text, "\n") < 2) {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);

@@ -14,6 +14,8 @@ const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
+const session_line = @import("session_line.zig");
+const Bounded = @import("bounded.zig").Bounded;
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -28,6 +30,124 @@ pub const Inspection = enum { status, requests, help, command };
 /// its footer, status and cursor, in one UI step after join.
 /// The frontend's private scratch files, which a read borrows whole.
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+
+/// The moment a Session line was read at. Every input of the context
+/// estimate takes a Session position and every settings change a revision,
+/// so a page with another moment may show other facts.
+pub const Moment = struct { revision: u64, end: u64 };
+
+/// What the Session line shows from Current, as the UI keeps it between
+/// reads. A scan reads Current again only when its page's moment differs.
+pub const Line = struct {
+    comptime {
+        std.debug.assert(@max(protocol.max_label_bytes, protocol.max_session_bytes) <= session_line.max_name_bytes);
+    }
+
+    /// Null until the first read.
+    read: ?Moment = null,
+    label: ?Bounded(protocol.max_label_bytes) = null,
+    first_position: ?u64 = null,
+    model: Bounded(protocol.max_model_bytes) = .{},
+    effort: ?protocol.ReasoningEffort = null,
+    left: ?u8 = null,
+    asks: bool = false,
+
+    fn stale(read: ?Moment, page: *const protocol.ActivityFacts) bool {
+        const moment = read orelse return true;
+        return moment.revision != page.work.revision or moment.end != page.end;
+    }
+
+    /// Fills `line` with the facts this read's Current capture holds.
+    fn take(line: *?Line, current: *const protocol_reply.Current, moment: Moment) void {
+        const settings = &current.settings;
+        const first = (current.first_message.value orelse null) orelse null;
+        const trigger = settings.compaction_trigger;
+        const estimate = (settings.context_estimate.value orelse null) orelse null;
+        line.* = .{
+            .read = moment,
+            .label = if (settings.label) |label| plain(protocol.max_label_bytes, label.slice()) else null,
+            .first_position = if (first) |message| message.value.position else null,
+            .model = plain(protocol.max_model_bytes, settings.model.slice()),
+            .effort = if (settings.reasoning_effort) |effort| effort.value else null,
+            .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
+            .asks = settings.permission_mode.value == .ask,
+        };
+    }
+
+    /// Null until the first read.
+    pub fn facts(self: *const Line, hint: *const Hint, reference: []const u8) ?session_line.Facts {
+        if (self.read == null) return null;
+        const label: ?[]const u8 = if (self.label) |*text| text.slice() else null;
+        const line: ?[]const u8 = switch (hint.*) {
+            .line => |*text| text.slice(),
+            .unread, .absent => null,
+        };
+        return .{
+            .name = session_line.name(label, line, reference).text,
+            .model = self.model.slice(),
+            .effort = self.effort,
+            .left = self.left,
+            .asks = self.asks,
+        };
+    }
+};
+
+/// An unlabelled Session's name: its first Message's first line, read once,
+/// since that Message never changes.
+pub const Hint = union(enum) {
+    unread,
+    /// The lookup found no line to show; the reference names the Session.
+    absent,
+    line: Bounded(session_line.max_line_bytes),
+};
+
+/// Reads the hint from the first Message at `position`. A refusal or content
+/// that is not text answers it with the reference; a canonical Store,
+/// transport or cancellation failure fails the read, as the page's would.
+fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
+    var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
+    const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
+        error.InvalidResponse => return .absent,
+        else => return err,
+    };
+    switch (reply) {
+        .line => |bytes| {
+            const line = session_line.firstLine(bytes);
+            return if (line.len == 0) .absent else .{ .line = plain(session_line.max_line_bytes, line) };
+        },
+        .failure => |failure| {
+            if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
+            return .absent;
+        },
+    }
+}
+
+/// Text the Host holds, without terminal controls and with its tabs and line
+/// ends as spaces, within `limit` bytes: cut at a code point and ended with
+/// an ellipsis when longer. One pass, straight into the value.
+fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
+    var value: Bounded(limit) = .{};
+    var text: TerminalText = .{ .mode = .multiline };
+    // The longest kept text an ellipsis can still follow.
+    var room: usize = 0;
+    for (bytes, 1..) |byte, count| {
+        var storage: [32]u8 = undefined;
+        var piece = std.Io.Writer.fixed(&storage);
+        text.feed(&piece, &.{byte}) catch unreachable;
+        if (count == bytes.len) text.finish(&piece) catch unreachable;
+        const shown = piece.buffered();
+        if (value.len + shown.len > limit) {
+            value.len = room;
+            @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
+            value.len += session_line.ellipsis.len;
+            return value;
+        }
+        for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
+        value.len += shown.len;
+        if (value.len + session_line.ellipsis.len <= limit) room = value.len;
+    }
+    return value;
+}
 
 pub const Job = struct {
     init: std.process.Init = undefined,
@@ -64,10 +184,18 @@ pub const Job = struct {
     open_status: bool = false,
     watch_status: bool = false,
     status_shown: u64 = 0,
+    // The moment the UI's Session line was read at, and whether it still
+    // needs the unlabelled Session's name.
+    line_read: ?Moment = null,
+    hint_wanted: bool = false,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
         // consent describe one moment.
         work: protocol.PageWork = .{},
+        // The Session line's facts, when this read took them.
+        line: ?Line = null,
+        // The unlabelled Session's name, when this read looked it up.
+        hint: ?Hint = null,
         // /status from one Current capture is in the status file.
         status: bool = false,
         status_digest: u64 = 0,
@@ -147,21 +275,29 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     };
     // The page carries its work from its own Store read.
     job.result.work = page.facts.work;
-    // Only /status reads Current, once; it may be newer than the page.
-    if (job.open_status or job.watch_status) {
+    // /status and a stale Session line read Current, once; it may be newer
+    // than the page.
+    const line_stale = Line.stale(job.line_read, &page.facts);
+    if (job.open_status or job.watch_status or line_stale) {
         const current = try View.current(requests, job.store, job.session, job.files.scratch);
+        if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
         // Before anything else reuses scratch, which holds this capture's rows.
-        job.result.status_digest = try statusDigest(job, task.io, &current);
-        if (job.open_status or job.result.status_digest != job.status_shown) {
-            try job.files.status.setLength(task.io, 0);
-            try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
-            var buffer: [4096]u8 = undefined;
-            var output = job.files.status.writerStreaming(task.io, &buffer);
-            try writeStatus(job, task.io, &current, &output.interface);
-            try output.flush();
-            job.result.status = true;
+        if (job.open_status or job.watch_status) {
+            job.result.status_digest = try statusDigest(job, task.io, &current);
+            if (job.open_status or job.result.status_digest != job.status_shown) {
+                try job.files.status.setLength(task.io, 0);
+                try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
+                var buffer: [4096]u8 = undefined;
+                var output = job.files.status.writerStreaming(task.io, &buffer);
+                try writeStatus(job, task.io, &current, &output.interface);
+                try output.flush();
+                job.result.status = true;
+            }
         }
     }
+    if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
+        job.result.hint = try readHint(requests, job, position);
+    };
     job.result.live = View.Live.init(page.facts.call_activity);
     // Admission ids follow Session positions, so the newest one shown
     // means every earlier Message was delivered too.
@@ -927,7 +1063,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
@@ -998,4 +1134,94 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     try std.testing.expectEqual(@as(?c_int, null), Probe.leaked);
     var bytes: [16]u8 = undefined;
     try std.testing.expectEqualStrings("page\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
+}
+
+test "the Session line takes its facts from Current and reads again after a change" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+    const reference_format = "{{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
+    var line: ?Line = null;
+    const unread: Hint = .unread;
+    try std.testing.expect((Line{}).facts(&unread, "k7m2qx") == null);
+    const moment: Moment = .{ .revision = 3, .end = 40 };
+    var page: protocol.ActivityFacts = .{ .end = 40, .work = .{ .revision = 3 } };
+    try std.testing.expect(Line.stale(null, &page));
+    for ([_]struct { label: []const u8, mode: []const u8, effort: []const u8, trigger: []const u8, estimate: []const u8, first: []const u8, name: []const u8, left: ?u8 }{
+        .{ .label = "\"Fix \\u001b[31mtests\"", .mode = "ask", .effort = "\"low\"", .trigger = "\"1000\"", .estimate = "\"310\"", .first = "null", .name = "Fix \\x1b[31mtests", .left = 69 },
+        .{ .label = "null", .mode = "bypass", .effort = "null", .trigger = "null", .estimate = "null", .first = "null", .name = "k7m2qx", .left = null },
+        .{ .label = "null", .mode = "bypass", .effort = "\"high\"", .trigger = "\"1000\"", .estimate = "\"1000\"", .first = "{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1\",\"sender\":null,\"content\":" ++ reference ++ "}", .name = "k7m2qx", .left = 0 },
+    }) |case| {
+        var bytes: [4096]u8 = undefined;
+        const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, case.first });
+        try file.setLength(io, 0);
+        try file.writePositionalAll(io, report, 0);
+        const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
+            std.debug.print("{s}\n", .{report});
+            return err;
+        };
+        Line.take(&line, &reply.current, moment);
+        try std.testing.expect(!Line.stale(line.?.read, &page));
+        const facts = line.?.facts(&unread, "k7m2qx").?;
+        try std.testing.expectEqualStrings(case.name, facts.name);
+        // The model's control byte shows as text, not as a terminal control.
+        try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
+        try std.testing.expectEqual(case.left, facts.left);
+        try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
+        try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
+        try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
+    }
+    // The first line names an unlabelled Session once read; a blank one
+    // leaves the reference.
+    const hint: Hint = .{ .line = plain(session_line.max_line_bytes, session_line.firstLine("  Summarize\tCI\r\nand more")) };
+    try std.testing.expectEqualStrings("Summarize CI", line.?.facts(&hint, "k7m2qx").?.name);
+    const absent: Hint = .absent;
+    try std.testing.expectEqualStrings("k7m2qx", line.?.facts(&absent, "k7m2qx").?.name);
+    // Another revision or end position makes the facts stale; another page
+    // of the same moment does not.
+    for ([_]Moment{ .{ .revision = 4, .end = 40 }, .{ .revision = 3, .end = 41 } }) |next| {
+        page.work.revision = next.revision;
+        page.end = next.end;
+        try std.testing.expect(Line.stale(moment, &page));
+    }
+    page.end = 40;
+    page.work.revision = 3;
+    page.work.work = .{ .turn = 9, .operation = 12 };
+    try std.testing.expect(!Line.stale(moment, &page));
+}
+
+test "plain text keeps whole code points within its bound, escapes controls and cuts once" {
+    try std.testing.expectEqualStrings("a b c", plain(16, "a\tb\nc").slice());
+    try std.testing.expectEqualStrings("x\\x1b[31my", plain(16, "x\x1b[31my").slice());
+    // Every length around the bound, with two-byte code points and escapes:
+    // the value is the whole escaped text when it fits, else its longest
+    // whole-code-point start that leaves room for the ellipsis, then one.
+    for ([_][]const u8{ "é", "a", "\x01", "中" }) |unit| for (0..12) |count| {
+        var bytes: [64]u8 = undefined;
+        for (0..count) |at| @memcpy(bytes[at * unit.len ..][0..unit.len], unit);
+        const source = bytes[0 .. count * unit.len];
+        var escaped: [256]u8 = undefined;
+        var out = std.Io.Writer.fixed(&escaped);
+        var text: TerminalText = .{ .mode = .multiline };
+        try text.feed(&out, source);
+        try text.finish(&out);
+        const whole = out.buffered();
+        const value = plain(12, source);
+        const shown = value.slice();
+        try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+        try std.testing.expect(shown.len <= 12);
+        if (whole.len <= 12) {
+            try std.testing.expectEqualStrings(whole, shown);
+        } else {
+            const kept = shown[0 .. shown.len - session_line.ellipsis.len];
+            try std.testing.expect(std.mem.endsWith(u8, shown, session_line.ellipsis));
+            try std.testing.expect(std.mem.startsWith(u8, whole, kept));
+            // One more escaped unit would not leave room for the ellipsis.
+            const unit_len = whole.len / count;
+            try std.testing.expect(kept.len % unit_len == 0 and kept.len + unit_len + session_line.ellipsis.len > 12);
+        }
+    };
 }

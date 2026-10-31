@@ -12,6 +12,7 @@
 //! overview state.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
+const session_line = @import("session_line.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
@@ -37,7 +38,7 @@ pub const max_page_rows = 8;
 /// First lines one refresh asks for.
 pub const max_first_line_reads = 8;
 /// Bytes of a first line kept for its title; a longer line ends in an ellipsis.
-pub const max_line_bytes = 256;
+pub const max_line_bytes = session_line.max_line_bytes;
 /// The shell reads this much of a first line: one byte more than a row keeps,
 /// so a longer line shows that it was cut.
 pub const max_line_read_bytes = max_line_bytes + 1;
@@ -636,7 +637,7 @@ pub const State = struct {
     /// ledger is full, and the overview says so.
     fn request(self: *State, kind: @FieldType(Request, "kind"), ref: ?Reference) bool {
         if (self.request_count == max_requests) {
-            self.say(.attention, "! Too many requests waiting. Try again shortly.", .{});
+            self.say(.attention, "! Busy; try again shortly.", .{});
             return false;
         }
         self.requests[self.request_count] = .{ .kind = kind, .session = ref };
@@ -802,11 +803,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .stopped => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! Could not stop {s}. ({s})", .{ &result.reference, code });
+                    state.say(.attention, "! {s} not stopped: {s}", .{ &result.reference, code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! Not sure {s} stopped. Details when you leave.", .{&result.reference});
+                    state.say(.attention, "! {s} stop unsure; details on exit", .{&result.reference});
                 },
             }
             state.next_list_ms = 0;
@@ -826,7 +827,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! Could not start the Session. ({s})", .{code});
+                    state.say(.attention, "! Not started: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
                     // The saved request holds the text; recovery, not a
@@ -835,7 +836,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     if (!state.left) effects.add(.clear_draft);
                     state.settings = .{};
                     state.next_list_ms = 0;
-                    state.say(.attention, "! Not sure the Session started. Details when you leave.", .{});
+                    state.say(.attention, "! Start unsure; details on exit", .{});
                 },
             }
         },
@@ -1106,32 +1107,8 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
         row.line = .unavailable;
         return;
     };
-    try state.lines.append(state.gpa, firstLineText(bytes));
+    try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
-}
-
-/// The line up to its first line end, trimmed, within `max_line_bytes`.
-fn firstLineText(bytes: []const u8) Bounded(max_line_bytes) {
-    const end = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
-    const line = std.mem.trim(u8, bytes[0..end], " \t");
-    var value: Bounded(max_line_bytes) = .{};
-    const ellipsis = "…";
-    const kept = if (line.len <= max_line_bytes) line.len else codepointStart(line, max_line_bytes - ellipsis.len);
-    @memcpy(value.bytes[0..kept], line[0..kept]);
-    value.len = kept;
-    if (kept < line.len) {
-        @memcpy(value.bytes[kept..][0..ellipsis.len], ellipsis);
-        value.len += ellipsis.len;
-    }
-    return value;
-}
-
-/// The start of the code point holding byte `at`, so a cut there keeps whole
-/// code points.
-fn codepointStart(bytes: []const u8, at: usize) usize {
-    var start = at;
-    while (start > 0 and start < bytes.len and bytes[start] & 0xc0 == 0x80) start -= 1;
-    return start;
 }
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
@@ -1159,10 +1136,10 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
-                .invalid => state.say(.attention, "! That text had bytes that are not text, so it was not sent.", .{}),
-                .overflow => state.say(.attention, "! That's too long to send.", .{}),
-                .edit_rejected => state.say(.attention, "! That character cannot stand alone, so it was not added.", .{}),
-                .unbound => state.say(.attention, "! That key combination does nothing here.", .{}),
+                .invalid => state.say(.attention, "! Not valid text; nothing sent.", .{}),
+                .overflow => state.say(.attention, "! Too long to send.", .{}),
+                .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
+                .unbound => state.say(.attention, "! That key does nothing here.", .{}),
             }
         },
     }
@@ -1177,7 +1154,7 @@ fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
 /// Says why `row` takes no stop. An unconfirmed one says leaving gives the details.
 fn refuseStop(state: *State, row: *const Row) void {
     if (state.openStop(row.reference)) |held| if (held.status == .unknown)
-        return state.say(.attention, "! Not sure {s} stopped. Details when you leave.", .{&row.reference});
+        return state.say(.attention, "! {s} stop unsure; details on exit", .{&row.reference});
     state.say(.quiet, "{s} is already {s}.", .{ &row.reference, rules.get(shownKind(state, row)).word });
 }
 
@@ -1201,7 +1178,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) void {
     }
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
-    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown command. Try /configure or /exit.", .{});
+    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /configure or /exit", .{});
     if (configure(state, text[name.len..])) effects.add(.clear_draft);
 }
 
@@ -1231,20 +1208,20 @@ fn configure(state: *State, arguments: []const u8) bool {
     }
     for (cli_args.live_configure.options) |option| {
         if (parsed.has(option.name) and startOption(option.name) == null) {
-            state.say(.attention, "! --{s} is not a start setting; set it once the Session starts.", .{option.name});
+            state.say(.attention, "! Set --{s} after the start", .{option.name});
             return false;
         }
     }
     // The Host admits any model name, so the client checks release support,
     // as `session start` does.
     if (parsed.get("model")) |model| if (!model_capability.supportsModel(model)) {
-        state.say(.attention, "! Unsupported model {s}; rui session configure --help lists them.", .{model});
+        state.say(.attention, "! Unsupported; session configure -h", .{});
         return false;
     };
     var next: StartSettings = .{};
     inline for (start_options, 0..) |name, option| {
         if (parsed.get(name) orelse state.settings.get(option)) |value| next.put(option, value) catch {
-            state.say(.attention, "! Start settings hold at most {d} bytes.", .{StartSettings.max_bytes});
+            state.say(.attention, "! Settings over {d} bytes", .{StartSettings.max_bytes});
             return false;
         };
     }
@@ -2398,10 +2375,8 @@ fn pulseEnd(row: *const Row) u64 {
 
 /// The row title: its Label, else the first line of its first Message (a
 /// greyed hint), else its reference.
-fn title(state: *const State, row: *const Row) struct { text: []const u8, hint: bool } {
-    if (row.label) |*text| return .{ .text = text.slice(), .hint = false };
-    if (state.lineOf(row)) |line| return .{ .text = line, .hint = true };
-    return .{ .text = &row.reference, .hint = true };
+fn title(state: *const State, row: *const Row) session_line.Name {
+    return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
 /// What the row says beside its title, unless its group heading says it.
@@ -2547,10 +2522,29 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
+/// A notice, which reads whole on a 40-column overview in the row under its
+/// input.
 fn expectNotice(state: *const State, expected: ?[]const u8) !void {
+    return expectNoticeAt(state, expected, true);
+}
+
+/// A notice whose data (a Host's code, the list of start settings) may be
+/// cut at the edge of a narrow overview; its wording is not.
+fn expectNoticeWithData(state: *const State, expected: []const u8) !void {
+    return expectNoticeAt(state, expected, false);
+}
+
+fn expectNoticeAt(state: *const State, expected: ?[]const u8, whole_at_40: bool) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
+        if (whole_at_40 and state.prompt == null) {
+            const screen = try screenText(state, 40, 24, .{});
+            defer std.testing.allocator.free(screen);
+            var lines = std.mem.splitScalar(u8, screen, '\n');
+            for (0..23) |_| _ = lines.next();
+            try std.testing.expectEqualStrings(text, std.mem.trim(u8, lines.next().?, " "));
+        }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
 
@@ -2896,7 +2890,7 @@ test "a cancelled stop prompt sends nothing" {
     try expectEffects(&.{}, try press(&state, .{}, .stop));
     try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .{}, .stop));
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .failed = "session_not_found" } } }));
-    try expectNotice(&state, "! Could not stop k7m2qx. (session_not_found)");
+    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
 }
 
 test "unconfirmed stops keep their handles until departure; a full ledger refuses another" {
@@ -2916,7 +2910,7 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
         var bytes: [32]u8 = undefined;
         const handle = try std.fmt.bufPrint(&bytes, "stop-handle-{d}", .{n});
         var notice: [128]u8 = undefined;
-        const recover = try std.fmt.bufPrint(&notice, "! Not sure {s} stopped. Details when you leave.", .{ref});
+        const recover = try std.fmt.bufPrint(&notice, "! {s} stop unsure; details on exit", .{ref});
         try expectEffects(&.{}, try press(&state, .{}, .stop));
         try expectEffects(&.{.{ .stop = ref.* }}, try press(&state, .{}, .stop));
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref.*, .outcome = .{ .unconfirmed = handle } } }));
@@ -2936,7 +2930,7 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
     for (stopped) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, &last));
     try expectEffects(&.{}, try press(&state, .{}, .stop));
     try expectEffects(&.{}, try press(&state, .{}, .stop));
-    try expectNotice(&state, "! Too many requests waiting. Try again shortly.");
+    try expectNotice(&state, "! Busy; try again shortly.");
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try writeDeparture(&state, &departure.writer);
@@ -3007,7 +3001,7 @@ test "the composer starts a Session with its text and opens it" {
     draft = try typeText(&state, "Try again");
     _ = try submit(&state, draft);
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    try expectNotice(&state, "! Could not start the Session. (model_capability_unavailable)");
+    try expectNoticeWithData(&state, "! Not started: model_capability_unavailable");
     try std.testing.expect(!state.starting());
 }
 
@@ -3017,7 +3011,7 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{}, try submit(&state, draft));
-    try expectNotice(&state, "! Unknown command. Try /configure or /exit.");
+    try expectNotice(&state, "! Unknown; try /configure or /exit");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
@@ -3064,19 +3058,19 @@ test "/configure holds start settings for the Session the next Enter starts" {
 
     // Only `session start` options, in the conversation's grammar, are held.
     for ([_]struct { []const u8, []const u8 }{
-        .{ "/configure --instructions -", "! --instructions is not a start setting; set it once the Session starts." },
-        .{ "/configure --text-output", "! --text-output is not a start setting; set it once the Session starts." },
+        .{ "/configure --instructions -", "! Set --instructions after the start" },
+        .{ "/configure --text-output", "! Set --text-output after the start" },
         .{ "/configure", configure_usage },
         .{ "/configure --help", configure_usage },
         .{ "/configure --bogus 1", configure_usage },
         .{ "/configure --label \"open", configure_usage },
         // The Host would admit it; its Turns would fail at the provider.
-        .{ "/configure --model gpt-5", "! Unsupported model gpt-5; rui session configure --help lists them." },
-        .{ "/status", "! Unknown command. Try /configure or /exit." },
+        .{ "/configure --model gpt-5", "! Unsupported; session configure -h" },
+        .{ "/status", "! Unknown; try /configure or /exit" },
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{}, try submit(&state, draft));
-        try expectNotice(&state, case[1]);
+        try if (case[1].ptr == configure_usage.ptr) expectNoticeWithData(&state, case[1]) else expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
     }
 }
@@ -3115,10 +3109,10 @@ test "end of input, ctrl-c and /exit leave" {
 test "a line the editor rejects says why once; text it could not take clears" {
     var draft: Draft = .{};
     for ([_]struct { keymap.Outcome(Action), []const u8, bool }{
-        .{ .{ .refused = .invalid }, "! That text had bytes that are not text, so it was not sent.", true },
-        .{ .{ .refused = .overflow }, "! That's too long to send.", true },
-        .{ .{ .refused = .edit_rejected }, "! That character cannot stand alone, so it was not added.", false },
-        .{ .{ .refused = .unbound }, "! That key combination does nothing here.", false },
+        .{ .{ .refused = .invalid }, "! Not valid text; nothing sent.", true },
+        .{ .{ .refused = .overflow }, "! Too long to send.", true },
+        .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
+        .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {
         var state = try opened(&mixed);
         defer state.deinit();
@@ -3160,8 +3154,8 @@ test "an unconfirmed start clears the composer and names the request that recove
     try expectEffects(&.{.clear_draft}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
     try std.testing.expect(!state.starting());
     try std.testing.expect(state.settings.empty());
-    try expectNotice(&state, "! Not sure the Session started. Details when you leave.");
-    try expectScreenLine(&state, 23, " ! Not sure the Session started. Details when you leave.");
+    try expectNotice(&state, "! Start unsure; details on exit");
+    try expectScreenLine(&state, 23, " ! Start unsure; details on exit");
     // The next tick lists at once, so a start that did land shows.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
     // A second unconfirmed start keeps the first one's handle.
@@ -3304,8 +3298,8 @@ test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM
 
 test "a first line read one byte past the kept bound shows it was cut" {
     var line: [max_line_read_bytes]u8 = @splat('a');
-    try std.testing.expect(std.mem.endsWith(u8, firstLineText(&line).slice(), "…"));
-    try std.testing.expect(!std.mem.endsWith(u8, firstLineText(line[0..max_line_bytes]).slice(), "…"));
+    try std.testing.expect(std.mem.endsWith(u8, session_line.cut(max_line_bytes, session_line.firstLine(&line)).slice(), "…"));
+    try std.testing.expect(!std.mem.endsWith(u8, session_line.cut(max_line_bytes, session_line.firstLine(line[0..max_line_bytes])).slice(), "…"));
 }
 
 test "a first line arriving titles its unlabelled row" {
@@ -3407,16 +3401,6 @@ test "a row from another Workspace keeps its title at every width" {
         const columns = Columns.of(width);
         try std.testing.expect(columns.workspace == 0 or columns.word -| 2 -| Columns.title -| 2 -| columns.workspace >= columns.workspace);
     }
-}
-
-test "a long first line keeps whole code points and ends in an ellipsis" {
-    var line: [400]u8 = undefined;
-    for (0..200) |at| @memcpy(line[at * 2 ..][0..2], "é");
-    const kept = firstLineText(&line);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(kept.slice()));
-    try std.testing.expect(std.mem.endsWith(u8, kept.slice(), "…"));
-    try std.testing.expect(kept.len <= max_line_bytes);
-    try std.testing.expectEqualStrings("short", firstLineText("short\nrest").slice());
 }
 
 test "the selection stays on its Session when it moves from working to finished" {

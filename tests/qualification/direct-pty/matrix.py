@@ -89,24 +89,24 @@ def inventory():
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
     for name, enter, leave, first in (
-        ("key-pgup", b"\x1b[5~", b"\x07", 59),
-        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 38),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 59),
-        ("key-up-csi", b"\x1b[A", b"\x07", 79),
-        ("key-up-ss3", b"\x1bOA", b"\x07", 79),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 59),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 59),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 59),
-        ("key-esc", b"\x1b[5~", b"\x1b", 59),
-        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 77),
+        ("key-pgup", b"\x1b[5~", b"\x07", 61),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 41),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 61),
+        ("key-up-csi", b"\x1b[A", b"\x07", 80),
+        ("key-up-ss3", b"\x1bOA", b"\x07", 80),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 61),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 61),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 61),
+        ("key-esc", b"\x1b[5~", b"\x1b", 61),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 78),
         ("status", b"/status\r", b"\x1b", None),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
                   "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
         if name == "key-pgdn":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 59}]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 61}]
         elif name == "wheel-alt-scroll":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (78, 79)]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (79, 80)]
         rows.append(vector)
     for name, data, expected in (
         ("typing", b"tmux typing\r", "tmux typing"),

@@ -375,7 +375,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         else => .activity,
                     };
                     front.admission.details_sent = front.admission.sent;
-                    front.job = ops.freeze(front, front.reading.phase);
+                    _ = ops.freeze(front, front.reading.phase);
                     front.job.result.history_cursor = next_cursor;
                     if (event == .status) {
                         front.inspection.status_requested = true;
@@ -520,7 +520,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     front.submission.store = store;
     front.submission.session = session;
     front.reading.phase = .activity;
-    front.job = ops.freeze(front, .activity);
+    _ = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
     try ops.scan(&front.job, &task);
     try ops.showStaged(front);
@@ -531,7 +531,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     try std.testing.expect(std.c.read(release_file.handle, &byte, 1) == 1);
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
     for (0..16) |prefix| {
-        front.job = ops.freeze(front, .activity);
+        _ = ops.freeze(front, .activity);
         try ops.scan(&front.job, &task);
         try ops.showStaged(front);
         try ops.applyReader(front, .complete);
@@ -638,12 +638,12 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, "", &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
         } else {
             // Every frame byte is accepted before flush fails. Publishing
             // between writeAll and flush must fail this independent control.
             var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, "", &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);

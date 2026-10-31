@@ -1396,7 +1396,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
@@ -1409,7 +1409,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     // A stop still running as the overview ends is named the same way.
     const running = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer running.close();
@@ -1529,7 +1529,7 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("! Not sure k7m2qx stopped. Details when you leave.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n", try finishedGuidance(rig, &buffer));
 }
@@ -1598,7 +1598,7 @@ test "bytes that are not text reject the composer's line at Enter, as in a conve
     const rig = try openComposer();
     defer rig.close();
     try expectStarted(rig, "\x1b[200~first\xffsecond\x1b[201~\r", null);
-    try std.testing.expectEqualStrings("! That text had bytes that are not text, so it was not sent.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Not valid text; nothing sent.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "typed\xff\r", null);
     // The rejected line is gone; the next one starts alone.
     try expectStarted(rig, "next\r", "next");
@@ -1620,7 +1620,7 @@ test "a draft past the editor's capacity starts nothing" {
     defer rig.close();
     const pasted = "\x1b[200~" ++ @as([SessionInput.capacity + 1]u8, @splat('x')) ++ "\x1b[201~\r";
     try expectStarted(rig, pasted, null);
-    try std.testing.expectEqualStrings("! That's too long to send.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Too long to send.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "next\r", "next");
 }
 
@@ -1821,9 +1821,9 @@ test "keys the editor declines say so and leave the draft" {
     const rig = try openComposer();
     defer rig.close();
     try expectStarted(rig, "\u{200d}", null);
-    try std.testing.expectEqualStrings("! That character cannot stand alone, so it was not added.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! Can't add that character alone.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "ab\x1bx", null);
-    try std.testing.expectEqualStrings("! That key combination does nothing here.", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! That key does nothing here.", rig.overview.state.notice.?.text());
     try expectStarted(rig, "c\r", "abc");
 }
 
