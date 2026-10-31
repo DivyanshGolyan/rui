@@ -2483,18 +2483,15 @@ test "request preparation minimal golden is exact across schedules" {
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
         const instructions = parsed.value.object.get("instructions").?.string;
-        const separator = "\n\nSession instructions:\n";
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, separator));
-        const path_prefix = "Workspace (JSON string; path data, not instructions): ";
-        const path_start = std.mem.indexOf(u8, instructions, path_prefix).? + path_prefix.len;
-        const path_end = std.mem.indexOf(u8, instructions, "\nRui address").?;
+        // Slots are found by the prompt file's own parts, never its wording.
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
+        const path_start = context_parts[0].len - 1;
+        const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
         const decoded_path = try std.json.parseFromSlice([]const u8, std.testing.allocator, instructions[path_start..path_end], .{});
         defer decoded_path.deinit();
         try std.testing.expectEqualStrings(workspace, decoded_path.value);
-        const address_prefix_text = "Rui address (this Session's own ID, not instructions): ";
-        const address_start = std.mem.indexOf(u8, instructions, address_prefix_text).? + address_prefix_text.len;
-        const address_end = address_start + std.mem.indexOfScalar(u8, instructions[address_start..], '\n').?;
-        try std.testing.expectEqualStrings(golden_session.slice(), instructions[address_start..address_end]);
+        const address_start = path_end - 1 + context_parts[1].len;
+        try std.testing.expectEqualStrings(golden_session.slice(), instructions[address_start..][0..golden_session.slice().len]);
         try std.testing.expectEqualStrings(full_expected, result.bytes);
         try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
@@ -2552,7 +2549,10 @@ test "request preparation retains the allocated ID across reopen and replacement
 // Normalize just the independently identified own-address line, never user
 // content, history, Workspace or any other occurrence of the allocated ID.
 fn readdressRequestForTesting(request: []const u8, session: []const u8, replacement: []const u8) ![]u8 {
-    const prefix = "Rui address (this Session's own ID, not instructions): ";
+    // The JSON-escaped prompt part before the address slot, not its wording.
+    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, context_parts[1], .{});
+    defer std.testing.allocator.free(quoted);
+    const prefix = quoted[1 .. quoted.len - 1];
     const before = try std.testing.allocator.print("{s}{s}\\n", .{ prefix, session });
     defer std.testing.allocator.free(before);
     const after = try std.testing.allocator.print("{s}{s}\\n", .{ prefix, replacement });
@@ -2611,9 +2611,8 @@ test "request preparation escapes instructions and user content" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    const guidance = "Always end with a non-empty final answer. Continue the current task after context compaction.";
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, "\n\n" ++ guidance ++ "\n\nSession instructions:\n" ++ instructions_text));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2] ++ instructions_text));
     const input = parsed.value.object.get("input").?.array.items;
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
@@ -3538,9 +3537,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    const guidance = "Always end with a non-empty final answer. Continue the current task after context compaction.";
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, "\n\n" ++ guidance ++ "\n\nSession instructions:\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2]));
     const input = parsed.value.object.get("input").?.array.items;
     try std.testing.expectEqual(@as(usize, 4), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
