@@ -1,0 +1,40 @@
+diff --git a/build.zig b/build.zig
+index a30c551..2398269 100644
+--- a/build.zig
++++ b/build.zig
+@@ -891,6 +891,7 @@ fn addRui(
+     configureHostLaunch(b, executable);
+     configureTerminalEditor(b, executable);
+     configureTransport(b, executable, target, pinned_transport);
++    executable.root_module.addImport("codec_runtime", addCodecRuntime(b, target, optimize, true));
+     return executable;
+ }
+ 
+diff --git a/src/cli.zig b/src/cli.zig
+index 8a0cfcc..8664315 100644
+--- a/src/cli.zig
++++ b/src/cli.zig
+@@ -41,6 +41,7 @@ test "detached launcher reports exec failure before claiming Host readiness" {
+ }
+ 
+ pub fn main(init: std.process.Init) !void {
++    if (std.c.getenv("RUI_CODEC_RUNTIME_PROBE") != null) codecRuntimeProbe();
+     run(init) catch |err| {
+         if (err == error.EmptyMessageInput) {
+             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
+@@ -2819,3 +2820,15 @@ fn testPipe() ![2]std.posix.fd_t {
+ fn closeDescriptor(fd: std.posix.fd_t) void {
+     _ = std.c.close(fd);
+ }
++
++fn codecRuntimeProbe() void {
++    const cr = @import("codec_runtime");
++    var bytes = "\x00asm\x01\x00\x00\x00".*;
++    var module = cr.Module.load(&bytes) catch return;
++    defer module.unload();
++    var job = cr.Job.begin(&module, .{ .memory_pages = 1 }) catch return;
++    defer job.end();
++    const f = job.function("f", 0) orelse return;
++    _ = job.call(f, &.{}, 1) catch return;
++    _ = job.memory();
++}

@@ -102,6 +102,40 @@ pub fn build(b: *std.Build) void {
         h2_test_step.dependOn(&run_h2_tests.step);
     }
 
+    const codec_runtime_test_step = b.step("test-codec-runtime", "Run the codec sandbox's own tests against tiny modules");
+    const codec_runtime_tests = b.addTest(.{
+        .root_module = addCodecRuntime(b, target, .ReleaseSafe, true),
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    codec_runtime_tests.root_module.addAnonymousImport("codec_runtime_fixture", .{
+        .root_source_file = addWasmModule(b, "codec-runtime-fixture", "src/codec_runtime/fixture.zig").getEmittedBin(),
+    });
+    const run_codec_runtime_tests = ci.run(codec_runtime_tests);
+    run_codec_runtime_tests.has_side_effects = true;
+    codec_runtime_test_step.dependOn(&run_codec_runtime_tests.step);
+
+    const codec_runtime_bench = b.addExecutable(.{
+        .name = "rui-codec-runtime-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/codec_runtime/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const bench_c_safety = b.option(bool, "codec-runtime-c-safety", "Keep Zig's C safety checks in WAMR for codec-runtime-bench (default true, as tests build it)") orelse true;
+    codec_runtime_bench.root_module.addImport("codec_runtime", addCodecRuntime(b, target, .ReleaseSafe, bench_c_safety));
+    codec_runtime_bench.root_module.addImport("scan", b.createModule(.{ .root_source_file = b.path("src/codec_runtime/scan.zig") }));
+    codec_runtime_bench.root_module.addAnonymousImport("scan_wasm", .{
+        .root_source_file = addWasmModule(b, "codec-runtime-scan", "src/codec_runtime/scan_module.zig").getEmittedBin(),
+    });
+    const run_codec_runtime_bench = b.addRunArtifact(codec_runtime_bench);
+    run_codec_runtime_bench.has_side_effects = true;
+    run_codec_runtime_bench.addPassthruArgs();
+    b.step(
+        "codec-runtime-bench",
+        "Measure the codec sandbox: wasm vs native scan throughput and private memory per phase (nonblocking)",
+    ).dependOn(&run_codec_runtime_bench.step);
+
     // Test actors are never shipped and run briefly. On x86_64, Zig's own
     // backend builds each in about a second, where LLVM pays a ~28 CPU-second
     // ReleaseSafe floor; safety checks stay on. Its aarch64-macos build of these
@@ -488,6 +522,7 @@ pub fn build(b: *std.Build) void {
         "--ast-check",
     });
     check_step.dependOn(h2_test_step);
+    check_step.dependOn(codec_runtime_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
@@ -545,6 +580,7 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(&run_tests.step);
         process_integrations.step.dependOn(&run_renderer_allocation.step);
         process_integrations.step.dependOn(h2_test_step);
+        process_integrations.step.dependOn(codec_runtime_test_step);
     }
     process_integrations.addFileInput(ci.path(release));
     full_check_step.dependOn(&process_integrations.step);
@@ -975,6 +1011,128 @@ fn addH2(
         module.linkSystemLibrary("pthread", .{});
         module.linkSystemLibrary("dl", .{});
     }
+    return module;
+}
+
+/// The codec sandbox: WAMR's fast interpreter built from the pinned source,
+/// with no AOT, JIT, WASI, threads or host functions. Software bounds checks
+/// keep WAMR from installing signal handlers or reserving 8 GiB per instance.
+fn addCodecRuntime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, c_safety: bool) *std.Build.Module {
+    const wamr = b.dependency("wamr", .{});
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/codec_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const bindings = addBindings(b, module, "wamr",
+        \\#include <wasm_export.h>
+        \\
+    );
+    bindings.addIncludePath(wamr.path("core/iwasm/include"));
+    const darwin = target.result.os.tag == .macos;
+    for ([_][]const u8{
+        "core/iwasm/include",
+        "core/iwasm/common",
+        "core/iwasm/interpreter",
+        "core/shared/mem-alloc",
+        "core/shared/utils",
+        "core/shared/platform/include",
+        if (darwin) "core/shared/platform/darwin" else "core/shared/platform/linux",
+    }) |path| module.addIncludePath(wamr.path(path));
+    const macros = [_][2][]const u8{
+        .{ "BH_MALLOC", "wasm_runtime_malloc" },
+        .{ "BH_FREE", "wasm_runtime_free" },
+        .{ if (darwin) "BH_PLATFORM_DARWIN" else "BH_PLATFORM_LINUX", "1" },
+        .{ if (target.result.cpu.arch == .aarch64) "BUILD_TARGET_AARCH64" else "BUILD_TARGET_X86_64", "1" },
+        .{ "WASM_ENABLE_INTERP", "1" },
+        .{ "WASM_ENABLE_FAST_INTERP", "1" },
+        .{ "WASM_ENABLE_AOT", "0" },
+        .{ "WASM_ENABLE_JIT", "0" },
+        .{ "WASM_ENABLE_FAST_JIT", "0" },
+        .{ "WASM_ENABLE_LIBC_BUILTIN", "0" },
+        .{ "WASM_ENABLE_LIBC_WASI", "0" },
+        .{ "WASM_ENABLE_MULTI_MODULE", "0" },
+        .{ "WASM_ENABLE_MINI_LOADER", "0" },
+        .{ "WASM_ENABLE_SHARED_MEMORY", "0" },
+        .{ "WASM_ENABLE_THREAD_MGR", "0" },
+        .{ "WASM_ENABLE_BULK_MEMORY", "1" },
+        .{ "WASM_ENABLE_REF_TYPES", "1" },
+        .{ "WASM_ENABLE_SIMD", "0" },
+        .{ "WASM_ENABLE_INSTRUCTION_METERING", "1" },
+        .{ "WASM_DISABLE_HW_BOUND_CHECK", "1" },
+        .{ "WASM_DISABLE_STACK_HW_BOUND_CHECK", "1" },
+        .{ "WASM_DISABLE_WAKEUP_BLOCKING_OP", "1" },
+        .{ "WASM_HAVE_MREMAP", if (darwin) "0" else "1" },
+        // Otherwise WAMR guesses from Zig and Clang globals that memory above
+        // the heap base is unused, and cuts it from the module.
+        .{ "WASM_ENABLE_SHRUNK_MEMORY", "0" },
+    };
+    for (macros) |macro| module.addCMacro(macro[0], macro[1]);
+    if (!darwin) module.addCMacro("_GNU_SOURCE", "1");
+    module.addCSourceFiles(.{
+        .root = wamr.path("."),
+        .files = &.{
+            "core/shared/platform/common/posix/posix_blocking_op.c",
+            "core/shared/platform/common/posix/posix_malloc.c",
+            "core/shared/platform/common/posix/posix_memmap.c",
+            "core/shared/platform/common/posix/posix_sleep.c",
+            "core/shared/platform/common/posix/posix_thread.c",
+            "core/shared/platform/common/posix/posix_time.c",
+            "core/shared/mem-alloc/ems/ems_alloc.c",
+            "core/shared/mem-alloc/ems/ems_gc.c",
+            "core/shared/mem-alloc/ems/ems_hmu.c",
+            "core/shared/mem-alloc/ems/ems_kfc.c",
+            "core/shared/mem-alloc/mem_alloc.c",
+            "core/shared/utils/bh_assert.c",
+            "core/shared/utils/bh_bitmap.c",
+            "core/shared/utils/bh_common.c",
+            "core/shared/utils/bh_hashmap.c",
+            "core/shared/utils/bh_leb128.c",
+            "core/shared/utils/bh_list.c",
+            "core/shared/utils/bh_log.c",
+            "core/shared/utils/bh_queue.c",
+            "core/shared/utils/bh_vector.c",
+            "core/shared/utils/runtime_timer.c",
+            "core/iwasm/common/wasm_blocking_op.c",
+            "core/iwasm/common/wasm_c_api.c",
+            "core/iwasm/common/wasm_exec_env.c",
+            "core/iwasm/common/wasm_loader_common.c",
+            "core/iwasm/common/wasm_memory.c",
+            "core/iwasm/common/wasm_native.c",
+            "core/iwasm/common/wasm_runtime_common.c",
+            "core/iwasm/common/wasm_shared_memory.c",
+            "core/iwasm/common/arch/invokeNative_general.c",
+            "core/iwasm/interpreter/wasm_interp_fast.c",
+            "core/iwasm/interpreter/wasm_loader.c",
+            "core/iwasm/interpreter/wasm_runtime.c",
+        },
+        // WAMR reads unaligned values on purpose.
+        .flags = &.{ "-std=gnu99", "-ffunction-sections", "-fdata-sections", if (c_safety) "-fno-sanitize=alignment" else "-fno-sanitize=undefined" },
+    });
+    module.addCSourceFile(.{
+        .file = wamr.path(if (darwin) "core/shared/platform/darwin/platform_init.c" else "core/shared/platform/linux/platform_init.c"),
+        .flags = &.{"-std=gnu99"},
+    });
+    if (darwin) module.addCSourceFile(.{ .file = wamr.path("core/shared/platform/common/memory/mremap.c"), .flags = &.{"-std=gnu99"} });
+    return module;
+}
+
+/// A freestanding wasm32 module from `source`, the shape a user codec takes:
+/// every `export fn` exported, no imports, a 64 KiB shadow stack. ReleaseSafe,
+/// as the native code it is compared with.
+fn addWasmModule(b: *std.Build, name: []const u8, source: []const u8) *std.Build.Step.Compile {
+    const module = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    module.entry = .disabled;
+    module.rdynamic = true;
+    module.stack_size = 64 * 1024;
     return module;
 }
 

@@ -98,6 +98,8 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
     (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
+    (("src/codec_runtime*",), ("test-codec-runtime",), ("test-codec-runtime",),
+     "The codec sandbox's own tests against tiny modules"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
     (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig", "src/history_memo.zig",
@@ -176,7 +178,7 @@ RULES = (
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "admission-integration", "dispatch-integration",
+    "test", "test-h2", "test-codec-runtime", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
