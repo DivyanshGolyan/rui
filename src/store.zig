@@ -6780,7 +6780,7 @@ pub const Store = struct {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
         const report = failure.report();
-        std.debug.assert(report.len <= provider_output.max_report_bytes and std.unicode.utf8ValidateSlice(report));
+        std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const access = try self.enter(.none);
         defer access.release();
         return access.finishTransaction(Ordinary.attempt_binding, faults, self.settleModelAttemptFailureLocked(binding, failure, disposition, faults));
