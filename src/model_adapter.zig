@@ -245,11 +245,11 @@ test "provider interpretation preserves independently reported model evidence" {
             try std.testing.expectEqualStrings("r", interpreted.accepted.output.evidence.response_id.slice());
             try std.testing.expectEqualSlices(u8, case.certificate, interpreted.accepted.model_evidence.slice());
             var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.output.item_count);
-            var pressure: ?u64 = null;
+            var usage: ?output_format.Usage = null;
             while (try reader.next()) |record| if (record.tag == .usage) {
-                pressure = record.usage_tokens;
+                usage = record.usage;
             };
-            try std.testing.expectEqual(@as(?u64, 11), pressure);
+            try std.testing.expectEqual(@as(?output_format.Usage, .{ .uncached = 7, .cache_read = 0, .cache_write = 0, .output = 4 }), usage);
         } else {
             try std.testing.expect(interpreted == .rejected);
             try std.testing.expectEqualStrings("malformed_provider_output", interpreted.rejected.code);

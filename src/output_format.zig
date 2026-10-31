@@ -35,6 +35,20 @@ pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
 /// Whether a bag record belongs to the item or to the latest part.
 pub const BagScope = enum(u8) { item = 0, part = 1 };
 
+/// Token usage in Rui's form. Each provider maps its own report onto these
+/// four counts; a count the provider does not bill is zero.
+pub const Usage = struct {
+    uncached: u64,
+    cache_read: u64,
+    cache_write: u64,
+    output: u64,
+
+    /// Context pressure: every token the next request starts from.
+    pub fn pressure(self: Usage) u64 {
+        return self.uncached +| self.cache_read +| self.cache_write +| self.output;
+    }
+};
+
 pub const OutputMetadataRecord = struct {
     tag: OutputRecordTag,
     kind: OutputItemKind = .reasoning,
@@ -44,7 +58,8 @@ pub const OutputMetadataRecord = struct {
     decoded_length: u64 = 0,
     id_digest: [32]u8 = @splat(0),
     content_digest: [32]u8 = @splat(0),
-    usage_tokens: ?u64 = null,
+    /// A usage record's counts, when the provider's report was usable.
+    usage: ?Usage = null,
     /// An item record's replay rule, judged once at acceptance: a reasoning
     /// item whose nonempty `content` holds only reasoning_text blocks, which
     /// replay leaves out.
@@ -122,8 +137,8 @@ pub const OutputMetadataWriter = struct {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(record.tag);
         bytes[1] = @backingInt(record.kind);
-        std.debug.assert(record.usage_tokens == null or record.tag == .usage);
-        bytes[2] = @intFromBool(record.usage_tokens != null);
+        std.debug.assert(record.usage == null or record.tag == .usage);
+        bytes[2] = @intFromBool(record.usage != null);
         std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
         bytes[3] = @intFromBool(record.omit_reasoning_text);
         std.debug.assert(record.tag == .part or (record.part_kind == .opaque_block and record.part_array == .none));
@@ -134,12 +149,20 @@ pub const OutputMetadataWriter = struct {
         bytes[6] = @backingInt(record.part_array);
         std.debug.assert(record.phase == .unphased or (record.tag == .item and record.kind == .message));
         bytes[7] = @backingInt(record.phase);
-        // Usage has no item ordinal; this slot holds its certified pressure.
-        std.mem.writeInt(u64, bytes[8..16], record.usage_tokens orelse record.ordinal, .little);
+        std.mem.writeInt(u64, bytes[8..16], record.ordinal, .little);
         std.mem.writeInt(u64, bytes[16..24], record.start, .little);
         std.mem.writeInt(u64, bytes[24..32], record.length, .little);
         std.mem.writeInt(u64, bytes[32..40], record.decoded_length, .little);
         @memcpy(bytes[40..72], &record.id_digest);
+        if (record.usage) |usage| {
+            // A usage record has no ordinal, decoded length or id; its
+            // counts take those slots.
+            std.debug.assert(record.ordinal == 0 and record.decoded_length == 0 and std.mem.allEqual(u8, &record.id_digest, 0));
+            std.mem.writeInt(u64, bytes[8..16], usage.uncached, .little);
+            std.mem.writeInt(u64, bytes[32..40], usage.cache_read, .little);
+            std.mem.writeInt(u64, bytes[40..48], usage.cache_write, .little);
+            std.mem.writeInt(u64, bytes[48..56], usage.output, .little);
+        }
         @memcpy(bytes[72..104], &record.content_digest);
         try self.file.writeStreamingAll(self.io, &bytes);
         self.records += 1;
@@ -188,6 +211,16 @@ pub const OutputMetadataReader = struct {
             (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
         if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
             bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
+        const usage: ?Usage = if (bytes[2] == 1) .{
+            .uncached = std.mem.readInt(u64, bytes[8..16], .little),
+            .cache_read = std.mem.readInt(u64, bytes[32..40], .little),
+            .cache_write = std.mem.readInt(u64, bytes[40..48], .little),
+            .output = std.mem.readInt(u64, bytes[48..56], .little),
+        } else null;
+        if (usage != null) {
+            @memset(bytes[8..16], 0);
+            @memset(bytes[32..72], 0);
+        }
         return .{
             .tag = switch (bytes[0]) {
                 1 => .item,
@@ -207,13 +240,13 @@ pub const OutputMetadataReader = struct {
                 4 => .compaction,
                 else => return error.CorruptOutputMetadata,
             },
-            .ordinal = if (bytes[0] == @backingInt(OutputRecordTag.usage)) 0 else std.mem.readInt(u64, bytes[8..16], .little),
+            .ordinal = std.mem.readInt(u64, bytes[8..16], .little),
             .start = std.mem.readInt(u64, bytes[16..24], .little),
             .length = std.mem.readInt(u64, bytes[24..32], .little),
             .decoded_length = std.mem.readInt(u64, bytes[32..40], .little),
             .id_digest = bytes[40..72].*,
             .content_digest = bytes[72..104].*,
-            .usage_tokens = if (bytes[2] == 1) std.mem.readInt(u64, bytes[8..16], .little) else null,
+            .usage = usage,
             .omit_reasoning_text = bytes[3] == 1,
             .part_kind = @fromBackingInt(@intCast(bytes[4])),
             .scope = @fromBackingInt(@intCast(bytes[5])),

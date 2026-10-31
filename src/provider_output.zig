@@ -2218,76 +2218,42 @@ fn itemIdentity(window: *Window, item: Range) !struct {
     };
 }
 
-/// Derive the pressure anchor while validating provider bytes, not during
-/// Store replay. The raw usage range remains private immutable evidence.
-pub fn usagePressure(io: std.Io, file: std.Io.File, start: u64, length: u64) !?u64 {
+/// Read the usage counts while validating provider bytes, not during Store
+/// replay. The raw usage range remains private immutable evidence.
+pub fn readUsage(io: std.Io, file: std.Io.File, start: u64, length: u64) !?output_format.Usage {
     var window: Window = .{ .io = io, .file = file };
-    return usageTokens(&window, .{ .start = start, .length = length });
+    return responsesUsage(&window, .{ .start = start, .length = length });
 }
 
-fn usageTokens(window: *Window, usage: Range) !?u64 {
-    var source = try FileSource.init(window, usage);
-    var depth: usize = 0;
-    var total: ?u64 = null;
-    var input: ?u64 = null;
-    var output: ?u64 = null;
-    var input_seen = false;
-    var output_seen = false;
-    var duplicate_split = false;
-    while (try source.peek() != null) {
-        switch (try source.take()) {
-            '{', '[' => depth += 1,
-            '}', ']' => depth -= 1,
-            '"' => {
-                var key: [32]u8 = undefined;
-                var length_decoded: usize = 0;
-                while (try source.peek() != '"') {
-                    var scalar: [4]u8 = undefined;
-                    const count = try output_format.decodeScalar(&source, &scalar);
-                    for (scalar[0..count]) |decoded| {
-                        if (length_decoded < key.len) key[length_decoded] = decoded;
-                        length_decoded += 1;
-                    }
-                }
-                _ = try source.take();
-                if (depth != 1 or length_decoded > key.len) continue;
-                try source.space();
-                if (try source.peek() != ':') continue;
-                _ = try source.take();
-                const is_input = std.mem.eql(u8, key[0..length_decoded], "input_tokens");
-                const is_output = std.mem.eql(u8, key[0..length_decoded], "output_tokens");
-                if (is_input) {
-                    duplicate_split = duplicate_split or input_seen;
-                    input_seen = true;
-                }
-                if (is_output) {
-                    duplicate_split = duplicate_split or output_seen;
-                    output_seen = true;
-                }
-                try source.space();
-                var token_count: u64 = 0;
-                var digits: usize = 0;
-                const first_digit = try source.peek();
-                while (try source.peek()) |next| {
-                    if (next < '0' or next > '9') break;
-                    _ = try source.take();
-                    token_count = token_count *| 10 +| (next - '0');
-                    digits += 1;
-                }
-                if (digits == 0 or (digits > 1 and first_digit == '0') or token_count > std.math.maxInt(i64)) continue;
-                try source.space();
-                const delimiter = try source.peek();
-                if (delimiter != ',' and delimiter != '}') continue;
-                if (std.mem.eql(u8, key[0..length_decoded], "total_tokens")) total = token_count;
-                if (is_input) input = token_count;
-                if (is_output) output = token_count;
-            },
-            else => {},
-        }
-    }
-    if (total) |value| return value;
-    if (duplicate_split) return null;
-    return (input orelse return null) +| (output orelse return null);
+/// Maps a Responses usage report onto Rui's four counts. `input_tokens`
+/// includes the cached ones, and Responses bills no cache writes. A report
+/// with a count missing, repeated or outside a whole SQLite integer is not
+/// usable; pressure then falls back to the Store's estimate.
+fn responsesUsage(window: *Window, usage: Range) !?output_format.Usage {
+    const fields = try readFields(window, usage, &.{ "input_tokens", "output_tokens", "input_tokens_details" });
+    const input = try tokenCount(window, fields.get("input_tokens") catch return null) orelse return null;
+    const output = try tokenCount(window, fields.get("output_tokens") catch return null) orelse return null;
+    var cached: u64 = 0;
+    const details = fields.get("input_tokens_details") catch return null;
+    if (details) |range| if (!try rangeEquals(window, range, "null")) {
+        const detail = readFields(window, range, &.{"cached_tokens"}) catch |err| switch (err) {
+            error.UnexpectedJsonDelimiter => return null,
+            else => return err,
+        };
+        if (detail.get("cached_tokens") catch return null) |count|
+            cached = try tokenCount(window, count) orelse return null;
+    };
+    if (cached > input) return null;
+    return .{ .uncached = input - cached, .cache_read = cached, .cache_write = 0, .output = output };
+}
+
+fn tokenCount(window: *Window, value: ?Range) !?u64 {
+    const range = value orelse return null;
+    const count = readIndex(window, range) catch |err| switch (err) {
+        error.InvalidProviderIndex, error.TrailingJson, error.Overflow => return null,
+        else => return err,
+    };
+    return if (count > std.math.maxInt(i64)) null else count;
 }
 
 fn validateCompleted(
@@ -2330,14 +2296,12 @@ fn validateCompleted(
         return error.ContradictoryProviderOutput;
     if (try fields.get("usage")) |usage| {
         if (try rangeEquals(window, usage, "null")) return;
-        const usage_fields = try readFields(window, usage, &.{"total_tokens"});
-        _ = try usage_fields.get("total_tokens");
         try metadata.append(.{
             .tag = .usage,
             .start = usage.start,
             .length = usage.length,
             .content_digest = try contentDigestRange(window, usage),
-            .usage_tokens = try usageTokens(window, usage),
+            .usage = try responsesUsage(window, usage),
         });
     }
 }
@@ -3184,6 +3148,34 @@ test "provider completion treats null usage as absent and rejects malformed opti
         } else |err| {
             try std.testing.expectEqualStrings("malformed_provider_output", failureCode(err));
         }
+    }
+}
+
+test "responses usage maps onto Rui's four counts" {
+    const Usage = output_format.Usage;
+    const cases = [_]struct { []const u8, ?Usage }{
+        .{ "{\"input_tokens\":7,\"output_tokens\":11,\"total_tokens\":18}", .{ .uncached = 7, .cache_read = 0, .cache_write = 0, .output = 11 } },
+        .{ "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":64},\"output_tokens\":5}", .{ .uncached = 36, .cache_read = 64, .cache_write = 0, .output = 5 } },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":null,\"output_tokens\":0}", .{ .uncached = 9, .cache_read = 0, .cache_write = 0, .output = 0 } },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":{},\"output_tokens\":1}", .{ .uncached = 9, .cache_read = 0, .cache_write = 0, .output = 1 } },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":9},\"output_tokens\":1}", .{ .uncached = 0, .cache_read = 9, .cache_write = 0, .output = 1 } },
+        .{ "{\"total_tokens\":18}", null },
+        .{ "{\"input_tokens\":7}", null },
+        .{ "{\"input_tokens\":7,\"output_tokens\":1.5}", null },
+        .{ "{\"input_tokens\":-7,\"output_tokens\":1}", null },
+        .{ "{\"input_tokens\":9223372036854775808,\"output_tokens\":1}", null },
+        .{ "{\"input_tokens\":1,\"input_tokens\":2,\"output_tokens\":0}", null },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":10},\"output_tokens\":1}", null },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":[],\"output_tokens\":1}", null },
+        .{ "{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":null},\"output_tokens\":1}", null },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        const file = try tmp.dir.createFile(std.testing.io, "usage", .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, case[0]);
+        try std.testing.expectEqual(case[1], try readUsage(std.testing.io, file, 0, case[0].len));
     }
 }
 

@@ -5611,7 +5611,7 @@ pub const Store = struct {
         // Covered provider/tool material is excluded separately by the base.
         var usage_position: u64 = 0;
         var result_admission = frontier;
-        const usage = try self.cached("SELECT o.usage_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
+        const usage = try self.cached("SELECT o.usage_uncached_tokens,o.usage_cache_read_tokens,o.usage_cache_write_tokens,o.usage_output_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
             "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
             "WHERE o.session_ref=?1 AND " ++ oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
             "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
@@ -5622,11 +5622,17 @@ pub const Store = struct {
         try bindText(usage, 4, current.model.slice());
         switch (c.sqlite3_step(usage)) {
             c.SQLITE_ROW => {
-                usage_tokens = try readNullableTokens(usage, 0, true);
-                if (usage_tokens != null) {
-                    usage_position = @intCast(try readNullablePositiveI64(usage, 1) orelse return error.CorruptStore);
+                if (try readNullableTokens(usage, 0, true)) |uncached| {
+                    const counts: output_format.Usage = .{
+                        .uncached = uncached,
+                        .cache_read = try readNullableTokens(usage, 1, true) orelse return error.CorruptStore,
+                        .cache_write = try readNullableTokens(usage, 2, true) orelse return error.CorruptStore,
+                        .output = try readNullableTokens(usage, 3, true) orelse return error.CorruptStore,
+                    };
+                    usage_tokens = counts.pressure();
+                    usage_position = @intCast(try readNullablePositiveI64(usage, 4) orelse return error.CorruptStore);
                     // Include this producer: its results follow usage.
-                    result_admission = @intCast(try readNullablePositiveI64(usage, 2) orelse return error.CorruptStore);
+                    result_admission = @intCast(try readNullablePositiveI64(usage, 5) orelse return error.CorruptStore);
                 }
             },
             c.SQLITE_DONE => {},
@@ -6933,7 +6939,7 @@ pub const Store = struct {
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         var imported_items: u64 = 0;
         var usage_id: ?i64 = null;
-        var usage_tokens: ?u64 = null;
+        var usage: ?output_format.Usage = null;
         // Each item's records precede its item record.
         var item_records_start: u64 = 0;
         while (try metadata.next()) |record| {
@@ -6948,7 +6954,7 @@ pub const Store = struct {
                     true,
                     faults,
                 );
-                usage_tokens = record.usage_tokens;
+                usage = record.usage;
                 continue;
             }
             if (record.tag != .item) continue;
@@ -7056,7 +7062,8 @@ pub const Store = struct {
         const resolution_code = @tagName(turn_policy.Resolution.of(output_fact));
         {
             const update = try self.cached(
-                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12," ++ operation_resolved_at_sql ++ " " ++
+                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11," ++
+                    "usage_uncached_tokens=?12,usage_cache_read_tokens=?13,usage_cache_write_tokens=?14,usage_output_tokens=?15," ++ operation_resolved_at_sql ++ " " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer resetCached(update);
@@ -7069,9 +7076,11 @@ pub const Store = struct {
             try bindNullableI64(update, 9, usage_id);
             try bindU64(update, 10, binding.attempt_ordinal);
             try bindU64(update, 11, output.item_count);
-            // Pressure saturates; every trigger it meets is an SQLite integer,
-            // so clamping to the largest one preserves each decision.
-            try bindNullableU64(update, 12, if (usage_tokens) |tokens| @min(tokens, std.math.maxInt(i64)) else null);
+            // The provider parser admits only counts that fit an SQLite integer.
+            try bindNullableU64(update, 12, if (usage) |counts| counts.uncached else null);
+            try bindNullableU64(update, 13, if (usage) |counts| counts.cache_read else null);
+            try bindNullableU64(update, 14, if (usage) |counts| counts.cache_write else null);
+            try bindNullableU64(update, 15, if (usage) |counts| counts.output else null);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
@@ -8349,12 +8358,19 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
-        \\ usage_tokens INTEGER CHECK(usage_tokens IS NULL OR (usage_tokens>=0 AND usage_content_id IS NOT NULL)),
+        \\ usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),
+        \\ usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),
+        \\ usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),
+        \\ usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),
         \\ retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),
         \\ resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
+        \\ -- Usage counts are all present or all absent, and only beside the report.
+        \\ CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR
+        \\       (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND
+        \\        usage_output_tokens IS NOT NULL AND usage_content_id IS NOT NULL)),
         \\ CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),
         \\ -- The second the current state began: exactly the time its state owns.
         \\ CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR
@@ -9457,7 +9473,7 @@ fn settleCallsForTestingWithFaults(
             .start = start,
             .length = bytes.len,
             .content_digest = protocol.contentDigest(bytes),
-            .usage_tokens = try provider_output.usagePressure(std.testing.io, source, start, bytes.len),
+            .usage = try provider_output.readUsage(std.testing.io, source, start, bytes.len),
         });
     }
     try metadata.sealForRead();
@@ -19637,7 +19653,19 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
 }
 
 test "compaction exact threshold zero reservation and integer usage fallback" {
-    for ([_][]const u8{ "{\"total_tokens\":999}", "{\"total_tokens\":1000}", "{\"total_tokens\":1000.5}", "{\"total_tokens\":1000e0}", "{\"total_tokens\":-1000}", "{\"total_tokens\":0}", "{\"total_tokens\":18446744073709551616}", "{\"total_tokens\":1000000}", "{\"total_tokens\":9223372036854775807}", "{\"input_tokens\":9223372036854775807,\"output_tokens\":9223372036854775807}" }, 0..) |usage, index| {
+    for ([_][]const u8{
+        "{\"input_tokens\":999,\"output_tokens\":0}",
+        "{\"input_tokens\":1000,\"output_tokens\":0}",
+        "{\"input_tokens\":1000.5,\"output_tokens\":0}",
+        "{\"input_tokens\":1000e0,\"output_tokens\":0}",
+        "{\"input_tokens\":-1000,\"output_tokens\":0}",
+        "{\"input_tokens\":0,\"output_tokens\":0}",
+        "{\"input_tokens\":18446744073709551616,\"output_tokens\":0}",
+        "{\"input_tokens\":1000000,\"output_tokens\":0}",
+        "{\"input_tokens\":9223372036854775807,\"output_tokens\":0}",
+        "{\"input_tokens\":9223372036854775807,\"output_tokens\":9223372036854775807}",
+        "{\"input_tokens\":1000,\"input_tokens_details\":{\"cached_tokens\":600},\"output_tokens\":0}",
+    }, 0..) |usage, index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -19659,10 +19687,14 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, usage);
-        if (index >= 8) {
-            // Split counts can sum above SQLite's signed range. Saturation
-            // must preserve the high-pressure decision rather than wrap/null.
-            try std.testing.expectEqual(@as(u64, std.math.maxInt(i64)), try queryU64(storage.database, "SELECT usage_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
+        if (index == 9) {
+            // The counts are stored as reported; their sum passes SQLite's
+            // signed range, and pressure saturates instead of wrapping.
+            try std.testing.expectEqual(@as(u64, std.math.maxInt(i64)), try queryU64(storage.database, "SELECT usage_output_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
+        }
+        if (index == 10) {
+            try std.testing.expectEqual(@as(u64, 400), try queryU64(storage.database, "SELECT usage_uncached_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
+            try std.testing.expectEqual(@as(u64, 600), try queryU64(storage.database, "SELECT usage_cache_read_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
         }
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(if (index == 1 or index >= 8) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
@@ -19673,7 +19705,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
     for ([_]struct { usage: ?[]const u8, usable: bool }{
         .{ .usage = null, .usable = false },
         .{ .usage = "{\"total_tokens\":1.5}", .usable = false },
-        .{ .usage = "{\"total_tokens\":1}", .usable = true },
+        .{ .usage = "{\"total_tokens\":1}", .usable = false },
         .{ .usage = "{\"input_tokens\":1}", .usable = false },
         .{ .usage = "{\"output_tokens\":1}", .usable = false },
         .{ .usage = "{\"input_tokens\":1,\"output_tokens\":null}", .usable = false },
@@ -19683,7 +19715,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
         .{ .usage = "{\"input_tokens\":1,\"output_tokens\":9223372036854775808}", .usable = false },
         .{ .usage = "{\"input_tokens\":1,\"output_tokens\":0}", .usable = true },
         .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1}", .usable = true },
-        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999}", .usable = true },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999}", .usable = false },
         .{ .usage = "{\"total_tokens\":1.5,\"input_tokens\":0,\"output_tokens\":0}", .usable = true },
         .{ .usage = "{\"input_tokens\":1,\"input_tokens\":2,\"output_tokens\":0}", .usable = false },
         .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":2}", .usable = false },
@@ -19699,8 +19731,10 @@ test "compaction pressure uses the latest accepted output even without usage" {
         .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_\\u0074okens\":2}", .usable = false },
         .{ .usage = "{\"input_tokens\":99999,\"input_tokens\":99999,\"output_tokens\":0}", .usable = false },
         .{ .usage = "{\"input_tokens\":0,\"output_tokens\":99999,\"output_tokens\":99999}", .usable = false },
-        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999,\"input_tokens\":null,\"output_tokens\":0}", .usable = true },
-        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":99999,\"total_tokens\":0}", .usable = true },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999,\"input_tokens\":null,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":99999,\"total_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":0}", .usable = false },
         .{ .usage = "{\"input_tokens\":0,\"details\":{\"input_tokens\":99999,\"output_tokens\":99999},\"output_tokens\":0}", .usable = true },
     }) |case| {
         for ([_]enum { host_input, provider_output, small }{ .host_input, .provider_output, .small }) |context| {
@@ -19720,7 +19754,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
             try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), if (context == .host_input) &original else "small input");
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
-            try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"total_tokens\":1}");
+            try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"input_tokens\":1,\"output_tokens\":0}");
             try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "small suffix");
             const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(second));
@@ -20365,8 +20399,8 @@ test "model admission work excludes accepted compaction base history" {
             } else {
                 const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                 try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
-                    .low => "{\"total_tokens\":1}",
-                    .high => "{\"total_tokens\":1000}",
+                    .low => "{\"input_tokens\":1,\"output_tokens\":0}",
+                    .high => "{\"input_tokens\":1000,\"output_tokens\":0}",
                     .missing => null,
                     .unchanged => unreachable,
                 });
@@ -20446,7 +20480,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     // Isolate revision history from accepted-output population.
                     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
                 } else {
-                    try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"total_tokens\":99900}" else "{\"total_tokens\":99999}") else "{\"total_tokens\":1}") else null);
+                    try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"input_tokens\":99900,\"output_tokens\":0}" else "{\"input_tokens\":99999,\"output_tokens\":0}") else "{\"input_tokens\":1,\"output_tokens\":0}") else null);
                 }
                 if (kind == .action) {
                     const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;

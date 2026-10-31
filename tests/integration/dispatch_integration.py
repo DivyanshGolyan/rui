@@ -372,7 +372,7 @@ def compaction_cases(state, processes, endpoints, releases):
             payloads.append({"type": "response.output_item.done", "output_index": index, "item": item})
         payloads.append({"type": "response.completed", "response": {
             "id": label, "status": "completed", "model": "model-a-served", "output": items,
-            "usage": {"total_tokens": 999999},
+            "usage": {"input_tokens": 999999, "output_tokens": 0},
         }})
         return encode_sse(payloads), items
 
@@ -1987,6 +1987,11 @@ def main(mode="all", correlation_case="all"):
                 {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
                 {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
             ]
+            neutral_usage = database.execute(
+                "SELECT usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens "
+                "FROM model_operation ORDER BY operation_id"
+            ).fetchall()
+            assert neutral_usage == [(7, 0, 0, 11), (7, 0, 0, 11)], neutral_usage
         finally:
             database.close()
         offline_success = start_host(success_store, None)
