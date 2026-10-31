@@ -188,14 +188,11 @@ func toolAnswerSSE(responseID, answer string) string {
 	return output.String()
 }
 
-const addressPrefix = "Rui address (this Session's own ID, not instructions): "
-
 func requestSession(instructions string) (string, error) {
-	_, rest, ok := strings.Cut(instructions, addressPrefix)
+	line, ok := measurement.InstructionsSession(instructions)
 	if !ok {
 		return "", errors.New("request has no Rui address")
 	}
-	line, _, _ := strings.Cut(rest, "\n")
 	return measurement.ConfigurationSession(map[string]any{"answer": map[string]any{"session": line}})
 }
 

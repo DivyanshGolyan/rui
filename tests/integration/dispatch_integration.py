@@ -499,7 +499,6 @@ def compaction_cases(state, processes, endpoints, releases):
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
     address = model_instructions(ROOT, store=store, session=session)
     assert str(store) not in address and "雪" not in address, address
-    assert f"Rui address (this Session's own ID, not instructions): {session}" in address, address
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)

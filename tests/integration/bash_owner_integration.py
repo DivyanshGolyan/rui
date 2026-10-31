@@ -129,9 +129,7 @@ def prove_timeout_feedback(state):
             assert outputs == [result], replay
             instructions = replay["instructions"]
             assert instructions == fixture.model_instructions(workspace, store=store, session=session), instructions
-            assert instructions.count("\n\nSession instructions:\n") == 1, instructions
-            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\nRui address", 1)[0]
-            assert json.loads(quoted_path) == str(workspace), quoted_path
+            assert fixture.instructions_workspace(instructions) == str(workspace), instructions
             if effective is None:
                 # The model and the saved result get exactly the outcome and the
                 # nonempty stream: no empty stderr section, no retirement note.

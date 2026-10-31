@@ -1536,6 +1536,7 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
 /// capture's attention rows.
 pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
+    try writeSafeFieldTo(out, "Label: ", if (work.settings.label) |label| label.slice() else "not set");
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
     try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));

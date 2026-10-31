@@ -21,13 +21,14 @@ class Handler(fixture.http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(request)
-        session = request["instructions"].split("Rui address (this Session's own ID, not instructions): ")[1].splitlines()[0]
+        session = fixture.instructions_session(request["instructions"])
         assert re.fullmatch("[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
         if session == self.server.receiver:
             for item in request["input"]:
                 if item.get("role") == "user" and len(item["content"]) == 2:
-                    sender = item["content"][0]["text"].split(": ", 1)[1].splitlines()[0]
                     template = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text()
+                    prefix = template.split("{}", 1)[0]
+                    sender = item["content"][0]["text"][len(prefix):len(prefix) + 6]
                     assert re.fullmatch("[0123456789abcdefghjkmnpqrstvwxyz]{6}", sender), sender
                     assert item["content"][0]["text"] == template.replace("{}", sender)
                     self.server.senders.append(sender)
