@@ -19,8 +19,9 @@ on:
 permissions:
   contents: write
   actions: write
-  # Promotion holds while a stable-red issue is open.
-  issues: read
+  # Promotion holds while a stable-red issue is open, after closing the issues
+  # landed commits fix: GitHub ignores closing keywords in GITHUB_TOKEN pushes.
+  issues: write
 
 jobs:
   completion:
