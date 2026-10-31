@@ -182,10 +182,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
+    const held = page.facts.work.work.state.holdsQueue();
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end, .held = held };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(&output);
+        try pending.render(page.facts.work.work, &output);
         job.result.lowest = pending.lowest;
         // A queued Message older than the page shows only in a transcript's
         // listing, at the opening's seam. No later boundary may precede its
@@ -255,7 +256,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
-            try View.message(requests, job.store, job.session, item, echo.message, true, &output, job.colour);
+            try View.message(requests, job.store, job.session, item, echo.message, true, echo.held, &output, job.colour);
             job.result.listing = null;
         },
         .range => |range| {
@@ -272,7 +273,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                         else => continue,
                     };
                     if (!range.all and value.state == .applied) continue;
-                    try View.message(requests, job.store, job.session, item, value, true, &output, job.colour);
+                    try View.message(requests, job.store, job.session, item, value, true, page.facts.work.work.state.holdsQueue(), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
@@ -305,6 +306,8 @@ const DisplayCapture = struct {
     blocks: Collected = .{},
     /// The page's end, for boundary cursors.
     end: u64 = 0,
+    /// Work under way held queued input when the page was read.
+    held: bool = false,
     /// Messages shown before the current item.
     messages: Messages = .{},
     /// Shown items where a transcript may begin.
@@ -343,7 +346,7 @@ const DisplayCapture = struct {
         if (self.current) |current| {
             self.messages.observe(current, self.current_shown);
             if (self.current_shown) switch (current.value) {
-                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .read_end = self.end }),
+                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .read_end = self.end, .held = self.held }),
                 else => {},
             };
         }
@@ -403,6 +406,8 @@ pub const Echo = struct {
     ordinal: u64,
     message: protocol.ActivityItem.Message,
     read_end: u64,
+    /// Work under way held queued input as of `read_end`.
+    held: bool,
 };
 
 /// The Messages one read shows, in order: a page holds at most one each.
@@ -555,7 +560,7 @@ pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64
 test "a transcript lists each recorded Message once, whole, before the copy that follows it" {
     const Make = struct {
         fn echo(position: u64, output: u64) Echo {
-            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 } };
+            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .held = true, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 } };
         }
     };
     const opening: Marks.Mark = .{ .offset = 0, .cursor = .{ .end = 20 }, .admitted = 5 };

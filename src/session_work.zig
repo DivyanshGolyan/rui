@@ -75,6 +75,15 @@ pub const WorkState = union(Kind) {
         };
     }
 
+    /// Whether queued input waits behind work under way: a model Attempt,
+    /// a retry not yet due, running Bash, a Permission Decision or a stop
+    /// settling. A pending Session is starting its next step now, so nothing
+    /// holds a queued Message back; idle and ended work hold no queue.
+    pub fn holdsQueue(self: WorkState) bool {
+        const progress_ = self.progress() orelse return false;
+        return progress_ != .runnable;
+    }
+
     pub fn since(self: WorkState) u64 {
         return switch (self) {
             inline else => |value| value.since,
@@ -540,6 +549,11 @@ test "progress follows the work table" {
             else => .{ .since = 1 },
         });
         try std.testing.expectEqual(expected.get(kind), state.progress());
+        // Only work under way holds queued input back; pending reads it next.
+        try std.testing.expectEqual(switch (kind) {
+            .working, .retrying, .bash, .approval, .stopping => true,
+            .idle, .pending, .finished, .failed, .stopped => false,
+        }, state.holdsQueue());
         try std.testing.expectEqual(@as(u64, 1), state.since());
         // Only a due retry changes with time.
         try std.testing.expectEqual(kind == .retrying, std.meta.activeTag(state.asOf(5_000)) != kind);

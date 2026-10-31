@@ -969,9 +969,11 @@ pub const Pending = struct {
     /// where a transcript's search for unapplied Messages may stop.
     lowest: ?u64 = null,
 
-    pub fn render(self: *const Pending, sink: anytype) !void {
-        if (self.total == 0) return;
-        try print(sink, "Rui: {d} queued messages.\n", .{self.total});
+    /// Says nothing unless work under way holds the queue (see `messageLabel`).
+    pub fn render(self: *const Pending, work: protocol.SessionWork, sink: anytype) !void {
+        if (self.total == 0 or !work.state.holdsQueue()) return;
+        if (self.total == 1) return sink.feed("1 message is queued behind the current work.\n");
+        try print(sink, "{d} messages are queued behind the current work.\n", .{self.total});
     }
 };
 
@@ -994,19 +996,54 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
     }
 }
 
-/// What a Message's state was when read: a transcript labels it as of then.
-pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state")) ?[]const u8 {
+/// What a Message's state was when read, with the work read beside it: a
+/// transcript labels it as of then. A queued Message is labelled only while
+/// work under way holds it back; otherwise its Session reads it at the step
+/// starting now, and a label would outlive that at once. Only a stop's
+/// exclusion asks something of the person, so only it carries the mark.
+pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), held: bool) ?[]const u8 {
     return switch (state) {
         .applied => null,
-        .queued => "Queued",
-        .excluded => "Stopped before it ran · send it again to run it",
+        .queued => if (held) "Queued" else null,
+        .excluded => "! Stopped before it ran · send it again to run it",
     };
+}
+
+test "a queued Message is labelled, and counted, only while work under way holds it" {
+    const Sink = struct {
+        out: std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    const working: protocol.SessionWork = .{ .state = .{ .working = .{ .since = 1 } } };
+    const pending_: protocol.SessionWork = .{ .state = .{ .pending = .{ .since = 1 } } };
+    // Opened between admission and the model request that reads it: the
+    // Session is pending, so a label would be stale by the next frame.
+    try std.testing.expect(messageLabel(.queued, pending_.state.holdsQueue()) == null);
+    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, working.state.holdsQueue()).?);
+    // A stop's exclusion asks the person to act whatever the work is doing.
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, false).?);
+    try std.testing.expect(messageLabel(.applied, true) == null);
+    for ([_]struct { total: u64, work: protocol.SessionWork, expected: []const u8 }{
+        .{ .total = 1, .work = pending_, .expected = "" },
+        .{ .total = 0, .work = working, .expected = "" },
+        .{ .total = 1, .work = working, .expected = "1 message is queued behind the current work.\n" },
+        .{ .total = 24, .work = working, .expected = "24 messages are queued behind the current work.\n" },
+    }) |case| {
+        var buffer: [64]u8 = undefined;
+        var sink: Sink = .{ .out = .fixed(&buffer) };
+        const summary: Pending = .{ .total = case.total };
+        try summary.render(case.work, &sink);
+        try std.testing.expectEqualStrings(case.expected, sink.out.buffered());
+    }
 }
 
 /// One Message in full, labelled unless applied: live, in the opening and in
 /// a transcript's listing alike.
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, sink: anytype, colour: bool) !void {
-    if (label) if (messageLabel(value.state)) |text| try print(sink, "\n! {s}", .{text});
+/// `held` says whether work under way held queued input when it was read.
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, held: bool, sink: anytype, colour: bool) !void {
+    if (label) if (messageLabel(value.state, held)) |text| try print(sink, "\n{s}", .{text});
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     if (value.sender) |sender| {
         var line: PeerLine(@TypeOf(sink)) = undefined;
@@ -1293,12 +1330,12 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .admission => |value| {
                 if (historical and value.state == .applied) continue;
                 compact_tools.* = false;
-                try message(requests, store, session, item, value, historical, sink, colour);
+                try message(requests, store, session, item, value, historical, page.facts.work.work.state.holdsQueue(), sink, colour);
             },
             .user => |value| {
                 if (!historical) continue; // Live Admission already showed it.
                 compact_tools.* = false;
-                try message(requests, store, session, item, value, false, sink, colour);
+                try message(requests, store, session, item, value, false, false, sink, colour);
             },
             .assistant => |reference| {
                 compact_tools.* = false;
