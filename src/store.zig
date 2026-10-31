@@ -6060,8 +6060,8 @@ pub const Store = struct {
 
     fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
         const statement = try self.cached(
-            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort " ++
-                "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort,s.codec,s.codec_options IS NULL " ++
+                "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
         defer resetCached(statement);
@@ -6092,6 +6092,11 @@ pub const Store = struct {
         out.output_reservation = try readNullableTokens(statement, 8, true) orelse return error.CorruptStore;
         out.reasoning_effort = try readNullableEffort(statement, 9);
         out.provider = try readProvider(statement, 4);
+        // Requests are built by the provider's one codec, which takes no
+        // options; a Session pinned to anything else cannot be served.
+        var codec: protocol.Bounded(40) = .{};
+        try readText(statement, 10, &codec);
+        if (!codec.eql(@tagName(out.provider.codec())) or c.sqlite3_column_int(statement, 11) != 1) return error.CorruptStore;
         out.session_affinity = hash.finalResult()[0..16].*;
     }
 
@@ -7856,10 +7861,11 @@ pub const Store = struct {
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-        const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
+        const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
         defer resetCached(statement);
         try bindSettings(statement, session_ref, current);
         try bindU64(statement, 9, current.next_position);
+        try bindText(statement, 15, @tagName(current.provider.codec()));
         try expectDone(statement);
         if (c.sqlite3_changes(self.database) != 1) return false;
         try self.touch(session_ref);
@@ -8241,7 +8247,11 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE TABLE session(
         \\ session_ref TEXT PRIMARY KEY CHECK(length(session_ref)=6 AND length(CAST(session_ref AS BLOB))=6 AND session_ref NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*'),
         \\ workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),
-        \\ provider TEXT NOT NULL,
+        \\ -- A label's syntax, not a provider list, so a new provider is no format change.
+        \\ provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND provider NOT GLOB '*[^a-z0-9_-]*'),
+        \\ -- The Session's immutable binding: grammar version and its options.
+        \\ codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),
+        \\ codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),
         \\ model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
     ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
@@ -8273,7 +8283,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ revision INTEGER NOT NULL CHECK(revision>0),
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ workspace TEXT NOT NULL,
-        \\ provider TEXT NOT NULL,
+        \\ provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND provider NOT GLOB '*[^a-z0-9_-]*'),
         \\ model TEXT NOT NULL,
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
@@ -14546,11 +14556,43 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", created_session_0.slice());
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session"));
+    for ([_][:0]const u8{
+        "UPDATE session SET provider='Codex' WHERE session_ref=?1",
+        "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
+        "UPDATE session SET provider='codex.v2' WHERE session_ref=?1",
+        "UPDATE session SET provider='' WHERE session_ref=?1",
+        "UPDATE session SET provider='abcdefghijklmnopq' WHERE session_ref=?1",
+        "UPDATE session SET codec_options=x'' WHERE session_ref=?1",
+    }) |fault| try std.testing.expectError(error.StatementFailed, execSessionSql(storage.database, fault, created_session_0.slice()));
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
 
     try execSessionSql(storage.database, "UPDATE session SET provider='other' WHERE session_ref=?1", created_session_0.slice());
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
+}
+
+test "a Session pinned to a codec this Host cannot build fences its settings" {
+    for ([_]?[:0]const u8{
+        null,
+        "UPDATE session SET codec='openai-responses/2' WHERE session_ref=?1",
+        "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
+    }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "config");
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session"));
+        try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (fault) |sql| try execSessionSql(storage.database, sql, session.slice());
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(binding, &view);
+        defer view.close();
+        if (fault == null) _ = try testSettings(&view) else try std.testing.expectError(error.CorruptStore, testSettings(&view));
+    }
 }
 
 test "created Session tools and permission resolve to product defaults" {
@@ -18357,8 +18399,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             if (ineligible != 0) {
                 try exec(
                     database,
-                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position,created_at) VALUES('st0ped','/','codex','model-a',1,0,0,NULL,1,1,1)",
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+                        "output_schema_content_id,revision,next_position,created_at) VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -18374,9 +18416,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             }
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
                     "output_schema_content_id,revision,next_position,created_at) " ++
-                    "SELECT printf('%06d',value),'/','codex','model-a',1,0,0,NULL,1,1,1 FROM sequence; " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -18527,9 +18569,9 @@ test "retry admission and exhausted recovery use their selection indexes" {
 fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try exec(
         database,
-        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask," ++
+        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
             "permission_mode,revision,next_position,created_at) " ++
-            "SELECT DISTINCT session_ref,'/w','codex','m',1,0,0,1,1,1 FROM model_operation",
+            "SELECT DISTINCT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1 FROM model_operation",
     );
 }
 
