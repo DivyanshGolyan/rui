@@ -5,6 +5,7 @@ const execution = @import("execution.zig");
 const transport_policy = @import("transport_policy.zig");
 const named_scratch = @import("named_scratch.zig");
 const history_memo = @import("history_memo.zig");
+const prefix_seal = @import("prefix_seal.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -397,6 +398,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
+        error.EncodingDrift => "encoding_drift",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
@@ -1163,8 +1165,10 @@ pub const Preparation = struct {
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
-        /// This request's history span, from its start while memos are kept.
+        /// This request's history span, from its start.
         span: ?MemoSpan = null,
+        /// A fully rebuilt span being checked against the Session's seal.
+        prefix_check: ?PrefixCheck = null,
         /// The sealed span being kept as the Session's memo.
         memo_write: ?history_memo.Write = null,
     };
@@ -1178,6 +1182,21 @@ pub const Preparation = struct {
         /// The finished span, kept as the Session's memo once the request
         /// seals.
         next: ?history_memo.Memo = null,
+    };
+
+    const PrefixCheck = struct {
+        /// The span's request offset, and how many of its bytes to hash.
+        start: u64,
+        length: u64,
+        hashed: u64 = 0,
+        hasher: prefix_seal.Sha256 = .init(.{}),
+        /// The Session's seal this span must begin with, until its bytes
+        /// are hashed.
+        bound: ?store.PrefixSeal,
+        /// Whether the hashed span replaces the seal.
+        record: bool,
+        anchor: ?u64,
+        admission_position: u64,
     };
 
     const MemoCopy = struct {
@@ -1205,6 +1224,7 @@ pub const Preparation = struct {
         tools,
         text_format,
         end,
+        prefix_check,
         history_store,
         complete,
     };
@@ -1312,6 +1332,11 @@ pub const Preparation = struct {
             items_left -= 1;
             if (self.state.pieces.next()) |piece| {
                 self.startPiece(piece) catch |err| return .{ .failed = err };
+                continue;
+            }
+            if (self.state.stage == .prefix_check) {
+                if (!(self.advancePrefixCheck(&bytes_left) catch |err| return .{ .failed = err })) continue;
+                self.state.stage = .history_store;
                 continue;
             }
             // The sealed request is the memo's source, copied under the
@@ -1446,7 +1471,7 @@ pub const Preparation = struct {
                 return .item;
             },
             .end => return .end,
-            .history_store, .complete => unreachable,
+            .prefix_check, .history_store, .complete => unreachable,
         }
         return .pending;
     }
@@ -1454,8 +1479,8 @@ pub const Preparation = struct {
     /// Never inlined: it runs once per request, and its memo and key copies
     /// stay out of the frame every history item uses.
     noinline fn startSpan(self: *Preparation) !Next {
-        const memos = self.state.memos orelse return .pending;
         self.state.span = .{ .start = self.writer.offset };
+        const memos = self.state.memos orelse return .pending;
         const memo = memos.held(self.settings.session.slice()) orelse return .pending;
         const key = try self.memoKey();
         if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
@@ -1628,8 +1653,66 @@ pub const Preparation = struct {
         self.state.stage = .history_store;
         const span = &(self.state.span orelse return);
         const next = span.next orelse return;
+        // A memo copy is this Host's own earlier encoding; only a full
+        // rebuild can disagree with what an earlier Host sent.
+        if (span.copy == null) {
+            const stored = try self.view.prefixSeal();
+            const bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
+            if (bound) |held| if (held.span_length > next.length) return error.EncodingDrift;
+            // The seal is replaced only once the span has doubled, so a
+            // Session's seal writes are logarithmic in its history and the
+            // seal always covers at least half of a rebuilt span.
+            const record = if (bound) |held| next.length >= 2 * held.span_length and next.length != 0 else true;
+            self.state.prefix_check = .{
+                .start = span.start,
+                .length = if (record) next.length else bound.?.span_length,
+                .bound = bound,
+                .record = record,
+                .anchor = next.key.anchor,
+                .admission_position = next.admission_position,
+            };
+            self.state.stage = .prefix_check;
+        }
+        const memos = self.state.memos orelse return;
         const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
-        self.state.memo_write = self.state.memos.?.begin(self.writer.io, next, span.start, if (prefix) |*value| value else null);
+        self.state.memo_write = memos.begin(self.writer.io, next, span.start, if (prefix) |*value| value else null);
+    }
+
+    /// Hash the rebuilt span from the sealed request, one window per step
+    /// under the allowance. Its first bytes must match the Session's seal;
+    /// a mismatch fails the Attempt before anything is sent, because the
+    /// provider cached the earlier bytes. Returns true once the check, and
+    /// any new seal, is done.
+    fn advancePrefixCheck(self: *Preparation, bytes_left: *usize) !bool {
+        const check = &self.state.prefix_check.?;
+        while (true) {
+            if (check.bound) |bound| if (check.hashed == bound.span_length) {
+                var at_seal = check.hasher;
+                if (!std.mem.eql(u8, &at_seal.finalResult(), &bound.digest)) return error.EncodingDrift;
+                check.bound = null;
+            };
+            if (check.hashed == check.length) break;
+            if (bytes_left.* == 0) return false;
+            const limit = if (check.bound) |bound| bound.span_length else check.length;
+            const count: usize = @intCast(@min(bytes_left.*, self.memo_window.len, limit - check.hashed));
+            const window = self.memo_window[0..count];
+            if (try self.readonly.readPositionalAll(self.writer.io, window, check.start + check.hashed) != count)
+                return error.RequestSealFailed;
+            check.hasher.update(window);
+            check.hashed += count;
+            bytes_left.* -= count;
+        }
+        if (check.record) {
+            const next: store.PrefixSeal = .{
+                .anchor = check.anchor,
+                .admission_position = check.admission_position,
+                .span_length = check.length,
+                .digest = check.hasher.finalResult(),
+            };
+            try self.view.recordPrefixSeal(&next);
+        }
+        self.state.prefix_check = null;
+        return true;
     }
 
     fn abandonMemoWrite(self: *Preparation) void {
@@ -3859,6 +3942,92 @@ test "a history memo hit writes exactly the bytes of a full rebuild" {
         try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         try std.testing.expect(heldMemoLength(&memos, session.slice()) > covered);
     }
+}
+
+test "a full rebuild must begin with the Session's prefix seal" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // Each rebuild runs as a restarted Host's would, with an empty memo
+    // table, and returns its span's length.
+    const Rebuild = struct {
+        fn span(test_setup: *PreparationTestSetup, attempt: store.AttemptBinding, name: []const u8) !u64 {
+            var entries: [2]history_memo.Table.Entry = @splat(.{});
+            var table: history_memo.Table = .{ .entries = &entries, .scratch_path = test_setup.root };
+            defer table.deinit(std.testing.io);
+            const rebuilt = try prepareMemoForTesting(test_setup, attempt, &table, .{});
+            std.testing.allocator.free(rebuilt.bytes);
+            try std.testing.expectEqual(@as(usize, 0), rebuilt.copied);
+            return heldMemoLength(&table, name);
+        }
+    };
+    var length = try Rebuild.span(&setup, binding, session.slice());
+    var sealed = (try setup.storage.prefixSealForTesting(binding)).?;
+    try std.testing.expectEqual(length, sealed.span_length);
+    // Later Operations begin with the sealed bytes. The seal moves to the
+    // whole span once that span has doubled, and otherwise stays.
+    var replaced: usize = 0;
+    var round: u64 = 1;
+    while (round <= 6) : (round += 1) {
+        binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
+        length = try Rebuild.span(&setup, binding, session.slice());
+        const current = (try setup.storage.prefixSealForTesting(binding)).?;
+        if (length >= 2 * sealed.span_length) {
+            try std.testing.expectEqual(length, current.span_length);
+            try std.testing.expect(current.admission_position > sealed.admission_position);
+            replaced += 1;
+        } else try std.testing.expectEqual(sealed, current);
+        sealed = current;
+    }
+    try std.testing.expect(replaced != 0);
+    try std.testing.expect(sealed.span_length < length);
+    // A seal the rebuild disagrees with fails before anything is sent and
+    // stays for every later rebuild. A seal of another anchor or of a later
+    // view does not bind and is replaced by the whole span.
+    const Case = struct { seal: store.PrefixSeal, drift: bool };
+    var flipped = sealed;
+    flipped.digest[31] ^= 1;
+    var longer = sealed;
+    longer.span_length = length + 1;
+    var shorter = sealed;
+    shorter.span_length -= 1;
+    var anchored = flipped;
+    anchored.anchor = 1;
+    var later = flipped;
+    later.admission_position = std.math.maxInt(u64);
+    for ([_]Case{
+        .{ .seal = flipped, .drift = true },
+        .{ .seal = longer, .drift = true },
+        .{ .seal = shorter, .drift = true },
+        .{ .seal = anchored, .drift = false },
+        .{ .seal = later, .drift = false },
+    }) |case| {
+        try setup.storage.setPrefixSealForTesting(binding, &case.seal);
+        if (case.drift) {
+            try std.testing.expectError(error.EncodingDrift, Rebuild.span(&setup, binding, session.slice()));
+            try std.testing.expectEqual(case.seal, (try setup.storage.prefixSealForTesting(binding)).?);
+        } else {
+            try std.testing.expectEqual(length, try Rebuild.span(&setup, binding, session.slice()));
+            const current = (try setup.storage.prefixSealForTesting(binding)).?;
+            try std.testing.expectEqual(@as(?u64, null), current.anchor);
+            try std.testing.expectEqual(length, current.span_length);
+        }
+    }
+    try std.testing.expectEqualStrings("encoding_drift", preparationFailureCode(error.EncodingDrift));
+    // A memo hit is this Host's own encoding and is not checked again.
+    var entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    _ = try Rebuild.span(&setup, binding, session.slice());
+    _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+    try setup.storage.setPrefixSealForTesting(binding, &flipped);
+    const hit = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(hit.bytes);
+    try std.testing.expectEqual(@as(usize, @intCast(length)), hit.copied);
 }
 
 test "a history memo that does not match the frozen request is rebuilt in full" {

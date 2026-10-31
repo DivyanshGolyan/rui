@@ -7,6 +7,12 @@ const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 const output_format = @import("output_format.zig");
+const prefix_seal = @import("prefix_seal.zig");
+pub const PrefixSeal = prefix_seal.PrefixSeal;
+comptime {
+    // The schema's fixed literal for the seal's length.
+    std.debug.assert(prefix_seal.encoded_bytes == 56);
+}
 const provider_output = @import("provider_output.zig");
 const retry_policy = @import("retry_policy.zig");
 const turn_policy = @import("turn_policy.zig");
@@ -718,6 +724,19 @@ pub const HistoricalView = struct {
         };
         self.selected_coverage = value;
         return value;
+    }
+
+    /// The Session's prefix seal, if a full rebuild has recorded one.
+    pub fn prefixSeal(self: *HistoricalView) !?PrefixSeal {
+        std.debug.assert(self.active);
+        return self.store.readPrefixSeal(self.binding);
+    }
+
+    /// Record this view's fully rebuilt span as the Session's seal, while
+    /// the Attempt is still current.
+    pub fn recordPrefixSeal(self: *HistoricalView, seal: *const PrefixSeal) !void {
+        std.debug.assert(self.active);
+        return self.store.recordPrefixSeal(self.binding, seal);
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -1910,6 +1929,22 @@ pub const Store = struct {
     /// Test fixture for a historical producing binding unavailable through
     /// today's immutable Session configuration admission. Requires a newer
     /// current revision, leaving that revision and its frozen inputs intact.
+    pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        return self.readPrefixSealLocked(binding);
+    }
+
+    pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        const statement = try self.cached("UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
+        defer resetCached(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        const bytes = seal.encode();
+        try bindBlob(statement, 2, &bytes);
+        try expectDone(statement);
+        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
+    }
+
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
         var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
@@ -6112,6 +6147,41 @@ pub const Store = struct {
         return access.finish(Ordinary.none, self.validateHistoricalOutputsStepLocked(view));
     }
 
+    fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.readPrefixSealLocked(binding));
+    }
+
+    fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+        const statement = try self.cached("SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1");
+        defer resetCached(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
+        if (c.sqlite3_column_type(statement, 0) != c.SQLITE_BLOB) return error.CorruptStore;
+        return try PrefixSeal.decode(columnBytes(statement, 0));
+    }
+
+    fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.attempt_binding, .{}, self.recordPrefixSealLocked(binding, seal));
+    }
+
+    fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        try self.execute("BEGIN IMMEDIATE");
+        try self.validateCurrentAttempt(binding);
+        const update = try self.cached("UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
+        defer resetCached(update);
+        try bindU64(update, 1, binding.operation_id);
+        const bytes = seal.encode();
+        try bindBlob(update, 2, &bytes);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
+        try self.execute("COMMIT");
+    }
+
     fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
         const access = try self.enter(.none);
         defer access.release();
@@ -8252,6 +8322,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ -- The Session's immutable binding: grammar version and its options.
         \\ codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),
         \\ codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),
+        \\ -- What the last fully rebuilt history span encoded to (prefix_seal.zig).
+        \\ prefix_seal BLOB CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),
         \\ model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
     ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
