@@ -1891,7 +1891,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const observation = try checkedObservation(io, reply, target);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    try writer.writeAll("{\"version\":\"2\",\"type\":\"command_observation\",\"key\":");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":");
     try std.json.Stringify.value(observation.key.slice(), .{}, writer);
     try writer.writeAll(",\"observation\":");
     try observation.writeJson(writer);
@@ -2468,7 +2468,7 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try rows.end();
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
-    writer.writeAll("{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[") catch |err| return output.failure(err);
+    writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[") catch |err| return output.failure(err);
     var window: [protocol.content_window_bytes]u8 = undefined;
     var offset: u64 = 0;
     while (offset < rows.pos) {

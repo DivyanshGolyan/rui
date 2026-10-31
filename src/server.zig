@@ -2005,7 +2005,7 @@ const Reply = struct {
     }
 
     fn prepareHeader(self: *Reply, status: u16, content_type: []const u8, length: u64) !void {
-        const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{ status, httpReason(status), content_type, length });
+        const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ status, httpReason(status), content_type, length });
         self.header_length = header.len;
         self.renew();
     }
@@ -2051,7 +2051,7 @@ const Reply = struct {
         self.end = start + length;
         if (public) {
             try self.fill();
-            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{ length, location.reference.length, self.end });
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ length, location.reference.length, self.end });
             self.header_length = header.len;
             self.renew();
         } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);
@@ -2991,7 +2991,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try key.set(&escaped_key);
     const peer: protocol.Peer = .{ .session = session };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
-    const field: @typeInfo(@FieldType(protocol.ProposalMetadata, "fields")).array.child = .{ .length = max, .digest = content.digest };
+    const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },

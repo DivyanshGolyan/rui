@@ -885,6 +885,7 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
         .function_call => {
             const tags = .{ output_format.OutputRecordTag.name, .call_id, .arguments };
             // Index 0 is the provider item id, kept in the item bag.
+            comptime std.debug.assert(std.mem.eql(u8, OutputItemCheck.decoded_names[0], "id"));
             inline for (tags, item_check.decoded_fields[1..], item_check.encoded_spans[1..]) |tag, decoded, span| {
                 const encoded = try stringContents(window, item, span);
                 try response.metadata.append(.{
@@ -1187,7 +1188,7 @@ pub const OutputItemCheck = struct {
 
     /// From the end of a value's key to its closing quote.
     pub const Span = struct { after_key: u64, end: u64 };
-    pub const DecodedField = struct { length: u64, digest: [32]u8 };
+    pub const DecodedField = protocol.ProposalFieldReference;
 
     /// How the grammar judged one complete item.
     pub const Verdict = union(enum) {

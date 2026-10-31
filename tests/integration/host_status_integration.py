@@ -480,7 +480,7 @@ def main():
                 (f"HTTP/1.1 0200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
                  "X-Rui-Wire-Version: 2\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version : 1\r\n\r\n").encode() + valid_body,
+                 "X-Rui-Wire-Version : 2\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
                  "X-Rui-Wire-Version: 2\r\nTransfer-Encoding: chunked\r\n\r\n").encode() + valid_body,
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\n{}",

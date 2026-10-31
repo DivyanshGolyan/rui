@@ -1425,7 +1425,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
     const fd = try connectRequest(requests, address, null);
     errdefer closeSocket(requests.io, fd);
     var header_buffer: [512]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "POST " ++ route ++ " HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{body.len});
+    const header = try std.fmt.bufPrint(&header_buffer, "POST " ++ route ++ " HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len});
     try writeAllRequest(requests, fd, header, null);
     try writeAllRequest(requests, fd, body, null);
     return fd;
@@ -1466,7 +1466,7 @@ fn uploadRequest(
     until: ?i128,
 ) !void {
     var header_buffer: [512]u8 = undefined;
-    var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n", .{ route, length })).len;
+    var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n", .{ route, length })).len;
     if (instance) |id| {
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
     }
@@ -3146,7 +3146,7 @@ test "Session list client streams a page larger than the resident reply buffer" 
 
 fn writeContentTestHead(fd: std.posix.fd_t, length: u64) !void {
     var buffer: [256]u8 = undefined;
-    try writeAll(fd, try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{ length, length, length }));
+    try writeAll(fd, try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ length, length, length }));
 }
 
 test "a first-line read returns the text before the first line break, within the limit" {

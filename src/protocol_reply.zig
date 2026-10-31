@@ -511,6 +511,8 @@ test "Host unavailable replies require a known complete error" {
         "{\"version\":\"2\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
         "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
         "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        // The previous wire version, as an older Host would answer.
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"2\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
         "{\"version\":\"2\",\"type\":\"busy\",\"nested\":{\"code\":\"discovery_capacity_exhausted\"}}",
@@ -570,7 +572,7 @@ pub const CurrentReply = union(enum) {
 
     pub fn writeJson(self: *const CurrentReply, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
         return switch (self.*) {
-            .unconfigured => writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}"),
+            .unconfigured => writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}"),
             .current => |*current| current.writeJson(io, file, writer),
             .failure => |failure| failure.err(),
         };
@@ -737,7 +739,7 @@ pub const Current = struct {
     }
 
     pub fn writeJson(self: *const Current, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
-        try writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":");
+        try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":");
         try std.json.Stringify.value(self.settings, .{}, writer);
         try writer.print(",\"pending_messages\":\"{d}\",\"work\":", .{self.pending_messages});
         try std.json.Stringify.value(self.work, .{}, writer);
@@ -1245,7 +1247,7 @@ pub const SessionListPage = struct {
     }
 
     pub fn writeJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
-        try writer.writeAll("{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[");
+        try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
         try self.writeRowsJson(writer);
         var token: [protocol.SinceToken.max_bytes]u8 = undefined;
         try writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":", .{ self.delta, self.since.format(&token) });
@@ -2612,7 +2614,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
 /// A list page of rows named by `references`, then `facts`.
 fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.print("{{\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});

@@ -394,9 +394,9 @@ def performance_case(item_bytes):
         calls = [r for r in first["page"]["items"] if kind(r) == "call"]
         assert len(calls) == 1 and calls[0]["value"]["call"]["action"] is not None, first
         assert calls[0]["value"]["call"]["rejection"] is None, first
-        assert calls[0]["value"]["call"]["fields"][3]["bytes"] == str(argument_bytes), first
-        for reference, identity in zip(calls[0]["value"]["call"]["fields"][:3],
-                (b"performance-item-0", b"bash", b"performance-call")):
+        assert calls[0]["value"]["call"]["fields"][2]["bytes"] == str(argument_bytes), first
+        for reference, identity in zip(calls[0]["value"]["call"]["fields"][:2],
+                (b"bash", b"performance-call")):
             assert reference == {"bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
         expected = first["page"]["call_activity"]
         assert expected["total"] == "1" and expected["entries"][0]["presentation"]["description"] == label, expected

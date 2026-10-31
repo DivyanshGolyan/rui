@@ -4088,7 +4088,7 @@ pub const Store = struct {
     ) !void {
         var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
         const found = try self.readSession(session_ref, &current);
-        try capture.append("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"");
+        try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"");
         try capture.append(@tagName(profile));
         try capture.append("\",\"session\":");
         if (!found) {
@@ -8509,7 +8509,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     );
     try exec(database, "PRAGMA application_id=1280591409");
     try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
-    const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','2'),('store_selector',?1)");
+    const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','" ++ protocol.wire_version ++ "'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
     try expectDone(statement);
@@ -9385,7 +9385,6 @@ const TestingCall = struct {
     decoded_call_id: []const u8,
     encoded_arguments: []const u8,
     decoded_arguments: []const u8,
-    controls: []const u8 = "",
 };
 
 fn settleCallsForTesting(
@@ -9409,7 +9408,7 @@ fn settleCallsForTestingWithFaults(
 ) !void {
     var capacity: usize = if (usage_json) |bytes| bytes.len else 0;
     for (calls) |call| capacity += 128 + 6 * (call.item_id.len + call.name.len) +
-        call.encoded_call_id.len + call.encoded_arguments.len + call.controls.len;
+        call.encoded_call_id.len + call.encoded_arguments.len;
     const source_buffer = try std.testing.allocator.alloc(u8, capacity);
     defer std.testing.allocator.free(source_buffer);
     const ranges = try std.testing.allocator.alloc([2]u64, calls.len);
@@ -9421,7 +9420,7 @@ fn settleCallsForTestingWithFaults(
         try std.json.Stringify.value(call.item_id, .{}, &source_writer);
         try source_writer.writeAll(",\"name\":");
         try std.json.Stringify.value(call.name, .{}, &source_writer);
-        try source_writer.print(",\"call_id\":\"{s}\",\"arguments\":\"{s}\"{s}}}", .{ call.encoded_call_id, call.encoded_arguments, call.controls });
+        try source_writer.print(",\"call_id\":\"{s}\",\"arguments\":\"{s}\"}}", .{ call.encoded_call_id, call.encoded_arguments });
         range.* = .{ item_start, source_writer.end - item_start };
     }
     if (usage_json) |bytes| {
@@ -13185,14 +13184,14 @@ test "historical accepted assistant output completeness and provenance fence rea
 test "historical preparation fences a served call that does not match its certificate" {
     // A call binds its Tool Results through its admission certificate; replay
     // reads each call's bytes against their digest.
-    for ([_]struct { fault: [:0]const u8, failure: anyerror = error.CorruptStore }{
-        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
-        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)" },
-        .{ .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id" },
-        .{ .fault = "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL" },
-        .{ .fault = "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL" },
-        .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
-    }) |case| {
+    for ([_][:0]const u8{
+        "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
+        "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)",
+        "UPDATE model_tool_call SET arguments_content_id=name_content_id",
+        "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL",
+        "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL",
+        "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL",
+    }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -13207,7 +13206,7 @@ test "historical preparation fences a served call that does not match its certif
         };
         try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try exec(storage.database, case.fault);
+        try exec(storage.database, fault);
         var root: [protocol.max_store_bytes]u8 = undefined;
         const length = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
@@ -13221,7 +13220,7 @@ test "historical preparation fences a served call that does not match its certif
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
-                    try std.testing.expectEqual(case.failure, err);
+                    try std.testing.expectEqual(error.CorruptStore, err);
                     break;
                 },
                 .prepared => |*request| {
@@ -13230,7 +13229,7 @@ test "historical preparation fences a served call that does not match its certif
                 },
             }
         }
-        try std.testing.expectEqual(case.failure == error.CorruptStore, storage.isFenced());
+        try std.testing.expect(storage.isFenced());
         preparation.cancel();
         try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
