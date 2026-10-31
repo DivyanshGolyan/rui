@@ -7433,12 +7433,20 @@ pub const Store = struct {
         while (try self.nextAnswerPart(parts)) |id| {
             const part = try self.readContentMetadata(id);
             if (part.private) return error.CorruptOutputMetadata;
+            // A part may be a shared row this output did not write, so its
+            // bytes are checked against its digest before they are joined.
+            var own = protocol.contentHasher();
             var offset: u64 = 0;
             while (offset < part.length) {
                 const wanted: usize = @intCast(@min(part.length - offset, copy.window.len));
                 try self.readBlob(id, offset, copy.window[0..wanted]);
                 copy.hash.update(copy.window[0..wanted]);
+                own.update(copy.window[0..wanted]);
                 offset += wanted;
+            }
+            if (!std.mem.eql(u8, &own.finalResult(), &part.digest)) {
+                self.read_blob.close();
+                return self.fence(error.CorruptStore);
             }
             length = try std.math.add(u64, length, part.length);
         }
@@ -17182,6 +17190,22 @@ test "replay fences part damage that keeps every digest" {
         } else return error.MissingCorruptionFailure;
         try std.testing.expect(storage.isFenced());
     }
+}
+
+test "a joined answer fences a damaged shared part" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "shared-part-config");
+    const single = [_]TestingAnswerPart{.{ .encoded = "one", .decoded = "one" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "shared-part-first", &single);
+    // The row keeps its digest while its bytes change.
+    try exec(storage.database, "UPDATE content SET payload=CAST('onx' AS BLOB) WHERE private=0 AND payload=CAST('one' AS BLOB)");
+    const joined = [_]TestingAnswerPart{ .{ .encoded = "one", .decoded = "one" }, .{ .encoded = "two", .decoded = "two" } };
+    try std.testing.expectError(error.CorruptStore, answerTestTurn(&storage, &tmp, session.slice(), "shared-part-joined", &joined));
+    try std.testing.expect(storage.isFenced());
 }
 
 test "a warm Turn prepares no statement" {

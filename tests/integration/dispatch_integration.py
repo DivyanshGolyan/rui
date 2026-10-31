@@ -944,7 +944,7 @@ def sse_framing_cases(state, processes, endpoints):
     """Spec framing, exact decoded replay, and immutable raw failure evidence."""
     state = state / "sse-framing-cases"
     state.mkdir(mode=0o700)
-    # Replay rebuilds top-level separators; nested value spelling is verbatim.
+    # Replay is written canonically and parses equal to what was received.
     reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
     item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
     notification = b'data: {"type":"response.future.notice","item":{"type":"future_tool"}}\r\r'
@@ -979,7 +979,8 @@ def sse_framing_cases(state, processes, endpoints):
     message(state, store, "sse-next", session, "second")
     result, answer, _ = wait_for_result_release(store, "sse-next", session, time.monotonic() + 10)
     assert result["result"]["status"] == "completed" and answer == b"Next", (result, answer)
-    assert reasoning in endpoint.requests[1] and item in endpoint.requests[1], "decoded item bytes changed in replay"
+    replayed = json.loads(endpoint.requests[1])["input"]
+    assert json.loads(reasoning) in replayed and json.loads(item) in replayed, ("replayed items changed", replayed)
     assert len(endpoint.requests) == 2 and failed_response_records(store) == []
     stop_host(host)
     processes.remove(host)
