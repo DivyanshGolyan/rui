@@ -5617,7 +5617,7 @@ def main(selected="all"):
         saved.rename(saved.parent / "preferences.backup")
         sole = defaults(preferences_home)
         assert sole["provider"] is None and sole["next_session"] == {
-            "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "configured"}, sole
+            "status": "selected", "provider": "codex", "model": "gpt-6.1-sol", "local_credential": "configured"}, sole
         (saved.parent / "preferences.backup").rename(saved)
         credential.unlink()
         saved.write_text("version=9\n")
