@@ -25,6 +25,10 @@ pub const OutputMetadataRecord = struct {
     id_digest: [32]u8 = @splat(0),
     content_digest: [32]u8 = @splat(0),
     usage_tokens: ?u64 = null,
+    /// An item record's replay rule, judged once at acceptance: a reasoning
+    /// item whose nonempty `content` holds only reasoning_text blocks, which
+    /// replay leaves out.
+    omit_reasoning_text: bool = false,
 
     /// One past the record's last encoded byte.
     pub fn end(self: *const OutputMetadataRecord) !u64 {
@@ -93,6 +97,8 @@ pub const OutputMetadataWriter = struct {
         bytes[1] = @backingInt(record.kind);
         std.debug.assert(record.usage_tokens == null or record.tag == .usage);
         bytes[2] = @intFromBool(record.usage_tokens != null);
+        std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
+        bytes[3] = @intFromBool(record.omit_reasoning_text);
         // Usage has no item ordinal; this slot holds its certified pressure.
         std.mem.writeInt(u64, bytes[8..16], record.usage_tokens orelse record.ordinal, .little);
         std.mem.writeInt(u64, bytes[16..24], record.start, .little);
@@ -139,6 +145,8 @@ pub const OutputMetadataReader = struct {
         if (count != bytes.len) return error.CorruptOutputMetadata;
         self.offset += bytes.len;
         if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
+        if (bytes[3] > 1 or (bytes[3] == 1 and (bytes[0] != @backingInt(OutputRecordTag.item) or
+            bytes[1] != @backingInt(OutputItemKind.reasoning)))) return error.CorruptOutputMetadata;
         return .{
             .tag = switch (bytes[0]) {
                 1 => .item,
@@ -164,6 +172,7 @@ pub const OutputMetadataReader = struct {
             .id_digest = bytes[40..72].*,
             .content_digest = bytes[72..104].*,
             .usage_tokens = if (bytes[2] == 1) std.mem.readInt(u64, bytes[8..16], .little) else null,
+            .omit_reasoning_text = bytes[3] == 1,
         };
     }
 
@@ -287,3 +296,26 @@ pub const JsonStringSource = struct {
         return byte;
     }
 };
+
+test "a metadata record's replay-rule byte is set only on a reasoning item record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (0..256) |flag| for ([_]OutputRecordTag{ .item, .text, .item_id }) |tag| for ([_]OutputItemKind{ .reasoning, .message, .function_call, .compaction }) |kind| {
+        var bytes: [output_metadata_record_bytes]u8 = @splat(0);
+        bytes[0] = @backingInt(tag);
+        bytes[1] = @backingInt(kind);
+        bytes[3] = @intCast(flag);
+        const file = try tmp.dir.createFile(std.testing.io, "record", .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, &bytes);
+        var reader = try OutputMetadataReader.init(std.testing.io, file, 1);
+        const valid = flag == 0 or (flag == 1 and tag == .item and kind == .reasoning);
+        if (reader.next()) |record| {
+            try std.testing.expect(valid);
+            try std.testing.expectEqual(flag == 1, record.?.omit_reasoning_text);
+        } else |err| {
+            try std.testing.expect(!valid);
+            try std.testing.expectEqual(error.CorruptOutputMetadata, err);
+        }
+    };
+}

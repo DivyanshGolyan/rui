@@ -1075,8 +1075,6 @@ pub const Preparation = struct {
     /// The content the emission reads; open exactly while
     /// `state.emission.readsContent()`.
     reader: store.HistoricalReader = undefined,
-    /// The served output entry the replay_verdict stage judges.
-    replay_entry: store.HistoricalEntry = undefined,
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
     state: State,
@@ -1136,7 +1134,6 @@ pub const Preparation = struct {
         instructions,
         history_start,
         history,
-        replay_verdict,
         tool_results,
         covered_tool_results,
         compaction_trigger,
@@ -1337,26 +1334,14 @@ pub const Preparation = struct {
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
                             self.state.continuation_unavailable = true;
                         };
-                        self.replay_entry = entry.*;
-                        self.state.stage = .replay_verdict;
-                    },
-                }
-            },
-            // Every replayed item is judged, even once continuation is
-            // unavailable: compatibility never excuses unauthenticated later
-            // items. The Store already judged a call before serving it, so
-            // each item gets one grammar pass. Unusable output stays private;
-            // no partial request can seal.
-            .replay_verdict => {
-                items_left.* += 1; // The Store charges its own reading work.
-                const verdict = try self.view.replayVerdictStep(&self.replay_entry, bytes_left, items_left) orelse return .pending;
-                self.state.stage = .history;
-                switch (verdict) {
-                    .incompatible => self.state.continuation_unavailable = true,
-                    .compatible => |compatible| if (!self.state.continuation_unavailable) {
+                        // Acceptance judged the item once, under the grammar
+                        // this Store format fixes; replay applies its rule.
+                        // Unusable output stays private; no partial request
+                        // can seal.
+                        if (self.state.continuation_unavailable) return .pending;
                         self.state.item = .{ .replayed_output = .{
-                            .content = self.replay_entry.content.?,
-                            .omit_reasoning_text = compatible.omit_reasoning_text,
+                            .content = entry.content.?,
+                            .omit_reasoning_text = entry.content.?.item_identity.?.omit_reasoning_text,
                         } };
                         return .item;
                     },
@@ -1549,7 +1534,18 @@ pub const Preparation = struct {
             },
             .replay => |*cursor| {
                 const source = HistoricalSource{ .reader = &self.reader, .ranged = true };
-                if (try cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
+                // Acceptance parsed this item, so syntax the cursor refuses
+                // means the saved bytes changed.
+                const progress = cursor.advance(source, &self.writer, bytes_left, items_left) catch |err| switch (err) {
+                    error.UnexpectedJsonEnd,
+                    error.UnexpectedJsonDelimiter,
+                    error.TrailingJson,
+                    error.InvalidJsonEscape,
+                    error.InvalidJsonString,
+                    => return self.reader.corrupt(),
+                    else => return err,
+                };
+                if (progress == .pending) return false;
                 self.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
@@ -2181,6 +2177,10 @@ fn settleComposedForTesting(
         .length = item_json.len,
         .id_digest = protocol.contentDigest(item_id),
         .content_digest = protocol.contentDigest(item_json),
+        .omit_reasoning_text = switch (try Output.judgeForTesting(item_json)) {
+            .compatible => |compatible| compatible.omit_reasoning_text,
+            .incompatible => |reason| return reason,
+        },
     });
     var offset: u64 = item_json.len;
     for (calls, 0..) |call, index| {
@@ -3164,40 +3164,20 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     }
 }
 
-test "request preparation rejects unsupported saved meaning and fences malformed canonical items" {
-    for ([_]struct { item: []const u8, kind: output_format.OutputItemKind = .reasoning, failure: anyerror }{
-        .{ .item = "null", .failure = error.CorruptStore },
-        .{ .item = "true", .failure = error.CorruptStore },
-        .{ .item = "false", .failure = error.CorruptStore },
-        .{ .item = "42", .failure = error.CorruptStore },
-        .{ .item = "\"opaque\"", .failure = error.CorruptStore },
-        .{ .item = "[]", .failure = error.CorruptStore },
-        .{ .item = "[{\"type\":\"message\",\"id\":\"r\"}]", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":[0,]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"encrypted_content\":\"opaque\"}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"a\"},{\"type\":\"reasoning_text\",\"text\":true}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"future_text\"},{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[],\"annotations\":false}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"},{\"type\":\"future\"}]}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"\\u0074ype\":\"output_text\",\"text\":\"a\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"type\":\"reasoning_text\",\"text\":\"a\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"type\":\"summary_text\",\"text\":\"a\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-    }) |case| {
+test "request preparation fences a saved output item that no longer parses" {
+    // Acceptance judges each item once; replay trusts that judgment and the
+    // content digest. Bytes rewritten with a matching digest are outside
+    // that boundary, but replay fences any whose top-level object it cannot
+    // frame. It does not judge values again, so a rewrite that frames is
+    // replayed as saved.
+    for ([_][]const u8{
+        "null",
+        "42",
+        "\"opaque\"",
+        "[]",
+        "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"",
+        "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"} {}",
+    }) |rewritten| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3206,7 +3186,8 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", session.slice(), "next");
-        try settleComposedForTesting(&setup, first, "saved-metadata", case.kind, case.item, "r", &.{});
+        try settleComposedForTesting(&setup, first, "saved-metadata", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
+        try setup.storage.rewriteOutputItemForTesting(first, rewritten);
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         var used: std.atomic.Value(u64) = .init(0);
@@ -3218,19 +3199,19 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             var unexpected = request;
             unexpected.deinit(std.testing.io, preparation.writer.budget);
-            return error.ExpectedContinuationUnavailable;
+            return error.ExpectedCorruptStore;
         } else |err| {
-            try std.testing.expectEqual(case.failure, err);
+            try std.testing.expectEqual(error.CorruptStore, err);
         }
-        try std.testing.expectEqual(case.failure == error.CorruptStore, setup.storage.isFenced());
+        try std.testing.expect(setup.storage.isFenced());
         try preparation.checkIntegrity(binding);
         preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
 
-test "request preparation resumes large private replay validation before emission" {
-    for ([_]bool{ false, true }) |supported| {
+test "request preparation replays a large private reasoning item within each advance's allowance" {
+    {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3252,10 +3233,7 @@ test "request preparation resumes large private replay validation before emissio
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
             if (writer == &item) try writer.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
             try writer.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
-            try writer.writeAll(if (supported)
-                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
-            else
-                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
+            try writer.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         }
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -3266,37 +3244,22 @@ test "request preparation resumes large private replay validation before emissio
         try setup.storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        var validation_turns: usize = 0;
         var turns: usize = 0;
         while (true) {
             turns += 1;
-            try std.testing.expect(turns < 100000);
-            // While the item is judged, nothing of it is emitted, and the
-            // grammar reads no more than the advance charges.
-            const judging = preparation.state.stage == .replay_verdict;
+            try std.testing.expect(turns < 1000000);
+            // Replay reads and writes no more than each advance charges.
             const written = preparation.writer.offset;
-            const read_before = preparation.view.itemCheckBytes() orelse 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (judging and preparation.state.stage == .replay_verdict) {
-                validation_turns += 1;
-                const read_after = preparation.view.itemCheckBytes().?;
-                try std.testing.expect(read_after >= read_before and read_after - read_before <= 7);
-                try std.testing.expectEqual(written, preparation.writer.offset);
-                try std.testing.expect(preparation.state.emission == .none);
-                try preparation.checkIntegrity(binding);
-            }
+            try std.testing.expect(preparation.writer.offset - written <= 7);
+            if (progress == .pending) try preparation.checkIntegrity(binding);
             switch (progress) {
                 .pending => {},
-                .failed => |err| {
-                    try std.testing.expect(!supported);
-                    try std.testing.expectEqual(error.ContinuationUnavailable, err);
-                    break;
-                },
+                .failed => |err| return err,
                 .prepared => |*request| {
                     defer request.deinit(std.testing.io, preparation.writer.budget);
-                    try std.testing.expect(supported);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
@@ -3305,7 +3268,6 @@ test "request preparation resumes large private replay validation before emissio
                 },
             }
         }
-        try std.testing.expect(validation_turns > 5000);
         if (preparation.state.active) preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }

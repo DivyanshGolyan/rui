@@ -849,6 +849,7 @@ const Array = struct {
 const ItemValidation = struct {
     kind: output_format.OutputItemKind,
     id_digest: [32]u8,
+    omit_reasoning_text: bool = false,
     non_whitespace: bool = false,
     phase: enum { unphased, commentary, final_answer } = .unphased,
 };
@@ -881,16 +882,16 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     var bytes: usize = std.math.maxInt(usize);
     var items: usize = std.math.maxInt(usize);
     // Unbounded allowances finish the item in one call.
-    switch ((try item_check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
-        .compatible => {},
+    const omit_reasoning_text = switch ((try item_check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
+        .compatible => |compatible| compatible.omit_reasoning_text,
         .incompatible => |reason| return reason,
-    }
+    };
     const kind = item_check.item_kind.?;
     const id_digest = item_check.idDigest();
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
-        .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest },
+        .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest, .omit_reasoning_text = omit_reasoning_text },
         .function_call => {
             const tags = .{ output_format.OutputRecordTag.item_id, .name, .call_id, .arguments };
             inline for (tags, item_check.decoded_fields, item_check.encoded_spans) |tag, decoded, span| {
@@ -942,16 +943,18 @@ fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Ran
     return .{ .start = source.offset(), .length = item.start + span.end - source.offset() };
 }
 
-/// The one output item grammar: import accepts an item only when this pass
-/// does, and replay runs it again because adapter rules can change between
-/// attempts. Partial string/number tokens never own payload storage. Frames
+/// The one output item grammar: acceptance stores an item only when this
+/// pass does, with the replay rule it judged. Replay applies that rule
+/// without judging again, so a change to what this grammar accepts or omits
+/// changes the Store format (`store.schema_version`). A served call item is
+/// read again only to authenticate its certified fields. Partial string/number tokens never own payload storage. Frames
 /// retain only consequential field facts; errors in meaning are deferred
 /// until syntax and the complete source have validated.
 /// Initialize/use in final storage (the scanner borrows its nesting buffer).
 pub const OutputItemCheck = struct {
     /// Set at import: the Operation the item arrives under, which decides
-    /// whether a compaction or a call may appear at all. Replay leaves it
-    /// null; an accepted item stays replayable under any later Operation.
+    /// whether a compaction or a call may appear at all. Authentication of a
+    /// saved call leaves it null.
     operation: ?output_format.ModelOperationKind = null,
     scanner: ?std.json.Scanner = null,
     nesting: [16]u8 = undefined,
@@ -2194,6 +2197,28 @@ pub fn testingItemCheck() *OutputItemCheck {
     return &testing_item_check;
 }
 
+/// Judge one complete item in memory the way acceptance does, for tests that
+/// save output without a provider stream.
+pub fn judgeForTesting(item: []const u8) !OutputItemCheck.Verdict {
+    const item_check = testingItemCheck();
+    item_check.reset(null);
+    const Source = struct {
+        bytes: []const u8,
+
+        pub fn contentLength(self: @This()) u64 {
+            return self.bytes.len;
+        }
+
+        pub fn readContent(self: @This(), offset: u64, destination: []u8) !usize {
+            @memcpy(destination, self.bytes[@intCast(offset)..][0..destination.len]);
+            return destination.len;
+        }
+    };
+    var bytes: usize = std.math.maxInt(usize);
+    var items: usize = std.math.maxInt(usize);
+    return (try item_check.advance(Source{ .bytes = item }, &bytes, &items)).?;
+}
+
 /// Tests' provider failure, the last validation's.
 var testing_provider_failure: ProviderFailure = undefined;
 
@@ -2266,6 +2291,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
             .length = item.length,
             .id_digest = validation.id_digest,
             .content_digest = try contentDigestRange(window, item),
+            .omit_reasoning_text = validation.omit_reasoning_text,
         });
         response.item_count += 1;
         return;

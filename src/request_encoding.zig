@@ -230,8 +230,10 @@ pub const RawCursor = struct {
 
 pub const ReplayProgress = enum { pending, done };
 
-/// Incrementally rebuilds one trusted canonical provider item while omitting
-/// only the top-level `created_by` field. Source scans and retained-field
+/// Incrementally rebuilds one saved provider item, which acceptance parsed,
+/// while omitting only the top-level `created_by` field (and `content` when
+/// asked). Its source may verify the item's digest only as it reads, so a
+/// copy can start before the item is verified. Source scans and retained-field
 /// copies both consume the caller's byte allowance.
 pub const ReplayCursor = struct {
     phase: Phase = .open,
@@ -246,8 +248,8 @@ pub const ReplayCursor = struct {
     copy_buffer_offset: usize = 0,
     emitted: bool = false,
     omit_field: bool = false,
-    /// Set before copying a validated reasoning item whose `content` holds
-    /// private reasoning text. The saved item keeps that field unchanged.
+    /// Set before copying a reasoning item whose saved replay rule says its
+    /// `content` holds private reasoning text. The saved item keeps that field unchanged.
     omit_content: bool = false,
     key_matches: bool = true,
     content_matches: bool = true,
