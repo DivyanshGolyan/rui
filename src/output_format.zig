@@ -218,6 +218,8 @@ pub const OutputMetadataReader = struct {
             .output = std.mem.readInt(u64, bytes[48..56], .little),
         } else null;
         if (usage != null) {
+            // The counts' slots end at 56; the rest of the id slot is unused.
+            if (!std.mem.allEqual(u8, bytes[56..72], 0)) return error.CorruptOutputMetadata;
             @memset(bytes[8..16], 0);
             @memset(bytes[32..72], 0);
         }

@@ -1224,7 +1224,6 @@ pub const Preparation = struct {
         tools,
         text_format,
         end,
-        prefix_check,
         history_store,
         complete,
     };
@@ -1334,14 +1333,13 @@ pub const Preparation = struct {
                 self.startPiece(piece) catch |err| return .{ .failed = err };
                 continue;
             }
-            if (self.state.stage == .prefix_check) {
-                if (!(self.advancePrefixCheck(&bytes_left) catch |err| return .{ .failed = err })) continue;
-                self.state.stage = .history_store;
-                continue;
-            }
-            // The sealed request is the memo's source, copied under the
-            // allowance; a failure loses only the memo.
+            // The sealed request is the source of the prefix check and the
+            // memo, read once under the allowance; a failure loses only the
+            // memo.
             if (self.state.stage == .history_store) {
+                if (self.state.prefix_check != null) {
+                    if (!(self.advancePrefixCheck(&bytes_left) catch |err| return .{ .failed = err })) continue;
+                }
                 const write = &(self.state.memo_write orelse return self.finish());
                 const memos = self.state.memos.?;
                 bytes_left -= memos.writeChunk(self.writer.io, write, self.readonly, bytes_left, &self.memo_window) catch {
@@ -1471,7 +1469,7 @@ pub const Preparation = struct {
                 return .item;
             },
             .end => return .end,
-            .prefix_check, .history_store, .complete => unreachable,
+            .history_store, .complete => unreachable,
         }
         return .pending;
     }
@@ -1658,12 +1656,16 @@ pub const Preparation = struct {
         if (span.copy == null) {
             const stored = try self.view.prefixSeal();
             const bound = if (stored) |held| if (held.binds(next.key.anchor, next.admission_position)) held else null else null;
+            // A seal from a later view, as when an earlier Operation is
+            // retried, covers more than this view can: it neither binds
+            // nor is replaced.
+            const later = if (stored) |held| held.anchor == next.key.anchor and held.admission_position > next.admission_position else false;
             if (bound) |held| if (held.span_length > next.length) return error.EncodingDrift;
             // The seal is replaced only once the span has doubled, so a
             // Session's seal writes are logarithmic in its history and the
             // seal always covers at least half of a rebuilt span.
-            const record = if (bound) |held| next.length >= 2 * held.span_length and next.length != 0 else true;
-            self.state.prefix_check = .{
+            const record = if (bound) |held| next.length >= 2 * held.span_length and next.length != 0 else !later;
+            if (!later) self.state.prefix_check = .{
                 .start = span.start,
                 .length = if (record) next.length else bound.?.span_length,
                 .bound = bound,
@@ -1671,7 +1673,6 @@ pub const Preparation = struct {
                 .anchor = next.key.anchor,
                 .admission_position = next.admission_position,
             };
-            self.state.stage = .prefix_check;
         }
         const memos = self.state.memos orelse return;
         const prefix: ?history_memo.Prefix = if (span.copy) |copy| .{ .memo = copy.memo, .hasher = copy.hasher } else null;
@@ -1679,10 +1680,11 @@ pub const Preparation = struct {
     }
 
     /// Hash the rebuilt span from the sealed request, one window per step
-    /// under the allowance. Its first bytes must match the Session's seal;
-    /// a mismatch fails the Attempt before anything is sent, because the
-    /// provider cached the earlier bytes. Returns true once the check, and
-    /// any new seal, is done.
+    /// under the allowance, and hand each window on to the memo being
+    /// written. Its first bytes must match the Session's seal; a mismatch
+    /// fails the Attempt before anything is sent, because the provider
+    /// cached the earlier bytes, and the memo is never kept. Returns true
+    /// once the check, and any new seal, is done.
     fn advancePrefixCheck(self: *Preparation, bytes_left: *usize) !bool {
         const check = &self.state.prefix_check.?;
         while (true) {
@@ -1699,6 +1701,11 @@ pub const Preparation = struct {
             if (try self.readonly.readPositionalAll(self.writer.io, window, check.start + check.hashed) != count)
                 return error.RequestSealFailed;
             check.hasher.update(window);
+            if (self.state.memo_write) |*write| {
+                // A rebuilt span's memo is written from its first byte.
+                std.debug.assert(write.written == check.hashed);
+                history_memo.Table.appendChunk(self.writer.io, write, window) catch self.abandonMemoWrite();
+            }
             check.hashed += count;
             bytes_left.* -= count;
         }
@@ -3986,9 +3993,11 @@ test "a full rebuild must begin with the Session's prefix seal" {
     try std.testing.expect(replaced != 0);
     try std.testing.expect(sealed.span_length < length);
     // A seal the rebuild disagrees with fails before anything is sent and
-    // stays for every later rebuild. A seal of another anchor or of a later
-    // view does not bind and is replaced by the whole span.
-    const Case = struct { seal: store.PrefixSeal, drift: bool };
+    // stays for every later rebuild. A seal of another anchor does not bind
+    // and is replaced by the whole span; one of a later view, as when an
+    // earlier Operation is retried, neither binds nor is replaced.
+    const Outcome = enum { drift, replaced, kept };
+    const Case = struct { seal: store.PrefixSeal, outcome: Outcome };
     var flipped = sealed;
     flipped.digest[31] ^= 1;
     var longer = sealed;
@@ -4000,28 +4009,38 @@ test "a full rebuild must begin with the Session's prefix seal" {
     var later = flipped;
     later.admission_position = std.math.maxInt(u64);
     for ([_]Case{
-        .{ .seal = flipped, .drift = true },
-        .{ .seal = longer, .drift = true },
-        .{ .seal = shorter, .drift = true },
-        .{ .seal = anchored, .drift = false },
-        .{ .seal = later, .drift = false },
+        .{ .seal = flipped, .outcome = .drift },
+        .{ .seal = longer, .outcome = .drift },
+        .{ .seal = shorter, .outcome = .drift },
+        .{ .seal = anchored, .outcome = .replaced },
+        .{ .seal = later, .outcome = .kept },
     }) |case| {
         try setup.storage.setPrefixSealForTesting(binding, &case.seal);
-        if (case.drift) {
+        if (case.outcome == .drift) {
             try std.testing.expectError(error.EncodingDrift, Rebuild.span(&setup, binding, session.slice()));
             try std.testing.expectEqual(case.seal, (try setup.storage.prefixSealForTesting(binding)).?);
+            continue;
+        }
+        try std.testing.expectEqual(length, try Rebuild.span(&setup, binding, session.slice()));
+        const current = (try setup.storage.prefixSealForTesting(binding)).?;
+        if (case.outcome == .kept) {
+            try std.testing.expectEqual(case.seal, current);
         } else {
-            try std.testing.expectEqual(length, try Rebuild.span(&setup, binding, session.slice()));
-            const current = (try setup.storage.prefixSealForTesting(binding)).?;
             try std.testing.expectEqual(@as(?u64, null), current.anchor);
             try std.testing.expectEqual(length, current.span_length);
         }
     }
     try std.testing.expectEqualStrings("encoding_drift", preparationFailureCode(error.EncodingDrift));
-    // A memo hit is this Host's own encoding and is not checked again.
+    // A drifted rebuild keeps no memo, so no later request copies it
+    // unchecked; a memo hit is this Host's own encoding and is not checked
+    // again.
     var entries: [2]history_memo.Table.Entry = @splat(.{});
     var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
     defer memos.deinit(std.testing.io);
+    try setup.storage.setPrefixSealForTesting(binding, &flipped);
+    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
+    try std.testing.expectEqual(@as(usize, 0), heldMemoLength(&memos, session.slice()));
+    try setup.storage.setPrefixSealForTesting(binding, &anchored);
     _ = try Rebuild.span(&setup, binding, session.slice());
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
     try setup.storage.setPrefixSealForTesting(binding, &flipped);

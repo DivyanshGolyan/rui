@@ -34,6 +34,8 @@ pub const PrefixSeal = struct {
 
     pub fn encode(self: *const PrefixSeal) [encoded_bytes]u8 {
         var bytes: [encoded_bytes]u8 = undefined;
+        // Anchors are Session positions, which start at 1; 0 encodes none.
+        std.debug.assert(self.anchor != 0 and self.admission_position != 0);
         std.mem.writeInt(u64, bytes[0..8], self.anchor orelse 0, .little);
         std.mem.writeInt(u64, bytes[8..16], self.admission_position, .little);
         std.mem.writeInt(u64, bytes[16..24], self.span_length, .little);
