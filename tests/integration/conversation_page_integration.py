@@ -356,7 +356,39 @@ def whole_stream_shape(length):
                 head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **(identity | changes))
                 assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
             wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "stream producer cleanup")
-            print(f"whole stream {length} bytes: exact escape-heavy framing passed")
+            stop_process(process)
+            process = None
+            # Alter only a stopped Store: a whole-value read checks the digest
+            # before its final window, so damage cannot read as success.
+            with sqlite3.connect(store / "rui.sqlite3") as database:
+                if length:
+                    answer, payload = database.execute(
+                        "SELECT c.content_id,c.payload FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.entry_kind=3"
+                    ).fetchone()
+                    assert payload[:1] == b"x"
+                    database.execute("UPDATE content SET payload=? WHERE content_id=?", (b"y" + payload[1:], answer))
+                else:
+                    # Authenticate the admitted empty User entry independently
+                    # of the later assistant entry.
+                    answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
+                    database.execute("UPDATE content SET digest=? WHERE content_id=?", (b"\xff" * 32, answer))
+            process, fields = start_host(store, provider)
+            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
+            if length <= 4096:
+                assert head.startswith(b"HTTP/1.1 500 "), (length, head, len(body))
+                assert json.loads(body)["code"] == "canonical_store_failure", body
+            else:
+                assert head.startswith(b"HTTP/1.1 200 "), head
+                assert f"Content-Length: {length}\r\n".encode() in head, head
+                # No byte of the failed final window may escape, even at an
+                # exact window multiple. Earlier bytes are not authenticated.
+                sent = ((length - 1) // 4096) * 4096
+                assert body == (b"y" + expected[1:])[:sent] and len(body) < length, (length, len(body))
+                assert b"HTTP/1.1" not in body and b"canonical_store_failure" not in body
+            assert process.wait(timeout=5) == 1, "canonical corruption did not shut down Host"
+            stop_process(process)
+            process = None
+            print(f"whole stream {length} bytes: exact escape-heavy framing and digest no-false-success witness passed")
         finally:
             dispose_page(process, endpoint, worker, 5)
 

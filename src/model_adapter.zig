@@ -1981,7 +1981,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     try std.testing.expect(setup.storage.configure(&configuration, true, .{}) == .accepted);
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", "peer-reasoning", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
+    try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
     const action = (try setup.storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var input: store.BashExecutionInput = undefined;
     try setup.storage.readBashExecutionInput(action, &input);
@@ -2200,10 +2200,8 @@ fn settleComposedForTesting(
     file_prefix: []const u8,
     item_kind: output_format.OutputItemKind,
     item_json: []const u8,
-    item_id: []const u8,
     calls: []const ComposedCall,
 ) !void {
-    _ = item_id;
     const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}";
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
@@ -2294,7 +2292,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         .{ .item_id = "order-item-a", .call_id = "order-call-a" },
         .{ .item_id = "order-item-b", .call_id = "order-call-b" },
     };
-    try settleComposedForTesting(setup, source_binding, "composed-metadata", .reasoning, reasoning_json, "r1", &calls);
+    try settleComposedForTesting(setup, source_binding, "composed-metadata", .reasoning, reasoning_json, &calls);
     var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
     try second_deny.key.set("composed-deny-second");
     second_deny.session = session;
@@ -3156,7 +3154,7 @@ test "request preparation fences a saved provider bag whose bytes changed" {
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", session.slice(), "next");
-        try settleComposedForTesting(&setup, first, "saved-metadata", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
+        try settleComposedForTesting(&setup, first, "saved-metadata", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
         try setup.storage.damageOutputBagForTesting(first);
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
@@ -3209,7 +3207,7 @@ test "request preparation replays a large private reasoning item within each adv
         try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
         try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
-        try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
+        try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         var used: std.atomic.Value(u64) = .init(0);
@@ -3278,7 +3276,7 @@ test "request preparation authenticates the historical requested model binding" 
     try setup.submit("binding-one", "binding-one", session.slice(), "original");
     const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try setup.submit("binding-two", "binding-two", session.slice(), "next");
-    try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
+    try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
@@ -3308,6 +3306,118 @@ test "request preparation authenticates the historical requested model binding" 
     try std.testing.expect(!setup.storage.isFenced());
     try std.testing.expect(retained == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+/// Settles `items` (complete provider item JSON) as one model success with
+/// no selected answer, splitting each through acceptance.
+fn settleItemsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, file_prefix: []const u8, items: []const []const u8) !void {
+    var source_buffer: [16 * 1024]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(&source_buffer);
+    var ranges: [32][2]u64 = undefined;
+    std.debug.assert(items.len <= ranges.len);
+    for (items, 0..) |item, ordinal| {
+        ranges[ordinal] = .{ source_writer.end, item.len };
+        try source_writer.writeAll(item);
+    }
+    const source_bytes = source_writer.buffered();
+    var name: [64]u8 = undefined;
+    const source = try setup.tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&name, "{s}-source", .{file_prefix}), .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, source_bytes);
+    try source.sync(std.testing.io);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, file_prefix, .{ .used = &metadata_used, .limit = 1 << 20 }, false, &retained_metadata);
+    defer metadata.deinit();
+    var calls: u64 = 0;
+    for (ranges[0..items.len], 0..) |range, ordinal| {
+        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
+        if (record.kind == .function_call) calls += 1;
+    }
+    try metadata.sealForRead();
+    try setup.storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = source_bytes.len,
+        .metadata = metadata.file,
+        .item_count = items.len,
+        .call_count = calls,
+        .answer_length = 0,
+        .answer_digest = protocol.contentDigest(""),
+        .response_id = .{},
+        .model_evidence = .{ .len = 7, .bytes = .{1} ++ @as([774]u8, @splat(0)) },
+        .request_id = .{},
+    }, .{});
+}
+
+fn jsonEqualForTesting(a: std.json.Value, b: std.json.Value) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .object => |object| object.count() == b.object.count() and for (object.keys(), object.values()) |key, value| {
+            const other = b.object.get(key) orelse break false;
+            if (!jsonEqualForTesting(value, other)) break false;
+        } else true,
+        .array => |array| array.items.len == b.array.items.len and for (array.items, b.array.items) |x, y| {
+            if (!jsonEqualForTesting(x, y)) break false;
+        } else true,
+        .string => |text| std.mem.eql(u8, text, b.string),
+        .number_string => |text| std.mem.eql(u8, text, b.number_string),
+        .integer => |value| value == b.integer,
+        .float => |value| value == b.float,
+        .bool => |value| value == b.bool,
+        .null => true,
+    };
+}
+
+test "every replayed output item parses equal to the item the provider sent" {
+    // Through acceptance, the Store and the Codex writer. Only `created_by`
+    // and private reasoning text are left out, as the pinned first-party
+    // serializer leaves them out.
+    const cases = [_]struct { sent: []const u8, replayed: ?[]const u8 = null }{
+        .{
+            .sent = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"created_by\":\"x\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9\\/\"},{\"type\":\"summary_text\",\"text\":\"\"}]," ++
+                "\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\\nthought\"}],\"encrypted_content\":\"gAAA==\",\"status\":\"completed\"}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9/\"},{\"type\":\"summary_text\",\"text\":\"\"}],\"encrypted_content\":\"gAAA==\",\"status\":\"completed\"}",
+        },
+        .{ .sent = "{\"type\":\"reasoning\",\"id\":\"rs_2\",\"summary\":[],\"content\":[],\"encrypted_content\":\"e\",\"future\":{\"nested\":[null,true,1.5e3]}}" },
+        .{ .sent = "{\"type\":\"reasoning\",\"id\":\"rs_3\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"s\",\"extra\":{\"k\":[]}}],\"encrypted_content\":\"e\"}" },
+        .{
+            .sent = "{\"type\":\"message\",\"id\":\"m_1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"partial_answer\",\"created_by\":\"y\"," ++
+                "\"content\":[{\"type\":\"output_text\",\"text\":\"see \\\"this\\\"\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"u\",\"start_index\":0}],\"logprobs\":[{\"token\":\"see\",\"logprob\":-0.25,\"bytes\":[115,101,101],\"top_logprobs\":[]}]},{\"type\":\"refusal\",\"refusal\":\"no\"}]}",
+            .replayed = "{\"type\":\"message\",\"id\":\"m_1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"partial_answer\"," ++
+                "\"content\":[{\"type\":\"output_text\",\"text\":\"see \\\"this\\\"\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"u\",\"start_index\":0}],\"logprobs\":[{\"token\":\"see\",\"logprob\":-0.25,\"bytes\":[115,101,101],\"top_logprobs\":[]}]},{\"type\":\"refusal\",\"refusal\":\"no\"}]}",
+        },
+        .{ .sent = "{\"type\":\"message\",\"id\":\"m_2\",\"role\":\"assistant\",\"phase\":null,\"content\":[{\"type\":\"output_text\",\"text\":\"a\\u0000b\\ud83d\\ude42\",\"annotations\":[],\"future\":\"kept\"}]}" },
+        .{ .sent = "{\"st\\u0061tus\":\"completed\",\"type\":\"message\",\"id\":\"m_3\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"text\":\"first\",\"type\":\"output_text\"},{\"type\":\"output_text\",\"text\":\"\"}]}" },
+        .{ .sent = "{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"completed\",\"name\":\"unknown\",\"call_id\":\"call\\nA\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"future\":[]}" },
+        .{ .sent = "{\"type\":\"message\",\"id\":\"m_4\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}" },
+    };
+    var sent: [cases.len][]const u8 = undefined;
+    for (cases, &sent) |case, *item| item.* = case.sent;
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("parse-equal-config");
+    try setup.submit("parse-equal-one", "parse-equal-one", session.slice(), "original");
+    const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, source, "parse-equal-output", &sent);
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    const input = parsed.object.get("input").?.array.items;
+    // The user input, every item in order, then the rejected call's result.
+    try std.testing.expectEqual(cases.len + 2, input.len);
+    for (cases, input[1 .. 1 + cases.len], 0..) |case, actual, index| {
+        const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena, case.replayed orelse case.sent, .{});
+        if (!jsonEqualForTesting(expected, actual)) {
+            std.debug.print("item {d} sent: {s}\nrequest: {s}\n", .{ index, case.sent, request.bytes });
+            return error.TestExpectedEqual;
+        }
+    }
+    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 1].object.get("type").?.string);
 }
 
 test "request preparation replays reasoning continuation without its private reasoning text" {
@@ -3341,7 +3451,7 @@ test "request preparation replays reasoning continuation without its private rea
         try setup.submit("reasoning-text-one", "reasoning-text-one", session.slice(), "original");
         const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try setup.submit("reasoning-text-two", "reasoning-text-two", session.slice(), "next");
-        try settleComposedForTesting(&setup, source, "reasoning-text-output", .reasoning, case.saved, "r", &.{});
+        try settleComposedForTesting(&setup, source, "reasoning-text-output", .reasoning, case.saved, &.{});
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
@@ -3517,7 +3627,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
-        try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", "suffix", &.{});
+        try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
         try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -3634,17 +3744,23 @@ fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBi
     return memo.copied;
 }
 
-/// Settle `binding` with a reasoning item and one Bash call, deny that call
-/// and admit the successor.
+/// Settle `binding` with a reasoning item or a message and one Bash call,
+/// deny that call and admit the successor.
 fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
     var names: [4][32]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
     const reasoning_id = try std.fmt.bufPrint(&names[1], "memo-r{d}", .{round});
     const item_id = try std.fmt.bufPrint(&names[2], "memo-item-{d}", .{round});
     const call_id = try std.fmt.bufPrint(&names[3], "memo-call-{d}", .{round});
-    var json_buffer: [128]u8 = undefined;
-    const reasoning = try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round });
-    try settleComposedForTesting(setup, binding, prefix, .reasoning, reasoning, reasoning_id, &.{.{ .item_id = item_id, .call_id = call_id }});
+    var json_buffer: [512]u8 = undefined;
+    // Alternate items with parts and bags: a reasoning summary, then a
+    // commentary message whose text parts carry annotations.
+    const kind: output_format.OutputItemKind = if (round % 2 == 0) .message else .reasoning;
+    const item = if (kind == .reasoning)
+        try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"plan \\u00e9 {d}\"}}],\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round, round })
+    else
+        try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"message\",\"id\":\"{s}\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{{\"type\":\"output_text\",\"text\":\"step {d}\",\"annotations\":[{{\"type\":\"url_citation\",\"url\":\"u\"}}]}},{{\"type\":\"output_text\",\"text\":\"\\n\"}}]}}", .{ reasoning_id, round });
+    try settleComposedForTesting(setup, binding, prefix, kind, item, &.{.{ .item_id = item_id, .call_id = call_id }});
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = round };
     var key_buffer: [32]u8 = undefined;
     try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));

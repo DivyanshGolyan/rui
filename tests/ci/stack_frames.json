@@ -12,7 +12,7 @@
     "execution_turn", "failed_responses", "history_memo", "model_adapter", "model_capability",
     "named_scratch", "os.descriptor_limit", "os.pages", "output_format", "output_retention",
     "platform", "preference_values", "preferences", "protocol", "provider", "provider_output",
-    "request_encoding", "server", "server_execution", "server_host", "session_work", "signal_stack",
+    "server", "server_execution", "server_host", "session_work", "signal_stack",
     "stderr", "store", "tools", "transport_policy", "h2", "Connection", "Engine", "Resolver",
     "Stream", "proxy", "tls", "job"
   ],

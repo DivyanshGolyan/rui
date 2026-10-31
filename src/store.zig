@@ -619,9 +619,21 @@ pub const HistoricalView = struct {
     entries_next: usize = 0,
     entries_end: usize = 0,
     /// The output item whose parts `nextOutputPart` serves.
-    output_parts: ?struct { operation_id: u64, item_ordinal: u64, next: u64 } = null,
+    output_parts: ?OutputPartCursor = null,
 
     const entry_batch = 16;
+
+    const OutputPartCursor = struct {
+        operation_id: u64,
+        item_ordinal: u64,
+        kind: OutputItemKind,
+        /// The item's saved part count; the walk must end exactly there.
+        count: u64,
+        next: u64 = 0,
+        /// Arrays already closed: each array's parts are contiguous.
+        closed: [2]bool = .{ false, false },
+        array: output_format.PartArray = .none,
+    };
 
     /// The view's selected Compaction Base: its admission position, from
     /// which accepted output is validated, and the position of its
@@ -763,8 +775,9 @@ pub const HistoricalView = struct {
         std.debug.assert(reference.belongsTo(self));
         const identity: ContentReference = .{ .length = reference.length, .digest = reference.digest };
         const location: ContentLocation = .{ .store = self.store, .reference = identity, .content_id = reference.content_id };
-        out.* = .{ .view = self, .reference = reference, .verified = reference.verified };
+        out.* = .{ .view = self, .reference = reference };
         out.reader.open(location);
+        out.reader.verified = reference.verified;
         self.readers += 1;
     }
 
@@ -819,9 +832,6 @@ pub const HistoricalReader = struct {
     view: *HistoricalView,
     reference: HistoricalContent,
     active: bool = true,
-    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-    verified_position: u64 = 0,
-    verified: bool = false,
 
     fn usable(self: *const HistoricalReader) bool {
         return self.active and self.reference.belongsTo(self.view);
@@ -834,23 +844,11 @@ pub const HistoricalReader = struct {
         return self.view == view and self.usable();
     }
 
+    /// Replay reads in order, so its content reader checks every value's
+    /// digest at its end.
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
-        std.debug.assert(self.usable() and (self.verified or start == self.verified_position));
-        const count = try self.reader.read(start, destination);
-        try self.verify(start, destination[0..count]);
-        return count;
-    }
-
-    /// Extend the digest check over bytes read at `start` past the verified
-    /// position; at the content's end a mismatch fences the Store.
-    fn verify(self: *HistoricalReader, start: u64, bytes: []const u8) !void {
-        if (self.verified or start + bytes.len <= self.verified_position) return;
-        self.hash.update(bytes[@intCast(self.verified_position - start)..]);
-        self.verified_position = start + bytes.len;
-        if (self.verified_position != self.reference.length) return;
-        if (!std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest))
-            return self.view.store.fence(error.CorruptStore);
-        self.verified = true;
+        std.debug.assert(self.usable() and (self.reader.verified or start == self.reader.verified_position));
+        return self.reader.read(start, destination);
     }
 
     pub fn close(self: *HistoricalReader) void {
@@ -1189,6 +1187,12 @@ pub const ContentReader = struct {
     prefetch_source: i64 = 0,
     prefetch_start: u64 = 0,
     prefetch_length: usize = 0,
+    /// Bytes read in order from the start are hashed; reaching the end
+    /// checks the digest before the last window is returned. Reads that
+    /// skip ahead stop this check.
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    verified_position: u64 = 0,
+    verified: bool = false,
 
     /// Builds the reader where it lives. Needs no Store access.
     pub fn open(self: *ContentReader, location: ContentLocation) void {
@@ -1209,7 +1213,19 @@ pub const ContentReader = struct {
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
-        return self.store.readOwnedContent(self, start, destination);
+        const count = try self.store.readOwnedContent(self, start, destination);
+        try self.verify(start, destination[0..count]);
+        return count;
+    }
+
+    fn verify(self: *ContentReader, start: u64, bytes: []const u8) !void {
+        if (self.verified or start > self.verified_position or start + bytes.len < self.verified_position) return;
+        self.hash.update(bytes[@intCast(self.verified_position - start)..]);
+        self.verified_position = start + bytes.len;
+        if (self.verified_position != self.reference.length) return;
+        self.verified = true;
+        if (!std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest))
+            return self.store.fence(error.CorruptStore);
     }
 
     /// Read at any public byte offset.
@@ -3291,8 +3307,8 @@ pub const Store = struct {
 
     /// One content value read in order under the Store lock, a window at a
     /// time. Declared with a literal of its Store and length, which leaves
-    /// the reader's projection window and this window unwritten, then
-    /// `reader.open`ed; `= undefined` would fill all 6.5 KB with 0xAA.
+    /// the reader and this window unwritten, then `reader.open`ed;
+    /// `= undefined` would fill the window with 0xAA.
     const ContentSource = struct {
         store: *Store,
         reader: ContentReader = undefined,
@@ -6396,7 +6412,7 @@ pub const Store = struct {
     fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
         const statement = try self.cached(
             "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
-                "call.name_content_id,call.call_id_content_id,call.arguments_content_id " ++
+                "call.name_content_id,call.call_id_content_id,call.arguments_content_id,item.part_count " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
                 "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
                 "WHERE current.operation_id=?1",
@@ -6412,7 +6428,9 @@ pub const Store = struct {
         const phase = std.enums.fromInt(output_format.NeutralPhase, c.sqlite3_column_int(statement, 3)) orelse return error.CorruptStore;
         const omit = c.sqlite3_column_int(statement, 4);
         if (omit != 0 and omit != 1) return error.CorruptStore;
-        const bag_id = optionalColumnId(statement, 5);
+        const bag_id = optionalColumnId(statement, 5) orelse return error.CorruptStore;
+        const part_count = c.sqlite3_column_int64(statement, 9);
+        if (part_count < 0 or (part_count != 0 and kind != .reasoning and kind != .message)) return error.CorruptStore;
         const has_call = c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL;
         if (has_call != (kind == .function_call)) return error.CorruptStore;
         var call_ids: [3]i64 = undefined;
@@ -6424,12 +6442,12 @@ pub const Store = struct {
             for (&fields, call_ids) |*content, id| content.* = try self.historicalContentAs(view, id, false);
             call = fields;
         }
-        view.output_parts = .{ .operation_id = @intCast(operation_id), .item_ordinal = @intCast(item_ordinal), .next = 0 };
+        view.output_parts = .{ .operation_id = @intCast(operation_id), .item_ordinal = @intCast(item_ordinal), .kind = kind, .count = @intCast(part_count) };
         return .{
             .kind = kind,
             .phase = phase,
             .omit_reasoning_text = omit == 1,
-            .bag = if (bag_id) |id| try self.historicalContentAs(view, id, true) else null,
+            .bag = try self.historicalBag(view, bag_id),
             .call = call,
         };
     }
@@ -6443,9 +6461,8 @@ pub const Store = struct {
     fn readHistoricalPartLocked(self: *Store, view: *HistoricalView) !?HistoricalPart {
         const cursor = &view.output_parts.?;
         const statement = try self.cached(
-            "SELECT part.part_ordinal,part.part_array,part.part_kind,part.text_content_id,part.extras_content_id,item.item_kind " ++
-                "FROM model_output_part part JOIN model_output_item item ON item.operation_id=part.operation_id AND item.item_ordinal=part.item_ordinal " ++
-                "WHERE part.operation_id=?1 AND part.item_ordinal=?2 AND part.part_ordinal>=?3 ORDER BY part.part_ordinal LIMIT 1",
+            "SELECT part_ordinal,part_array,part_kind,text_content_id,extras_content_id FROM model_output_part " ++
+                "WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal>=?3 ORDER BY part_ordinal LIMIT 1",
         );
         defer resetCached(statement);
         try bindU64(statement, 1, cursor.operation_id);
@@ -6453,28 +6470,54 @@ pub const Store = struct {
         try bindU64(statement, 3, cursor.next);
         switch (c.sqlite3_step(statement)) {
             c.SQLITE_DONE => {
+                // A part missing from the end changes what the model saw.
+                if (cursor.next != cursor.count) return error.CorruptStore;
                 view.output_parts = null;
                 return null;
             },
-            c.SQLITE_ROW => {},
+            c.SQLITE_ROW => if (cursor.next == cursor.count) return error.CorruptStore,
             else => return error.HistoricalEntryReadFailed,
         }
         if (c.sqlite3_column_int64(statement, 0) != cursor.next) return error.CorruptStore;
         const array = std.enums.fromInt(output_format.PartArray, c.sqlite3_column_int(statement, 1)) orelse return error.CorruptStore;
         const kind = std.enums.fromInt(output_format.PartKind, c.sqlite3_column_int(statement, 2)) orelse return error.CorruptStore;
         const text_id = optionalColumnId(statement, 3);
-        const bag_id = optionalColumnId(statement, 4);
-        // Reasoning text is private evidence; a message's text is its answer.
-        const private_text = c.sqlite3_column_int(statement, 5) != @backingInt(OutputItemKind.message);
-        if (array == .none or (kind == .opaque_block) != (text_id == null) or (kind == .opaque_block and bag_id == null)) return error.CorruptStore;
+        const bag_id = optionalColumnId(statement, 4) orelse return error.CorruptStore;
+        if (!partFits(cursor.kind, array, kind) or (kind == .opaque_block) != (text_id == null)) return error.CorruptStore;
+        // Each array's parts are contiguous, so the writer opens it once.
+        if (array != cursor.array) {
+            if (cursor.closed[@backingInt(array) - 1]) return error.CorruptStore;
+            if (cursor.array != .none) cursor.closed[@backingInt(cursor.array) - 1] = true;
+            cursor.array = array;
+        }
         resetCached(statement);
         cursor.next += 1;
         return .{
             .array = array,
             .kind = kind,
-            .text = if (text_id) |id| try self.historicalContentAs(view, id, private_text) else null,
-            .bag = if (bag_id) |id| try self.historicalContentAs(view, id, true) else null,
+            .text = if (text_id) |id| try self.historicalContentAs(view, id, partTextIsPrivate(cursor.kind)) else null,
+            .bag = try self.historicalBag(view, bag_id),
         };
+    }
+
+    /// Whether a part of this array and kind belongs in an item of `item`
+    /// kind, as acceptance splits them.
+    fn partFits(item: OutputItemKind, array: output_format.PartArray, kind: output_format.PartKind) bool {
+        return switch (item) {
+            .message => array == .content and (kind == .opaque_block or kind == .output_text or kind == .refusal),
+            .reasoning => switch (array) {
+                .summary => kind == .opaque_block or kind == .summary_text,
+                .content => kind == .opaque_block or kind == .reasoning_text,
+                .none => false,
+            },
+            .function_call, .compaction => false,
+        };
+    }
+
+    /// A saved bag, or null when it is empty: the writer adds nothing for it.
+    fn historicalBag(self: *Store, view: *HistoricalView, id: i64) !?HistoricalContent {
+        const bag = try self.historicalContentAs(view, id, true);
+        return if (bag.length == 0) null else bag;
     }
 
     fn readHistoricalToolResult(
@@ -6917,9 +6960,11 @@ pub const Store = struct {
                 c.SQLITE_ROW => return error.InvalidProviderEnvelope,
                 else => return error.OutputReadFailed,
             }
+            // The item in Rui's own form: its parts and provider bags.
+            const neutral = try self.importNeutralItem(binding, output, record, item_records_start, metadata.offset, faults);
             const insert = try self.cached(
-                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             );
             defer resetCached(insert);
             try bindU64(insert, 1, binding.operation_id);
@@ -6931,9 +6976,9 @@ pub const Store = struct {
             try bindBlob(insert, 7, &record.id_digest);
             try bindI64(insert, 8, @intFromBool(record.omit_reasoning_text));
             try bindI64(insert, 9, @backingInt(record.phase));
+            try bindI64(insert, 10, neutral.bag);
+            try bindU64(insert, 11, neutral.part_count);
             try expectDone(insert);
-            // The item in Rui's own form: its parts and provider bags.
-            try self.importNeutralItem(binding, output, record, item_records_start, metadata.offset, faults);
             imported_items += 1;
         }
         if (imported_items != output.item_count) return error.CorruptOutputMetadata;
@@ -7200,83 +7245,63 @@ pub const Store = struct {
     /// in `[metadata_start, metadata_end)`: its parts, its text (every
     /// part's decoded text back to back) and its provider bags.
     /// noinline: its windows live in this frame only.
-    noinline fn importNeutralItem(self: *Store, binding: AttemptBinding, output: *const ValidatedOutput, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, faults: Faults) !void {
+    noinline fn importNeutralItem(self: *Store, binding: AttemptBinding, output: *const ValidatedOutput, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, faults: Faults) !ImportedNeutral {
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         metadata.offset = metadata_start;
         metadata.length = metadata_end;
-        // Reasoning text is private evidence; a message's text is its answer.
-        const private_text = item.kind != .message;
+        const private_text = partTextIsPrivate(item.kind);
         var item_bag: ?i64 = null;
-        var part_ordinal: u64 = 0;
-        var part_start: ?u64 = null;
+        var part_count: u64 = 0;
+        // The open part: its record's offset and its text row. Every part
+        // closes with its bag, so one INSERT writes the whole row.
+        var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?i64 } = null;
         while (try metadata.next()) |record| {
             if (record.tag == .item) break;
             if (record.ordinal != item.ordinal or record.kind != item.kind) return error.CorruptOutputMetadata;
             switch (record.tag) {
                 .part => {
-                    // A part without a bag closes when the next one opens.
-                    if (part_start != null) part_ordinal += 1;
-                    part_start = metadata.offset;
-                    const text_content_id = if (record.part_kind == .opaque_block) null else try self.importDecodedString(output, record, private_text, faults);
-                    const insert = try self.cached(
-                        "INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,part_kind,text_content_id) VALUES(?1,?2,?3,?4,?5,?6)",
-                    );
-                    defer resetCached(insert);
-                    try bindU64(insert, 1, binding.operation_id);
-                    try bindU64(insert, 2, item.ordinal);
-                    try bindU64(insert, 3, part_ordinal);
-                    try bindI64(insert, 4, @backingInt(record.part_array));
-                    try bindI64(insert, 5, @backingInt(record.part_kind));
-                    try bindNullableI64(insert, 6, text_content_id);
-                    try expectDone(insert);
+                    if (part != null or item_bag != null) return error.CorruptOutputMetadata;
+                    const text = if (record.part_kind == .opaque_block) null else try self.importDecodedString(output, record, private_text, faults);
+                    part = .{ .record = record, .start = metadata.offset, .text = text };
                 },
-                .extras => {
-                    const start = switch (record.scope) {
-                        .part => part_start orelse return error.CorruptOutputMetadata,
-                        .item => metadata_start,
-                    };
-                    const bag = try self.importBag(output, record, start, metadata.offset, faults);
-                    switch (record.scope) {
-                        .part => {
-                            try self.setPartBag(binding, item.ordinal, part_ordinal, bag);
-                            part_ordinal += 1;
-                            part_start = null;
-                        },
-                        .item => {
-                            if (item_bag != null) return error.CorruptOutputMetadata;
-                            item_bag = bag;
-                        },
-                    }
+                .extras => switch (record.scope) {
+                    .part => {
+                        const pending = part orelse return error.CorruptOutputMetadata;
+                        const bag = try self.importBag(output, record, pending.start, metadata.offset, faults);
+                        const insert = try self.cached(
+                            "INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,part_kind,text_content_id,extras_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        );
+                        defer resetCached(insert);
+                        try bindU64(insert, 1, binding.operation_id);
+                        try bindU64(insert, 2, item.ordinal);
+                        try bindU64(insert, 3, part_count);
+                        try bindI64(insert, 4, @backingInt(pending.record.part_array));
+                        try bindI64(insert, 5, @backingInt(pending.record.part_kind));
+                        try bindNullableI64(insert, 6, pending.text);
+                        try bindI64(insert, 7, bag);
+                        try expectDone(insert);
+                        part_count += 1;
+                        part = null;
+                    },
+                    .item => {
+                        if (part != null or item_bag != null) return error.CorruptOutputMetadata;
+                        item_bag = try self.importBag(output, record, metadata_start, metadata.offset, faults);
+                    },
                 },
                 .member, .item_id, .name, .call_id, .arguments => {},
                 .usage => return error.CorruptOutputMetadata,
                 .item => unreachable,
             }
         }
-        const update = try self.cached(
-            "UPDATE model_output_item SET phase=?3,extras_content_id=?4 WHERE operation_id=?1 AND item_ordinal=?2",
-        );
-        defer resetCached(update);
-        try bindU64(update, 1, binding.operation_id);
-        try bindU64(update, 2, item.ordinal);
-        try bindI64(update, 3, @backingInt(item.phase));
-        try bindNullableI64(update, 4, item_bag);
-        try expectDone(update);
-        if (c.sqlite3_changes(self.database) != 1) return error.CorruptOutputMetadata;
+        if (part != null) return error.CorruptOutputMetadata;
+        return .{ .bag = item_bag orelse return error.CorruptOutputMetadata, .part_count = part_count };
     }
 
-    /// Gives the latest part its bag. A part without one keeps NULL.
-    fn setPartBag(self: *Store, binding: AttemptBinding, item_ordinal: u64, part_ordinal: u64, bag: i64) !void {
-        const update = try self.cached(
-            "UPDATE model_output_part SET extras_content_id=?4 WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal=?3",
-        );
-        defer resetCached(update);
-        try bindU64(update, 1, binding.operation_id);
-        try bindU64(update, 2, item_ordinal);
-        try bindU64(update, 3, part_ordinal);
-        try bindI64(update, 4, bag);
-        try expectDone(update);
-        if (c.sqlite3_changes(self.database) != 1) return error.CorruptOutputMetadata;
+    const ImportedNeutral = struct { bag: i64, part_count: u64 };
+
+    /// Reasoning text is private evidence; a message's text is its answer.
+    fn partTextIsPrivate(kind: OutputItemKind) bool {
+        return kind != .message;
     }
 
     /// Copies one bag, the `member` records of `trailer`'s scope in
@@ -7293,7 +7318,7 @@ pub const Store = struct {
         var members = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         members.offset = start;
         members.length = end;
-        var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
+        var copy: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
         var written: u64 = 0;
         var first = true;
         while (try members.next()) |member| {
@@ -7334,7 +7359,7 @@ pub const Store = struct {
         var blob: ?*c.sqlite3_blob = null;
         if (c.sqlite3_blob_open(self.database, "main", "content", "payload", slot.id, 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
         defer _ = c.sqlite3_blob_close(blob);
-        var decoded: HashedWindow(512) = .{ .hash = protocol.contentHasher() };
+        var decoded: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
         var count: usize = 0;
         var written: u64 = 0;
         var text: output_format.EncodedStringReader = .{ .io = self.io, .file = output.source, .position = part.start, .end = try part.end() };
@@ -7354,6 +7379,17 @@ pub const Store = struct {
 
     /// A message's answer: its text parts back to back. One part (the norm)
     /// is its own row; several are copied into one row.
+    fn nextAnswerPart(_: *Store, parts: *c.sqlite3_stmt) !?i64 {
+        return switch (c.sqlite3_step(parts)) {
+            c.SQLITE_ROW => c.sqlite3_column_int64(parts, 0),
+            c.SQLITE_DONE => null,
+            else => error.OutputReadFailed,
+        };
+    }
+
+    /// A message's public text: its one text part's row, or for several
+    /// parts their text joined into one row. The parts are walked twice
+    /// (hash, then copy), so no part list or count limit is held.
     noinline fn importAnswer(self: *Store, binding: AttemptBinding, item_ordinal: u64, faults: Faults) !i64 {
         const parts = try self.cached(
             "SELECT text_content_id FROM model_output_part WHERE operation_id=?1 AND item_ordinal=?2 AND part_kind IN (1,2) ORDER BY part_ordinal",
@@ -7361,26 +7397,13 @@ pub const Store = struct {
         defer resetCached(parts);
         try bindU64(parts, 1, binding.operation_id);
         try bindU64(parts, 2, item_ordinal);
-        var ids: [max_answer_parts]i64 = undefined;
+        var copy: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
+        var first: ?i64 = null;
         var count: usize = 0;
-        while (true) switch (c.sqlite3_step(parts)) {
-            c.SQLITE_ROW => {
-                if (count == ids.len) return error.UnsupportedProviderOutput;
-                ids[count] = c.sqlite3_column_int64(parts, 0);
-                count += 1;
-            },
-            c.SQLITE_DONE => break,
-            else => return error.OutputReadFailed,
-        };
-        resetCached(parts);
-        if (count == 0) return error.CorruptOutputMetadata;
-        if (count == 1) {
-            if ((try self.readContentMetadata(ids[0])).private) return error.CorruptOutputMetadata;
-            return ids[0];
-        }
-        var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
         var length: u64 = 0;
-        for (ids[0..count]) |id| {
+        while (try self.nextAnswerPart(parts)) |id| {
+            if (first == null) first = id;
+            count += 1;
             const part = try self.readContentMetadata(id);
             if (part.private) return error.CorruptOutputMetadata;
             var offset: u64 = 0;
@@ -7393,6 +7416,8 @@ pub const Store = struct {
             length = try std.math.add(u64, length, part.length);
         }
         self.read_blob.close();
+        if (count == 0) return error.CorruptOutputMetadata;
+        if (count == 1) return first.?;
         const digest = copy.hash.finalResult();
         const slot = try self.contentSlot(&digest, length, false);
         if (slot.existing or length == 0) return slot.id;
@@ -7401,11 +7426,14 @@ pub const Store = struct {
         defer _ = c.sqlite3_blob_close(blob);
         var written: u64 = 0;
         var check = protocol.contentHasher();
-        for (ids[0..count]) |id| {
-            const part = try self.readContentMetadata(id);
+        resetCached(parts);
+        try bindU64(parts, 1, binding.operation_id);
+        try bindU64(parts, 2, item_ordinal);
+        while (try self.nextAnswerPart(parts)) |id| {
+            const part_length = (try self.readContentMetadata(id)).length;
             var offset: u64 = 0;
-            while (offset < part.length) {
-                const wanted: usize = @intCast(@min(part.length - offset, copy.window.len));
+            while (offset < part_length) {
+                const wanted: usize = @intCast(@min(part_length - offset, copy.window.len));
                 try self.readBlob(id, offset, copy.window[0..wanted]);
                 try self.writeCheckedBytes(blob, &check, copy.window[0..wanted], &written, length);
                 offset += wanted;
@@ -7413,7 +7441,7 @@ pub const Store = struct {
             if (faults.output_import) return error.InjectedOutputImportFailure;
         }
         self.read_blob.close();
-        if (!std.mem.eql(u8, &check.finalResult(), &digest)) return error.OutputSourceChanged;
+        if (written != length or !std.mem.eql(u8, &check.finalResult(), &digest)) return error.OutputSourceChanged;
         return slot.id;
     }
 
@@ -8045,8 +8073,7 @@ pub const Store = struct {
         return .{ .length = @intCast(length), .digest = try readDigest(statement, 1), .private = c.sqlite3_column_int(statement, 2) != 0 };
     }
 
-    // Every public metadata/byte route validates the exposed content, never
-    // its projection backing: raw provider source rows are legitimately private.
+    // Every public metadata/byte route validates the exposed content itself.
     fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
         const metadata = try self.readContentMetadata(content_id);
         if (metadata.private) return error.CorruptStore;
@@ -8133,8 +8160,9 @@ fn verifyExternalContent(
 // population/worker-stack multiplier. Synchronous locked work needs no heap
 // prefetch: it already reuses SQLite's overflow-page index for the whole call.
 const content_prefetch_bytes = 128 * 1024;
-/// A message's text blocks: one is the norm.
-const max_answer_parts = 64;
+/// Import-time copy and decode windows: small, so settlement frames stay
+/// within the Host stack rule.
+const import_window_bytes = 512;
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
@@ -8350,7 +8378,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ -- Rui's own form: the message phase, the parts below, and the
         \\ -- provider bag of what that form does not hold.
         \\ phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN (0,1,2) AND (phase=0 OR item_kind=2)),
-        \\ extras_content_id INTEGER REFERENCES content(content_id),
+        \\ extras_content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ part_count INTEGER NOT NULL CHECK(part_count>=0 AND (part_count=0 OR item_kind IN (1,2))),
         \\ PRIMARY KEY(operation_id,item_ordinal),
         \\ UNIQUE(session_ref,session_position),
         \\ UNIQUE(operation_id,item_id_digest)
@@ -8360,9 +8389,11 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ item_ordinal INTEGER NOT NULL,
         \\ part_ordinal INTEGER NOT NULL CHECK(part_ordinal>=0),
         \\ part_array INTEGER NOT NULL CHECK(part_array IN (1,2)),
-        \\ part_kind INTEGER NOT NULL CHECK(part_kind BETWEEN 0 AND 4),
+        \\ -- output_text and refusal are message content, summary_text a
+        \\ -- summary, reasoning_text reasoning content; 0 is an opaque block.
+        \\ part_kind INTEGER NOT NULL CHECK(part_kind=0 OR (part_kind IN (1,2,4) AND part_array=1) OR (part_kind=3 AND part_array=2)),
         \\ text_content_id INTEGER REFERENCES content(content_id) CHECK((part_kind=0)=(text_content_id IS NULL)),
-        \\ extras_content_id INTEGER REFERENCES content(content_id) CHECK(part_kind>0 OR extras_content_id IS NOT NULL),
+        \\ extras_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ PRIMARY KEY(operation_id,item_ordinal,part_ordinal)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_tool_call(
@@ -16942,7 +16973,7 @@ test "private-only model output never becomes public conversation" {
     // Keep a successor queued: a terminal text Turn requires an answer, while
     // this intermediate accepted output contains only opaque continuation.
     try submitTestMessage(&storage, &tmp, "private-next", "private-next-message", session.slice(), "later");
-    const bytes = "private continuation";
+    const bytes = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"private continuation\"}";
     const source = try tmp.dir.createFile(std.testing.io, "private-output", .{ .read = true });
     defer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -16953,7 +16984,7 @@ test "private-only model output never becomes public conversation" {
     var retained: ?named_scratch.Owner = null;
     var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "private-metadata", .{ .used = &used, .limit = 1024 }, false, &retained);
     defer metadata.deinit();
-    try metadata.append(.{ .tag = .item, .kind = .reasoning, .start = 0, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
+    _ = try provider_output.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
     try metadata.sealForRead();
     try storage.settleModelSuccess(binding, &.{
         .source = source,
@@ -17095,6 +17126,37 @@ fn answerTestTurn(
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
+}
+
+test "replay fences part damage that keeps every digest" {
+    for ([_][:0]const u8{
+        "DELETE FROM model_output_part WHERE part_ordinal=1",
+        "UPDATE model_output_item SET part_count=part_count+1 WHERE item_kind=2",
+        "UPDATE model_output_part SET part_array=2,part_kind=3 WHERE part_ordinal=0",
+    }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "part-damage-config");
+        const answer = [_]TestingAnswerPart{ .{ .encoded = "one", .decoded = "one" }, .{ .encoded = "two", .decoded = "two" } };
+        try answerTestTurn(&storage, &tmp, session.slice(), "part-damage", &answer);
+        try submitTestMessage(&storage, &tmp, "part-damage-next", "part-damage-next", session.slice(), "next");
+        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try exec(storage.database, fault);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(next, &view);
+        defer view.close();
+        var cursor: TestingHistoryCursor = .{};
+        var bytes: [512]u8 = undefined;
+        while (try cursor.next(&view)) |entry| {
+            if (entry.kind != .provider_output) continue;
+            try std.testing.expectError(error.CorruptStore, renderTestingEntry(&view, entry, &bytes));
+            break;
+        } else return error.MissingCorruptionFailure;
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
 test "a warm Turn prepares no statement" {

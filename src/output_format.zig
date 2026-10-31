@@ -216,10 +216,10 @@ pub const OutputMetadataReader = struct {
             .content_digest = bytes[72..104].*,
             .usage_tokens = if (bytes[2] == 1) std.mem.readInt(u64, bytes[8..16], .little) else null,
             .omit_reasoning_text = bytes[3] == 1,
-            .part_kind = @enumFromInt(bytes[4]),
-            .scope = @enumFromInt(bytes[5]),
-            .part_array = @enumFromInt(bytes[6]),
-            .phase = @enumFromInt(bytes[7]),
+            .part_kind = @fromBackingInt(@intCast(bytes[4])),
+            .scope = @fromBackingInt(@intCast(bytes[5])),
+            .part_array = @fromBackingInt(@intCast(bytes[6])),
+            .phase = @fromBackingInt(@intCast(bytes[7])),
         };
     }
 
