@@ -67,6 +67,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
+          publish-caches: 'false'
           # Released bytes never come from shared build caches.
           cold: 'true'
       - name: Build and check the tagged release
