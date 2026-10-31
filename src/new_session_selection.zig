@@ -133,14 +133,14 @@ test "new Session explicit choices bypass stale defaults without destination fal
         try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(state));
     try std.testing.expectEqualStrings("explicit-model", (try snapshot.resolve(.renewal_due)).?.model.slice());
     snapshot.intent.model = null;
-    try std.testing.expectEqualStrings("gpt-6-luna", (try snapshot.resolve(.configured)).?.model.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(.configured)).?.model.slice());
     snapshot.defaults = .{};
     snapshot.intent = .{};
     const home = try snapshot.destination("/home/test", &fallback);
     try std.testing.expect(!home.saved);
     try std.testing.expectEqualStrings("/home/test/.local/share/rui/store", home.path);
     try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(.missing));
-    try std.testing.expectEqualStrings("gpt-6-luna", (try snapshot.resolve(.renewal_due)).?.model.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(.renewal_due)).?.model.slice());
     snapshot.intent.model = "bad model";
     try std.testing.expectError(error.UnsupportedSelectionModel, snapshot.resolve(.configured));
 
