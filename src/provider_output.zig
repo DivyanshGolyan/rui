@@ -784,23 +784,6 @@ fn stringDigest(window: *Window, value: Range) ![32]u8 {
     return hash.finalResult();
 }
 
-/// Bind every public call field to the accepted private provider item, including
-/// deduplicated content whose projection may originate in another item.
-pub fn authenticateCall(source: anytype, references: anytype) !void {
-    const names = &.{ "id", "name", "call_id", "arguments" };
-    const fields = try collectFields(source, names);
-    inline for (names, 0..) |name, index| {
-        const range = try fields.required(name);
-        try source.setRange(range.start, range.length);
-        var hash = protocol.contentHasher();
-        var decoded: Decoded = .{ .hash = &hash };
-        const parsed = try parseString(source, &decoded);
-        try source.expectEnd();
-        if (parsed.decoded_length != references[index].length or
-            !std.mem.eql(u8, &hash.finalResult(), &references[index].digest)) return error.CorruptStore;
-    }
-}
-
 fn readIndex(window: *Window, value: Range) !u64 {
     var source = try FileSource.init(window, value);
     try source.space();
@@ -946,16 +929,15 @@ fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Ran
 /// The one output item grammar: acceptance stores an item only when this
 /// pass does, with the replay rule it judged. Replay applies that rule
 /// without judging again, so a change to what this grammar accepts or omits
-/// changes the Store format (`store.schema_version`). A served call item is
-/// read again only to authenticate its certified fields. Partial string/number tokens never own payload storage. Frames
+/// changes the Store format (`store.schema_version`). Partial string/number
+/// tokens never own payload storage. Frames
 /// retain only consequential field facts; errors in meaning are deferred
 /// until syntax and the complete source have validated.
 /// Initialize/use in final storage (the scanner borrows its nesting buffer).
 pub const OutputItemCheck = struct {
-    /// Set at import: the Operation the item arrives under, which decides
-    /// whether a compaction or a call may appear at all. Authentication of a
-    /// saved call leaves it null.
-    operation: ?output_format.ModelOperationKind = null,
+    /// The Operation the item arrives under, which decides whether a
+    /// compaction or a call may appear at all.
+    operation: output_format.ModelOperationKind = undefined,
     scanner: ?std.json.Scanner = null,
     nesting: [16]u8 = undefined,
     allocator: std.heap.FixedBufferAllocator = undefined,
@@ -1029,33 +1011,14 @@ pub const OutputItemCheck = struct {
     /// decode scratch keep their `undefined` defaults, unwritten until the
     /// grammar fills them. An all-comptime `.{}` would copy the whole
     /// 66 KB default instead.
-    pub fn reset(self: *OutputItemCheck, operation: ?output_format.ModelOperationKind) void {
+    pub fn reset(self: *OutputItemCheck, operation: output_format.ModelOperationKind) void {
         self.* = .{ .operation = operation };
-    }
-
-    /// Bind every retained item to its admission-certified type and ID.
-    /// Compatibility errors are deferred until these canonical facts agree.
-    pub fn authenticateIdentity(self: *const OutputItemCheck, kind: output_format.OutputItemKind, id_digest: [32]u8) !void {
-        const actual = try self.frames[0].get("type");
-        if (!actual.is(@tagName(kind)) or self.decoded_fields_seen & 1 == 0 or
-            !std.mem.eql(u8, &self.decoded_fields[0].digest, &id_digest)) return error.CorruptStore;
     }
 
     /// After a compatible item validates, the digest of its decoded `id`.
     pub fn idDigest(self: *const OutputItemCheck) [32]u8 {
         std.debug.assert(self.decoded_fields_seen & 1 != 0);
         return self.decoded_fields[0].digest;
-    }
-
-    /// After advance completes, bind admission-certified fields to the exact
-    /// decoded top-level strings. One token hasher and four results suffice;
-    /// nested/open fields never acquire per-frame hashes or payload copies.
-    pub fn authenticate(self: *const OutputItemCheck, references: anytype) !void {
-        if (self.decoded_fields_seen != 15) return error.CorruptStore;
-        for (self.decoded_fields, references) |actual, expected| {
-            if (actual.length != expected.length or !std.mem.eql(u8, &actual.digest, &expected.digest))
-                return error.CorruptStore;
-        }
     }
 
     // Other kinds leave `content` open, duplicates included.
@@ -1393,13 +1356,13 @@ pub const OutputItemCheck = struct {
                     },
                     .compaction => {
                         const rules = Rules(kindFields(.compaction)){ .frame = frame };
-                        if (self.operation) |operation| if (operation != .compaction) return error.UnsupportedProviderOutput;
+                        if (self.operation != .compaction) return error.UnsupportedProviderOutput;
                         try rules.completed();
                         try rules.encrypted();
                     },
                     .function_call => {
                         const rules = Rules(kindFields(.function_call)){ .frame = frame };
-                        if (self.operation) |operation| if (operation == .compaction) return error.UnsupportedProviderOutput;
+                        if (self.operation == .compaction) return error.UnsupportedProviderOutput;
                         try rules.completed();
                         const caller = try rules.get("caller");
                         switch (caller.shape) {
@@ -1584,15 +1547,11 @@ pub const OutputItemCheck = struct {
                 .end_of_document => {
                     if (self.result.shape != .object) return error.UnexpectedJsonDelimiter;
                     // A consumed duplicate is a lookup the grammar makes, so
-                    // it always fails the item too; replay names it first.
+                    // it always fails the item too.
                     const reason = self.result.failure orelse {
                         std.debug.assert(!self.result.ambiguous.all);
                         return .{ .compatible = .{ .omit_reasoning_text = self.replaysReasoningText() } };
                     };
-                    if (self.operation == null) {
-                        if (self.result.ambiguous.all) return error.DuplicateJsonField;
-                        std.debug.assert(reason != error.DuplicateJsonField);
-                    }
                     return .{ .incompatible = reason };
                 },
                 .allocated_string, .allocated_number => unreachable,
@@ -1602,12 +1561,11 @@ pub const OutputItemCheck = struct {
     }
 };
 
-/// Check one selected canonical item against current wire rules, without
-/// emitting metadata or retaining a payload. Store owns integrity validation.
-/// Test driver for the same bounded grammar request preparation uses.
-fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !OutputItemCheck.Verdict {
+/// Judge one item from a file under `operation`, without emitting metadata
+/// or retaining a payload: the grammar import runs, driven over windows.
+fn judgeFile(io: std.Io, source: std.Io.File, length: u64, operation: output_format.ModelOperationKind) !OutputItemCheck.Verdict {
     const item_check = testingItemCheck();
-    item_check.* = .{};
+    item_check.reset(operation);
     const Source = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1625,6 +1583,14 @@ fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !OutputItemCheck
         var bytes: usize = protocol.content_window_bytes;
         var items: usize = 64;
         if (try item_check.advance(Source{ .io = io, .file = source, .length = length }, &bytes, &items)) |verdict| return verdict;
+    }
+}
+
+fn expectDecodedFields(item_check: *const OutputItemCheck, expected: anytype) !void {
+    try std.testing.expectEqual(@as(u4, 15), item_check.decoded_fields_seen);
+    for (item_check.decoded_fields, expected) |actual, field| {
+        try std.testing.expectEqual(field.length, actual.length);
+        try std.testing.expectEqualSlices(u8, &field.digest, &actual.digest);
     }
 }
 
@@ -1672,13 +1638,13 @@ const replay_cases = [_]struct { item: []const u8, supported: bool, operation: o
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .supported = false },
 };
 
-test "replay compatibility rejects unsupported meaning and preserves open fields" {
+test "the item grammar rejects unsupported meaning and preserves open fields" {
     for (replay_cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        const verdict = try validateReplay(std.testing.io, source.file, case.item.len);
+        const verdict = try judgeFile(std.testing.io, source.file, case.item.len, case.operation);
         try std.testing.expectEqual(case.supported, verdict == .compatible);
     }
 }
@@ -1699,13 +1665,22 @@ const replay_failure_cases = [_]struct { item: []const u8, failure: anyerror, op
     .{ .item = "{\"type\":\"future\",\"id\":\"r\",\"open\":[true,]}", .failure = error.SyntaxError },
 };
 
-test "replay compatibility distinguishes consumed duplicates and syntax from unsupported shapes" {
+test "the item grammar refuses consumed duplicates and syntax" {
     for (replay_failure_cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        try std.testing.expectError(case.failure, validateReplay(std.testing.io, source.file, case.item.len));
+        const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
+            try std.testing.expectEqual(error.SyntaxError, err);
+            try std.testing.expectEqual(case.failure, err);
+            continue;
+        };
+        // A consumed duplicate fails the item; an earlier broken rule may
+        // be the one named.
+        try std.testing.expectEqual(error.DuplicateJsonField, case.failure);
+        try std.testing.expect(verdict == .incompatible);
+        try std.testing.expectError(verdict.incompatible, importTestingItem(&tmp, case.item, case.operation));
     }
 }
 
@@ -1766,12 +1741,14 @@ test "import accepts exactly the items replay accepts and names the same broken 
         const imported: ?anyerror = if (importTestingItem(&tmp, case.item, case.operation)) |_| null else |err| err;
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        const verdict = validateReplay(std.testing.io, source.file, case.item.len) catch |err| {
-            // Canonical bytes cannot hold either failure, so import refuses
-            // both; the precedence test pins the reason it names.
+        const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
             try std.testing.expectEqual(case.failure orelse return error.TestUnexpectedError, err);
+            try std.testing.expectEqual(error.SyntaxError, err);
             try std.testing.expect(imported != null);
-            if (err != error.SyntaxError) try std.testing.expectEqual(error.DuplicateJsonField, err);
+            continue;
+        };
+        if (case.failure) |failure| if (failure == error.DuplicateJsonField) {
+            try std.testing.expect(verdict == .incompatible and imported != null);
             continue;
         };
         try std.testing.expectEqual(case.compatible, verdict == .compatible);
@@ -1785,32 +1762,29 @@ test "import accepts exactly the items replay accepts and names the same broken 
     }
 }
 
-test "import names the first rule broken in lookup order while replay names a consumed duplicate first" {
+test "import names the first rule broken in lookup order" {
     const cases = [_]struct {
         item: []const u8,
         operation: output_format.ModelOperationKind,
         import: anyerror,
-        /// What replay reports: an error, or else the incompatible reason.
-        replay: anyerror,
-        replay_is_error: bool,
     }{
         // Status is looked up before content blocks.
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
         // Blocks are judged in order.
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .operation = .assistant_response, .import = error.UnsupportedContentBlock, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .operation = .assistant_response, .import = error.DuplicateJsonField, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .operation = .assistant_response, .import = error.UnsupportedContentBlock },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .operation = .assistant_response, .import = error.DuplicateJsonField },
         // Type, ID and metadata come before every other rule.
-        .{ .item = "{\"type\":\"message\",\"type\":\"message\",\"id\":\"m\",\"status\":\"future\"}", .operation = .assistant_response, .import = error.DuplicateJsonField, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"type\":\"message\",\"id\":\"m\",\"status\":\"future\"}", .operation = .assistant_response, .import = error.DuplicateJsonField },
         // The Operation is checked after type, ID and metadata, before the
-        // kind's own rules. Replay accepts compactions and calls anywhere.
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\"}", .operation = .assistant_response, .import = error.UnsupportedProviderOutput, .replay = error.ContinuationUnavailable, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":null}}", .operation = .compaction, .import = error.UnsupportedProviderOutput, .replay = error.ExpectedJsonString, .replay_is_error = false },
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":1}}", .operation = .assistant_response, .import = error.UnsupportedMetadataAuthority, .replay = error.UnsupportedMetadataAuthority, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.EmptyProviderIdentity, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"\",\"status\":\"future\",\"encrypted_content\":\"opaque\"}", .operation = .assistant_response, .import = error.EmptyProviderIdentity, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
+        // kind's own rules.
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\"}", .operation = .assistant_response, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":null}}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":1}}", .operation = .assistant_response, .import = error.UnsupportedMetadataAuthority },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.EmptyProviderIdentity },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"\",\"status\":\"future\",\"encrypted_content\":\"opaque\"}", .operation = .assistant_response, .import = error.EmptyProviderIdentity },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1818,15 +1792,11 @@ test "import names the first rule broken in lookup order while replay names a co
         try std.testing.expectError(case.import, importTestingItem(&tmp, case.item, case.operation));
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        if (case.replay_is_error) {
-            try std.testing.expectError(case.replay, validateReplay(std.testing.io, source.file, case.item.len));
-        } else {
-            try expectIncompatible(case.replay, try validateReplay(std.testing.io, source.file, case.item.len));
-        }
+        try expectIncompatible(case.import, try judgeFile(std.testing.io, source.file, case.item.len, case.operation));
     }
 }
 
-test "replay compatibility streams opaque windows and preserves syntax failures" {
+test "the item grammar streams opaque windows and preserves syntax failures" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "replay", .{ .read = true });
@@ -1837,12 +1807,12 @@ test "replay compatibility streams opaque windows and preserves syntax failures"
     try file.writeStreamingAll(std.testing.io, prefix);
     for (0..3) |_| try file.writeStreamingAll(std.testing.io, &window);
     try file.writeStreamingAll(std.testing.io, suffix);
-    try expectCompatible(try validateReplay(std.testing.io, file, prefix.len + 3 * window.len + suffix.len));
+    try expectCompatible(try judgeFile(std.testing.io, file, prefix.len + 3 * window.len + suffix.len, .assistant_response));
 
     const invalid = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}";
     const source = try testingObject(&tmp, invalid);
     defer source.file.close(std.testing.io);
-    try std.testing.expectError(error.InvalidJsonUtf8, validateReplay(std.testing.io, source.file, invalid.len));
+    try std.testing.expectError(error.InvalidJsonUtf8, judgeFile(std.testing.io, source.file, invalid.len, .assistant_response));
 }
 
 test "replay compatibility cursor bounds actual sequential reads including open fields" {
@@ -1879,7 +1849,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
         else
             "\"caller\":{\"type\":\"program\"},\"name\":\"bash\",\"id\":\"f\",\"call_id\":\"c\",\"type\":\"function_call\"}");
         var source = CountingSource{ .file = file, .length = try file.length(std.testing.io) };
-        var item_check: OutputItemCheck = .{};
+        var item_check: OutputItemCheck = .{ .operation = .assistant_response };
         var turns: usize = 0;
         while (true) {
             turns += 1;
@@ -1901,7 +1871,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
     }
 }
 
-test "incremental call authentication binds all four decoded fields with fixed storage" {
+test "a call's four decoded fields stream with fixed storage" {
     const Source = struct {
         bytes: []const u8,
         pub fn contentLength(source: @This()) u64 {
@@ -1917,7 +1887,7 @@ test "incremental call authentication binds all four decoded fields with fixed s
     var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
     for ([_][]const u8{ "item", "bash", "call", "a\x00🚀" }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
-    var item_check: OutputItemCheck = .{};
+    var item_check: OutputItemCheck = .{ .operation = .assistant_response };
     var turns: usize = 0;
     while (true) {
         var bytes: usize = 1;
@@ -1929,15 +1899,7 @@ test "incremental call authentication binds all four decoded fields with fixed s
         }
     }
     try std.testing.expect(turns >= source.bytes.len);
-    try item_check.authenticate(expected);
-    for (0..4) |i| {
-        var corrupt = expected;
-        corrupt[i].digest[0] ^= 1;
-        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
-        corrupt = expected;
-        corrupt[i].length += 1;
-        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
-    }
+    try expectDecodedFields(&item_check, expected);
     try std.testing.expect(@sizeOf(@TypeOf(item_check.decoded_fields)) == 160);
 }
 
@@ -1988,7 +1950,7 @@ test "long strings decode and locate exactly across read windows" {
     for ([_][]const u8{ decoded.written(), "bash", decoded.written(), decoded.written() }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
     for ([_]usize{ 1, 7, protocol.content_window_bytes - 1, protocol.content_window_bytes, protocol.content_window_bytes + 1 }) |allowance| {
-        var item_check: OutputItemCheck = .{};
+        var item_check: OutputItemCheck = .{ .operation = .assistant_response };
         while (true) {
             var bytes = allowance;
             var items: usize = 1;
@@ -1997,7 +1959,7 @@ test "long strings decode and locate exactly across read windows" {
                 break;
             }
         }
-        try item_check.authenticate(expected);
+        try expectDecodedFields(&item_check, expected);
         // Each located value is exactly the encoded text after its key.
         for ([_]usize{ 0, 2, 3 }) |field| {
             const span = item_check.encoded_spans[field];
@@ -2199,9 +2161,9 @@ pub fn testingItemCheck() *OutputItemCheck {
 
 /// Judge one complete item in memory the way acceptance does, for tests that
 /// save output without a provider stream.
-pub fn judgeForTesting(item: []const u8) !OutputItemCheck.Verdict {
+pub fn judgeForTesting(item: []const u8, operation: output_format.ModelOperationKind) !OutputItemCheck.Verdict {
     const item_check = testingItemCheck();
-    item_check.reset(null);
+    item_check.reset(operation);
     const Source = struct {
         bytes: []const u8,
 
@@ -2604,7 +2566,7 @@ test "provider refusal preserves text and rejects malformed or incomplete candid
     try std.testing.expectEqual(protocol.contentDigest(refusal), result.first_item.content_digest);
     const source = try testingObject(&tmp, refusal);
     defer source.file.close(std.testing.io);
-    try expectCompatible(try validateReplay(std.testing.io, source.file, refusal.len));
+    try expectCompatible(try judgeFile(std.testing.io, source.file, refusal.len, .assistant_response));
     try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, done, 4096));
     try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n", 4096));
     const delta = "data: {\"type\":\"response.refusal.delta\",\"delta\":\"not an answer\"}\n\n";
@@ -2626,11 +2588,7 @@ test "provider refusal preserves text and rejects malformed or incomplete candid
         try std.testing.expectError(case.failure, validateTestingSse(&tmp, stream, 4096));
         const invalid = try testingObject(&tmp, item);
         defer invalid.file.close(std.testing.io);
-        if (case.failure == error.DuplicateJsonField) {
-            try std.testing.expectError(error.DuplicateJsonField, validateReplay(std.testing.io, invalid.file, item.len));
-        } else {
-            try expectIncompatible(case.failure, try validateReplay(std.testing.io, invalid.file, item.len));
-        }
+        try expectIncompatible(case.failure, try judgeFile(std.testing.io, invalid.file, item.len, .assistant_response));
     }
 }
 
@@ -3570,10 +3528,10 @@ test "provider field collection cannot grant authority through escaped metadata 
     const item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}}";
     var object = try testingObject(&tmp, item);
     defer object.file.close(std.testing.io);
-    try expectIncompatible(error.UnsupportedMetadataAuthority, try validateReplay(std.testing.io, object.file, item.len));
+    try expectIncompatible(error.UnsupportedMetadataAuthority, try judgeFile(std.testing.io, object.file, item.len, .compaction));
 }
 
-test "provider authority metadata rejects every supported item on acceptance and replay" {
+test "provider authority metadata rejects every supported item" {
     const prefixes = .{
         "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\"",
         "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]",
@@ -3594,10 +3552,10 @@ test "provider authority metadata rejects every supported item on acceptance and
             defer source.file.close(std.testing.io);
             if (comptime std.mem.eql(u8, key, "future")) {
                 _ = try validateTestingOperation(&tmp, sse, 4096, purpose);
-                try expectCompatible(try validateReplay(std.testing.io, source.file, item.len));
+                try expectCompatible(try judgeFile(std.testing.io, source.file, item.len, purpose));
             } else {
                 try std.testing.expectError(error.UnsupportedMetadataAuthority, validateTestingOperation(&tmp, sse, 4096, purpose));
-                try expectIncompatible(error.UnsupportedMetadataAuthority, try validateReplay(std.testing.io, source.file, item.len));
+                try expectIncompatible(error.UnsupportedMetadataAuthority, try judgeFile(std.testing.io, source.file, item.len, purpose));
             }
         }
     }

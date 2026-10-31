@@ -1192,7 +1192,6 @@ pub const Preparation = struct {
     ) !void {
         retained.* = null;
         errdefer self.view.close();
-        std.debug.assert(self.view.itemCheckIdle());
         self.state = .{ .route = route, .faults = faults, .memos = memos };
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
@@ -2177,7 +2176,7 @@ fn settleComposedForTesting(
         .length = item_json.len,
         .id_digest = protocol.contentDigest(item_id),
         .content_digest = protocol.contentDigest(item_json),
-        .omit_reasoning_text = switch (try Output.judgeForTesting(item_json)) {
+        .omit_reasoning_text = switch (try Output.judgeForTesting(item_json, if (item_kind == .compaction) .compaction else .assistant_response)) {
             .compatible => |compatible| compatible.omit_reasoning_text,
             .incompatible => |reason| return reason,
         },

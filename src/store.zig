@@ -432,8 +432,6 @@ pub const HistoricalContent = struct {
     item_identity: ?struct {
         kind: OutputItemKind,
         id_digest: [32]u8,
-        /// A call item's admission-certified fields, which its bytes decode to.
-        call_fields: ?@FieldType(protocol.ProposalMetadata, "fields") = null,
         /// The replay rule the output item grammar judged at acceptance.
         omit_reasoning_text: bool = false,
     } = null,
@@ -601,9 +599,6 @@ pub const HistoricalView = struct {
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
     group_scan: GroupScan = .{},
-    /// Readied by openHistoricalView: a `.{}` default here is one comptime
-    /// value, copied whole (71 KB) into every view.
-    output_check: OutputCheck = undefined,
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
     // Ordinary entries copied from one ranged read. Plain values, never a
@@ -635,18 +630,6 @@ pub const HistoricalView = struct {
         position: u64 = 0,
     };
 
-    // The one call item being authenticated by the grammar, with its own
-    // reader; one at a time, independent of item size or count.
-    const OutputCheck = struct {
-        entry: HistoricalEntry = undefined,
-        /// Open exactly while `reading`.
-        reader: ContentReader = undefined,
-        reading: bool = false,
-        hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-        /// Reset where the view opens and where each item's read starts.
-        item_check: provider_output.OutputItemCheck = undefined,
-    };
-
     /// A ready entry lives in the view until its next step.
     pub const EntryProgress = union(enum) { pending, ready: ?*const HistoricalEntry };
 
@@ -655,8 +638,8 @@ pub const HistoricalView = struct {
     pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
-        if (!self.output_check.reading) items_left.* -= 1;
-        return self.store.readHistoricalEntry(self, after_position, bytes_left, items_left) catch |err| switch (err) {
+        items_left.* -= 1;
+        return self.store.readHistoricalEntry(self, after_position) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
         };
@@ -709,11 +692,6 @@ pub const HistoricalView = struct {
         };
         self.selected_coverage = value;
         return value;
-    }
-
-    /// Whether no output item is being read, so the view may move.
-    pub fn itemCheckIdle(self: *const HistoricalView) bool {
-        return !self.output_check.reading and self.output_check.item_check.scanner == null;
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -769,7 +747,6 @@ pub const HistoricalView = struct {
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
-        if (self.output_check.reading) self.output_check.reader.close();
         self.active = false;
     }
 
@@ -3139,7 +3116,7 @@ pub const Store = struct {
             observation.output_schema = .{ .length = metadata.length, .digest = metadata.digest };
         }
         observation.pending_messages = try self.countPendingMessages(session_ref);
-        try self.validateActiveTurnToolCalls(session_ref, true);
+        try self.validateActiveTurnToolCalls(session_ref);
         observation.action_count = try self.countActions(session_ref);
         observation.rejected_call_count = try self.countRejectedCalls(session_ref);
     }
@@ -3322,7 +3299,7 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         const operation: ?u64 = if (ordinal == 0) null else @intCast(try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore);
-        if (operation) |op| _ = try self.readToolOutcomeFacts(op, true, false);
+        if (operation) |op| _ = try self.readToolOutcomeFacts(op, true);
         const admitted_at: ?u64 = if (ordinal == 0) if (try readNullablePositiveI64(statement, 2)) |second| @intCast(second) else null else null;
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
         if (ordinal == 0 and c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) {
@@ -3418,7 +3395,7 @@ pub const Store = struct {
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 3, &session);
         const position = try readNullablePositiveI64(statement, 4) orelse return error.CorruptStore;
-        _ = try self.proposalLocked(session.slice(), @intCast(position), false);
+        _ = try self.proposalLocked(session.slice(), @intCast(position));
         var result: protocol.ToolPresentation = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
         if (c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL) {
             var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
@@ -3529,7 +3506,7 @@ pub const Store = struct {
             const call_ordinal = c.sqlite3_column_int64(statement, 1);
             if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL or call_ordinal < 0) return error.CorruptStore;
             if (last_operation != operation) {
-                publication = (try self.readToolOutcomeFacts(operation, false, false)).position;
+                publication = (try self.readToolOutcomeFacts(operation, false)).position;
                 const projected = try readNullablePositiveI64(statement, 2);
                 if (publication != (if (projected) |p| @as(u64, @intCast(p)) else null)) return error.CorruptStore;
                 last_operation = operation;
@@ -3618,7 +3595,7 @@ pub const Store = struct {
                 result.content_id = content.id;
             },
             4 => {
-                const call = (try self.proposalLocked(session, position, false)).metadata;
+                const call = (try self.proposalLocked(session, position)).metadata;
                 result.item.value = .{ .call = call };
                 const select = try self.cached("SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2");
                 defer resetCached(select);
@@ -3749,7 +3726,7 @@ pub const Store = struct {
         const end = request.end orelse next_position - 1;
         if (end >= next_position) return error.InvalidCursor;
         if (request.after != 0) {
-            _ = self.proposalLocked(request.session.slice(), request.after, true) catch |err| switch (err) {
+            _ = self.proposalLocked(request.session.slice(), request.after) catch |err| switch (err) {
                 error.ContentNotFound => return error.InvalidCursor,
                 else => return err,
             };
@@ -3773,7 +3750,7 @@ pub const Store = struct {
                 break;
             }
             const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
-            page.items[page.count] = (try self.proposalLocked(request.session.slice(), @intCast(position), true)).metadata;
+            page.items[page.count] = (try self.proposalLocked(request.session.slice(), @intCast(position))).metadata;
             page.count += 1;
         }
     }
@@ -3782,7 +3759,7 @@ pub const Store = struct {
 
     // The page, continuation cursor and byte route share one provenance check.
     // LEFT JOIN keeps missing/contradictory owners visible as corruption.
-    fn proposalLocked(self: *Store, session: []const u8, position: u64, authenticate: bool) !ProposalIdentity {
+    fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
         const statement = try self.cached("SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
             "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
             "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
@@ -3791,7 +3768,7 @@ pub const Store = struct {
             "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
             "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
             "(call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
-            "THEN 1 ELSE 0 END,source.content_id,call.field_metadata FROM model_output_item item " ++
+            "THEN 1 ELSE 0 END,call.field_metadata FROM model_output_item item " ++
             "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
             "LEFT JOIN content source ON source.content_id=item.content_id " ++
             "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
@@ -3826,8 +3803,8 @@ pub const Store = struct {
         }
         // Four admission-certified (little-endian length, SHA-256) pairs.
         // Reference substitution is detectable without reopening payloads.
-        if (c.sqlite3_column_bytes(statement, 11) != 160) return error.CorruptStore;
-        const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 11) orelse return error.CorruptStore);
+        if (c.sqlite3_column_bytes(statement, 10) != 160) return error.CorruptStore;
+        const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 10) orelse return error.CorruptStore);
         for (&result.content_ids, &result.metadata.fields, 0..) |*id, *field, index| {
             id.* = try readNullablePositiveI64(statement, @intCast(5 + index)) orelse return error.CorruptStore;
             const metadata = try self.readPublicContentMetadata(id.*);
@@ -3835,22 +3812,7 @@ pub const Store = struct {
                 !std.mem.eql(u8, &metadata.digest, certified[index * 40 + 8 ..][0..32])) return error.CorruptStore;
             field.* = .{ .length = metadata.length, .digest = metadata.digest };
         }
-        if (authenticate) {
-            try self.authenticateProposalLocked(try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, &result.metadata.fields);
-        }
         return result;
-    }
-
-    /// Reads the call's private item back and checks it still carries the
-    /// certified fields. noinline: its content window lives in this frame
-    /// only, not in every proposal read's.
-    noinline fn authenticateProposalLocked(self: *Store, item_content_id: i64, fields: *const @FieldType(protocol.ProposalMetadata, "fields")) !void {
-        const metadata = try self.readContentMetadata(item_content_id);
-        const location = try self.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, true);
-        var source: ContentSource = .{ .store = self, .end = metadata.length };
-        source.reader.open(location);
-        defer source.reader.close();
-        @import("provider_output.zig").authenticateCall(&source, fields) catch return error.CorruptStore;
     }
 
     pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
@@ -3861,7 +3823,7 @@ pub const Store = struct {
     }
 
     fn openProposalFieldLocked(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
-        const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
+        const identity = self.proposalLocked(request.session.slice(), request.position) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return self.fence(err),
         };
@@ -4141,7 +4103,7 @@ pub const Store = struct {
         else
             null;
         const pending_messages = try self.countPendingMessages(session_ref);
-        try self.validateActiveTurnToolCalls(session_ref, profile == .full);
+        try self.validateActiveTurnToolCalls(session_ref);
         const action_count = try self.countActions(session_ref);
         const rejected_call_count = try self.countRejectedCalls(session_ref);
 
@@ -4581,7 +4543,7 @@ pub const Store = struct {
             const length = c.sqlite3_column_int64(statement, 5);
             if (action_id <= 0 or parent <= 0 or ordinal < 0 or position <= 0 or length < 0) return error.CorruptStore;
             if (parent != last_parent) {
-                publication = (try self.readToolOutcomeFacts(@intCast(parent), false, false)).position;
+                publication = (try self.readToolOutcomeFacts(@intCast(parent), false)).position;
                 last_parent = parent;
             }
             var code: protocol.Bounded(32) = .{};
@@ -4641,7 +4603,7 @@ pub const Store = struct {
             const rejection_length = c.sqlite3_column_int64(statement, 4);
             if (operation_id <= 0 or call_ordinal < 0 or acceptance_position <= 0 or rejection_length < 0) return error.CorruptStore;
             if (operation_id != last_parent) {
-                publication = (try self.readToolOutcomeFacts(@intCast(operation_id), false, false)).position;
+                publication = (try self.readToolOutcomeFacts(@intCast(operation_id), false)).position;
                 last_parent = operation_id;
             }
             var code: protocol.Bounded(32) = .{};
@@ -5147,7 +5109,7 @@ pub const Store = struct {
         return @intCast(value);
     }
 
-    fn validateActiveTurnToolCalls(self: *Store, session_ref: []const u8, authenticate: bool) !void {
+    fn validateActiveTurnToolCalls(self: *Store, session_ref: []const u8) !void {
         const statement = try self.cached(
             "SELECT operation.operation_id FROM turn active INDEXED BY turn_one_active_per_session " ++
                 "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
@@ -5162,7 +5124,7 @@ pub const Store = struct {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
                 if (operation_id <= 0) return error.CorruptStore;
-                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false, authenticate);
+                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false);
             },
             c.SQLITE_DONE => return,
             else => return error.CallReadFailed,
@@ -5181,7 +5143,6 @@ pub const Store = struct {
         self: *Store,
         operation_id: u64,
         require_terminal: bool,
-        authenticate: bool,
     ) !ToolOutcomeFacts {
         const statement = try self.cached(
             "SELECT (SELECT count(*) FROM model_output_item expected " ++
@@ -5234,7 +5195,7 @@ pub const Store = struct {
             var session: protocol.Bounded(protocol.max_session_bytes) = .{};
             try readText(sources, 0, &session);
             const source_position = try readNullablePositiveI64(sources, 1) orelse return error.CorruptStore;
-            _ = try self.proposalLocked(session.slice(), @intCast(source_position), authenticate);
+            _ = try self.proposalLocked(session.slice(), @intCast(source_position));
         }
         return .{
             .position = if (terminal == expected) (if (position) |value| @intCast(value) else null) else null,
@@ -5275,7 +5236,7 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         const position = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-        _ = try self.proposalLocked(session_ref, @intCast(position), true);
+        _ = try self.proposalLocked(session_ref, @intCast(position));
         const metadata = try self.readPublicContentMetadata(content_id);
         return .{ .length = metadata.length, .digest = metadata.digest };
     }
@@ -6007,7 +5968,7 @@ pub const Store = struct {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
                 if (operation_id <= 0) return error.CorruptStore;
-                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false, false);
+                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false);
             },
             c.SQLITE_DONE => return,
             else => return error.CallReadFailed,
@@ -6034,8 +5995,6 @@ pub const Store = struct {
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
         try self.checkAttempt(binding);
         out.* = .{ .store = self, .binding = binding };
-        out.output_check.reading = false;
-        out.output_check.item_check.reset(null);
     }
 
     fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
@@ -6128,11 +6087,10 @@ pub const Store = struct {
         out.session_affinity = hash.finalResult()[0..16].*;
     }
 
-    fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
-        if (view.output_check.reading) view.output_check.reader.prepareRead();
+    fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
         const access = try self.enter(.none);
         defer access.release();
-        return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left)) };
+        return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position)) };
     }
 
     fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
@@ -6218,9 +6176,8 @@ pub const Store = struct {
 
     /// The served entry lives in the view: in its read-ahead, its next tool
     /// group or its output check.
-    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?*const HistoricalEntry {
+    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
         std.debug.assert(view.outputs_validated);
-        if (view.output_check.reading) return try self.checkHistoricalOutput(view, bytes_left, items_left);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
             view.entries_end = 0;
@@ -6251,73 +6208,7 @@ pub const Store = struct {
         if (view.next_tool_group) |*group| {
             if (group.position < ordinary.position) return self.activateHistoricalToolGroup(view);
         }
-        // A call's certified fields bind its Tool Results, so its bytes are
-        // authenticated before it is served, replayed or not.
-        if (ordinary.kind != .provider_output or ordinary.content.?.item_identity.?.kind != .function_call) return ordinary;
-        try self.startHistoricalOutput(view, ordinary);
-        return error.HistoricalPending;
-    }
-
-    fn startHistoricalOutput(self: *Store, view: *HistoricalView, entry: *const HistoricalEntry) !void {
-        const content = entry.content.?;
-        const identity: ContentReference = .{ .length = content.length, .digest = content.digest };
-        const location: ContentLocation = if (content.raw)
-            .{ .store = self, .reference = identity, .content_id = content.content_id, .raw = true }
-        else
-            try self.openProjectionLocked(content.content_id, identity);
-        view.output_check = .{ .entry = entry.*, .reading = true };
-        view.output_check.item_check.reset(null);
-        view.output_check.reader.open(location);
-        // The next step reads it, after preparing the read outside Store access.
-    }
-
-    /// Run a call item's grammar pass under the caller's allowance:
-    /// authenticate its bytes, type, ID and certified fields. Acceptance
-    /// already judged it under the grammar this Store format fixes, so an
-    /// item the grammar now refuses is corrupt.
-    /// Returns the checked entry, marked verified, in the output check.
-    fn checkHistoricalOutput(self: *Store, view: *HistoricalView, bytes_left: *usize, items_left: *usize) !*const HistoricalEntry {
-        const check = &view.output_check;
-        const Source = struct {
-            storage: *Store,
-            check: *HistoricalView.OutputCheck,
-
-            pub fn contentLength(source: @This()) u64 {
-                return source.check.reader.reference.length;
-            }
-
-            pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
-                try source.storage.readOwnedContentLocked(&source.check.reader, offset, destination);
-                source.check.hash.update(destination);
-                if (offset + destination.len == source.contentLength() and
-                    !std.mem.eql(u8, &source.check.hash.finalResult(), &source.check.reader.reference.digest)) return error.CorruptStore;
-                return destination.len;
-            }
-        };
-        const judged = check.item_check.advance(Source{ .storage = self, .check = check }, bytes_left, items_left) catch |err| switch (err) {
-            // Canonical items passed this grammar's syntax before acceptance.
-            error.SyntaxError,
-            error.UnexpectedEndOfInput,
-            error.UnexpectedJsonDelimiter,
-            error.InvalidJsonUtf8,
-            error.JsonTooDeep,
-            error.DuplicateJsonField,
-            => return error.CorruptStore,
-            else => return err,
-        };
-        const verdict = judged orelse return error.HistoricalPending;
-        const entry = &check.entry;
-        const identity = entry.content.?.item_identity.?;
-        std.debug.assert(identity.kind == .function_call);
-        try check.item_check.authenticateIdentity(identity.kind, identity.id_digest);
-        try check.item_check.authenticate(identity.call_fields orelse return error.CorruptStore);
-        // A call never omits reasoning text; the schema keeps its rule 0.
-        if (verdict == .incompatible) return error.CorruptStore;
-        std.debug.assert(!verdict.compatible.omit_reasoning_text and !identity.omit_reasoning_text);
-        check.reader.close();
-        check.reading = false;
-        entry.content.?.verified = true;
-        return entry;
+        return ordinary;
     }
 
     /// The next host input or output item after `after_position`, served from
@@ -6331,7 +6222,7 @@ pub const Store = struct {
         errdefer view.entries_end = 0;
         const statement = try self.cached(
             "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
-                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id),NULL,NULL " ++
+                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id),NULL " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "LEFT JOIN content ON content.content_id=e.content_id " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
@@ -6343,7 +6234,7 @@ pub const Store = struct {
                 "AND owner.admission_position<current.admission_position AND " ++
                 "(item.item_kind!=3 OR " ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
                 "((" ++ resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL," ++
-                "(SELECT call.field_metadata FROM model_tool_call call WHERE item.item_kind=3 AND call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal),item.replay_omits_reasoning_text " ++
+                "item.replay_omits_reasoning_text " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN content ON content.content_id=item.content_id " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
@@ -6389,24 +6280,13 @@ pub const Store = struct {
             if (model.len == 0) return error.CorruptStore;
             _ = try readProvider(statement, 8);
             requested_model = model;
-            const omit_reasoning_text = c.sqlite3_column_int(statement, 14);
+            const omit_reasoning_text = c.sqlite3_column_int(statement, 13);
             if (omit_reasoning_text != 0 and omit_reasoning_text != 1) return error.CorruptStore;
             content.item_identity = .{
                 .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 9)) orelse return error.CorruptStore,
                 .id_digest = try readDigest(statement, 10),
                 .omit_reasoning_text = omit_reasoning_text == 1,
             };
-            if (content.item_identity.?.kind == .function_call) {
-                // Four (little-endian length, SHA-256) pairs, as admission certified them.
-                if (c.sqlite3_column_bytes(statement, 13) != 160) return error.CorruptStore;
-                const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 13) orelse return error.CorruptStore);
-                var fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
-                for (&fields, 0..) |*field, index| field.* = .{
-                    .length = std.mem.readInt(u64, certified[index * 40 ..][0..8], .little),
-                    .digest = certified[index * 40 + 8 ..][0..32].*,
-                };
-                content.item_identity.?.call_fields = fields;
-            }
         }
         var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
         if (c.sqlite3_column_type(statement, 12) != c.SQLITE_NULL) {
@@ -6473,7 +6353,7 @@ pub const Store = struct {
             if (c.sqlite3_column_int(item, 1) != 3) return error.HistoricalPending;
             var session: protocol.Bounded(protocol.max_session_bytes) = .{};
             try readText(item, 2, &session);
-            const proposal = try self.proposalLocked(session.slice(), position, false);
+            const proposal = try self.proposalLocked(session.slice(), position);
             if (proposal.metadata.operation != scan.source or proposal.metadata.call_ordinal != scan.calls) return error.CorruptStore;
             const outcome = try self.cached("SELECT coalesce(call.acceptance_position,action.acceptance_position)," ++
                 "coalesce(call.rejection_content_id,action.resolution_content_id)," ++
@@ -12938,7 +12818,7 @@ fn testingHistoricalStep(view: *HistoricalView, after: *u64, bytes: *usize, item
     }
 }
 
-test "historical preparation yields covered group populations and cancels proposal authentication" {
+test "historical preparation yields covered group populations under small allowances" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -12960,7 +12840,7 @@ test "historical preparation yields covered group populations and cancels propos
         binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     }
     // An after-position covering every group must not drain discovery in one
-    // call. Closing in the middle of private validation releases its reader.
+    // call, and a view closed mid-discovery leaves checkpoints free.
     {
         var view: HistoricalView = undefined;
         try storage.openHistoricalView(binding, &view);
@@ -12968,45 +12848,35 @@ test "historical preparation yields covered group populations and cancels propos
         var bytes: usize = 7;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
-        var after: u64 = 0;
-        while (!view.output_check.reading) {
-            bytes = 7;
-            items = 1;
-            try testingHistoricalStep(&view, &after, &bytes, &items);
-        }
-        bytes = 7;
-        items = 1;
-        try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
         _ = try configureTestSession(&storage, "yielded-checkpoint");
         const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
-        const closes = storage.testing_content_work.closes.load(.monotonic);
         view.close();
-        try std.testing.expectEqual(closes + 1, storage.testing_content_work.closes.load(.monotonic));
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(binding, &view);
     defer view.close();
     while (!try view.validateOutputsStep()) {}
-    var charged: u64 = 0;
     var turns: usize = 0;
+    var served: usize = 0;
     var after: u64 = 0;
     while (after != std.math.maxInt(u64)) {
         turns += 1;
         try std.testing.expect(turns < 200000);
-        const closes = storage.testing_content_work.closes.load(.monotonic);
         var bytes: usize = 127;
         var items: usize = 3;
+        const before = after;
         try testingHistoricalStep(&view, &after, &bytes, &items);
-        charged += 127 - bytes;
-        try std.testing.expect(storage.testing_content_work.closes.load(.monotonic) - closes <= 1);
+        if (after != before) served += 1;
     }
-    try std.testing.expect(charged >= 8 * calls.len * arguments.len);
-    try std.testing.expect(turns > charged / 127);
+    // One user input, 8 groups of 16 calls, their 8 result groups and the
+    // end, each served by its own step after discovery yields.
+    try std.testing.expectEqual(@as(usize, 1 + 8 * calls.len + 8 + 1), served);
+    try std.testing.expect(turns > served);
     try std.testing.expect(!storage.isFenced());
 }
 
-test "large historical readers and yielded group authentication leave checkpoints free" {
+test "large historical readers leave checkpoints free" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -13027,25 +12897,6 @@ test "large historical readers and yielded group authentication leave checkpoint
         .decoded_arguments = text,
     }});
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    {
-        var view: HistoricalView = undefined;
-        try storage.openHistoricalView(continuation, &view);
-        defer view.close();
-        while (!try view.validateOutputsStep()) {}
-        var after: u64 = 0;
-        while (!view.output_check.reading) {
-            var bytes: usize = 4096;
-            var items: usize = 1;
-            try testingHistoricalStep(&view, &after, &bytes, &items);
-        }
-        view.output_check.reader.allocator = std.testing.allocator;
-        var bytes: usize = 4096;
-        var items: usize = 1;
-        try std.testing.expect(try view.nextEntryStep(after, &bytes, &items) == .pending);
-        _ = try configureTestSession(&storage, "large-group-write");
-        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
-        // Closing a pending view also frees its reader-owned copied window.
-    }
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(continuation, &view);
     defer view.close();
@@ -13073,14 +12924,13 @@ test "large historical readers and yielded group authentication leave checkpoint
 
 test "historical preparation rejects missing extra and reordered sibling classifications incrementally" {
     for ([_]bool{ false, true }) |covered| {
-        // `corrupts_bytes`: the fault breaks bytes the grammar reads, not rows.
+        // `corrupts_bytes`: the fault breaks bytes replay reads, not rows.
         cases: for ([_]struct { sql: [:0]const u8, corrupts_bytes: bool = false }{
             .{ .sql = "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99" },
             .{ .sql = "DELETE FROM model_tool_call WHERE call_ordinal=1" },
             .{ .sql = "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1" },
             .{ .sql = "DELETE FROM model_output_item WHERE item_ordinal=1; DELETE FROM model_tool_call WHERE call_ordinal=1" },
             .{ .sql = "DELETE FROM model_output_item WHERE operation_id IN (SELECT operation_id FROM model_tool_call); DELETE FROM model_tool_call" },
-            .{ .sql = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .corrupts_bytes = true },
             .{ .sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1", .corrupts_bytes = true },
         }) |fault| {
             var tmp = std.testing.tmpDir(.{});
@@ -13115,9 +12965,8 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 continue :cases;
             })) {}
             // Row faults fail while discovery walks the group, before any
-            // entry is served. A call's bytes are read, and matched with its
-            // certified fields, before that call is served: only the user
-            // input is served, the first call fences, and no results follow.
+            // entry is served. Corrupt call bytes fence when replay reads
+            // the first call, whose digest no longer matches.
             const bytes_fault = fault.corrupts_bytes;
             var served: ?HistoricalEntry = null;
             while (true) {
@@ -13125,6 +12974,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 var items: usize = 1;
                 const progress = view.nextEntryStep(if (served) |entry| entry.position else 0, &bytes, &items) catch |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
+                    try std.testing.expect(!bytes_fault);
                     break;
                 };
                 if (!bytes_fault and view.tool_group_initialized) return error.MissingCorruptionFailure;
@@ -13132,17 +12982,19 @@ test "historical preparation rejects missing extra and reordered sibling classif
                     .pending => {},
                     .ready => |entry| {
                         // The view never reaches its end, so no request seals.
-                        if (!bytes_fault or served != null) return error.MissingCorruptionFailure;
-                        try std.testing.expectEqual(HistoricalEntryKind.user, entry.?.kind);
+                        if (!bytes_fault) return error.MissingCorruptionFailure;
                         served = entry.?.*;
+                        if (served.?.kind == .user) continue;
+                        try std.testing.expectEqual(HistoricalEntryKind.provider_output, served.?.kind);
+                        try std.testing.expectEqual(OutputItemKind.function_call, served.?.content.?.item_identity.?.kind);
+                        var reader: HistoricalReader = undefined;
+                        try view.openContent(served.?.content.?, &reader);
+                        defer reader.close();
+                        var buffer: [4096]u8 = undefined;
+                        try std.testing.expectError(error.CorruptStore, reader.read(0, buffer[0..@intCast(served.?.content.?.length)]));
+                        break;
                     },
                 }
-            }
-            if (bytes_fault) {
-                try std.testing.expect(served != null);
-                const first_call = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
-                try std.testing.expect(served.?.position < first_call);
-                try std.testing.expectEqual(first_call, view.output_check.entry.position);
             }
             try std.testing.expect(storage.isFenced());
         }
@@ -13150,7 +13002,10 @@ test "historical preparation rejects missing extra and reordered sibling classif
 }
 
 test "historical accepted assistant output completeness and provenance fence reads" {
-    const Incompatibility = enum { none, model, reasoning, answer };
+    // Replay trusts each item's saved kind, identity and bytes once their
+    // digest matches; acceptance judged them, and the rows below the
+    // admission boundary are immutable.
+    const Incompatibility = enum { none, model };
     for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, tied_owners: bool = false, failure: anyerror = error.CorruptStore }{
         .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
         .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
@@ -13167,22 +13022,13 @@ test "historical accepted assistant output completeness and provenance fence rea
         .{ .fault = "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1" },
         .{ .fault = "UPDATE model_output_item SET session_ref='f0re1g'" },
         .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
-        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1) WHERE item_ordinal=0" },
-        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0) WHERE item_ordinal=1" },
-        .{ .fault = "UPDATE model_output_item SET item_kind=2 WHERE item_ordinal=0" },
-        .{ .fault = "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1" },
-        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
-        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
-        .{ .incompatible = .reasoning, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)" },
-        .{ .incompatible = .reasoning, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
-        .{ .incompatible = .answer, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
-        .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0)" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)" },
+        // Once continuation is unavailable, later items are not read.
+        .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0)", .failure = error.ContinuationUnavailable },
         .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE model_operation SET resolution_code='tool_proposals' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE turn SET session_ref='f0re1g' WHERE turn_id=(SELECT turn_id FROM model_operation WHERE output_item_count IS NOT NULL)" },
-        .{ .incompatible = .reasoning, .failure = error.ContinuationUnavailable },
-        .{ .incompatible = .answer, .failure = error.ContinuationUnavailable },
         .{ .incompatible = .model, .failure = error.ContinuationUnavailable },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -13240,22 +13086,6 @@ test "historical accepted assistant output completeness and provenance fence rea
         switch (case.incompatible) {
             .none => {},
             .model => try storage.setHistoricalModelForTesting(source_binding, "different-model"),
-            .reasoning, .answer => {
-                // Preserve canonical content integrity and certified identity;
-                // only current adapter compatibility changes in this sibling.
-                const bytes = if (case.incompatible == .reasoning)
-                    "{\"type\":\"reasoning\",\"id\":\"r\"}"
-                else
-                    "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"}]}";
-                const update = try prepare(storage.database, "UPDATE content SET payload=?1,byte_length=?2,digest=?3 " ++
-                    "WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=?4)");
-                defer _ = c.sqlite3_finalize(update);
-                try bindBlob(update, 1, bytes);
-                try bindU64(update, 2, bytes.len);
-                try bindBlob(update, 3, &protocol.contentDigest(bytes));
-                try bindU64(update, 4, if (case.incompatible == .reasoning) 0 else 1);
-                try expectDone(update);
-            },
         }
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
         if (case.tied_owners) try exec(storage.database, "UPDATE model_operation SET admission_position=" ++
@@ -13290,23 +13120,17 @@ test "historical accepted assistant output completeness and provenance fence rea
     }
 }
 
-test "historical preparation fences a served call the grammar refuses or that does not match its certificate" {
-    // Acceptance stores only calls the grammar accepts, so a refused call in
-    // the Store is corruption, like a call whose bytes and certificate differ.
-    for ([_]struct { controls: []const u8, fault: ?[:0]const u8 = null, failure: anyerror, incompatible_last: bool = false }{
-        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .failure = error.CorruptStore },
-        .{ .controls = ",\"namespace\":\"future\"", .failure = error.CorruptStore },
-        .{ .controls = ",\"caller\":{\"type\":\"future\"},\"late\":[0,]", .failure = error.CorruptStore },
-        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1", .failure = error.CorruptStore },
-        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .failure = error.CorruptStore },
-        .{ .controls = ",\"status\":\"future\",\"arguments\":\"{}\"", .failure = error.CorruptStore },
-        .{ .controls = ",\"status\":\"future\",\"name\":\"unknown\"", .failure = error.CorruptStore },
-        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)", .failure = error.CorruptStore },
-        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB) WHERE call_ordinal=1", .failure = error.CorruptStore },
-        .{ .controls = ",\"namespace\":\"future\"", .incompatible_last = true, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0", .failure = error.CorruptStore },
-        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
-        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
-        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+test "historical preparation fences a served call that does not match its certificate" {
+    // A call binds its Tool Results through its admission certificate; replay
+    // reads each call's bytes against their digest.
+    for ([_]struct { controls: []const u8 = "", fault: [:0]const u8, failure: anyerror = error.CorruptStore, incompatible_last: bool = false }{
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)" },
+        .{ .incompatible_last = true, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -13322,7 +13146,7 @@ test "historical preparation fences a served call the grammar refuses or that do
         };
         try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        if (case.fault) |fault| try exec(storage.database, fault);
+        try exec(storage.database, case.fault);
         var root: [protocol.max_store_bytes]u8 = undefined;
         const length = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
@@ -19628,8 +19452,8 @@ test "persisted tool label corruption fences every publication route" {
     }
 }
 
-test "tool label observation trusts admission but exact inspection authenticates payload" {
-    for ([_]enum { arguments, execution, proposal, full }{ .arguments, .execution, .proposal, .full }) |route| {
+test "tool label observation trusts admission while reading a damaged call field fences" {
+    {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -19642,7 +19466,6 @@ test "tool label observation trusts admission but exact inspection authenticates
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
         const before = try storage.activityPageForTesting(request);
-        const action = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation");
         // Damage only undisplayed private bytes, not the accepted references or
         // their metadata. Lightweight observations no longer read those bytes.
         try exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT content_id FROM model_output_item WHERE item_kind=3)");
@@ -19656,27 +19479,15 @@ test "tool label observation trusts admission but exact inspection authenticates
             try std.testing.expectEqual(original.presentation.code, observed.presentation.code);
         }
         try std.testing.expect(!storage.isFenced());
-        const result: anyerror!void = switch (route) {
-            .arguments => if (storage.actionArguments(session.slice(), action)) |_| {} else |err| err,
-            .execution => blk: {
-                const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
-                var input: BashExecutionInput = undefined;
-                break :blk storage.readBashExecutionInput(admitted.permit.binding, &input);
-            },
-            .proposal => blk: {
-                const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
-                if (storage.openProposalField(&.{ .session = request.session, .position = position, .field = .arguments })) |value| {
-                    var reader: ContentReader = undefined;
-                    reader.open(value);
-                    reader.close();
-                    break :blk {};
-                } else |err| break :blk err;
-            },
-            .full => if (testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full)) |bytes| blk: {
-                std.testing.allocator.free(bytes);
-                break :blk {};
-            } else |err| err,
-        };
+        // Every exact read checks the bytes it reads: the arguments field is
+        // a view over the damaged call item, so its digest no longer matches.
+        const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+        const location = try storage.openProposalField(&.{ .session = request.session, .position = position, .field = .arguments });
+        var reader: ContentReader = undefined;
+        reader.open(location);
+        defer reader.close();
+        var buffer: [4096]u8 = undefined;
+        const result = reader.read(0, buffer[0..@intCast(location.reference.length)]);
         try std.testing.expectError(error.CorruptStore, result);
         try std.testing.expect(storage.isFenced());
     }
@@ -19714,14 +19525,17 @@ test "completed tool labels trust admission while model replay authenticates pay
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(next, &view);
     defer view.close();
-    // Discovery trusts the labels; the first call's bytes are read, and
-    // fence, before that call is served.
+    // Discovery trusts the labels; the first call's bytes fence when they
+    // are read for replay.
     const first = (try view.nextEntry(0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, first.kind);
-    try std.testing.expectError(error.CorruptStore, view.nextEntry(first.position));
-    const first_call = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
-    try std.testing.expect(first.position < first_call);
-    try std.testing.expectEqual(first_call, view.output_check.entry.position);
+    const call = (try view.nextEntry(first.position)).?;
+    try std.testing.expectEqual(try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3"), call.position);
+    var reader: HistoricalReader = undefined;
+    try view.openContent(call.content.?, &reader);
+    defer reader.close();
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectError(error.CorruptStore, reader.read(0, buffer[0..@intCast(call.content.?.length)]));
     try std.testing.expect(storage.isFenced());
 }
 
