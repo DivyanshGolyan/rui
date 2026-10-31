@@ -888,6 +888,7 @@ const HistoricalSource = struct {
 // Shared wording, with JSON string contents streamed into each {} slot.
 // Fixtures use the same text but independently encode the supplied identities.
 const context_parts = blk: {
+    @setEvalBranchQuota(10_000);
     var parts = std.mem.splitSequence(u8, @embedFile("model_instructions.txt"), "{}");
     const result = .{ parts.next().?, parts.next().?, parts.next().? };
     std.debug.assert(parts.next() == null);

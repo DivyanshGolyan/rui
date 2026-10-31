@@ -1337,7 +1337,7 @@ def command_entry_cases():
             coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
             status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {initial_session}\nLabel: none\n" in status, status
+            assert f"Session: {initial_session}\nLabel: not set\n" in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
