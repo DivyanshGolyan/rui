@@ -23,7 +23,7 @@ The maintained source for verifying Rui's full-screen interactive terminal. Read
 
 ## Features
 
-- [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer and capture correlation.
+- [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer, capture correlation, and the input matrix every editor-hosting surface must pass.
 - [Consent](./consent.md): approval prompt reading, allow `a` and deny `d`, and pasted choices.
 - [Status and navigation](./status-navigation.md): `/status`, `/details`, PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
 - [Exit and terminal restoration](./exit-restore.md): `/exit`, Ctrl-C and SIGTERM restore termios and the screen.

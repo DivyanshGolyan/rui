@@ -1,6 +1,6 @@
 ---
 name: verify-rui
-description: Drive Rui's full-screen interactive terminal (the renderer) the way a user does, on a pinned build, in a synthetic HOME/Store with a deterministic provider, through a plain PTY or tmux (detached or with an attached client), and capture byte-exact evidence. Use to prove or diagnose compose/submit, consent, /status, scrolling, exit/signal restoration, tmux and hardware-input behavior on macOS or Linux.
+description: Drive Rui's full-screen interactive terminal (the renderer) the way a user does, on a pinned build, in a synthetic HOME/Store with a deterministic provider, through a plain PTY or tmux (detached or with an attached client), and capture byte-exact evidence. Use to prove or diagnose the overview, compose/submit, consent, /status, scrolling, exit/signal restoration, tmux and hardware-input behavior on macOS or Linux.
 ---
 
 # verify-rui

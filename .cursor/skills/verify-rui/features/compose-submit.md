@@ -35,3 +35,17 @@ Preconditions:
 - In tmux, Rui first receives DECRPM replies. Exclude `ESC[?…$y` from "typed input" counts.
 - A second provider request or a second new key after one Enter is the duplicate-submission symptom. Keep both keys and their `request inspect` output.
 - Any draft prefix you did not type (for example `.` or ` is`) is a stray-input symptom. Find its first byte in `input.jsonl` before blaming the editor.
+
+## Input matrix
+
+`compose-matrix`: every editor behavior holds on every surface that hosts the editor. Run it on `--session demo` and on `--session overview`, at `--size 80x24` and at the narrowest width the screen supports. Each case starts from an empty composer, and each step pairs `send` with `wait --after GEN`.
+
+| Case | Send | Expected |
+| --- | --- | --- |
+| Shift-Enter and Alt-Enter | `a`, then one of `--hex 1b0d` (ESC CR), `1b0a` (ESC LF), `1b5b31333b3275` (CSI 13;2u), `1b5b32373b323b31337e` (CSI 27;2;13~), `1b5b31333b3375` (CSI 13;3u), then `b` | Two draft lines `a` and `b`; provider count unchanged |
+| Alt-J | `a`, `--hex 1b6a`, `b` | Two draft lines |
+| Malformed paste | `--hex 1b5b3230307e6669727374ff7365636f6e641b5b3230317e` (`first\xffsecond`), then Enter | Rui refuses the line; no new `provider.jsonl` entry and no new request key |
+| Leading spaces | `--hex 1b5b3230307e2020696e64656e7465641b5b3230317e`, then Enter | `user_text` is `  indented`, spaces kept |
+| Wide grapheme | `--hex f09f9a80` (🚀) | Caret x advances by 2 |
+
+A case that passes on one surface and fails on the other is a parity bug: the second surface is not using the shared editor.
