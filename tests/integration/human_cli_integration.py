@@ -1622,9 +1622,11 @@ def scroll_return_case():
             capture = terminal_capture(master)
             assert not shown.startswith("Browsing"), (context, "still browsing", shown)
             assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The status row (a notice, if any) may sit between them.
+            # The draft keeps the bottom row under the rule, and the latest
+            # text is the last written row above it; a notice may sit between.
             rows = shown.rstrip("\n").split("\n")
-            assert rows[-1] == "› keep" and latest in rows[-4:-1], (context, "latest row not last", shown)
+            written = [row for row in rows[:-2] if row.strip()]
+            assert rows[-1] == "› keep" and set(rows[-2]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
 
         def leave(saved):
             records_before, requests = saved
@@ -3756,6 +3758,9 @@ def renderer_cases():
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
+            # The capture matches the pty before the first frame: the input
+            # draws on the bottom row, past a default-sized capture's last.
+            terminal.capture.resize(columns, rows)
             if opening:
                 terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
             yield terminal
@@ -4385,7 +4390,8 @@ def renderer_cases():
                 assert f"Action requiring attention: {action}" in shown, shown
             # The update replaces the page in place: what the user scrolled
             # to and was told stays, and nothing returns to the top.
-            tty.resize(80, 12)
+            # Thirteen rows: the rule above the input takes one of them.
+            tty.resize(80, 13)
             tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or "Session: " not in tty.capture.completed)
             # Line by line, so the last Action lands on the bottom row however
             # many rows the Store path wraps to.
@@ -4823,7 +4829,6 @@ def renderer_cases():
         heading = "Message · 301 lines · 16 KB"
         endpoint.responses.append(fixture.sse_answer("expand-answer", "reason", "message", "EXPAND-ANSWER")[0])
         with terminal(session, rows=40) as tty:
-            tty.capture.resize(80, 40)
             tty.send("\x1b[200~" + pasted + "\x1b[201~\r", "EXPAND-ANSWER")
             shown = tty.capture.completed
             assert "PASTE-0001" in shown and "PASTE-0002" not in shown and "┄ 299 more lines" in shown and "more lines ·" not in shown, shown
@@ -5113,7 +5118,6 @@ def renderer_cases():
             # The whole transcript must fit one screen; each raw export wraps
             # with the Store path's length, which is far longer on macOS.
             with terminal(session, ready_write, rows=40) as tty:
-                tty.capture.resize(80, 40)
                 requests = len(endpoint.requests)
                 tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)

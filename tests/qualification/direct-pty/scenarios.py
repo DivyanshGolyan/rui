@@ -221,15 +221,16 @@ def navigation(fixture, row):
         tty.send(b"~")
         tty.draft("~", 3)
         assert tty.screen.completed.startswith("Browsing") == browsing, "navigation view changed before ordered marker"
-        # 24 terminal rows minus heading and composer leaves 22 history rows.
-        # These literal fixture anchors are independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, first + 22)]
+        # 24 terminal rows minus heading, the rule and the composer leave 21
+        # history rows. These literal fixture anchors are independent of
+        # Rui's viewport.
+        expected = [f"History line {number:03d}" for number in range(first, first + 21)]
         actual = [line.strip() for line in tty.screen.completed.splitlines()
                   if line.strip().startswith("History line ")]
         assert actual == expected, ("navigation history anchor/distance", actual, expected)
         tty.send(b"\x15")
         tty.draft("", 2)
-    history(78, False)
+    history(79, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
@@ -249,7 +250,7 @@ def navigation(fixture, row):
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(78, False)
+    history(79, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"

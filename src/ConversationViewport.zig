@@ -5,6 +5,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
+const draft_layout = @import("draft_layout.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
@@ -58,17 +59,23 @@ fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0) result.row else result.row +| 1;
 }
 
-/// The draft's caret cell when vaxis prints `prefix` with grapheme wrapping.
-pub fn caret(layout: Layout, prefix: []const u8) struct { row: u16, col: u16 } {
-    var screen: vaxis.Screen = undefined;
-    const result = layout.measuring(&screen).print(&.{.{ .text = prefix }}, .{ .wrap = .grapheme, .commit = false });
-    return .{ .row = result.row, .col = result.col };
-}
+/// The draft as the input draws it, for `draft_layout`: whole clusters
+/// measured as the terminal measures them. The screen has already shown
+/// tabs as one space and refused clusters the terminal cannot draw.
+pub const DraftPieces = struct {
+    bytes: []const u8,
+    method: gwidth.Method,
+    at: usize = 0,
 
-/// Draft rows, including an empty row after a final newline or exact fill.
-pub fn draftRows(layout: Layout, draft: []const u8) u16 {
-    return caret(layout, draft).row +| 1;
-}
+    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
+        if (self.at == self.bytes.len) return null;
+        var clusters = unicode.graphemeIterator(self.bytes[self.at..]);
+        const cluster = clusters.next().?.bytes(self.bytes[self.at..]);
+        self.at += cluster.len;
+        const kind = draft_layout.kindOf(cluster);
+        return .{ .len = cluster.len, .cells = if (kind == .newline) 0 else gwidth.gwidth(cluster, self.method), .kind = kind };
+    }
+};
 
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
@@ -601,12 +608,10 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
-    // Draft rows wrap at cells; the caret follows a wrapped wide cluster.
-    const draft: Layout = .{ .width = 5, .method = .unicode };
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "abcd中"));
-    try std.testing.expectEqual(@as(u16, 2), caret(draft, "abcd中").col);
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "abcde"));
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "ab\n"));
+    // A draft's wide cluster moves whole to the next row.
+    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
+    try std.testing.expectEqual(@as(usize, 2), whole.lines);
+    try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
 test "positions move by laid-out rows and never skip the first unseen row" {

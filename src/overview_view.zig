@@ -15,6 +15,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
+const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
@@ -161,8 +162,11 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_end = null,
 });
 
-/// The composer's text and caret, as the shell's line editor holds them.
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0 };
+/// The composer's text and caret, as the shell's line editor holds them,
+/// and the draft line the previous frame showed first.
+/// `anchor` is the byte that started the composer's first shown line last
+/// frame.
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0 };
 
 /// What the composer made of one input, and its draft as that input left it.
 pub const Composed = struct { outcome: keymap.Outcome(Action), draft: Draft };
@@ -1538,6 +1542,9 @@ pub const Screen = struct {
     /// Where the terminal's cursor shows: the composer's caret, unless the
     /// composer is locked.
     cursor: ?Cursor = null,
+    /// The byte the composer's first shown line starts at, for the next
+    /// frame's `Draft.anchor`.
+    draft_anchor: usize = 0,
     /// A mark it drew changes with the frame: the shell draws the next one
     /// in `pulse_interval_ms`.
     pulses: bool = false,
@@ -1662,9 +1669,9 @@ pub const Screen = struct {
     }
 };
 
-const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, newline: []const u8 };
-const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = "·", .rule = "─", .ellipsis = "…", .arrows = "↑↓", .newline = "↵" };
-const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = "-", .rule = "-", .ellipsis = ".", .arrows = "^v", .newline = "|" };
+const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, up: []const u8, down: []const u8, newline: []const u8 };
+const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = "·", .rule = "─", .ellipsis = "…", .arrows = "↑↓", .up = "↑", .down = "↓", .newline = "↵" };
+const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = "-", .rule = "-", .ellipsis = ".", .arrows = "^v", .up = "^", .down = "v", .newline = "|" };
 
 /// Draws the overview. `frame` picks each pulsing mark's glyph.
 pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
@@ -1707,15 +1714,20 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
     }
     const row = @min(count, height);
     @memcpy(lines[0..row], top[0..row]);
-    const bottom = height -| 3;
-    if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
-    if (height >= 6) {
-        lines[height - 3] = try ruleLine(&painter);
-        var column: usize = 3;
-        lines[height - 2] = try composer(&painter, state, draft, &column);
+    // The bottom: the rule, the composer's rows and the hints, in the same
+    // rows a conversation gives its input.
+    var bottom = height;
+    if (height >= 6 and width >= 6) {
+        var layout: ComposerLayout = undefined;
+        layout.plan(&painter, draft, height);
+        bottom = height - 2 - layout.view.rows;
+        lines[bottom] = try ruleLine(&painter, layout.view);
+        try composer(&painter, state, draft, &layout, lines[bottom + 1 .. height - 1]);
         lines[height - 1] = try hints(&painter, state, draft);
-        if (!state.starting()) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
+        screen.draft_anchor = layout.lines[0].start;
+        if (!state.starting()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
     }
+    if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
     screen.pulses = painter.pulsed;
     return screen;
 }
@@ -1858,6 +1870,8 @@ const Painter = struct {
     /// past ASCII.
     fn standIn(self: *const Painter, codepoint: u21) ?[]const u8 {
         if (codepoint == '\n') return self.glyphs.newline;
+        // A tab shows as one space, as in a conversation.
+        if (codepoint == '\t') return " ";
         if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint < 0xa0) or codepoint == replacement) return "?";
         if (!self.caps.unicode and codepoint > 0x7e) return "?";
         return null;
@@ -2097,31 +2111,82 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-fn ruleLine(painter: *Painter) error{OutOfMemory}![]const Span {
+/// The rule above the composer. It names the draft lines hidden above or
+/// below the composer when there are any.
+fn ruleLine(painter: *Painter, view: draft_layout.View) error{OutOfMemory}![]const Span {
     painter.begin(false);
     const cells = painter.width -| 2;
-    const text = try painter.arena.alloc(u8, cells * painter.glyphs.rule.len);
-    for (0..cells) |at| @memcpy(text[at * painter.glyphs.rule.len ..][0..painter.glyphs.rule.len], painter.glyphs.rule);
+    var buffer: [64]u8 = undefined;
+    const label = draft_layout.label(&buffer, view, .{ .up = painter.glyphs.up, .down = painter.glyphs.down, .dot = painter.glyphs.dot });
+    const label_cells = painter.measure(label);
     try painter.pad(1, .{});
-    painter.push(text, cells, .{ .colour = .rule });
+    const left = draft_layout.labelColumn(label_cells, cells) orelse {
+        try ruleRun(painter, cells);
+        return painter.finish();
+    };
+    try ruleRun(painter, left);
+    _ = try painter.put(1 + left, label, label_cells, .{ .colour = .quiet });
+    try ruleRun(painter, cells - left - label_cells);
     return painter.finish();
 }
 
-/// The draft on one line, its caret in view: text before the caret keeps
-/// its end, text after it its start. `caret` gets the caret's column.
-fn composer(painter: *Painter, state: *const State, draft: Draft, caret: *usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+fn ruleRun(painter: *Painter, cells: usize) error{OutOfMemory}!void {
+    if (cells == 0) return;
+    const text = try painter.arena.alloc(u8, cells * painter.glyphs.rule.len);
+    for (0..cells) |at| @memcpy(text[at * painter.glyphs.rule.len ..][0..painter.glyphs.rule.len], painter.glyphs.rule);
+    painter.push(text, cells, .{ .colour = .rule });
+}
+
+/// The composer's lines as `draft_layout` breaks them, at three cells in.
+const ComposerLayout = struct {
+    shape: draft_layout.Shape,
+    view: draft_layout.View,
+    lines: [draft_layout.max_rows]draft_layout.Line,
+
+    fn plan(self: *ComposerLayout, painter: *const Painter, draft: Draft, height: u16) void {
+        const width = painter.width - 4;
+        const pieces: DraftPieces = .{ .pieces = .{ .bytes = draft.bytes, .painter = painter }, .width = width };
+        self.shape = draft_layout.shape(pieces, width, draft.cursor, draft.anchor);
+        self.view = draft_layout.fit(pieces, width, draft.cursor, self.shape, draft_layout.cap(height), &self.lines);
+    }
+};
+
+/// The draft as the composer draws it, for `draft_layout`: a newline breaks
+/// the line, and every other piece is what `Pieces` draws. A cluster wider
+/// than the line counts as filling it, which `put` shortens it to.
+const DraftPieces = struct {
+    pieces: Pieces,
+    width: u16,
+
+    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
+        const before = self.pieces.at;
+        if (before < self.pieces.bytes.len and self.pieces.bytes[before] == '\n') {
+            self.pieces.at += 1;
+            return .{ .len = 1, .cells = 0, .kind = .newline };
+        }
+        const piece = self.pieces.next() orelse return null;
+        return .{ .len = self.pieces.at - before, .cells = @intCast(@min(piece.cells, self.width)), .kind = draft_layout.kindOf(piece.bytes) };
+    }
+};
+
+/// The draft's shown lines, one per row of `rows`, the prompt on its first.
+fn composer(painter: *Painter, state: *const State, draft: Draft, layout: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
+    std.debug.assert(rows.len == layout.view.rows);
     const room = painter.width -| 4;
     if (draft.bytes.len == 0) {
+        painter.begin(false);
+        _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
         _ = try painter.put(3, "Type a task to start a Session", room, .{ .colour = .quiet });
-    } else {
-        const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
-        const before = try painter.putTail(3, draft.bytes[0..draft.cursor], room, style);
-        caret.* = 3 + before;
-        if (draft.cursor < draft.bytes.len and room > before) _ = try painter.put(caret.*, draft.bytes[draft.cursor..], room - before, style);
+        rows[0] = try painter.finish();
+        return;
     }
-    return painter.finish();
+    const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
+    for (layout.lines[0..rows.len], rows, 0..) |line, *out, index| {
+        painter.begin(false);
+        if (layout.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+        _ = try painter.put(3, draft.bytes[line.start..line.end], room, style);
+        out.* = try painter.finish();
+    }
 }
 
 fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory}![]const Span {
@@ -3169,18 +3234,54 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     draft.cursor = 4;
     try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
     try Expect.composerLine(&state, draft, " › Fix 中");
-    // A draft wider than the composer keeps the caret in view: the text
-    // before it keeps its end, the text after it its start.
+    // A draft wider than the composer wraps between words into rows that
+    // grow upward from the bottom: "Fix ", 76 x, then 24 x and " end".
     const long = "Fix " ++ @as([100]u8, @splat('x')) ++ " end";
     draft = try typeText(&state, long);
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 79 });
-    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 5 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 31 });
+    // Two cells wide, the space before "end" hangs past the edge: "en",
+    // then "d".
+    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 4 });
+    // On the soft break after "Fix ", the caret starts the next row.
     draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
-    try Expect.composerLine(&state, draft, " › Fix " ++ @as([71]u8, @splat('x')) ++ "…");
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 3 });
+    try Expect.composerLine(&state, draft, "   " ++ @as([24]u8, @splat('x')) ++ " end");
     draft.cursor = long.len;
     _ = try submit(&state, draft);
     try Expect.cursor(&state, draft, 80, null);
+}
+
+test "a draft past its cap scrolls inside the composer and the rule counts what it hides" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
+    const Expect = struct {
+        fn rows(from: *const State, typed: Draft, caps: Caps, rule: []const u8, top: []const u8, anchor: usize) !void {
+            var screen = try render(std.testing.allocator, from, typed, 40, 40, caps, 0);
+            defer screen.deinit();
+            var written: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer written.deinit();
+            try screen.write(&written.writer);
+            var lines = std.mem.splitScalar(u8, written.written(), '\n');
+            for (0..28) |_| _ = lines.next();
+            // Ten rows of draft under the rule, the hints on the last row.
+            try std.testing.expectEqualStrings(rule, lines.next().?);
+            try std.testing.expectEqualStrings(top, lines.next().?);
+            try std.testing.expectEqual(anchor, screen.draft_anchor);
+        }
+    };
+    // At the end, the first three lines are hidden above.
+    var draft: Draft = .{ .bytes = text, .cursor = text.len };
+    try Expect.rows(&state, draft, .{}, " ─────────── ↑ 3 more lines ───────────", "   4", 6);
+    // The caret moving up inside the shown lines keeps them.
+    draft = .{ .bytes = text, .cursor = 10, .anchor = 2 };
+    try Expect.rows(&state, draft, .{}, " ──────── ↑ 1 · ↓ 2 more lines ────────", "   2", 2);
+    // Above them, the composer follows the caret to the top.
+    draft = .{ .bytes = text, .cursor = 0, .anchor = 6 };
+    try Expect.rows(&state, draft, .{}, " ─────────── ↓ 3 more lines ───────────", " › 1", 0);
+    // Without Unicode the rule draws in ASCII.
+    draft = .{ .bytes = text, .cursor = text.len };
+    try Expect.rows(&state, draft, .{ .unicode = false }, " ----------- ^ 3 more lines -----------", "   4", 6);
 }
 
 test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM" {
@@ -4326,6 +4427,32 @@ test "render fits any screen size" {
         const text = try screenText(&state, size[0], size[1], .{});
         std.testing.allocator.free(text);
     }
+}
+
+test "the composer needs six rows and six columns, and shows nothing smaller" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for (1..9) |w| for (1..9) |h| {
+        const width: u16 = @intCast(w);
+        const height: u16 = @intCast(h);
+        var screen = try render(std.testing.allocator, &state, .{ .bytes = "draft", .cursor = 5 }, width, height, .{}, 0);
+        defer screen.deinit();
+        const fits = width >= 6 and height >= 6;
+        try std.testing.expectEqual(fits, screen.cursor != null);
+        if (screen.cursor) |cursor| {
+            try std.testing.expectEqual(height - 2, cursor.row);
+            try std.testing.expect(cursor.column < width);
+        }
+    };
+}
+
+test "a full-capacity draft of spaces keeps the composer's caret on screen" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const spaces: [65536]u8 = @splat(' ');
+    var screen = try render(std.testing.allocator, &state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
+    defer screen.deinit();
+    try std.testing.expectEqual(@as(?Screen.Cursor, .{ .row = 22, .column = 3 }), screen.cursor);
 }
 
 fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {

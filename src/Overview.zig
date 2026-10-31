@@ -223,6 +223,9 @@ input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
 draft: [SessionInput.capacity]u8 = undefined,
+/// The byte the latest frame's first composer line starts at, kept first by
+/// the next frame so the composer scrolls only when its caret leaves view.
+draft_anchor: usize = 0,
 /// The worker's descriptors: it writes one byte as its job ends.
 done: [2]c_int = .{ -1, -1 },
 /// Signal wakes.
@@ -460,7 +463,7 @@ fn event(self: *Self, value: view.Event) !?Next {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor };
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor };
 }
 
 fn queue(self: *Self, job: Job) void {
@@ -681,6 +684,7 @@ fn draw(self: *Self, frame: u64) !?Next {
     const size = self.terminal.geometry();
     var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), size.col, size.row, self.caps, frame);
     errdefer screen.deinit();
+    self.draft_anchor = screen.draft_anchor;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
     screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
