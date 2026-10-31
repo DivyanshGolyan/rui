@@ -1,8 +1,8 @@
 {
   "budget_bytes": 8192,
   "threads": {
-    "main thread": {"anchor": "server.serve", "chain_ceiling": 49152},
-    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 40960},
+    "main thread": {"anchor": "server.serve", "chain_ceiling": 45056},
+    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 32768},
     "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
     "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
   },
@@ -12,7 +12,7 @@
     "execution_turn", "failed_responses", "history_memo", "model_adapter", "model_capability",
     "named_scratch", "os.descriptor_limit", "os.pages", "output_format", "output_retention",
     "platform", "preference_values", "preferences", "protocol", "provider", "provider_output",
-    "request_encoding", "server", "server_execution", "server_host", "session_work", "signal_stack",
+    "server", "server_execution", "server_host", "session_work", "signal_stack",
     "stderr", "store", "tools", "transport_policy", "h2", "Connection", "Engine", "Resolver",
     "Stream", "proxy", "tls", "job"
   ],

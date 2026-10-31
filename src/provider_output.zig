@@ -251,12 +251,15 @@ const Utf8Validator = struct {
 const Decoded = struct {
     bounded: ?*protocol.Bounded(max_evidence_bytes) = null,
     hash: ?*std.crypto.hash.sha2.Sha256 = null,
+    /// A second digest the same bytes extend: a message's whole answer.
+    also: ?*std.crypto.hash.sha2.Sha256 = null,
     length: u64 = 0,
     overflow: bool = false,
 
     fn emit(self: *Decoded, bytes: []const u8) !void {
         self.length = try std.math.add(u64, self.length, bytes.len);
         if (self.hash) |hash| hash.update(bytes);
+        if (self.also) |hash| hash.update(bytes);
         if (self.bounded) |destination| {
             if (self.overflow) return;
             // Keep the prefix that fits, however the bytes arrive.
@@ -784,23 +787,6 @@ fn stringDigest(window: *Window, value: Range) ![32]u8 {
     return hash.finalResult();
 }
 
-/// Bind every public call field to the accepted private provider item, including
-/// deduplicated content whose projection may originate in another item.
-pub fn authenticateCall(source: anytype, references: anytype) !void {
-    const names = &.{ "id", "name", "call_id", "arguments" };
-    const fields = try collectFields(source, names);
-    inline for (names, 0..) |name, index| {
-        const range = try fields.required(name);
-        try source.setRange(range.start, range.length);
-        var hash = protocol.contentHasher();
-        var decoded: Decoded = .{ .hash = &hash };
-        const parsed = try parseString(source, &decoded);
-        try source.expectEnd();
-        if (parsed.decoded_length != references[index].length or
-            !std.mem.eql(u8, &hash.finalResult(), &references[index].digest)) return error.CorruptStore;
-    }
-}
-
 fn readIndex(window: *Window, value: Range) !u64 {
     var source = try FileSource.init(window, value);
     try source.space();
@@ -849,8 +835,12 @@ const Array = struct {
 const ItemValidation = struct {
     kind: output_format.OutputItemKind,
     id_digest: [32]u8,
+    omit_reasoning_text: bool = false,
     non_whitespace: bool = false,
     phase: enum { unphased, commentary, final_answer } = .unphased,
+    /// The phase Rui's form holds: only an exact `commentary` or
+    /// `final_answer` literal.
+    neutral_phase: output_format.NeutralPhase = .unphased,
 };
 
 /// One output item's bytes inside an event, read the way replay reads a
@@ -881,16 +871,17 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     var bytes: usize = std.math.maxInt(usize);
     var items: usize = std.math.maxInt(usize);
     // Unbounded allowances finish the item in one call.
-    switch ((try item_check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
-        .compatible => {},
+    const omit_reasoning_text = switch ((try item_check.advance(&ItemSource{ .window = window, .range = item }, &bytes, &items)).?) {
+        .compatible => |compatible| compatible.omit_reasoning_text,
         .incompatible => |reason| return reason,
-    }
+    };
     const kind = item_check.item_kind.?;
     const id_digest = item_check.idDigest();
+    const neutral = try splitNeutral(response, window, item, ordinal, kind, answer_hash);
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
-        .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest },
+        .reasoning, .compaction => return .{ .kind = kind, .id_digest = id_digest, .omit_reasoning_text = omit_reasoning_text },
         .function_call => {
             const tags = .{ output_format.OutputRecordTag.item_id, .name, .call_id, .arguments };
             inline for (tags, item_check.decoded_fields, item_check.encoded_spans) |tag, decoded, span| {
@@ -907,28 +898,7 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
             }
             return .{ .kind = .function_call, .id_digest = id_digest };
         },
-        .message => {
-            var array = try Array.init(window, .{ .start = item.start + item_check.content_span.start, .length = item_check.content_span.length });
-            var non_whitespace = false;
-            while (try array.next()) |block| {
-                const block_fields = try readFields(window, block, &.{ "type", "text", "refusal" });
-                var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
-                _ = try readString(window, try block_fields.required("type"), &block_kind);
-                const text_value = if (block_kind.eql("refusal")) try block_fields.required("refusal") else try block_fields.required("text");
-                var source = try FileSource.init(window, text_value);
-                var decoded = Decoded{ .hash = answer_hash };
-                const text = try parseString(&source, &decoded);
-                non_whitespace = non_whitespace or text.non_whitespace;
-                try response.metadata.append(.{
-                    .tag = .text,
-                    .ordinal = ordinal,
-                    .start = text.encoded.start,
-                    .length = text.encoded.length,
-                    .decoded_length = text.decoded_length,
-                });
-            }
-            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = item_check.messagePhase() };
-        },
+        .message => return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = neutral.non_whitespace, .phase = item_check.messagePhase(), .neutral_phase = neutral.phase },
     }
 }
 
@@ -942,17 +912,251 @@ fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Ran
     return .{ .start = source.offset(), .length = item.start + span.end - source.offset() };
 }
 
-/// The one output item grammar: import accepts an item only when this pass
-/// does, and replay runs it again because adapter rules can change between
-/// attempts. Partial string/number tokens never own payload storage. Frames
+/// One object's members in order, each with its raw `"key":value` bytes.
+const Members = struct {
+    source: FileSource,
+    done: bool = false,
+    first: bool = true,
+
+    const Member = struct { whole: Range, value: Range };
+
+    fn init(window: *Window, object: Range) !Members {
+        var source = try FileSource.init(window, object);
+        try source.expect('{');
+        return .{ .source = source };
+    }
+
+    /// The next member, its decoded key in `key` (empty when it does not
+    /// fit, which no neutral name does).
+    fn next(self: *Members, key: *protocol.Bounded(max_evidence_bytes)) !?Member {
+        if (self.done) return null;
+        try self.source.space();
+        if (self.first and try self.source.peek() == '}') {
+            _ = try self.source.take();
+            try self.source.expectEnd();
+            self.done = true;
+            return null;
+        }
+        self.first = false;
+        try self.source.space();
+        const start = self.source.offset();
+        try keyName(&self.source, key);
+        try self.source.expect(':');
+        try self.source.space();
+        const value_start = self.source.offset();
+        try skipValue(&self.source, 1);
+        const end = self.source.offset();
+        try self.source.space();
+        switch (try self.source.take()) {
+            '}' => {
+                try self.source.expectEnd();
+                self.done = true;
+            },
+            ',' => {},
+            else => return error.UnexpectedJsonDelimiter,
+        }
+        return .{ .whole = .{ .start = start, .length = end - start }, .value = .{ .start = value_start, .length = end - value_start } };
+    }
+};
+
+/// Accumulates one provider bag: its members' raw bytes joined by commas,
+/// `m1,m2,...`, so a writer splices it into the object it rebuilds. Hashed
+/// as the members are recorded.
+const Bag = struct {
+    scope: output_format.BagScope,
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    length: u64 = 0,
+    members: u64 = 0,
+
+    fn add(self: *Bag, response: *Response, window: *Window, ordinal: u64, kind: output_format.OutputItemKind, member: Range) !void {
+        if (self.members != 0) {
+            self.hash.update(",");
+            self.length += 1;
+        }
+        var offset = member.start;
+        const end = member.start + member.length;
+        while (offset < end) {
+            const bytes = try window.bytesAt(offset, end);
+            self.hash.update(bytes);
+            offset += bytes.len;
+        }
+        self.length = try std.math.add(u64, self.length, member.length);
+        self.members += 1;
+        try response.metadata.append(.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = member.start, .length = member.length, .scope = self.scope });
+    }
+
+    /// Records the trailer, even for an empty bag: every item and part has
+    /// one, so a missing bag is damage rather than an absence.
+    fn close(self: *Bag, response: *Response, ordinal: u64, kind: output_format.OutputItemKind) !void {
+        try response.metadata.append(.{
+            .tag = .extras,
+            .kind = kind,
+            .ordinal = ordinal,
+            .start = 0,
+            .length = 0,
+            .decoded_length = self.length,
+            .content_digest = self.hash.finalResult(),
+            .scope = self.scope,
+        });
+    }
+};
+
+fn isNonemptyArray(window: *Window, value: Range) !bool {
+    var array = try Array.init(window, value);
+    return try array.next() != null;
+}
+
+fn stringIs(window: *Window, value: Range, expected: []const u8) !bool {
+    var source = try FileSource.init(window, value);
+    if (try source.peek() != '"') return false;
+    var text: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = readString(window, value, &text) catch |err| switch (err) {
+        // Longer than any expected word, so not equal to it.
+        error.ProviderValueTooLong => return false,
+        else => return err,
+    };
+    return text.eql(expected);
+}
+
+/// Splits an accepted item into Rui's own form and the provider bags: every
+/// part of a recognised array becomes a `part` record (decoded text plus
+/// its block's other members as the part bag), and every top-level member
+/// Rui's form does not hold goes, as received, into the item bag. A member
+/// becomes neutral only in exactly the expected shape, so the bags keep
+/// everything else the model saw. `created_by` is dropped, as replay drops
+/// it.
+fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind, answer_hash: *std.crypto.hash.sha2.Sha256) !NeutralItem {
+    var result: NeutralItem = .{};
+    var answer: Answer = .{ .hash = answer_hash };
+    var bag: Bag = .{ .scope = .item };
+    var members = try Members.init(window, item);
+    var key: protocol.Bounded(max_evidence_bytes) = .{};
+    while (try members.next(&key)) |member| {
+        const neutral = if (key.eql("type") or key.eql("created_by"))
+            true
+        else switch (kind) {
+            .message => if (key.eql("role"))
+                try stringIs(window, member.value, "assistant")
+            else if (key.eql("phase")) phase: {
+                if (try stringIs(window, member.value, "commentary")) {
+                    result.phase = .commentary;
+                    break :phase true;
+                }
+                if (try stringIs(window, member.value, "final_answer")) {
+                    result.phase = .final_answer;
+                    break :phase true;
+                }
+                break :phase false;
+            } else if (key.eql("content"))
+                try splitParts(response, window, member.value, ordinal, kind, .content, &answer)
+            else
+                false,
+            .reasoning => if (key.eql("summary"))
+                try splitParts(response, window, member.value, ordinal, kind, .summary, null)
+            else if (key.eql("content"))
+                try splitParts(response, window, member.value, ordinal, kind, .content, null)
+            else
+                false,
+            .function_call => key.eql("name") or key.eql("call_id") or key.eql("arguments"),
+            .compaction => false,
+        };
+        if (!neutral) try bag.add(response, window, ordinal, kind, member.whole);
+    }
+    try bag.close(response, ordinal, kind);
+    result.non_whitespace = answer.non_whitespace;
+    return result;
+}
+
+const NeutralItem = struct {
+    phase: output_format.NeutralPhase = .unphased,
+    /// A message: whether its answer has any non-whitespace text.
+    non_whitespace: bool = false,
+};
+
+/// A message's answer: its text parts back to back.
+const Answer = struct {
+    hash: *std.crypto.hash.sha2.Sha256,
+    non_whitespace: bool = false,
+};
+
+/// Records each block of a nonempty array as a part, or returns false (the
+/// whole array stays in the item bag) for any other value.
+fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, kind: output_format.OutputItemKind, array_kind: output_format.PartArray, answer: ?*Answer) !bool {
+    var source = try FileSource.init(window, value);
+    if (try source.peek() != '[' or !try isNonemptyArray(window, value)) return false;
+    var array = try Array.init(window, value);
+    while (try array.next()) |block| {
+        var block_source = try FileSource.init(window, block);
+        const block_fields = if (try block_source.peek() == '{') try readFields(window, block, &.{ "type", "text", "refusal" }) else null;
+        var part_kind: output_format.PartKind = .opaque_block;
+        var text_key: []const u8 = "";
+        var text_value: Range = undefined;
+        // A block whose type or text is missing, duplicated or not a string
+        // is not Rui's: it stays whole as an opaque part. `get` fails only on
+        // a duplicate.
+        if (block_fields) |fields| known: {
+            const type_value = (fields.get("type") catch break :known) orelse break :known;
+            const candidates: []const struct { []const u8, output_format.PartKind, []const u8 } = switch (array_kind) {
+                .summary => &.{.{ "summary_text", .summary_text, "text" }},
+                .content => if (kind == .message)
+                    &.{ .{ "output_text", .output_text, "text" }, .{ "refusal", .refusal, "refusal" } }
+                else
+                    &.{.{ "reasoning_text", .reasoning_text, "text" }},
+                .none => unreachable,
+            };
+            for (candidates) |candidate| if (try stringIs(window, type_value, candidate[0])) {
+                const text = (if (std.mem.eql(u8, candidate[2], "text")) fields.get("text") else fields.get("refusal")) catch break :known;
+                text_value = text orelse break :known;
+                var probe = try FileSource.init(window, text_value);
+                if (try probe.peek() != '"') break :known;
+                part_kind = candidate[1];
+                text_key = candidate[2];
+            };
+        }
+        var part_bag: Bag = .{ .scope = .part };
+        if (part_kind == .opaque_block) {
+            try response.metadata.append(.{ .tag = .part, .kind = kind, .ordinal = ordinal, .start = block.start, .length = 0, .part_kind = .opaque_block, .part_array = array_kind });
+        } else {
+            var hash = protocol.contentHasher();
+            var decoded = Decoded{ .hash = &hash, .also = if (answer) |whole| whole.hash else null };
+            var text_source = try FileSource.init(window, text_value);
+            const text = try parseString(&text_source, &decoded);
+            if (answer) |whole| whole.non_whitespace = whole.non_whitespace or text.non_whitespace;
+            try response.metadata.append(.{
+                .tag = .part,
+                .kind = kind,
+                .ordinal = ordinal,
+                .start = text.encoded.start,
+                .length = text.encoded.length,
+                .decoded_length = text.decoded_length,
+                .content_digest = hash.finalResult(),
+                .part_kind = part_kind,
+                .part_array = array_kind,
+            });
+        }
+        var members = try Members.init(window, block);
+        var key: protocol.Bounded(max_evidence_bytes) = .{};
+        while (try members.next(&key)) |member| {
+            if (part_kind != .opaque_block and (key.eql("type") or key.eql(text_key))) continue;
+            try part_bag.add(response, window, ordinal, kind, member.whole);
+        }
+        try part_bag.close(response, ordinal, kind);
+    }
+    return true;
+}
+
+/// The one output item grammar: acceptance stores an item only when this
+/// pass does, with the replay rule it judged. Replay applies that rule
+/// without judging again, so a change to what this grammar accepts or omits
+/// changes the Store format (`store.schema_version`). Partial string/number
+/// tokens never own payload storage. Frames
 /// retain only consequential field facts; errors in meaning are deferred
 /// until syntax and the complete source have validated.
 /// Initialize/use in final storage (the scanner borrows its nesting buffer).
 pub const OutputItemCheck = struct {
-    /// Set at import: the Operation the item arrives under, which decides
-    /// whether a compaction or a call may appear at all. Replay leaves it
-    /// null; an accepted item stays replayable under any later Operation.
-    operation: ?output_format.ModelOperationKind = null,
+    /// The Operation the item arrives under, which decides whether a
+    /// compaction or a call may appear at all.
+    operation: output_format.ModelOperationKind = undefined,
     scanner: ?std.json.Scanner = null,
     nesting: [16]u8 = undefined,
     allocator: std.heap.FixedBufferAllocator = undefined,
@@ -979,8 +1183,6 @@ pub const OutputItemCheck = struct {
     /// decoded field's encoded value.
     key_end: u64 = 0,
     encoded_spans: [decoded_names.len]Span = undefined,
-    /// The item's top-level `content` array, brackets included.
-    content_span: Range = undefined,
 
     /// From the end of a value's key to its closing quote.
     pub const Span = struct { after_key: u64, end: u64 };
@@ -1026,33 +1228,14 @@ pub const OutputItemCheck = struct {
     /// decode scratch keep their `undefined` defaults, unwritten until the
     /// grammar fills them. An all-comptime `.{}` would copy the whole
     /// 66 KB default instead.
-    pub fn reset(self: *OutputItemCheck, operation: ?output_format.ModelOperationKind) void {
+    pub fn reset(self: *OutputItemCheck, operation: output_format.ModelOperationKind) void {
         self.* = .{ .operation = operation };
-    }
-
-    /// Bind every retained item to its admission-certified type and ID.
-    /// Compatibility errors are deferred until these canonical facts agree.
-    pub fn authenticateIdentity(self: *const OutputItemCheck, kind: output_format.OutputItemKind, id_digest: [32]u8) !void {
-        const actual = try self.frames[0].get("type");
-        if (!actual.is(@tagName(kind)) or self.decoded_fields_seen & 1 == 0 or
-            !std.mem.eql(u8, &self.decoded_fields[0].digest, &id_digest)) return error.CorruptStore;
     }
 
     /// After a compatible item validates, the digest of its decoded `id`.
     pub fn idDigest(self: *const OutputItemCheck) [32]u8 {
         std.debug.assert(self.decoded_fields_seen & 1 != 0);
         return self.decoded_fields[0].digest;
-    }
-
-    /// After advance completes, bind admission-certified fields to the exact
-    /// decoded top-level strings. One token hasher and four results suffice;
-    /// nested/open fields never acquire per-frame hashes or payload copies.
-    pub fn authenticate(self: *const OutputItemCheck, references: anytype) !void {
-        if (self.decoded_fields_seen != 15) return error.CorruptStore;
-        for (self.decoded_fields, references) |actual, expected| {
-            if (actual.length != expected.length or !std.mem.eql(u8, &actual.digest, &expected.digest))
-                return error.CorruptStore;
-        }
     }
 
     // Other kinds leave `content` open, duplicates included.
@@ -1390,13 +1573,13 @@ pub const OutputItemCheck = struct {
                     },
                     .compaction => {
                         const rules = Rules(kindFields(.compaction)){ .frame = frame };
-                        if (self.operation) |operation| if (operation != .compaction) return error.UnsupportedProviderOutput;
+                        if (self.operation != .compaction) return error.UnsupportedProviderOutput;
                         try rules.completed();
                         try rules.encrypted();
                     },
                     .function_call => {
                         const rules = Rules(kindFields(.function_call)){ .frame = frame };
-                        if (self.operation) |operation| if (operation == .compaction) return error.UnsupportedProviderOutput;
+                        if (self.operation == .compaction) return error.UnsupportedProviderOutput;
                         try rules.completed();
                         const caller = try rules.get("caller");
                         switch (caller.shape) {
@@ -1561,16 +1744,12 @@ pub const OutputItemCheck = struct {
                 .object_begin, .array_begin => {
                     if (self.depth > protocol.max_json_depth) return error.JsonTooDeep;
                     const object = token == .object_begin;
-                    if (self.depth == 1 and !object and self.frames[0].key == comptime index("content").?)
-                        self.content_span.start = self.diagnostics.getByteOffset() - 1;
                     const kind = self.childKind(object);
                     self.frames[self.depth] = .{ .kind = kind, .object = object };
                     self.depth += 1;
                 },
                 .object_end, .array_end => {
                     self.depth -= 1;
-                    if (self.depth == 1 and token == .array_end and self.frames[0].key == comptime index("content").?)
-                        self.content_span.length = self.diagnostics.getByteOffset() - self.content_span.start;
                     self.accept(self.finishFrame(&self.frames[self.depth]));
                 },
                 .partial_number => {},
@@ -1581,15 +1760,11 @@ pub const OutputItemCheck = struct {
                 .end_of_document => {
                     if (self.result.shape != .object) return error.UnexpectedJsonDelimiter;
                     // A consumed duplicate is a lookup the grammar makes, so
-                    // it always fails the item too; replay names it first.
+                    // it always fails the item too.
                     const reason = self.result.failure orelse {
                         std.debug.assert(!self.result.ambiguous.all);
                         return .{ .compatible = .{ .omit_reasoning_text = self.replaysReasoningText() } };
                     };
-                    if (self.operation == null) {
-                        if (self.result.ambiguous.all) return error.DuplicateJsonField;
-                        std.debug.assert(reason != error.DuplicateJsonField);
-                    }
                     return .{ .incompatible = reason };
                 },
                 .allocated_string, .allocated_number => unreachable,
@@ -1599,12 +1774,11 @@ pub const OutputItemCheck = struct {
     }
 };
 
-/// Check one selected canonical item against current wire rules, without
-/// emitting metadata or retaining a payload. Store owns integrity validation.
-/// Test driver for the same bounded grammar request preparation uses.
-fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !OutputItemCheck.Verdict {
+/// Judge one item from a file under `operation`, without emitting metadata
+/// or retaining a payload: the grammar import runs, driven over windows.
+fn judgeFile(io: std.Io, source: std.Io.File, length: u64, operation: output_format.ModelOperationKind) !OutputItemCheck.Verdict {
     const item_check = testingItemCheck();
-    item_check.* = .{};
+    item_check.reset(operation);
     const Source = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1622,6 +1796,14 @@ fn validateReplay(io: std.Io, source: std.Io.File, length: u64) !OutputItemCheck
         var bytes: usize = protocol.content_window_bytes;
         var items: usize = 64;
         if (try item_check.advance(Source{ .io = io, .file = source, .length = length }, &bytes, &items)) |verdict| return verdict;
+    }
+}
+
+fn expectDecodedFields(item_check: *const OutputItemCheck, expected: anytype) !void {
+    try std.testing.expectEqual(@as(u4, 15), item_check.decoded_fields_seen);
+    for (item_check.decoded_fields, expected) |actual, field| {
+        try std.testing.expectEqual(field.length, actual.length);
+        try std.testing.expectEqualSlices(u8, &field.digest, &actual.digest);
     }
 }
 
@@ -1669,13 +1851,13 @@ const replay_cases = [_]struct { item: []const u8, supported: bool, operation: o
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .supported = false },
 };
 
-test "replay compatibility rejects unsupported meaning and preserves open fields" {
+test "the item grammar rejects unsupported meaning and preserves open fields" {
     for (replay_cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        const verdict = try validateReplay(std.testing.io, source.file, case.item.len);
+        const verdict = try judgeFile(std.testing.io, source.file, case.item.len, case.operation);
         try std.testing.expectEqual(case.supported, verdict == .compatible);
     }
 }
@@ -1696,13 +1878,22 @@ const replay_failure_cases = [_]struct { item: []const u8, failure: anyerror, op
     .{ .item = "{\"type\":\"future\",\"id\":\"r\",\"open\":[true,]}", .failure = error.SyntaxError },
 };
 
-test "replay compatibility distinguishes consumed duplicates and syntax from unsupported shapes" {
+test "the item grammar refuses consumed duplicates and syntax" {
     for (replay_failure_cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        try std.testing.expectError(case.failure, validateReplay(std.testing.io, source.file, case.item.len));
+        const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
+            try std.testing.expectEqual(error.SyntaxError, err);
+            try std.testing.expectEqual(case.failure, err);
+            continue;
+        };
+        // A consumed duplicate fails the item; an earlier broken rule may
+        // be the one named.
+        try std.testing.expectEqual(error.DuplicateJsonField, case.failure);
+        try std.testing.expect(verdict == .incompatible);
+        try std.testing.expectError(verdict.incompatible, importTestingItem(&tmp, case.item, case.operation));
     }
 }
 
@@ -1763,12 +1954,14 @@ test "import accepts exactly the items replay accepts and names the same broken 
         const imported: ?anyerror = if (importTestingItem(&tmp, case.item, case.operation)) |_| null else |err| err;
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        const verdict = validateReplay(std.testing.io, source.file, case.item.len) catch |err| {
-            // Canonical bytes cannot hold either failure, so import refuses
-            // both; the precedence test pins the reason it names.
+        const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
             try std.testing.expectEqual(case.failure orelse return error.TestUnexpectedError, err);
+            try std.testing.expectEqual(error.SyntaxError, err);
             try std.testing.expect(imported != null);
-            if (err != error.SyntaxError) try std.testing.expectEqual(error.DuplicateJsonField, err);
+            continue;
+        };
+        if (case.failure) |failure| if (failure == error.DuplicateJsonField) {
+            try std.testing.expect(verdict == .incompatible and imported != null);
             continue;
         };
         try std.testing.expectEqual(case.compatible, verdict == .compatible);
@@ -1782,32 +1975,29 @@ test "import accepts exactly the items replay accepts and names the same broken 
     }
 }
 
-test "import names the first rule broken in lookup order while replay names a consumed duplicate first" {
+test "import names the first rule broken in lookup order" {
     const cases = [_]struct {
         item: []const u8,
         operation: output_format.ModelOperationKind,
         import: anyerror,
-        /// What replay reports: an error, or else the incompatible reason.
-        replay: anyerror,
-        replay_is_error: bool,
     }{
         // Status is looked up before content blocks.
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .operation = .assistant_response, .import = error.UnsupportedItemStatus },
         // Blocks are judged in order.
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .operation = .assistant_response, .import = error.UnsupportedContentBlock, .replay = error.DuplicateJsonField, .replay_is_error = true },
-        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .operation = .assistant_response, .import = error.DuplicateJsonField, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .operation = .assistant_response, .import = error.UnsupportedContentBlock },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .operation = .assistant_response, .import = error.DuplicateJsonField },
         // Type, ID and metadata come before every other rule.
-        .{ .item = "{\"type\":\"message\",\"type\":\"message\",\"id\":\"m\",\"status\":\"future\"}", .operation = .assistant_response, .import = error.DuplicateJsonField, .replay = error.DuplicateJsonField, .replay_is_error = true },
+        .{ .item = "{\"type\":\"message\",\"type\":\"message\",\"id\":\"m\",\"status\":\"future\"}", .operation = .assistant_response, .import = error.DuplicateJsonField },
         // The Operation is checked after type, ID and metadata, before the
-        // kind's own rules. Replay accepts compactions and calls anywhere.
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\"}", .operation = .assistant_response, .import = error.UnsupportedProviderOutput, .replay = error.ContinuationUnavailable, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":null}}", .operation = .compaction, .import = error.UnsupportedProviderOutput, .replay = error.ExpectedJsonString, .replay_is_error = false },
-        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":1}}", .operation = .assistant_response, .import = error.UnsupportedMetadataAuthority, .replay = error.UnsupportedMetadataAuthority, .replay_is_error = false },
-        .{ .item = "{\"type\":\"function_call\",\"id\":\"\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.EmptyProviderIdentity, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"\",\"status\":\"future\",\"encrypted_content\":\"opaque\"}", .operation = .assistant_response, .import = error.EmptyProviderIdentity, .replay = error.EmptyProviderIdentity, .replay_is_error = false },
+        // kind's own rules.
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\"}", .operation = .assistant_response, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":null}}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":1}}", .operation = .assistant_response, .import = error.UnsupportedMetadataAuthority },
+        .{ .item = "{\"type\":\"function_call\",\"id\":\"\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .operation = .compaction, .import = error.EmptyProviderIdentity },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"\",\"status\":\"future\",\"encrypted_content\":\"opaque\"}", .operation = .assistant_response, .import = error.EmptyProviderIdentity },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1815,15 +2005,11 @@ test "import names the first rule broken in lookup order while replay names a co
         try std.testing.expectError(case.import, importTestingItem(&tmp, case.item, case.operation));
         const source = try testingObject(&tmp, case.item);
         defer source.file.close(std.testing.io);
-        if (case.replay_is_error) {
-            try std.testing.expectError(case.replay, validateReplay(std.testing.io, source.file, case.item.len));
-        } else {
-            try expectIncompatible(case.replay, try validateReplay(std.testing.io, source.file, case.item.len));
-        }
+        try expectIncompatible(case.import, try judgeFile(std.testing.io, source.file, case.item.len, case.operation));
     }
 }
 
-test "replay compatibility streams opaque windows and preserves syntax failures" {
+test "the item grammar streams opaque windows and preserves syntax failures" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "replay", .{ .read = true });
@@ -1834,12 +2020,12 @@ test "replay compatibility streams opaque windows and preserves syntax failures"
     try file.writeStreamingAll(std.testing.io, prefix);
     for (0..3) |_| try file.writeStreamingAll(std.testing.io, &window);
     try file.writeStreamingAll(std.testing.io, suffix);
-    try expectCompatible(try validateReplay(std.testing.io, file, prefix.len + 3 * window.len + suffix.len));
+    try expectCompatible(try judgeFile(std.testing.io, file, prefix.len + 3 * window.len + suffix.len, .assistant_response));
 
     const invalid = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}";
     const source = try testingObject(&tmp, invalid);
     defer source.file.close(std.testing.io);
-    try std.testing.expectError(error.InvalidJsonUtf8, validateReplay(std.testing.io, source.file, invalid.len));
+    try std.testing.expectError(error.InvalidJsonUtf8, judgeFile(std.testing.io, source.file, invalid.len, .assistant_response));
 }
 
 test "replay compatibility cursor bounds actual sequential reads including open fields" {
@@ -1876,7 +2062,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
         else
             "\"caller\":{\"type\":\"program\"},\"name\":\"bash\",\"id\":\"f\",\"call_id\":\"c\",\"type\":\"function_call\"}");
         var source = CountingSource{ .file = file, .length = try file.length(std.testing.io) };
-        var item_check: OutputItemCheck = .{};
+        var item_check: OutputItemCheck = .{ .operation = .assistant_response };
         var turns: usize = 0;
         while (true) {
             turns += 1;
@@ -1898,7 +2084,7 @@ test "replay compatibility cursor bounds actual sequential reads including open 
     }
 }
 
-test "incremental call authentication binds all four decoded fields with fixed storage" {
+test "a call's four decoded fields stream with fixed storage" {
     const Source = struct {
         bytes: []const u8,
         pub fn contentLength(source: @This()) u64 {
@@ -1914,7 +2100,7 @@ test "incremental call authentication binds all four decoded fields with fixed s
     var expected: @FieldType(protocol.ProposalMetadata, "fields") = undefined;
     for ([_][]const u8{ "item", "bash", "call", "a\x00🚀" }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
-    var item_check: OutputItemCheck = .{};
+    var item_check: OutputItemCheck = .{ .operation = .assistant_response };
     var turns: usize = 0;
     while (true) {
         var bytes: usize = 1;
@@ -1926,15 +2112,7 @@ test "incremental call authentication binds all four decoded fields with fixed s
         }
     }
     try std.testing.expect(turns >= source.bytes.len);
-    try item_check.authenticate(expected);
-    for (0..4) |i| {
-        var corrupt = expected;
-        corrupt[i].digest[0] ^= 1;
-        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
-        corrupt = expected;
-        corrupt[i].length += 1;
-        try std.testing.expectError(error.CorruptStore, item_check.authenticate(corrupt));
-    }
+    try expectDecodedFields(&item_check, expected);
     try std.testing.expect(@sizeOf(@TypeOf(item_check.decoded_fields)) == 160);
 }
 
@@ -1985,7 +2163,7 @@ test "long strings decode and locate exactly across read windows" {
     for ([_][]const u8{ decoded.written(), "bash", decoded.written(), decoded.written() }, &expected) |value, *field|
         field.* = .{ .length = value.len, .digest = protocol.contentDigest(value) };
     for ([_]usize{ 1, 7, protocol.content_window_bytes - 1, protocol.content_window_bytes, protocol.content_window_bytes + 1 }) |allowance| {
-        var item_check: OutputItemCheck = .{};
+        var item_check: OutputItemCheck = .{ .operation = .assistant_response };
         while (true) {
             var bytes = allowance;
             var items: usize = 1;
@@ -1994,7 +2172,7 @@ test "long strings decode and locate exactly across read windows" {
                 break;
             }
         }
-        try item_check.authenticate(expected);
+        try expectDecodedFields(&item_check, expected);
         // Each located value is exactly the encoded text after its key.
         for ([_]usize{ 0, 2, 3 }) |field| {
             const span = item_check.encoded_spans[field];
@@ -2194,6 +2372,66 @@ pub fn testingItemCheck() *OutputItemCheck {
     return &testing_item_check;
 }
 
+/// Judge one complete item in memory the way acceptance does, for tests that
+/// save output without a provider stream.
+pub fn judgeForTesting(item: []const u8, operation: output_format.ModelOperationKind) !OutputItemCheck.Verdict {
+    const item_check = testingItemCheck();
+    item_check.reset(operation);
+    const Source = struct {
+        bytes: []const u8,
+
+        pub fn contentLength(self: @This()) u64 {
+            return self.bytes.len;
+        }
+
+        pub fn readContent(self: @This(), offset: u64, destination: []u8) !usize {
+            @memcpy(destination, self.bytes[@intCast(offset)..][0..destination.len]);
+            return destination.len;
+        }
+    };
+    var bytes: usize = std.math.maxInt(usize);
+    var items: usize = std.math.maxInt(usize);
+    return (try item_check.advance(Source{ .bytes = item }, &bytes, &items)).?;
+}
+
+/// Record one complete item already in `source` at `start` the way
+/// acceptance records it: its call fields, Rui's form, its bags and then
+/// the item record. Tests that save output without a provider stream use
+/// it so their metadata is what acceptance would write.
+/// The record that closes an accepted item's metadata.
+fn itemRecord(window: *Window, item: Range, ordinal: u64, validation: ItemValidation) !output_format.OutputMetadataRecord {
+    return .{
+        .tag = .item,
+        .kind = validation.kind,
+        .ordinal = ordinal,
+        .start = item.start,
+        .length = item.length,
+        .id_digest = validation.id_digest,
+        .content_digest = try contentDigestRange(window, item),
+        .omit_reasoning_text = validation.omit_reasoning_text,
+        .phase = validation.neutral_phase,
+    };
+}
+
+pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, source: std.Io.File, start: u64, length: u64, ordinal: u64, operation: output_format.ModelOperationKind) !output_format.OutputMetadataRecord {
+    var window: Window = .{ .io = metadata.io, .file = source };
+    var rejection: Rejection = .{};
+    var response: Response = .{
+        .metadata = metadata,
+        .operation = operation,
+        .rejection = &rejection,
+        .provider_failure = testingProviderFailure(),
+        .answer = .{ .digest = protocol.contentDigest("") },
+        .item_check = testingItemCheck(),
+    };
+    const item: Range = .{ .start = start, .length = length };
+    var message_hash = protocol.contentHasher();
+    const validation = try validateItem(&response, &window, item, ordinal, &message_hash);
+    const record = try itemRecord(&window, item, ordinal, validation);
+    try metadata.append(record);
+    return record;
+}
+
 /// Tests' provider failure, the last validation's.
 var testing_provider_failure: ProviderFailure = undefined;
 
@@ -2258,15 +2496,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
             .function_call => response.call_count += 1,
             .reasoning => {},
         }
-        try metadata.append(.{
-            .tag = .item,
-            .kind = validation.kind,
-            .ordinal = index,
-            .start = item.start,
-            .length = item.length,
-            .id_digest = validation.id_digest,
-            .content_digest = try contentDigestRange(window, item),
-        });
+        try metadata.append(try itemRecord(window, item, index, validation));
         response.item_count += 1;
         return;
     }
@@ -2578,7 +2808,7 @@ test "provider refusal preserves text and rejects malformed or incomplete candid
     try std.testing.expectEqual(protocol.contentDigest(refusal), result.first_item.content_digest);
     const source = try testingObject(&tmp, refusal);
     defer source.file.close(std.testing.io);
-    try expectCompatible(try validateReplay(std.testing.io, source.file, refusal.len));
+    try expectCompatible(try judgeFile(std.testing.io, source.file, refusal.len, .assistant_response));
     try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, done, 4096));
     try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n", 4096));
     const delta = "data: {\"type\":\"response.refusal.delta\",\"delta\":\"not an answer\"}\n\n";
@@ -2600,11 +2830,7 @@ test "provider refusal preserves text and rejects malformed or incomplete candid
         try std.testing.expectError(case.failure, validateTestingSse(&tmp, stream, 4096));
         const invalid = try testingObject(&tmp, item);
         defer invalid.file.close(std.testing.io);
-        if (case.failure == error.DuplicateJsonField) {
-            try std.testing.expectError(error.DuplicateJsonField, validateReplay(std.testing.io, invalid.file, item.len));
-        } else {
-            try expectIncompatible(case.failure, try validateReplay(std.testing.io, invalid.file, item.len));
-        }
+        try expectIncompatible(case.failure, try judgeFile(std.testing.io, invalid.file, item.len, .assistant_response));
     }
 }
 
@@ -2744,7 +2970,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var root_buffer: [protocol.max_store_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var used: std.atomic.Value(u64) = .init(raw.len);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 2 * output_format.output_metadata_record_bytes - shortfall };
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 5 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
@@ -2762,7 +2988,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
             try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
-            try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
+            try std.testing.expectEqual(raw.len + done.len + 5 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
         try std.testing.expectEqual(raw.len, try source.readPositionalAll(std.testing.io, &buffer, 0));
@@ -3174,7 +3400,9 @@ test "provider preserves ordered trustworthy function call envelopes" {
     try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
     try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
     try std.testing.expectEqual(@as(u64, 0), accepted.output.answer_length);
-    try std.testing.expectEqual(@as(u64, 2 * 5 * 104), accepted.metadata_bytes);
+    // Per call: the item, four call fields, and an item bag of `id` and
+    // `status` with its trailer.
+    try std.testing.expectEqual(@as(u64, 2 * 8 * 104), accepted.metadata_bytes);
 
     const invalid_second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"edit\",\"call_id\":\"call-B\",\"arguments\":\"{}\"}";
     const late_invalid = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
@@ -3227,7 +3455,7 @@ test "function call argument stream events are scratch and completed items remai
     defer valid_tmp.cleanup();
     const accepted = try validateTestingSse(&valid_tmp, stream, 64 * 1024);
     try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
-    try std.testing.expectEqual(@as(u64, 5 * 104), accepted.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, 8 * 104), accepted.metadata_bytes);
 
     const malformed = "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\"}";
     const malformed_stream = "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n" ++
@@ -3346,10 +3574,10 @@ test "Bash proposal metadata growth is linear and disk-backed" {
     const validated = try validateTestingSse(
         &tmp,
         writer.buffered(),
-        action_count * 5 * 104,
+        action_count * 8 * 104,
     );
     try std.testing.expectEqual(@as(u64, action_count), validated.output.call_count);
-    try std.testing.expectEqual(@as(u64, action_count * 5 * 104), validated.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, action_count * 8 * 104), validated.metadata_bytes);
     try std.testing.expect(@sizeOf(Validated) < protocol.content_window_bytes);
 }
 
@@ -3544,10 +3772,10 @@ test "provider field collection cannot grant authority through escaped metadata 
     const item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}}";
     var object = try testingObject(&tmp, item);
     defer object.file.close(std.testing.io);
-    try expectIncompatible(error.UnsupportedMetadataAuthority, try validateReplay(std.testing.io, object.file, item.len));
+    try expectIncompatible(error.UnsupportedMetadataAuthority, try judgeFile(std.testing.io, object.file, item.len, .compaction));
 }
 
-test "provider authority metadata rejects every supported item on acceptance and replay" {
+test "provider authority metadata rejects every supported item" {
     const prefixes = .{
         "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\"",
         "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]",
@@ -3568,10 +3796,10 @@ test "provider authority metadata rejects every supported item on acceptance and
             defer source.file.close(std.testing.io);
             if (comptime std.mem.eql(u8, key, "future")) {
                 _ = try validateTestingOperation(&tmp, sse, 4096, purpose);
-                try expectCompatible(try validateReplay(std.testing.io, source.file, item.len));
+                try expectCompatible(try judgeFile(std.testing.io, source.file, item.len, purpose));
             } else {
                 try std.testing.expectError(error.UnsupportedMetadataAuthority, validateTestingOperation(&tmp, sse, 4096, purpose));
-                try expectIncompatible(error.UnsupportedMetadataAuthority, try validateReplay(std.testing.io, source.file, item.len));
+                try expectIncompatible(error.UnsupportedMetadataAuthority, try judgeFile(std.testing.io, source.file, item.len, purpose));
             }
         }
     }

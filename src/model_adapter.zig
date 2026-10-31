@@ -878,14 +878,12 @@ const writePlainJsonRun = request_encoding.writePlainJsonRun;
 // selects a bounded refill size first, and any short canonical read fails.
 const HistoricalSource = struct {
     reader: *store.HistoricalReader,
-    ranged: bool = false,
 
     pub fn contentLength(self: HistoricalSource) u64 {
         return self.reader.reference.length;
     }
 
     pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
-        if (self.ranged) return self.reader.readRange(offset, destination);
         return self.reader.read(offset, destination);
     }
 
@@ -925,8 +923,11 @@ const RequestItem = union(enum) {
     history_memo,
     /// A User Message or an instruction update.
     message: store.HistoricalEntry,
-    /// One accepted output item, judged compatible and replayed.
-    replayed_output: Replayed,
+    /// One accepted output item in Rui's own form: its opening, each part,
+    /// and its close, which writes the item's provider bag.
+    output_open: store.HistoricalOutput,
+    output_part: store.HistoricalPart,
+    output_close,
     tool_result: store.HistoricalToolResult,
     compaction_trigger,
     tools,
@@ -947,13 +948,15 @@ const Piece = union(enum) {
     escaped_content: store.HistoricalContent,
     /// Canonical JSON, copied.
     verbatim_content: store.HistoricalContent,
-    /// Accepted output the grammar judged compatible, replayed.
-    replay: Replayed,
     history_memo,
 };
 
-/// A replayed output item. Private reasoning text is never replay input.
-const Replayed = struct { content: store.HistoricalContent, omit_reasoning_text: bool };
+/// What the writer of one output item carries between its items: the item
+/// itself and the part array it has open.
+const OutputWriting = struct {
+    output: store.HistoricalOutput = undefined,
+    array: output_format.PartArray = .none,
+};
 
 /// One item's pieces, written in order.
 const Pieces = struct {
@@ -990,9 +993,9 @@ fn separateInput(pieces: *Pieces, input_comma: *bool) void {
 }
 
 /// Fill `pieces` with the Codex Responses encoding of one item. Its pieces
-/// borrow from `item` and `settings`. `input_comma` is the only syntax state
-/// carried between items.
-fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, pieces: *Pieces) void {
+/// borrow from `item`, `settings` and `output`. `input_comma` and `output`
+/// are the only syntax state carried between items.
+fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, output: *OutputWriting, pieces: *Pieces) void {
     pieces.* = .{};
     switch (item.*) {
         .settings => {
@@ -1034,9 +1037,68 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
             pieces.add(.{ .escaped_content = entry.content.? });
             pieces.add(.{ .syntax = "\"}]}" });
         },
-        .replayed_output => |replayed| {
+        // An output item is rebuilt from Rui's form and its provider bags,
+        // written canonically: the model receives what it sent.
+        .output_open => |*head| {
             separateInput(pieces, input_comma);
-            pieces.add(.{ .replay = replayed });
+            output.* = .{ .output = head.* };
+            switch (head.kind) {
+                .reasoning => pieces.add(.{ .syntax = "{\"type\":\"reasoning\"" }),
+                .compaction => pieces.add(.{ .syntax = "{\"type\":\"compaction\"" }),
+                .message => pieces.add(.{ .syntax = switch (head.phase) {
+                    .unphased => "{\"type\":\"message\",\"role\":\"assistant\"",
+                    .commentary => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\"",
+                    .final_answer => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\"",
+                } }),
+                .function_call => {
+                    const call = &(head.call orelse unreachable);
+                    pieces.add(.{ .syntax = "{\"type\":\"function_call\",\"name\":\"" });
+                    pieces.add(.{ .escaped_content = call[0] });
+                    pieces.add(.{ .syntax = "\",\"call_id\":\"" });
+                    pieces.add(.{ .escaped_content = call[1] });
+                    pieces.add(.{ .syntax = "\",\"arguments\":\"" });
+                    pieces.add(.{ .escaped_content = call[2] });
+                    pieces.add(.{ .syntax = "\"" });
+                },
+            }
+        },
+        .output_part => |*part| {
+            // Private reasoning text is never replay input.
+            if (output.output.omit_reasoning_text and part.array == .content) return;
+            if (output.array == part.array) {
+                pieces.add(.{ .syntax = "," });
+            } else {
+                if (output.array != .none) pieces.add(.{ .syntax = "]" });
+                pieces.add(.{ .syntax = if (part.array == .content) ",\"content\":[" else ",\"summary\":[" });
+                output.array = part.array;
+            }
+            if (part.text) |text| {
+                pieces.add(.{ .syntax = switch (part.kind) {
+                    .output_text => "{\"type\":\"output_text\",\"text\":\"",
+                    .refusal => "{\"type\":\"refusal\",\"refusal\":\"",
+                    .summary_text => "{\"type\":\"summary_text\",\"text\":\"",
+                    .reasoning_text => "{\"type\":\"reasoning_text\",\"text\":\"",
+                    .opaque_block => unreachable,
+                } });
+                pieces.add(.{ .escaped_content = text });
+                if (part.bag) |bag| {
+                    pieces.add(.{ .syntax = "\"," });
+                    pieces.add(.{ .verbatim_content = bag });
+                    pieces.add(.{ .syntax = "}" });
+                } else pieces.add(.{ .syntax = "\"}" });
+            } else {
+                pieces.add(.{ .syntax = "{" });
+                pieces.add(.{ .verbatim_content = part.bag.? });
+                pieces.add(.{ .syntax = "}" });
+            }
+        },
+        .output_close => {
+            if (output.array != .none) pieces.add(.{ .syntax = "]" });
+            if (output.output.bag) |bag| {
+                pieces.add(.{ .syntax = "," });
+                pieces.add(.{ .verbatim_content = bag });
+            }
+            pieces.add(.{ .syntax = "}" });
         },
         .tool_result => |result| {
             separateInput(pieces, input_comma);
@@ -1075,8 +1137,6 @@ pub const Preparation = struct {
     /// The content the emission reads; open exactly while
     /// `state.emission.readsContent()`.
     reader: store.HistoricalReader = undefined,
-    /// The served output entry the replay_verdict stage judges.
-    replay_entry: store.HistoricalEntry = undefined,
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
     state: State,
@@ -1099,6 +1159,7 @@ pub const Preparation = struct {
         pieces: Pieces = .{},
         emission: Emission = .none,
         input_comma: bool = false,
+        output: OutputWriting = .{},
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -1136,7 +1197,8 @@ pub const Preparation = struct {
         instructions,
         history_start,
         history,
-        replay_verdict,
+        /// The parts of the output item being written, then its close.
+        output_parts,
         tool_results,
         covered_tool_results,
         compaction_trigger,
@@ -1166,7 +1228,6 @@ pub const Preparation = struct {
         fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: request_encoding.RawCursor,
-        replay: request_encoding.ReplayCursor,
         history_memo,
 
         /// Whether the emission reads the preparation's content reader.
@@ -1174,7 +1235,7 @@ pub const Preparation = struct {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
                 .json => |*json| json.bytes == null,
-                .raw, .replay => true,
+                .raw => true,
             };
         }
     };
@@ -1195,7 +1256,6 @@ pub const Preparation = struct {
     ) !void {
         retained.* = null;
         errdefer self.view.close();
-        std.debug.assert(self.view.itemCheckIdle());
         self.state = .{ .route = route, .faults = faults, .memos = memos };
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
@@ -1271,7 +1331,7 @@ pub const Preparation = struct {
             switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
                 .pending => {},
                 .item => switch (self.settings.provider) {
-                    .codex => codexPieces(&self.state.item, &self.settings, &self.state.input_comma, &self.state.pieces),
+                    .codex => codexPieces(&self.state.item, &self.settings, &self.state.input_comma, &self.state.output, &self.state.pieces),
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1337,30 +1397,25 @@ pub const Preparation = struct {
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
                             self.state.continuation_unavailable = true;
                         };
-                        self.replay_entry = entry.*;
-                        self.state.stage = .replay_verdict;
-                    },
-                }
-            },
-            // Every replayed item is judged, even once continuation is
-            // unavailable: compatibility never excuses unauthenticated later
-            // items. The Store already judged a call before serving it, so
-            // each item gets one grammar pass. Unusable output stays private;
-            // no partial request can seal.
-            .replay_verdict => {
-                items_left.* += 1; // The Store charges its own reading work.
-                const verdict = try self.view.replayVerdictStep(&self.replay_entry, bytes_left, items_left) orelse return .pending;
-                self.state.stage = .history;
-                switch (verdict) {
-                    .incompatible => self.state.continuation_unavailable = true,
-                    .compatible => |compatible| if (!self.state.continuation_unavailable) {
-                        self.state.item = .{ .replayed_output = .{
-                            .content = self.replay_entry.content.?,
-                            .omit_reasoning_text = compatible.omit_reasoning_text,
-                        } };
+                        // Acceptance judged the item once, under the grammar
+                        // this Store format fixes; replay applies its rule.
+                        // Unusable output stays private; no partial request
+                        // can seal.
+                        if (self.state.continuation_unavailable) return .pending;
+                        self.state.item = .{ .output_open = try self.view.openOutput(entry.position) };
+                        self.state.stage = .output_parts;
                         return .item;
                     },
                 }
+            },
+            .output_parts => {
+                if (try self.view.nextOutputPart()) |part| {
+                    self.state.item = .{ .output_part = part };
+                } else {
+                    self.state.item = .output_close;
+                    self.state.stage = .history;
+                }
+                return .item;
             },
             .tool_results => {
                 const result = try self.view.nextToolResult() orelse {
@@ -1524,10 +1579,6 @@ pub const Preparation = struct {
                 try self.view.openContent(content, &self.reader);
                 self.state.emission = .{ .raw = .{} };
             },
-            .replay => |replayed| {
-                try self.view.openContent(replayed.content, &self.reader);
-                self.state.emission = .{ .replay = .{ .omit_content = replayed.omit_reasoning_text } };
-            },
             .history_memo => self.state.emission = .{ .history_memo = {} },
         }
     }
@@ -1545,11 +1596,6 @@ pub const Preparation = struct {
             .raw => |*cursor| {
                 const source = HistoricalSource{ .reader = &self.reader };
                 if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
-                self.reader.close();
-            },
-            .replay => |*cursor| {
-                const source = HistoricalSource{ .reader = &self.reader, .ranged = true };
-                if (try cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 self.reader.close();
             },
             .history_memo => if (!try self.advanceMemoCopy(bytes_left, items_left)) return false,
@@ -1935,7 +1981,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     try std.testing.expect(setup.storage.configure(&configuration, true, .{}) == .accepted);
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", "peer-reasoning", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
+    try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
     const action = (try setup.storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var input: store.BashExecutionInput = undefined;
     try setup.storage.readBashExecutionInput(action, &input);
@@ -2154,112 +2200,43 @@ fn settleComposedForTesting(
     file_prefix: []const u8,
     item_kind: output_format.OutputItemKind,
     item_json: []const u8,
-    item_id: []const u8,
     calls: []const ComposedCall,
 ) !void {
-    const decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
     const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}";
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     try source_writer.writeAll(item_json);
-    var metadata_used: std.atomic.Value(u64) = .init(0);
-    var retained_metadata: ?named_scratch.Owner = null;
-    var metadata = try output_format.OutputMetadataWriter.init(
-        std.testing.io,
-        setup.root,
-        file_prefix,
-        .{ .used = &metadata_used, .limit = (1 + 5 * calls.len) * 104 },
-        false,
-        &retained_metadata,
-    );
-    defer metadata.deinit();
-    try metadata.append(.{
-        .tag = .item,
-        .kind = item_kind,
-        .ordinal = 0,
-        .start = 0,
-        .length = item_json.len,
-        .id_digest = protocol.contentDigest(item_id),
-        .content_digest = protocol.contentDigest(item_json),
-    });
-    var offset: u64 = item_json.len;
-    for (calls, 0..) |call, index| {
-        const ordinal = index + 1;
-        const item_start: usize = @intCast(offset);
-        // Full item JSON; string ranges address inner bytes (no quotes)
-        // with digests over the decoded values.
-        try source_writer.writeAll("{\"type\":\"function_call\",\"id\":\"");
-        const id_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(call.item_id);
-        const id_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"status\":\"completed\",\"name\":\"");
-        const name_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("bash");
-        const name_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"call_id\":\"");
-        const call_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(call.call_id);
-        const call_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\",\"arguments\":\"");
-        const args_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll(encoded_arguments);
-        const args_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
-        try source_writer.writeAll("\"}");
-        offset += @as(u64, @intCast(source_writer.buffered().len - item_start));
-        const item_bytes = source_writer.buffered()[item_start..];
-        try metadata.append(.{
-            .tag = .item_id,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = id_start,
-            .length = id_end - id_start,
-            .decoded_length = call.item_id.len,
-            .content_digest = protocol.contentDigest(call.item_id),
-        });
-        try metadata.append(.{
-            .tag = .name,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = name_start,
-            .length = name_end - name_start,
-            .decoded_length = "bash".len,
-            .content_digest = protocol.contentDigest("bash"),
-        });
-        try metadata.append(.{
-            .tag = .call_id,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = call_start,
-            .length = call_end - call_start,
-            .decoded_length = call.call_id.len,
-            .content_digest = protocol.contentDigest(call.call_id),
-        });
-        try metadata.append(.{
-            .tag = .arguments,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = args_start,
-            .length = args_end - args_start,
-            .decoded_length = decoded_arguments.len,
-            .content_digest = protocol.contentDigest(decoded_arguments),
-        });
-        try metadata.append(.{
-            .tag = .item,
-            .kind = .function_call,
-            .ordinal = ordinal,
-            .start = item_start,
-            .length = item_bytes.len,
-            .id_digest = protocol.contentDigest(call.item_id),
-            .content_digest = protocol.contentDigest(item_bytes),
-        });
+    var ranges: [16][2]u64 = undefined;
+    std.debug.assert(calls.len < ranges.len);
+    ranges[0] = .{ 0, item_json.len };
+    for (calls, 1..) |call, ordinal| {
+        const item_start = source_writer.end;
+        try source_writer.print("{{\"type\":\"function_call\",\"id\":\"{s}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"{s}\",\"arguments\":\"{s}\"}}", .{ call.item_id, call.call_id, encoded_arguments });
+        ranges[ordinal] = .{ item_start, source_writer.end - item_start };
     }
-    try metadata.sealForRead();
     const source_bytes = source_writer.buffered();
     var source_name: [64]u8 = undefined;
     const source = try setup.tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&source_name, "{s}-source", .{file_prefix}), .{ .read = true });
     defer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, source_bytes);
     try source.sync(std.testing.io);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(
+        std.testing.io,
+        setup.root,
+        file_prefix,
+        .{ .used = &metadata_used, .limit = 1 << 20 },
+        false,
+        &retained_metadata,
+    );
+    defer metadata.deinit();
+    const operation: output_format.ModelOperationKind = if (item_kind == .compaction) .compaction else .assistant_response;
+    for (ranges[0 .. 1 + calls.len], 0..) |range, ordinal| {
+        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
+        if (ordinal == 0 and record.kind != item_kind) return error.TestUnexpectedItemKind;
+    }
+    try metadata.sealForRead();
     try setup.storage.settleModelSuccess(binding, &.{
         .source = source,
         .source_length = source_bytes.len,
@@ -2315,7 +2292,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         .{ .item_id = "order-item-a", .call_id = "order-call-a" },
         .{ .item_id = "order-item-b", .call_id = "order-call-b" },
     };
-    try settleComposedForTesting(setup, source_binding, "composed-metadata", .reasoning, reasoning_json, "r1", &calls);
+    try settleComposedForTesting(setup, source_binding, "composed-metadata", .reasoning, reasoning_json, &calls);
     var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
     try second_deny.key.set("composed-deny-second");
     second_deny.session = session;
@@ -2330,11 +2307,12 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
 
 const composed_replayed = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"opaque\"}";
 
-// Replayed call items appear verbatim: they carry no top-level
-// response-only fields. Written separately from the settle helper so the
-// golden does not share its construction.
-const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-item-a\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
-const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
+// Replayed call items are rebuilt from Rui's form: the type and call fields
+// first, then the provider bag (`id`, `status`) as received. Written
+// separately from the settle helper so the golden does not share its
+// construction.
+const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-a\",\"status\":\"completed\"}";
+const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
 const composed_expected =
     "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
@@ -3164,40 +3142,10 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     }
 }
 
-test "request preparation rejects unsupported saved meaning and fences malformed canonical items" {
-    for ([_]struct { item: []const u8, kind: output_format.OutputItemKind = .reasoning, failure: anyerror }{
-        .{ .item = "null", .failure = error.CorruptStore },
-        .{ .item = "true", .failure = error.CorruptStore },
-        .{ .item = "false", .failure = error.CorruptStore },
-        .{ .item = "42", .failure = error.CorruptStore },
-        .{ .item = "\"opaque\"", .failure = error.CorruptStore },
-        .{ .item = "[]", .failure = error.CorruptStore },
-        .{ .item = "[{\"type\":\"message\",\"id\":\"r\"}]", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":[0,]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"encrypted_content\":\"opaque\"}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"a\"},{\"type\":\"reasoning_text\",\"text\":true}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"future_text\"},{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[],\"annotations\":false}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"},{\"type\":\"future\"}]}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"\\u0074ype\":\"output_text\",\"text\":\"a\"}]}", .kind = .message, .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"type\":\"reasoning_text\",\"text\":\"a\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"type\":\"summary_text\",\"text\":\"a\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
-    }) |case| {
+test "request preparation fences a saved provider bag whose bytes changed" {
+    // A saved bag is copied into the request as the provider sent it; the
+    // Store's digest is what keeps changed bytes out.
+    {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3206,7 +3154,8 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", session.slice(), "next");
-        try settleComposedForTesting(&setup, first, "saved-metadata", case.kind, case.item, "r", &.{});
+        try settleComposedForTesting(&setup, first, "saved-metadata", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
+        try setup.storage.damageOutputBagForTesting(first);
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         var used: std.atomic.Value(u64) = .init(0);
@@ -3218,19 +3167,19 @@ test "request preparation rejects unsupported saved meaning and fences malformed
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             var unexpected = request;
             unexpected.deinit(std.testing.io, preparation.writer.budget);
-            return error.ExpectedContinuationUnavailable;
+            return error.ExpectedCorruptStore;
         } else |err| {
-            try std.testing.expectEqual(case.failure, err);
+            try std.testing.expectEqual(error.CorruptStore, err);
         }
-        try std.testing.expectEqual(case.failure == error.CorruptStore, setup.storage.isFenced());
+        try std.testing.expect(setup.storage.isFenced());
         try preparation.checkIntegrity(binding);
         preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
 
-test "request preparation resumes large private replay validation before emission" {
-    for ([_]bool{ false, true }) |supported| {
+test "request preparation replays a large private reasoning item within each advance's allowance" {
+    {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3241,23 +3190,24 @@ test "request preparation resumes large private replay validation before emissio
         try setup.submit("large-next", "large-next-key", session.slice(), "next");
         var item_buffer: [64 * 1024]u8 = undefined;
         var item = std.Io.Writer.fixed(&item_buffer);
-        // The replayed item is the saved one without its reasoning text.
+        // The replayed item is the saved one without its reasoning text,
+        // rebuilt from Rui's form: type and parts first, then the provider
+        // bag in the order received.
         var replayed_buffer: [64 * 1024]u8 = undefined;
         var replayed = std.Io.Writer.fixed(&replayed_buffer);
+        const window: [protocol.content_window_bytes]u8 = @splat('x');
+        const summary = "\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}]";
+        try item.writeAll("{\"encrypted_content\":\"");
+        try replayed.writeAll("{\"type\":\"reasoning\"," ++ summary ++ ",\"encrypted_content\":\"");
         for ([_]*std.Io.Writer{ &item, &replayed }) |writer| {
-            try writer.writeAll("{\"encrypted_content\":\"");
-            const window: [protocol.content_window_bytes]u8 = @splat('x');
             for (0..5) |_| try writer.writeAll(&window);
             try writer.writeAll("\",");
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
-            if (writer == &item) try writer.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
-            try writer.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
-            try writer.writeAll(if (supported)
-                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
-            else
-                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
         }
-        try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
+        try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
+        try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
+        try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         var used: std.atomic.Value(u64) = .init(0);
@@ -3266,37 +3216,22 @@ test "request preparation resumes large private replay validation before emissio
         try setup.storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
-        var validation_turns: usize = 0;
         var turns: usize = 0;
         while (true) {
             turns += 1;
-            try std.testing.expect(turns < 100000);
-            // While the item is judged, nothing of it is emitted, and the
-            // grammar reads no more than the advance charges.
-            const judging = preparation.state.stage == .replay_verdict;
+            try std.testing.expect(turns < 1000000);
+            // Replay reads and writes no more than each advance charges.
             const written = preparation.writer.offset;
-            const read_before = preparation.view.itemCheckBytes() orelse 0;
             var progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            if (judging and preparation.state.stage == .replay_verdict) {
-                validation_turns += 1;
-                const read_after = preparation.view.itemCheckBytes().?;
-                try std.testing.expect(read_after >= read_before and read_after - read_before <= 7);
-                try std.testing.expectEqual(written, preparation.writer.offset);
-                try std.testing.expect(preparation.state.emission == .none);
-                try preparation.checkIntegrity(binding);
-            }
+            try std.testing.expect(preparation.writer.offset - written <= 7);
+            if (progress == .pending) try preparation.checkIntegrity(binding);
             switch (progress) {
                 .pending => {},
-                .failed => |err| {
-                    try std.testing.expect(!supported);
-                    try std.testing.expectEqual(error.ContinuationUnavailable, err);
-                    break;
-                },
+                .failed => |err| return err,
                 .prepared => |*request| {
                     defer request.deinit(std.testing.io, preparation.writer.budget);
-                    try std.testing.expect(supported);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
@@ -3305,7 +3240,6 @@ test "request preparation resumes large private replay validation before emissio
                 },
             }
         }
-        try std.testing.expect(validation_turns > 5000);
         if (preparation.state.active) preparation.cancel();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
@@ -3342,7 +3276,7 @@ test "request preparation authenticates the historical requested model binding" 
     try setup.submit("binding-one", "binding-one", session.slice(), "original");
     const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try setup.submit("binding-two", "binding-two", session.slice(), "next");
-    try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
+    try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
@@ -3374,6 +3308,118 @@ test "request preparation authenticates the historical requested model binding" 
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
+/// Settles `items` (complete provider item JSON) as one model success with
+/// no selected answer, splitting each through acceptance.
+fn settleItemsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, file_prefix: []const u8, items: []const []const u8) !void {
+    var source_buffer: [16 * 1024]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(&source_buffer);
+    var ranges: [32][2]u64 = undefined;
+    std.debug.assert(items.len <= ranges.len);
+    for (items, 0..) |item, ordinal| {
+        ranges[ordinal] = .{ source_writer.end, item.len };
+        try source_writer.writeAll(item);
+    }
+    const source_bytes = source_writer.buffered();
+    var name: [64]u8 = undefined;
+    const source = try setup.tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&name, "{s}-source", .{file_prefix}), .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, source_bytes);
+    try source.sync(std.testing.io);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, file_prefix, .{ .used = &metadata_used, .limit = 1 << 20 }, false, &retained_metadata);
+    defer metadata.deinit();
+    var calls: u64 = 0;
+    for (ranges[0..items.len], 0..) |range, ordinal| {
+        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
+        if (record.kind == .function_call) calls += 1;
+    }
+    try metadata.sealForRead();
+    try setup.storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = source_bytes.len,
+        .metadata = metadata.file,
+        .item_count = items.len,
+        .call_count = calls,
+        .answer_length = 0,
+        .answer_digest = protocol.contentDigest(""),
+        .response_id = .{},
+        .model_evidence = .{ .len = 7, .bytes = .{1} ++ @as([774]u8, @splat(0)) },
+        .request_id = .{},
+    }, .{});
+}
+
+fn jsonEqualForTesting(a: std.json.Value, b: std.json.Value) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .object => |object| object.count() == b.object.count() and for (object.keys(), object.values()) |key, value| {
+            const other = b.object.get(key) orelse break false;
+            if (!jsonEqualForTesting(value, other)) break false;
+        } else true,
+        .array => |array| array.items.len == b.array.items.len and for (array.items, b.array.items) |x, y| {
+            if (!jsonEqualForTesting(x, y)) break false;
+        } else true,
+        .string => |text| std.mem.eql(u8, text, b.string),
+        .number_string => |text| std.mem.eql(u8, text, b.number_string),
+        .integer => |value| value == b.integer,
+        .float => |value| value == b.float,
+        .bool => |value| value == b.bool,
+        .null => true,
+    };
+}
+
+test "every replayed output item parses equal to the item the provider sent" {
+    // Through acceptance, the Store and the Codex writer. Only `created_by`
+    // and private reasoning text are left out, as the pinned first-party
+    // serializer leaves them out.
+    const cases = [_]struct { sent: []const u8, replayed: ?[]const u8 = null }{
+        .{
+            .sent = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"created_by\":\"x\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9\\/\"},{\"type\":\"summary_text\",\"text\":\"\"}]," ++
+                "\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\\nthought\"}],\"encrypted_content\":\"gAAA==\",\"status\":\"completed\"}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan \\u00e9/\"},{\"type\":\"summary_text\",\"text\":\"\"}],\"encrypted_content\":\"gAAA==\",\"status\":\"completed\"}",
+        },
+        .{ .sent = "{\"type\":\"reasoning\",\"id\":\"rs_2\",\"summary\":[],\"content\":[],\"encrypted_content\":\"e\",\"future\":{\"nested\":[null,true,1.5e3]}}" },
+        .{ .sent = "{\"type\":\"reasoning\",\"id\":\"rs_3\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"s\",\"extra\":{\"k\":[]}}],\"encrypted_content\":\"e\"}" },
+        .{
+            .sent = "{\"type\":\"message\",\"id\":\"m_1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"partial_answer\",\"created_by\":\"y\"," ++
+                "\"content\":[{\"type\":\"output_text\",\"text\":\"see \\\"this\\\"\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"u\",\"start_index\":0}],\"logprobs\":[{\"token\":\"see\",\"logprob\":-0.25,\"bytes\":[115,101,101],\"top_logprobs\":[]}]},{\"type\":\"refusal\",\"refusal\":\"no\"}]}",
+            .replayed = "{\"type\":\"message\",\"id\":\"m_1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"partial_answer\"," ++
+                "\"content\":[{\"type\":\"output_text\",\"text\":\"see \\\"this\\\"\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"u\",\"start_index\":0}],\"logprobs\":[{\"token\":\"see\",\"logprob\":-0.25,\"bytes\":[115,101,101],\"top_logprobs\":[]}]},{\"type\":\"refusal\",\"refusal\":\"no\"}]}",
+        },
+        .{ .sent = "{\"type\":\"message\",\"id\":\"m_2\",\"role\":\"assistant\",\"phase\":null,\"content\":[{\"type\":\"output_text\",\"text\":\"a\\u0000b\\ud83d\\ude42\",\"annotations\":[],\"future\":\"kept\"}]}" },
+        .{ .sent = "{\"st\\u0061tus\":\"completed\",\"type\":\"message\",\"id\":\"m_3\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"text\":\"first\",\"type\":\"output_text\"},{\"type\":\"output_text\",\"text\":\"\"}]}" },
+        .{ .sent = "{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"completed\",\"name\":\"unknown\",\"call_id\":\"call\\nA\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"future\":[]}" },
+        .{ .sent = "{\"type\":\"message\",\"id\":\"m_4\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}" },
+    };
+    var sent: [cases.len][]const u8 = undefined;
+    for (cases, &sent) |case, *item| item.* = case.sent;
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("parse-equal-config");
+    try setup.submit("parse-equal-one", "parse-equal-one", session.slice(), "original");
+    const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, source, "parse-equal-output", &sent);
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    const input = parsed.object.get("input").?.array.items;
+    // The user input, every item in order, then the rejected call's result.
+    try std.testing.expectEqual(cases.len + 2, input.len);
+    for (cases, input[1 .. 1 + cases.len], 0..) |case, actual, index| {
+        const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena, case.replayed orelse case.sent, .{});
+        if (!jsonEqualForTesting(expected, actual)) {
+            std.debug.print("item {d} sent: {s}\nrequest: {s}\n", .{ index, case.sent, request.bytes });
+            return error.TestExpectedEqual;
+        }
+    }
+    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 1].object.get("type").?.string);
+}
+
 test "request preparation replays reasoning continuation without its private reasoning text" {
     // Saved items stay exact; only the replayed request drops reasoning_text
     // content, as the pinned first-party serializer does. Empty content has
@@ -3381,7 +3427,8 @@ test "request preparation replays reasoning continuation without its private rea
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
             .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
-            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            // Rebuilt from Rui's form: parts first, then the provider bag.
+            .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
             .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
@@ -3404,7 +3451,7 @@ test "request preparation replays reasoning continuation without its private rea
         try setup.submit("reasoning-text-one", "reasoning-text-one", session.slice(), "original");
         const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try setup.submit("reasoning-text-two", "reasoning-text-two", session.slice(), "next");
-        try settleComposedForTesting(&setup, source, "reasoning-text-output", .reasoning, case.saved, "r", &.{});
+        try settleComposedForTesting(&setup, source, "reasoning-text-output", .reasoning, case.saved, &.{});
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
@@ -3429,7 +3476,7 @@ test "request preparation replays reasoning continuation without its private rea
     };
 }
 
-test "request preparation cancellation yields inside canonical proposal authentication" {
+test "request preparation cancellation yields inside history discovery" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
@@ -3451,10 +3498,10 @@ test "request preparation cancellation yields inside canonical proposal authenti
         try preparation.checkIntegrity(binding);
         if (preparation.state.stage == .history and preparation.state.pieces.done() and preparation.writer.offset == before) {
             pending_turns += 1;
-            if (pending_turns == 12) break;
+            if (pending_turns == 10) break;
         }
     }
-    try std.testing.expectEqual(@as(usize, 12), pending_turns);
+    try std.testing.expectEqual(@as(usize, 10), pending_turns);
     preparation.cancel();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
@@ -3580,7 +3627,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
-        try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", "suffix", &.{});
+        try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
         try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -3697,17 +3744,23 @@ fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBi
     return memo.copied;
 }
 
-/// Settle `binding` with a reasoning item and one Bash call, deny that call
-/// and admit the successor.
+/// Settle `binding` with a reasoning item or a message and one Bash call,
+/// deny that call and admit the successor.
 fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
     var names: [4][32]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
     const reasoning_id = try std.fmt.bufPrint(&names[1], "memo-r{d}", .{round});
     const item_id = try std.fmt.bufPrint(&names[2], "memo-item-{d}", .{round});
     const call_id = try std.fmt.bufPrint(&names[3], "memo-call-{d}", .{round});
-    var json_buffer: [128]u8 = undefined;
-    const reasoning = try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round });
-    try settleComposedForTesting(setup, binding, prefix, .reasoning, reasoning, reasoning_id, &.{.{ .item_id = item_id, .call_id = call_id }});
+    var json_buffer: [512]u8 = undefined;
+    // Alternate items with parts and bags: a reasoning summary, then a
+    // commentary message whose text parts carry annotations.
+    const kind: output_format.OutputItemKind = if (round % 2 == 0) .message else .reasoning;
+    const item = if (kind == .reasoning)
+        try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"reasoning\",\"id\":\"{s}\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"plan \\u00e9 {d}\"}}],\"encrypted_content\":\"opaque-{d}\"}}", .{ reasoning_id, round, round })
+    else
+        try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"message\",\"id\":\"{s}\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{{\"type\":\"output_text\",\"text\":\"step {d}\",\"annotations\":[{{\"type\":\"url_citation\",\"url\":\"u\"}}]}},{{\"type\":\"output_text\",\"text\":\"\\n\"}}]}}", .{ reasoning_id, round });
+    try settleComposedForTesting(setup, binding, prefix, kind, item, &.{.{ .item_id = item_id, .call_id = call_id }});
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = round };
     var key_buffer: [32]u8 = undefined;
     try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));

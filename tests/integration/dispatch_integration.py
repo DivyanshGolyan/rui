@@ -34,6 +34,15 @@ def content_reference(text):
     return {"bytes": str(len(data)), "sha256": digest}
 
 
+def stored_message_parts(database):
+    """The first message item's saved parts: kind, text and bag bytes."""
+    return [(kind, bytes(text), bytes(bag)) for kind, text, bag in database.execute(
+        "SELECT p.part_kind,t.payload,b.payload FROM model_output_part p "
+        "JOIN content t ON t.content_id=p.text_content_id JOIN content b ON b.content_id=p.extras_content_id "
+        "WHERE (p.operation_id,p.item_ordinal)=(SELECT operation_id,item_ordinal FROM model_output_item "
+        "WHERE item_kind=2 ORDER BY operation_id,item_ordinal LIMIT 1) ORDER BY p.part_ordinal")]
+
+
 def failed_response_records(store):
     """Read back failed-response records in retention order, checking each
     private body against its metadata's length and digest."""
@@ -929,12 +938,13 @@ def refusal_cases(state, processes, endpoints):
         assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
         stop_host(host)
         processes.remove(host)
-        # Public reads are projections; canonical raw bytes retain refusal kind,
-        # unknown metadata and created_by independently of replay filtering.
+        # Public reads are projections; the saved parts keep the refusal kind
+        # and each block's unknown members in its bag.
         with sqlite3.connect(store / "rui.sqlite3") as database:
-            raw = database.execute("SELECT c.payload FROM model_output_item i JOIN content c "
-                "ON c.content_id=i.content_id WHERE i.item_kind=2 ORDER BY i.operation_id LIMIT 1").fetchone()
-            assert raw is not None and bytes(raw[0]) == json.dumps(item, separators=(",", ":")).encode(), raw
+            parts = stored_message_parts(database)
+        refusal_part = (2, refusal.encode(), b'"future":{"retained":true}')
+        want = [(1, b"Before. ", b""), refusal_part, (1, b"After.", b"")] if phased else [refusal_part]
+        assert parts == want, parts
         assert not failed_response_records(store), "accepted refusal became failed-response diagnostics"
         stop_endpoint(endpoint, endpoints)
     print("Refusal: public result/conversation, crash recovery and exact typed replay passed")
@@ -944,7 +954,7 @@ def sse_framing_cases(state, processes, endpoints):
     """Spec framing, exact decoded replay, and immutable raw failure evidence."""
     state = state / "sse-framing-cases"
     state.mkdir(mode=0o700)
-    # Replay rebuilds top-level separators; nested value spelling is verbatim.
+    # Replay is written canonically and parses equal to what was received.
     reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
     item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
     notification = b'data: {"type":"response.future.notice","item":{"type":"future_tool"}}\r\r'
@@ -979,7 +989,8 @@ def sse_framing_cases(state, processes, endpoints):
     message(state, store, "sse-next", session, "second")
     result, answer, _ = wait_for_result_release(store, "sse-next", session, time.monotonic() + 10)
     assert result["result"]["status"] == "completed" and answer == b"Next", (result, answer)
-    assert reasoning in endpoint.requests[1] and item in endpoint.requests[1], "decoded item bytes changed in replay"
+    replayed = json.loads(endpoint.requests[1])["input"]
+    assert json.loads(reasoning) in replayed and json.loads(item) in replayed, ("replayed items changed", replayed)
     assert len(endpoint.requests) == 2 and failed_response_records(store) == []
     stop_host(host)
     processes.remove(host)
@@ -1936,15 +1947,16 @@ def main(mode="all", correlation_case="all"):
         try:
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
             assert database.execute(
-                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id WHERE c.private=1"
+                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id WHERE c.private=1"
             ).fetchone()[0] == 4
             assert database.execute(
                 "SELECT attempt_ordinal,count(*) FROM model_output_item GROUP BY attempt_ordinal"
             ).fetchall() == [(1, 4)]
-            raw_reasoning = database.execute(
-                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
+            # Item-level created_by is dropped at import; the bag keeps the rest.
+            reasoning_bag = database.execute(
+                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
-            assert json.loads(raw_reasoning)["created_by"] == "d" * 64
+            assert "created_by" not in json.loads("{" + reasoning_bag + "}"), reasoning_bag
             observations = database.execute(
                 "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall()
@@ -2504,11 +2516,11 @@ def main(mode="all", correlation_case="all"):
             0, "answer", "contradictory-response",
             ("model-body", "model-openai-header", "model-x-openai-header"), contradictory_request_id,
         ), saved
-        raw_items = database.execute(
-            "SELECT c.payload FROM model_output_item i JOIN content c ON c.content_id=i.content_id ORDER BY i.item_ordinal"
-        ).fetchall()
-        assert raw_items == [(json.dumps(item, separators=(",", ":")).encode(),)
-                             for item in (contradictory_reasoning, contradictory_item)], raw_items
+        assert database.execute(
+            "SELECT item_kind FROM model_output_item ORDER BY item_ordinal"
+        ).fetchall() == [(1,), (2,)]
+        saved_parts = stored_message_parts(database)
+        assert saved_parts == [(1, b"preserved model evidence", b'"annotations":[],"extension":{"kept":true}')], saved_parts
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
         ).fetchone()[0] == 1
@@ -3270,13 +3282,13 @@ def main(mode="all", correlation_case="all"):
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 33
-        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
-        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
+        # The answer's text is saved once, as its public part, with no raw copy.
+        assert database.execute("SELECT private,length(payload) FROM content WHERE byte_length>=?", (len(large_answer),)).fetchall() == [(0, len(large_answer))]
         database.close()
         stop_endpoint(growth_endpoint, endpoints)
 
-        # Public answers are projections of immutable provider items. Exercise
-        # both dedup orders: answer then caller input, and caller then answer.
+        # A public answer is its message's saved part text. Exercise both dedup
+        # orders: answer then caller input, and caller then answer.
         parts = ["", "x" * 4093 + "\n", "🙂\t\\", ""]
         projected_answer = "".join(parts).encode()
         projection_endpoint = SuccessEndpoint([
@@ -3304,9 +3316,9 @@ def main(mode="all", correlation_case="all"):
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(projection_store / "rui.sqlite3") as database:
-            assert database.execute("SELECT c.payload IS NULL FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(1,), (0,)]
-            assert database.execute("SELECT count(*) FROM answer_text_projection").fetchone()[0] == len(parts)
-            assert database.execute("SELECT count(*) FROM answer_text_projection p JOIN content c ON c.content_id=p.source_content_id WHERE c.private<>1 OR c.payload IS NULL").fetchone()[0] == 0
+            assert database.execute("SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(projected_answer,), (b"caller-first",)]
+            assert database.execute("SELECT count(*) FROM model_output_part WHERE operation_id=1 AND part_kind=1").fetchone()[0] == len(parts)
+            assert database.execute("SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id WHERE c.private<>0").fetchone()[0] == 0
         host = start_host(projection_store, projection_url)
         processes.append(host)
         assert read_result(projection_store, "projection-first") == projected_answer

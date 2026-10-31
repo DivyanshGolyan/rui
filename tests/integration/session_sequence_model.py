@@ -252,6 +252,11 @@ test "TD1 sequence model {name}" {{
         raise AssertionError(unsafe)
     cache.mkdir(parents=True, exist_ok=True)
     with source_overlay(cache, source) as overlay:
+        # A cached overlay can hold a link to a root entry the source has
+        # since removed; it is not an input, so it goes.
+        for link in overlay.iterdir():
+            if link.name != "src" and link.name not in SCRATCH and link.is_symlink() and not (source / link.name).exists():
+                link.unlink()
         for path in source.iterdir():
             if path.name == "src" or path.name in SCRATCH:
                 continue
