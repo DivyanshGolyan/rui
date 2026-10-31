@@ -60,7 +60,7 @@ func configuration(store, workspace, identity string) configurationCommand {
 	omitted := optionalField{State: "omitted"}
 	provider := "codex"
 	model := "measurement-model"
-	return configurationCommand{Version: "1", Kind: "configure", Store: store, Key: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	return configurationCommand{Version: "2", Kind: "configure", Store: store, Key: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 }
 
 func run(binary string) (result map[string]any, resultError error) {

@@ -39,6 +39,7 @@ test {
     _ = @import("execution_turn.zig");
     _ = @import("history_memo.zig");
     _ = @import("named_scratch.zig");
+    _ = @import("prefix_seal.zig");
     _ = @import("new_session_selection.zig");
     _ = @import("request_encoding.zig");
     _ = @import("ResponseTiming.zig");

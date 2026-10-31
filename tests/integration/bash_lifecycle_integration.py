@@ -128,7 +128,7 @@ def hold_incomplete_connection(host, store, session):
     canonical = str(store.resolve())
     socket_path = host.rui_ready_fields["socket"]
     request = {
-        "version": "1",
+        "version": "2",
         "kind": "configure",
         "store": canonical,
         "key": "shutdown-drain",
@@ -151,7 +151,7 @@ def hold_incomplete_connection(host, store, session):
         b"Host: local\r\n"
         b"Content-Type: application/json\r\n"
         b"Content-Length: 1000000\r\n"
-        b"X-Rui-Wire-Version: 1\r\n\r\n"
+        b"X-Rui-Wire-Version: 2\r\n\r\n"
         + body
     )
     fixture.wait_for(

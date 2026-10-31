@@ -37,7 +37,7 @@ def main():
                 elif mode == "scope":
                     page["sessions"][0]["workspace"] = str(root) + "-other"
                 elif mode == "version":
-                    page["version"] = "2"
+                    page["version"] = "1"
                 elif mode == "cursor":
                     page["next"]["after"] = "0" + page["next"]["after"]
                 elif mode == "delta":
@@ -48,7 +48,7 @@ def main():
                     assert len(page["sessions"]) == 8 and int(page["next"]["after"]) < int(page["next"]["ceiling"]), page
                     page["next"]["after"] = page["next"]["ceiling"]
                 elif mode == "failure":
-                    page = {"version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
+                    page = {"version": "2", "type": "busy", "code": "ordinary_capacity_exhausted",
                         "wire_only": "discard-me"}
                     head = b"HTTP/1.1 503 Unavailable"
                 encoded = json.dumps(page, indent=2).encode()
@@ -56,7 +56,7 @@ def main():
                     encoded = encoded.replace(b'"type": "session_list",',
                         b'"type": "session_list", "type": "session_list",', 1)
                 return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
-                    b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                    b"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: "
                     + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
             for mode in ("exhausted", "unknown", "scope", "version", "cursor", "delta", "duplicate", "failure"):
                 proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
@@ -80,7 +80,7 @@ def main():
                     assert result.returncode != 0 and "InvalidSessionPage" in result.stderr, (mode, result)
                     assert result.stdout == "", ("invalid first page reached output", mode, result)
             failure = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                b"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: "
                 + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
             def paged(*args, replies=()):
                 """Lists through the real producer, answering page N with replies[N] when given."""

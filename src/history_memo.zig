@@ -274,10 +274,16 @@ pub const Table = struct {
     pub fn writeChunk(_: *const Table, io: std.Io, write: *Write, request: std.Io.File, limit: usize, window: []u8) !usize {
         const count: usize = @intCast(@min(write.memo.length - write.written, limit, window.len));
         if (try request.readPositionalAll(io, window[0..count], write.span_start + write.written) != count) return error.EndOfStream;
-        write.hasher.update(window[0..count]);
-        try write.file.writePositionalAll(io, window[0..count], write.written);
-        write.written += count;
+        try appendChunk(io, write, window[0..count]);
         return count;
+    }
+
+    /// Append span bytes the caller already read from the request.
+    pub fn appendChunk(io: std.Io, write: *Write, bytes: []const u8) !void {
+        std.debug.assert(bytes.len <= write.memo.length - write.written);
+        write.hasher.update(bytes);
+        try write.file.writePositionalAll(io, bytes, write.written);
+        write.written += bytes.len;
     }
 
     /// Keep the completely written span as its Session's memo.

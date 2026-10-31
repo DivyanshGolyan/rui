@@ -189,7 +189,7 @@ def status(store, env):
     assert result.returncode == 0, result.stderr
     # Metadata is exactly one JSON value on stdout.
     value = json.loads(result.stdout)
-    assert value["version"] == "1" and value["type"] == "host_status", result
+    assert value["version"] == "2" and value["type"] == "host_status", result
     return value
 
 
@@ -396,7 +396,7 @@ def startup_limits(root, env):
                         header, body = bytes(response).split(b"\r\n\r\n", 1)
                         assert header.startswith(b"HTTP/1.1 503 "), response
                         assert json.loads(body) == {
-                            "version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
+                            "version": "2", "type": "busy", "code": "ordinary_capacity_exhausted",
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
@@ -431,7 +431,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "1", "type": "busy", "code": "control_capacity_exhausted",
+                                "version": "2", "type": "busy", "code": "control_capacity_exhausted",
                             }, response
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
@@ -441,7 +441,7 @@ def startup_limits(root, env):
                         borrowers.pop().close()
                     # One stalled discovery must not borrow either control
                     # place. Exercise both request-line and body stalls.
-                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n"
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
                         discovery = socket.socket(socket.AF_UNIX)
                         borrowers.append(discovery)
@@ -458,7 +458,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "1", "type": "busy", "code": "discovery_capacity_exhausted",
+                                "version": "2", "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
                             control = socket.socket(socket.AF_UNIX)
@@ -528,7 +528,7 @@ def startup_limits(root, env):
         before = time.monotonic()
         failed = run_start(store, env)
         assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-        assert "wire metadata" in failed.stderr and "wire 1" in failed.stderr, failed.stderr
+        assert "wire metadata" in failed.stderr and "wire 2" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original

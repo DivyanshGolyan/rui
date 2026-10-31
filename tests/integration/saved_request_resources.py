@@ -70,7 +70,7 @@ def capture(state, binary, label, size, repetition):
             handle = announced[1]
         record = home / ".config/rui/requests" / f"{handle}.json"
         expected = hashlib.sha256()
-        prefix = ('{"version":"1","kind":"message","store":' + json.dumps(str((state / "offline-store").resolve()))
+        prefix = ('{"version":"2","kind":"message","store":' + json.dumps(str((state / "offline-store").resolve()))
             + ',"key":' + json.dumps(handle) + ',"session":"resources/original"'
             + (',"text"' if label == "baseline" else ',"sender":null,"sender_handle":null,"text"') + ':{"state":"value","value":"').encode()
         expected.update(prefix)

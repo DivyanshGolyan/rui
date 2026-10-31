@@ -73,7 +73,7 @@ pub const ConversationPage = struct {
         var storage: [2 * protocol.max_conversation_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidConversationPage;
-        if (!wire.version.eql("1") or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
         var page: ConversationPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
         if (page.end > std.math.maxInt(i64) or (cursor.end != 0 and page.end != cursor.end) or (page.more and page.count != page.items.len)) return error.InvalidConversationPage;
         var position = cursor.before_position;
@@ -125,7 +125,7 @@ pub const ProposalPage = struct {
             call_ordinal: JsonString(20),
             action: ?JsonString(20),
             rejection: ?JsonEnum(protocol.ProposalRejection),
-            fields: struct { item_id: Ref, name: Ref, call_id: Ref, arguments: Ref },
+            fields: struct { name: Ref, call_id: Ref, arguments: Ref },
         };
         const Items = struct {
             values: [protocol.proposal_page_items]Item = undefined,
@@ -147,7 +147,7 @@ pub const ProposalPage = struct {
         var storage: [2 * protocol.max_proposal_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidProposalPage;
-        if (!wire.version.eql("1") or !wire.type.eql("proposal_page")) return error.InvalidProposalPage;
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("proposal_page")) return error.InvalidProposalPage;
         var page: ProposalPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
         if (page.end > std.math.maxInt(i64) or (cursor.end != null and cursor.end.? != page.end) or
             page.end < cursor.after or (page.more and page.count != page.items.len)) return error.InvalidProposalPage;
@@ -210,7 +210,7 @@ pub const ActivityPage = struct {
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(protocol.max_code_bytes) };
-        const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
+        const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
         const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
@@ -251,7 +251,7 @@ pub const ActivityPage = struct {
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
         var page: ActivityPage = .{ .facts = .{ .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count } };
-        if (!wire.version.eql("1") or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
             (cursor.end != null and cursor.end.? != page.facts.end) or cursor.position > page.facts.end or
             (wire.more and wire.items.count != 16)) return error.InvalidActivityPage;
         var position = cursor.position;
@@ -428,7 +428,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
+    const golden = "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
@@ -459,15 +459,15 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
@@ -498,24 +498,26 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
 
 test "Host unavailable replies require a known complete error" {
     for ([_][]const u8{
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"connection_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"classification_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"connection_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"classification_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}",
     }) |body| try std.testing.expect(validHostUnavailable(body));
     for ([_][]const u8{
         "{}",
-        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
-        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
-        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"nested\":{\"code\":\"discovery_capacity_exhausted\"}}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\",\"code\":\"discovery_capacity_exhausted\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"",
+        "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
+        "{\"version\":\"2\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        // The previous wire version, as an older Host would answer.
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"nested\":{\"code\":\"discovery_capacity_exhausted\"}}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"",
     }) |body| try std.testing.expect(!validHostUnavailable(body));
 }
 
@@ -570,7 +572,7 @@ pub const CurrentReply = union(enum) {
 
     pub fn writeJson(self: *const CurrentReply, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
         return switch (self.*) {
-            .unconfigured => writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}"),
+            .unconfigured => writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}"),
             .current => |*current| current.writeJson(io, file, writer),
             .failure => |failure| failure.err(),
         };
@@ -693,7 +695,6 @@ pub const Current = struct {
             code: JsonString(32),
             acceptance_position: Id,
             result: Reference,
-            item_id: Reference,
             name: Reference,
             call_id: Reference,
             arguments: Reference,
@@ -738,7 +739,7 @@ pub const Current = struct {
     }
 
     pub fn writeJson(self: *const Current, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
-        try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":");
+        try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":");
         try std.json.Stringify.value(self.settings, .{}, writer);
         try writer.print(",\"pending_messages\":\"{d}\",\"work\":", .{self.pending_messages});
         try std.json.Stringify.value(self.work, .{}, writer);
@@ -830,7 +831,7 @@ pub const Current = struct {
         defer reader.deinit();
         var source: CurrentSource(@TypeOf(sink)) = .{ .reader = &reader, .sink = sink };
         const wire = try std.json.parseFromTokenSourceLeaky(Wire, token_allocator.allocator(), &source, .{ .ignore_unknown_fields = true });
-        if (body.remaining != .nothing or !wire.version.eql("1")) return error.InvalidObservation;
+        if (body.remaining != .nothing or !wire.version.eql(protocol.wire_version)) return error.InvalidObservation;
         const execution = wire.execution;
         const settings = wire.session orelse {
             if (wire.pending_messages.value != 0 or execution.status.value != .unavailable or execution.reason.value == null or
@@ -1190,7 +1191,7 @@ pub const SessionListPage = struct {
         const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &reader, .{ .ignore_unknown_fields = true }) catch return error.InvalidSessionPage;
         // Underlying physical EOF can precede the limit even after valid JSON.
         if (body.remaining != .nothing) return error.InvalidSessionPage;
-        if (!wire.version.eql("1") or !wire.type.eql("session_list")) return error.InvalidSessionPage;
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("session_list")) return error.InvalidSessionPage;
         var result: SessionListPage = .{
             .rows = wire.sessions.rows,
             .count = wire.sessions.count,
@@ -1246,7 +1247,7 @@ pub const SessionListPage = struct {
     }
 
     pub fn writeJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
-        try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+        try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
         try self.writeRowsJson(writer);
         var token: [protocol.SinceToken.max_bytes]u8 = undefined;
         try writer.print("],\"delta\":\"{t}\",\"since\":\"{s}\",\"next\":", .{ self.delta, self.since.format(&token) });
@@ -2043,7 +2044,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
     };
-    if (!wire.version.eql("1") or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
+    if (!wire.version.eql(protocol.wire_version) or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
     const answer = wire.answer.value orelse return error.InvalidResponse;
     if (target == .model_interruption) {
         const echoed = answer.target.value orelse return error.InvalidResponse;
@@ -2130,7 +2131,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
 test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     const digest = protocol.contentDigest("a\nµ");
     const target: MutationTarget = .{ .message = .{ .bytes = 4, .digest = digest } };
-    const prefix = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2q\\u0078\",\"admission\":\"7\"}";
+    const prefix = "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2q\\u0078\",\"admission\":\"7\"}";
     var suffix_storage: [256]u8 = undefined;
     const suffix = try std.fmt.bufPrint(&suffix_storage, ",\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
     var body: [protocol.max_response_bytes + 1]u8 = undefined;
@@ -2151,9 +2152,9 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = &body }, "k7m2qx", target).answer);
     for ([_][]const u8{
         "{\"version\":1,\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"07\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"07\"}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"}",
     }) |invalid_prefix| {
         const invalid = try std.fmt.bufPrint(&body, "{s}{s}", .{ invalid_prefix, suffix });
         try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "k7m2qx", target).answer);
@@ -2165,14 +2166,14 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
 }
 
 test "mutation decoder preserves invalid-target domain rejection not false fatal certainty" {
-    const body = "{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"18446744073709551615\"},\"code\":\"invalid_target\"}}";
+    const body = "{\"version\":\"2\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"18446744073709551615\"},\"code\":\"invalid_target\"}}";
     const target: MutationTarget = .{ .model_interruption = .{ .turn = 0, .operation = std.math.maxInt(u64) } };
     const answer = try decodeMutationReply(.{ .status = 200, .body = body }, "s", target).answer;
     try std.testing.expectEqualStrings("invalid_target", answer.result.rejected.slice());
     try std.testing.expect(answer.replayed);
     for ([_][]const u8{
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"unavailable\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"unavailable\"}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
     }) |unknown| {
         const reply = decodeMutationReply(.{ .status = 500, .body = unknown }, "s", target);
         try std.testing.expectError(if (std.mem.indexOf(u8, unknown, "unavailable") != null) error.HostInvocationFailed else error.InvalidResponse, reply.answer);
@@ -2183,7 +2184,7 @@ test "mutation decoder preserves invalid-target domain rejection not false fatal
 }
 
 test "mutation diagnostics own complete validated metadata without raw reply lifetime" {
-    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[null,{}]}";
+    const body = "{\"version\":\"2\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[null,{}]}";
     var bytes: [body.len]u8 = body.*;
     const reply = decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     @memset(&bytes, 'x');
@@ -2193,21 +2194,21 @@ test "mutation diagnostics own complete validated metadata without raw reply lif
     try std.testing.expectEqualStrings("invocation_error", reply.diagnostic.?.type.slice());
     try std.testing.expectEqualStrings("original/session", reply.context.session.slice());
     for ([_][]const u8{
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"capacity_exhausted\"}",
     }, [_]u16{ 500, 503 }) |valid, status| {
         const value = decodeMutationReply(.{ .status = status, .body = valid }, "s", .configure);
         try std.testing.expectError(if (status == 500) error.CanonicalStoreFailure else error.HostInvocationFailed, value.answer);
         try std.testing.expect(value.diagnostic != null);
     }
-    const prefix = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\"";
+    const prefix = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"busy\"";
     for ([_][]const u8{
         prefix ++ ",\"co\\u0064e\":\"other\"}",
         prefix ++ ",\"extra\":[}",
         prefix ++ "} trailing",
         prefix ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false}}",
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":[98]}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":[98]}",
     }) |invalid| {
         const value = decodeMutationReply(.{ .status = 500, .body = invalid }, "s", .configure);
         try std.testing.expectError(error.InvalidResponse, value.answer);
@@ -2224,7 +2225,7 @@ pub const MutationIdentity = struct {
 
 // Shared authority rule for operation replies and static read/error envelopes.
 pub fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
-    if (status == 200 or !std.mem.eql(u8, version, "1") or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
+    if (status == 200 or !std.mem.eql(u8, version, protocol.wire_version) or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
     if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
 }
 
@@ -2236,7 +2237,7 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
     const Envelope = struct {
         const Field = enum {
             other,
-            version_1,
+            current_version,
             invocation_error,
             canonical,
 
@@ -2249,7 +2250,7 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
                     .string, .allocated_string => |string| string,
                     else => unreachable,
                 };
-                if (std.mem.eql(u8, value, "1")) return .version_1;
+                if (std.mem.eql(u8, value, protocol.wire_version)) return .current_version;
                 if (std.mem.eql(u8, value, "invocation_error")) return .invocation_error;
                 return if (std.mem.eql(u8, value, "canonical_store_failure")) .canonical else .other;
             }
@@ -2283,19 +2284,19 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
         var diagnostic: InvocationDiagnostic = .{ .type = .{}, .code = .{} };
         diagnostic.code.set("canonical_store_failure") catch unreachable;
         if (envelope.type == .invocation_error) diagnostic.type.set("invocation_error") catch unreachable;
-        try validateInvocationDiagnostic(reply.status, if (envelope.version == .version_1) "1" else "", diagnostic);
+        try validateInvocationDiagnostic(reply.status, if (envelope.version == .current_version) protocol.wire_version else "", diagnostic);
         return error.CanonicalStoreFailure;
     }
 }
 
 test "canonical failure classifier validates complete string-only error envelope" {
     const canonical = [_][]const u8{
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"vers\\u0069on\":\"1\",\"ty\\u0070e\":\"invocation_\\u0065rror\",\"co\\u0064e\":\"canonical_store_\\u0066ailure\",\"extra\":[1,{}]}",
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"extra\":{\"x\":1,\"x\":2},\"extra\":null}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"vers\\u0069on\":\"2\",\"ty\\u0070e\":\"invocation_\\u0065rror\",\"co\\u0064e\":\"canonical_store_\\u0066ailure\",\"extra\":[1,{}]}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"extra\":{\"x\":1,\"x\":2},\"extra\":null}",
     };
     for (canonical) |body| try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body }));
-    const prefix = "{\"version\":\"1\",\"type\":\"invocation_error\",";
+    const prefix = "{\"version\":\"2\",\"type\":\"invocation_error\",";
     for ([_][]const u8{
         prefix ++ "\"code\":\"canonical_store_failure\",\"co\\u0064e\":\"other\"}",
         prefix ++ "\"code\":\"canonical_store_failure\",\"extra\":[}",
@@ -2312,28 +2313,28 @@ test "canonical failure classifier validates complete string-only error envelope
 test "canonical failure classifier uses only authoritative invocation envelope" {
     for ([_][]const u8{
         "{\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"vers\\u0069on\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"ty\\u0070e\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"3\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"vers\\u0069on\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"ty\\u0070e\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
         "{\"version\":null,\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"1\",\"type\":[105],\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"2\",\"type\":[105],\"code\":\"canonical_store_failure\"}",
         "{\"answer\":{\"code\":\"canonical_store_failure\",\"extra\":[}}",
     }) |body| try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body }));
     for ([_][]const u8{
         "{}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
-        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"unavailable\",\"answer\":{\"code\":\"canonical_store_failure\"}}",
+        "{\"version\":\"2\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
+        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"unavailable\",\"answer\":{\"code\":\"canonical_store_failure\"}}",
         "{\"answer\":{\"code\":\"unavailable\"}}",
         "{\"answer\":{\"extra\":{\"code\":\"canonical_store_failure\"}}}",
         "{\"extra\":{\"answer\":{\"code\":\"canonical_store_failure\"}}}",
     }) |body| try checkCanonicalFailure(.{ .status = 500, .body = body });
-    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
+    const body = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
     try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 409, .body = body }));
 }
 
 test "canonical failure classifier bounds deep wide and escaped maximum replies" {
-    const prefix = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"extra\":";
+    const prefix = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"extra\":";
     var body: [protocol.max_response_bytes + 1]u8 = undefined;
     @memcpy(body[0..prefix.len], prefix);
     const depth = (protocol.max_response_bytes - prefix.len - 2) / 2;
@@ -2352,7 +2353,7 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
     // A nearly maximum escaped field name must be released before code decode.
     const field_prefix = "{\"";
-    const field_suffix = "\":0,\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}";
+    const field_suffix = "\":0,\"version\":\"2\",\"type\":\"invocation_error\",\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}";
     @memcpy(body[0..field_prefix.len], field_prefix);
     length = field_prefix.len;
     const escaped_end = protocol.max_response_bytes - field_suffix.len - 6;
@@ -2424,7 +2425,7 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
@@ -2444,7 +2445,7 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    try std.testing.expectEqualStrings("{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         "\"label\":\"Review PR\"" ++ facts["\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
@@ -2456,7 +2457,7 @@ test "Session list reply owns read failure facts without asserting absence or ad
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "empty-report", .{ .read = true });
     defer file.close(io);
-    var wire = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"extension\":null}".*;
+    var wire = "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"extension\":null}".*;
     const reply = try SessionListReply.decode(io, file, null, .{}, .{ .command = .{ .status = 503, .body = &wire } });
     @memset(&wire, 'x');
     try std.testing.expectEqual(@as(u16, 503), reply.failure.status);
@@ -2471,7 +2472,7 @@ test "Session list byte range rejects zero instead of decoding an older page" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = 0 } }));
 }
@@ -2482,8 +2483,8 @@ test "Session list byte range reads a shorter overwritten prefix without changin
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const old = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
-    const current = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const old = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
+    const current = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, old, 0);
     try file.writePositionalAll(io, current, 0);
     const reply = try SessionListReply.decode(io, file, "/w", .{}, .{ .report = .{ .bytes = current.len } });
@@ -2505,7 +2506,7 @@ test "Session list byte range rejects physical EOF before promised completion" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 1 } }));
 }
@@ -2516,7 +2517,7 @@ test "Session list byte range rejects a promise excluding the final delimiter" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len - 1 } }));
 }
@@ -2527,7 +2528,7 @@ test "Session list byte range validates junk inside and ignores junk outside the
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire ++ "false", 0);
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 5 } }));
     const reply = try SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len } });
@@ -2543,19 +2544,19 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     defer tmp.cleanup();
     const row = "{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
     inline for (.{
-        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[]}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}false",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "{\"after\":\"7\",\"ceiling\":\"11\"}}",
-        "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ row ++ "," ++ row ++ testing_list_facts ++ "null}",
+        "{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[]}",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}false",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "{\"after\":\"7\",\"ceiling\":\"11\"}}",
+        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ row ++ "," ++ row ++ testing_list_facts ++ "null}",
     }, 0..) |wire, index| {
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("page-{d}", .{index}), .{ .read = true });
         defer file.close(io);
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
-    const prefix = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
+    const prefix = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
     inline for (.{
         "\"tools\":[\"bash\",\"bash\"],\"permission_mode\":\"ask\"",
         "\"tools\":null,\"permission_mode\":\"ask\"",
@@ -2613,7 +2614,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
 /// A list page of rows named by `references`, then `facts`.
 fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.print("{{\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
@@ -2732,7 +2733,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
         const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
@@ -2740,7 +2741,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
         try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
     }
     try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = wire.len } }));
-    const empty = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
+    const empty = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, empty, 0);
     const reply = try SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = empty.len } });
     try std.testing.expectEqual(@as(usize, 0), reply.page.count);
@@ -2760,7 +2761,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     var bytes: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &bytes);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
     var maximal: protocol.SessionRow = .{ .provider = .codex, .bash = true, .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
@@ -2819,7 +2820,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
 
 test "keyed observation retains request acceptance independently of later work" {
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+    const prefix = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     inline for (.{
         .{ "}}", CommandObservation.State.processing },
         .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("cd".*)))) ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
@@ -2844,16 +2845,16 @@ test "keyed observation retains request acceptance independently of later work" 
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",\"code\":\"unknown_session\",";
+    const prefix = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",\"code\":\"unknown_session\",";
     inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
-    const absent = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"";
+    const absent = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"";
     inline for (.{ "kind", "target", "code", "revision", "created", "input", "queue", "processing", "result", "progress", "selection", "completion", "interruption_target", "permission_target" }) |field|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
 }
 
 test "keyed observation validates all five operation shapes and binding" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",";
+    const prefix = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
         .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
@@ -2878,13 +2879,13 @@ test "keyed observation validates all five operation shapes and binding" {
         try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
         // Missing operation-specific metadata must not turn into confirmation.
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
-        const empty = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ case[0] ++ "\",\"target\":\"\",\"status\":\"";
+        const empty = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ case[0] ++ "\",\"target\":\"\",\"status\":\"";
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "accepted\"" ++ case[1] ++ "}}" }, "k"));
         if (!std.mem.eql(u8, case[0], "configure") and !std.mem.eql(u8, case[0], "message"))
             try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "rejected\",\"code\":\"invalid_session_reference\"" ++ case[2] ++ "}}" }, "k"));
     }
     inline for (.{ "configure", "message" }) |kind| {
-        const creation = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\",\"code\":\"";
+        const creation = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\",\"code\":\"";
         inline for (.{ "invalid_workspace", "model_capability_unavailable" }) |code| {
             const body = creation ++ code ++ "\",\"target\":\"\"}}";
             const rejected = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
@@ -2895,7 +2896,7 @@ test "keyed observation validates all five operation shapes and binding" {
                 try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ code ++ "\"" ++ target ++ "}}" }, "k"));
         }
     }
-    const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
+    const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     try std.testing.expectError(error.RequestNotAdmitted, absent.forMessage(&address));
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
@@ -2904,7 +2905,7 @@ test "keyed observation validates all five operation shapes and binding" {
 }
 
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const prefix = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
     inline for (.{
         ",\"processing\":null}}",                              ",\"processing\":{}}}",                                      ",\"processing\":{\"turn\":7}}}",
         ",\"result\":{\"status\":\"processing\"}}}",           ",\"result\":{\"status\":\"completed\"}}}",                  ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
@@ -2914,7 +2915,7 @@ test "keyed observation rejects malformed consequential fields before outcome in
     }) |suffix| try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ suffix }, "k"));
     inline for (.{ "0", "+7", "07", "18446744073709551616" }) |id|
         try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"" ++ id ++ "\"}}}" }, "k"));
-    inline for (.{ "{}", "[]", "{\"version\":\"2\"}", "{\"version\":\"1\",\"type\":\"wrong\"}" }) |body|
+    inline for (.{ "{}", "[]", "{\"version\":\"3\"}", "{\"version\":\"2\",\"type\":\"wrong\"}" }) |body|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"9\"}}}" }, "k"));
     var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
@@ -2923,7 +2924,7 @@ test "keyed observation rejects malformed consequential fields before outcome in
 
 test "keyed observation owns supported strings without retaining unknown DOM across polls" {
     const observation = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s/µ\",\"code\":\"line\\ncode\"}";
-    const body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\\u002fµ\",\"code\":\"line\\ncode\",\"unknown\":{\"precise\":123456789012345678901234567890,\"items\":[true,null,\"discard\"]}}}";
+    const body = "{\"version\":\"2\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\\u002fµ\",\"code\":\"line\\ncode\",\"unknown\":{\"precise\":123456789012345678901234567890,\"items\":[true,null,\"discard\"]}}}";
     for (0..100) |_| {
         var storage = body.*;
         const observed = try CommandObservation.parse(.{ .status = 200, .body = &storage }, "k");
@@ -2939,22 +2940,22 @@ test "keyed observation owns supported strings without retaining unknown DOM acr
 }
 
 test "keyed observation read diagnostics are owned without claiming admission" {
-    const wire = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"unknown\":[1,2,3]}";
+    const wire = "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"unknown\":[1,2,3]}";
     var storage = wire.*;
     const busy = try decodeReadFailure(.{ .status = 503, .body = &storage }, false);
     @memset(&storage, 'x');
     try std.testing.expectEqual(@as(u16, 503), busy.status);
     try std.testing.expectEqualStrings("ordinary_capacity_exhausted", busy.diagnostic.code.slice());
     try std.testing.expectEqual(error.HostInvocationFailed, busy.err());
-    const fatal = try decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}" }, false);
+    const fatal = try decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}" }, false);
     try std.testing.expectEqual(error.CanonicalStoreFailure, fatal.err());
     inline for (.{ "result_not_found", "result_not_ready", "result_failed" }) |code| {
-        const reply: CommandReply = .{ .status = 409, .body = "{\"version\":\"1\",\"type\":\"result_unavailable\",\"code\":\"" ++ code ++ "\"}" };
+        const reply: CommandReply = .{ .status = 409, .body = "{\"version\":\"2\",\"type\":\"result_unavailable\",\"code\":\"" ++ code ++ "\"}" };
         try std.testing.expectEqualStrings(code, (try decodeReadFailure(reply, true)).diagnostic.code.slice());
         try std.testing.expectError(error.InvalidResponse, decodeReadFailure(reply, false));
     }
     inline for (.{ "null", "{}" }) |value|
-        try std.testing.expectError(error.InvalidResponse, decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"observation\":" ++ value ++ "}" }, false));
+        try std.testing.expectError(error.InvalidResponse, decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"observation\":" ++ value ++ "}" }, false));
     std.debug.print("keyed facts bytes={d}; reply bytes={d}; fixed parser scratch={d}; no retained allocator/DOM\n", .{
         @sizeOf(CommandObservation), @sizeOf(protocol.ResponseBuffer), std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes),
     });
@@ -2966,7 +2967,7 @@ test "Current facts preserve explicit unconfigured and promised range" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
+    const wire = "{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
     try file.writePositionalAll(io, wire ++ "false", 0);
     try std.testing.expect((try CurrentReply.decode(io, file, "unknown", .{ .report = .{ .bytes = wire.len } })) == .unconfigured);
     inline for (.{ 0, wire.len - 1, wire.len + 1, wire.len + 6 }) |length|
@@ -2980,7 +2981,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
     const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
-    const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
@@ -3063,7 +3064,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -3111,7 +3112,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"2\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
@@ -3127,7 +3128,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"unknown_tool\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1000, i + 5001 });
-        try writer.writeAll(reference ++ ",\"item_id\":" ++ reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":null,\"code\":\"unknown_tool\",\"publication_position\":null}}");
+        try writer.writeAll(reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":null,\"code\":\"unknown_tool\",\"publication_position\":null}}");
     }
     try writer.writeAll("]},\"actionable_permissions\":[");
     for (0..257) |i| {
@@ -3201,7 +3202,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var prefix: [2048]u8 = undefined;
     try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
     inline for (.{
-        .{ "\"version\":\"1\"", "\"version\":\"2\"" },
+        .{ "\"version\":\"2\"", "\"version\":\"3\"" },
         .{ "\"tools\":[\"bash\"]", "\"tools\":[\"edit\"]" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
