@@ -1214,18 +1214,19 @@ pub const ContentReader = struct {
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
         const count = try self.store.readOwnedContent(self, start, destination);
-        try self.verify(start, destination[0..count]);
+        if (!self.absorb(start, destination[0..count])) return self.store.fence(error.CorruptStore);
         return count;
     }
 
-    fn verify(self: *ContentReader, start: u64, bytes: []const u8) !void {
-        if (self.verified or start > self.verified_position or start + bytes.len < self.verified_position) return;
+    /// Hashes bytes read at `start` that extend the in-order prefix; false
+    /// when they reach the end and the digest does not match.
+    fn absorb(self: *ContentReader, start: u64, bytes: []const u8) bool {
+        if (self.verified or start > self.verified_position or start + bytes.len < self.verified_position) return true;
         self.hash.update(bytes[@intCast(self.verified_position - start)..]);
         self.verified_position = start + bytes.len;
-        if (self.verified_position != self.reference.length) return;
+        if (self.verified_position != self.reference.length) return true;
         self.verified = true;
-        if (!std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest))
-            return self.store.fence(error.CorruptStore);
+        return std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest);
     }
 
     /// Read at any public byte offset.
@@ -3318,12 +3319,19 @@ pub const Store = struct {
         used: usize = 0,
         count: usize = 0,
 
+        /// Reads under the held lock, checking the digest at the end as
+        /// every content reader does; the caller's Access fences on error.
+        fn read(source: *ContentSource, start: u64, destination: []u8) !void {
+            try source.store.readOwnedContentLocked(&source.reader, start, destination);
+            if (!source.reader.absorb(start, destination)) return error.CorruptStore;
+        }
+
         /// The next window of bytes, consumed whole; null at the end.
         fn nextWindow(source: *ContentSource) !?[]const u8 {
             std.debug.assert(source.used == source.count);
             const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
             if (wanted == 0) return null;
-            try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+            try source.read(source.position, source.window[0..wanted]);
             source.position += wanted;
             return source.window[0..wanted];
         }
@@ -3331,7 +3339,7 @@ pub const Store = struct {
         pub fn peek(source: *@This()) !?u8 {
             if (source.used == source.count) {
                 const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-                try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+                try source.read(source.position, source.window[0..wanted]);
                 source.count = wanted;
                 source.used = 0;
                 if (source.count == 0) return null;
@@ -6484,6 +6492,9 @@ pub const Store = struct {
         const text_id = optionalColumnId(statement, 3);
         const bag_id = optionalColumnId(statement, 4) orelse return error.CorruptStore;
         if (!partFits(cursor.kind, array, kind) or (kind == .opaque_block) != (text_id == null)) return error.CorruptStore;
+        const bag = try self.historicalBag(view, bag_id);
+        // An opaque block is all bag: at least its type.
+        if (kind == .opaque_block and bag == null) return error.CorruptStore;
         // Each array's parts are contiguous, so the writer opens it once.
         if (array != cursor.array) {
             if (cursor.closed[@backingInt(array) - 1]) return error.CorruptStore;
@@ -6496,7 +6507,7 @@ pub const Store = struct {
             .array = array,
             .kind = kind,
             .text = if (text_id) |id| try self.historicalContentAs(view, id, partTextIsPrivate(cursor.kind)) else null,
-            .bag = try self.historicalBag(view, bag_id),
+            .bag = bag,
         };
     }
 
@@ -7041,80 +7052,7 @@ pub const Store = struct {
                 const owner = call_item orelse return error.CorruptOutputMetadata;
                 if (owner.ordinal != record.ordinal or owner.kind != .function_call) return error.CorruptOutputMetadata;
                 if (owner.kind != .function_call) return error.CorruptOutputMetadata;
-                const item_id_content_id = try self.importDecodedString(output, item_id, false, faults);
-                const name_content_id = try self.importDecodedString(output, name, false, faults);
-                const call_id_content_id = try self.importDecodedString(output, call_id, false, faults);
-                const arguments_content_id = try self.importDecodedString(output, record, false, faults);
-
-                const duplicate_call = try self.cached(
-                    "SELECT 1 FROM model_tool_call WHERE operation_id=?1 AND call_id_content_id=?2 LIMIT 1",
-                );
-                defer resetCached(duplicate_call);
-                try bindU64(duplicate_call, 1, binding.operation_id);
-                try bindI64(duplicate_call, 2, call_id_content_id);
-                switch (c.sqlite3_step(duplicate_call)) {
-                    c.SQLITE_DONE => {},
-                    c.SQLITE_ROW => return error.InvalidProviderEnvelope,
-                    else => return error.OutputReadFailed,
-                }
-
-                const call_facts = try inspectOutputCall(self.io, output.source, name, record);
-                const bash_arguments = call_facts.bash_arguments;
-                const rejection_code = tool_catalog.classifyCall(call_facts.name, bash_arguments != null, frozen_tools);
-                var rejection_buffer: [192]u8 = undefined;
-                const rejection_text = if (rejection_code) |code| text: {
-                    var rejected_name: output_format.NameReader = .{ .io = self.io, .file = output.source, .position = name.start, .end = try name.end() };
-                    break :text try tool_catalog.rejectionResult(code, &rejected_name, name.decoded_length, name.content_digest, &rejection_buffer);
-                } else null;
-                const rejection_content_id = if (rejection_text) |text|
-                    try self.importBytesContent(text, false, faults.output_import)
-                else
-                    null;
-                const acceptance_position = if (rejection_code != null)
-                    try self.claimSessionPosition(session_ref.slice())
-                else
-                    null;
-                const insert_call = try self.cached(
-                    "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id," ++
-                        "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                );
-                defer resetCached(insert_call);
-                try bindU64(insert_call, 1, binding.operation_id);
-                try bindU64(insert_call, 2, imported_calls);
-                try bindU64(insert_call, 3, record.ordinal);
-                try bindI64(insert_call, 4, item_id_content_id);
-                try bindI64(insert_call, 5, name_content_id);
-                try bindI64(insert_call, 6, call_id_content_id);
-                try bindI64(insert_call, 7, arguments_content_id);
-                try bindOptionalText(insert_call, 8, if (rejection_code) |code| @tagName(code) else "");
-                try bindNullableI64(insert_call, 9, rejection_content_id);
-                try bindNullableU64(insert_call, 10, acceptance_position);
-                if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
-                try bindOptionalText(insert_call, 12, if (bash_arguments) |*args| args.description.slice() else "");
-                var field_metadata: [160]u8 = undefined;
-                for ([_]OutputMetadataRecord{ item_id, name, call_id, record }, 0..) |field, index| {
-                    std.mem.writeInt(u64, field_metadata[index * 40 ..][0..8], field.decoded_length, .little);
-                    @memcpy(field_metadata[index * 40 + 8 ..][0..32], &field.content_digest);
-                }
-                try bindBlob(insert_call, 13, &field_metadata);
-                try expectDone(insert_call);
-
-                if (rejection_code == null) {
-                    const action_id = try self.nextIdentity("action_operation", "action_id");
-                    const insert_action = try self.cached(
-                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
-                            "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN unixepoch() END)",
-                    );
-                    defer resetCached(insert_action);
-                    try bindU64(insert_action, 1, action_id);
-                    try bindU64(insert_action, 2, binding.operation_id);
-                    try bindU64(insert_action, 3, imported_calls);
-                    try bindText(insert_action, 4, session_ref.slice());
-                    try bindU64(insert_action, 5, current.revision);
-                    try bindI64(insert_action, 6, @as(i64, if (current.permission_mode == 0) 0 else 1));
-                    try bindNullableU64(insert_action, 7, bash_arguments.?.timeout_ms);
-                    try expectDone(insert_action);
-                }
+                try self.importOutputCall(binding, output, session_ref.slice(), current, frozen_tools, imported_calls, .{ item_id, name, call_id, record }, faults);
                 item_id_record = null;
                 name_record = null;
                 call_id_record = null;
@@ -7154,6 +7092,88 @@ pub const Store = struct {
         } else try self.recordContinuation(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try self.execute("COMMIT");
+    }
+
+    /// Imports one accepted call: its fields, its classification and, when
+    /// it is runnable, its Action. noinline: the call's classification
+    /// buffers live in this frame only, not in the settlement frame under
+    /// which every item's import runs.
+    noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *const ValidatedOutput, session_ref_slice: []const u8, current: SessionFacts, frozen_tools: tool_catalog.ToolSet, imported_calls: u64, fields: [4]OutputMetadataRecord, faults: Faults) !void {
+        const item_id, const name, const call_id, const record = fields;
+        const item_id_content_id = try self.importDecodedString(output, item_id, false, faults);
+        const name_content_id = try self.importDecodedString(output, name, false, faults);
+        const call_id_content_id = try self.importDecodedString(output, call_id, false, faults);
+        const arguments_content_id = try self.importDecodedString(output, record, false, faults);
+
+        const duplicate_call = try self.cached(
+            "SELECT 1 FROM model_tool_call WHERE operation_id=?1 AND call_id_content_id=?2 LIMIT 1",
+        );
+        defer resetCached(duplicate_call);
+        try bindU64(duplicate_call, 1, binding.operation_id);
+        try bindI64(duplicate_call, 2, call_id_content_id);
+        switch (c.sqlite3_step(duplicate_call)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.InvalidProviderEnvelope,
+            else => return error.OutputReadFailed,
+        }
+
+        const call_facts = try inspectOutputCall(self.io, output.source, name, record);
+        const bash_arguments = call_facts.bash_arguments;
+        const rejection_code = tool_catalog.classifyCall(call_facts.name, bash_arguments != null, frozen_tools);
+        var rejection_buffer: [192]u8 = undefined;
+        const rejection_text = if (rejection_code) |code| text: {
+            var rejected_name: output_format.NameReader = .{ .io = self.io, .file = output.source, .position = name.start, .end = try name.end() };
+            break :text try tool_catalog.rejectionResult(code, &rejected_name, name.decoded_length, name.content_digest, &rejection_buffer);
+        } else null;
+        const rejection_content_id = if (rejection_text) |text|
+            try self.importBytesContent(text, false, faults.output_import)
+        else
+            null;
+        const acceptance_position = if (rejection_code != null)
+            try self.claimSessionPosition(session_ref_slice)
+        else
+            null;
+        const insert_call = try self.cached(
+            "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id," ++
+                "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        );
+        defer resetCached(insert_call);
+        try bindU64(insert_call, 1, binding.operation_id);
+        try bindU64(insert_call, 2, imported_calls);
+        try bindU64(insert_call, 3, record.ordinal);
+        try bindI64(insert_call, 4, item_id_content_id);
+        try bindI64(insert_call, 5, name_content_id);
+        try bindI64(insert_call, 6, call_id_content_id);
+        try bindI64(insert_call, 7, arguments_content_id);
+        try bindOptionalText(insert_call, 8, if (rejection_code) |code| @tagName(code) else "");
+        try bindNullableI64(insert_call, 9, rejection_content_id);
+        try bindNullableU64(insert_call, 10, acceptance_position);
+        if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
+        try bindOptionalText(insert_call, 12, if (bash_arguments) |*args| args.description.slice() else "");
+        var field_metadata: [160]u8 = undefined;
+        for ([_]OutputMetadataRecord{ item_id, name, call_id, record }, 0..) |field, index| {
+            std.mem.writeInt(u64, field_metadata[index * 40 ..][0..8], field.decoded_length, .little);
+            @memcpy(field_metadata[index * 40 + 8 ..][0..32], &field.content_digest);
+        }
+        try bindBlob(insert_call, 13, &field_metadata);
+        try expectDone(insert_call);
+
+        if (rejection_code == null) {
+            const action_id = try self.nextIdentity("action_operation", "action_id");
+            const insert_action = try self.cached(
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
+                    "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN unixepoch() END)",
+            );
+            defer resetCached(insert_action);
+            try bindU64(insert_action, 1, action_id);
+            try bindU64(insert_action, 2, binding.operation_id);
+            try bindU64(insert_action, 3, imported_calls);
+            try bindText(insert_action, 4, session_ref_slice);
+            try bindU64(insert_action, 5, current.revision);
+            try bindI64(insert_action, 6, @as(i64, if (current.permission_mode == 0) 0 else 1));
+            try bindNullableU64(insert_action, 7, bash_arguments.?.timeout_ms);
+            try expectDone(insert_action);
+        }
     }
 
     const ContentSlot = struct { id: i64, existing: bool };
@@ -7200,7 +7220,9 @@ pub const Store = struct {
         return slot.id;
     }
 
-    fn importSourceRange(
+    /// Copies the usage record's bytes. noinline with a small window, so
+    /// the settlement frame that every item import runs under stays small.
+    noinline fn importSourceRange(
         self: *Store,
         file: std.Io.File,
         source_length: u64,
@@ -7222,7 +7244,7 @@ pub const Store = struct {
         defer if (blob) |value| {
             _ = c.sqlite3_blob_close(value);
         };
-        var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
+        var copy: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
         var offset: u64 = 0;
         while (offset < length) {
             const wanted: usize = @intCast(@min(length - offset, copy.window.len));
@@ -7362,7 +7384,7 @@ pub const Store = struct {
         var decoded: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
         var count: usize = 0;
         var written: u64 = 0;
-        var text: output_format.EncodedStringReader = .{ .io = self.io, .file = output.source, .position = part.start, .end = try part.end() };
+        var text: output_format.EncodedStringWindow(import_window_bytes) = .{ .io = self.io, .file = output.source, .position = part.start, .end = try part.end() };
         while (try text.next()) |byte| {
             decoded.window[count] = byte;
             count += 1;
@@ -7388,7 +7410,7 @@ pub const Store = struct {
     }
 
     /// A message's public text: its one text part's row, or for several
-    /// parts their text joined into one row. The parts are walked twice
+    /// parts their text joined into one row. Several parts are walked twice
     /// (hash, then copy), so no part list or count limit is held.
     noinline fn importAnswer(self: *Store, binding: AttemptBinding, item_ordinal: u64, faults: Faults) !i64 {
         const parts = try self.cached(
@@ -7397,13 +7419,18 @@ pub const Store = struct {
         defer resetCached(parts);
         try bindU64(parts, 1, binding.operation_id);
         try bindU64(parts, 2, item_ordinal);
+        // One part, the norm, is the answer itself: nothing to read.
+        const first = try self.nextAnswerPart(parts) orelse return error.CorruptOutputMetadata;
+        if (try self.nextAnswerPart(parts) == null) {
+            if ((try self.readContentMetadata(first)).private) return error.CorruptOutputMetadata;
+            return first;
+        }
+        resetCached(parts);
+        try bindU64(parts, 1, binding.operation_id);
+        try bindU64(parts, 2, item_ordinal);
         var copy: HashedWindow(import_window_bytes) = .{ .hash = protocol.contentHasher() };
-        var first: ?i64 = null;
-        var count: usize = 0;
         var length: u64 = 0;
         while (try self.nextAnswerPart(parts)) |id| {
-            if (first == null) first = id;
-            count += 1;
             const part = try self.readContentMetadata(id);
             if (part.private) return error.CorruptOutputMetadata;
             var offset: u64 = 0;
@@ -7416,8 +7443,6 @@ pub const Store = struct {
             length = try std.math.add(u64, length, part.length);
         }
         self.read_blob.close();
-        if (count == 0) return error.CorruptOutputMetadata;
-        if (count == 1) return first.?;
         const digest = copy.hash.finalResult();
         const slot = try self.contentSlot(&digest, length, false);
         if (slot.existing or length == 0) return slot.id;

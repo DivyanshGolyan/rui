@@ -1,8 +1,8 @@
 {
   "budget_bytes": 8192,
   "threads": {
-    "main thread": {"anchor": "server.serve", "chain_ceiling": 49152},
-    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 40960},
+    "main thread": {"anchor": "server.serve", "chain_ceiling": 45056},
+    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 32768},
     "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
     "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
   },

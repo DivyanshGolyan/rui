@@ -281,7 +281,7 @@ pub const NameReader = EncodedStringWindow(64);
 /// read through a `window_bytes` window. Declared with a literal of its
 /// range (`.position = record.start, .end = try record.end()`), so the
 /// window stays unwritten until a read fills it.
-fn EncodedStringWindow(comptime window_bytes: usize) type {
+pub fn EncodedStringWindow(comptime window_bytes: usize) type {
     return struct {
         const Self = @This();
 
