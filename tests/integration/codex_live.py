@@ -80,7 +80,7 @@ def evidence(store):
 def private_reasoning_count(store, operation):
     with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as db:
         return db.execute(
-            "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id "
+            "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id "
             "WHERE item.operation_id=? AND item.item_kind=1 AND c.private=1",
             (operation,),
         ).fetchone()[0]

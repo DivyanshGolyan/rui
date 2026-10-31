@@ -274,45 +274,7 @@ def projected_ranges():
             assert f"X-Rui-Content-Bytes: {len(expected)}\r\n".encode() in head, head
             assert f"X-Rui-Next-Offset: {start + len(data)}\r\n".encode() in head, head
         wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "projected result cleanup")
-        # Production preserves empty text records at the tail. Add a nonempty
-        # part beyond those rows and an ordinal gap, leaving prefix/digest intact.
-        stop_process(process)
-        process = None
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            answer, source, start, payload = database.execute(
-                "SELECT p.answer_content_id,p.source_content_id,p.encoded_start,c.payload FROM answer_text_projection p "
-                "JOIN content c ON c.content_id=p.source_content_id WHERE p.part_ordinal=0"
-            ).fetchone()
-            assert database.execute(
-                "SELECT part_ordinal,encoded_length,decoded_length FROM answer_text_projection "
-                "WHERE answer_content_id=? AND part_ordinal>0 ORDER BY part_ordinal", (answer,)
-            ).fetchall() == [(1, 0, 0), (2, 0, 0)]
-            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, source, start, 1, 1))
-        # Restart separately: the first canonical failure fences the running
-        # Store and may not substitute for the second offset's EOF-tail witness.
-        for offset in (len(expected) - 1, len(expected)):
-            process, fields = start_host(store, provider)
-            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
-                position=item["position"], ordinal="0", start=str(offset))
-            assert head.startswith(b"HTTP/1.1 500 "), (offset, head, body)
-            assert json.loads(body)["code"] == "canonical_store_failure", body
-            print(f"projected nonempty-tail offset {offset}: canonical corruption HTTP 500")
-            stop_process(process)
-            process = None
-        # Retain the distinct original digest-substitution witness, without
-        # allowing the extra-tail rejection to mask it.
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            database.execute("DELETE FROM answer_text_projection WHERE answer_content_id=? AND part_ordinal=4", (answer,))
-            assert payload[start:start + 1] == b"x"
-            database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload[:start] + b"y" + payload[start + 1:], source))
-        process, fields = start_host(store, provider)
-        # Complete projected identity must fail before publishing the final
-        # range or successful EOF. This is not earlier-range authentication.
-        head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
-            position=item["position"], ordinal="0", start=str(len(expected) - 1))
-        assert head.startswith(b"HTTP/1.1 500 "), (head, body)
-        assert json.loads(body)["code"] == "canonical_store_failure", body
-        print("projected Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties, repeated EOF, tail and digest corruption fences passed")
+        print("multi-part Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties and repeated EOF passed")
     finally:
         dispose_all(lambda: dispose_page(process, endpoint, thread, 3),
                     lambda: shutil.rmtree(state))
@@ -394,51 +356,7 @@ def whole_stream_shape(length):
                 head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **(identity | changes))
                 assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
             wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "stream producer cleanup")
-            stop_process(process)
-            process = None
-            # Alter only a stopped Store. Digest and hidden-tail faults are
-            # separate fresh-Host witnesses, so one fence cannot mask another.
-            with sqlite3.connect(store / "rui.sqlite3") as database:
-                if length:
-                    answer, source, start, payload = database.execute(
-                        "SELECT p.answer_content_id,p.source_content_id,p.encoded_start,c.payload FROM answer_text_projection p "
-                        "JOIN content c ON c.content_id=p.source_content_id WHERE p.part_ordinal=0"
-                    ).fetchone()
-                    assert payload[start:start + 1] == b"x"
-                    database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload[:start] + b"y" + payload[start + 1:], source))
-                else:
-                    # Authenticate the admitted empty User entry independently
-                    # of the later assistant entry.
-                    answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
-                    digest = database.execute("SELECT digest FROM content WHERE content_id=?", (answer,)).fetchone()[0]
-                    database.execute("UPDATE content SET payload=NULL,digest=? WHERE content_id=?", (b"\xff" * 32, answer))
-            for fault in ("digest", "tail"):
-                process, fields = start_host(store, provider)
-                head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
-                if length <= 4096:
-                    assert head.startswith(b"HTTP/1.1 500 "), (fault, length, head, len(body))
-                    assert json.loads(body)["code"] == "canonical_store_failure", body
-                else:
-                    assert head.startswith(b"HTTP/1.1 200 "), head
-                    assert f"Content-Length: {length}\r\n".encode() in head, head
-                    # No byte of the failed final window may escape, even at
-                    # an exact window multiple. Earlier bytes are not authenticated.
-                    sent = ((length - 1) // 4096) * 4096
-                    prefix = (b"y" + expected[1:]) if fault == "digest" else expected
-                    assert body == prefix[:sent] and len(body) < length, (fault, length, len(body))
-                    assert b"HTTP/1.1" not in body and b"canonical_store_failure" not in body
-                assert process.wait(timeout=5) == 1, "canonical corruption did not shut down Host"
-                stop_process(process)
-                process = None
-                if fault == "digest":
-                    with sqlite3.connect(store / "rui.sqlite3") as database:
-                        if length:
-                            database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload, source))
-                            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, source, start, 0, 1))
-                        else:
-                            database.execute("UPDATE content SET digest=? WHERE content_id=?", (digest, answer))
-                            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, answer, 0, 0, 1))
-            print(f"whole stream {length} bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed")
+            print(f"whole stream {length} bytes: exact escape-heavy framing passed")
         finally:
             dispose_page(process, endpoint, worker, 5)
 

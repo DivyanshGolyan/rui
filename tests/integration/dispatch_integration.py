@@ -1936,15 +1936,16 @@ def main(mode="all", correlation_case="all"):
         try:
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
             assert database.execute(
-                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id WHERE c.private=1"
+                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id WHERE c.private=1"
             ).fetchone()[0] == 4
             assert database.execute(
                 "SELECT attempt_ordinal,count(*) FROM model_output_item GROUP BY attempt_ordinal"
             ).fetchall() == [(1, 4)]
-            raw_reasoning = database.execute(
-                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
+            # Item-level created_by is dropped at import; the bag keeps the rest.
+            reasoning_bag = database.execute(
+                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
-            assert json.loads(raw_reasoning)["created_by"] == "d" * 64
+            assert "created_by" not in json.loads("{" + reasoning_bag + "}"), reasoning_bag
             observations = database.execute(
                 "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall()
@@ -3270,13 +3271,13 @@ def main(mode="all", correlation_case="all"):
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 33
-        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
-        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
+        # The answer's text is saved once, as its public part, with no raw copy.
+        assert database.execute("SELECT private,length(payload) FROM content WHERE byte_length>=?", (len(large_answer),)).fetchall() == [(0, len(large_answer))]
         database.close()
         stop_endpoint(growth_endpoint, endpoints)
 
-        # Public answers are projections of immutable provider items. Exercise
-        # both dedup orders: answer then caller input, and caller then answer.
+        # A public answer is its message's saved part text. Exercise both dedup
+        # orders: answer then caller input, and caller then answer.
         parts = ["", "x" * 4093 + "\n", "🙂\t\\", ""]
         projected_answer = "".join(parts).encode()
         projection_endpoint = SuccessEndpoint([
@@ -3304,9 +3305,9 @@ def main(mode="all", correlation_case="all"):
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(projection_store / "rui.sqlite3") as database:
-            assert database.execute("SELECT c.payload IS NULL FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(1,), (0,)]
-            assert database.execute("SELECT count(*) FROM answer_text_projection").fetchone()[0] == len(parts)
-            assert database.execute("SELECT count(*) FROM answer_text_projection p JOIN content c ON c.content_id=p.source_content_id WHERE c.private<>1 OR c.payload IS NULL").fetchone()[0] == 0
+            assert database.execute("SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(projected_answer,), (b"caller-first",)]
+            assert database.execute("SELECT count(*) FROM model_output_part WHERE operation_id=1 AND part_kind=1").fetchone()[0] == len(parts)
+            assert database.execute("SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id WHERE c.private<>0").fetchone()[0] == 0
         host = start_host(projection_store, projection_url)
         processes.append(host)
         assert read_result(projection_store, "projection-first") == projected_answer

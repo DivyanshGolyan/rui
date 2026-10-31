@@ -251,12 +251,15 @@ const Utf8Validator = struct {
 const Decoded = struct {
     bounded: ?*protocol.Bounded(max_evidence_bytes) = null,
     hash: ?*std.crypto.hash.sha2.Sha256 = null,
+    /// A second digest the same bytes extend: a message's whole answer.
+    also: ?*std.crypto.hash.sha2.Sha256 = null,
     length: u64 = 0,
     overflow: bool = false,
 
     fn emit(self: *Decoded, bytes: []const u8) !void {
         self.length = try std.math.add(u64, self.length, bytes.len);
         if (self.hash) |hash| hash.update(bytes);
+        if (self.also) |hash| hash.update(bytes);
         if (self.bounded) |destination| {
             if (self.overflow) return;
             // Keep the prefix that fits, however the bytes arrive.
@@ -874,7 +877,7 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     };
     const kind = item_check.item_kind.?;
     const id_digest = item_check.idDigest();
-    const neutral = try splitNeutral(response, window, item, ordinal, kind);
+    const neutral = try splitNeutral(response, window, item, ordinal, kind, answer_hash);
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
@@ -895,29 +898,18 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
             }
             return .{ .kind = .function_call, .id_digest = id_digest };
         },
-        .message => {
-            var array = try Array.init(window, .{ .start = item.start + item_check.content_span.start, .length = item_check.content_span.length });
-            var non_whitespace = false;
-            while (try array.next()) |block| {
-                const block_fields = try readFields(window, block, &.{ "type", "text", "refusal" });
-                var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
-                _ = try readString(window, try block_fields.required("type"), &block_kind);
-                const text_value = if (block_kind.eql("refusal")) try block_fields.required("refusal") else try block_fields.required("text");
-                var source = try FileSource.init(window, text_value);
-                var decoded = Decoded{ .hash = answer_hash };
-                const text = try parseString(&source, &decoded);
-                non_whitespace = non_whitespace or text.non_whitespace;
-                try response.metadata.append(.{
-                    .tag = .text,
-                    .ordinal = ordinal,
-                    .start = text.encoded.start,
-                    .length = text.encoded.length,
-                    .decoded_length = text.decoded_length,
-                });
-            }
-            return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = non_whitespace, .phase = item_check.messagePhase(), .neutral_phase = neutral.phase };
-        },
+        .message => return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = neutral.non_whitespace, .phase = item_check.messagePhase(), .neutral_phase = neutral.phase },
     }
+}
+
+/// The encoded contents of a top-level string value inside `item`, between
+/// the quotes after its key's colon and its closing quote.
+fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Range {
+    var source = try FileSource.init(window, .{ .start = item.start + span.after_key, .length = span.end - span.after_key });
+    try source.expect(':');
+    try source.expect('"');
+    std.debug.assert(try rangeEquals(window, .{ .start = item.start + span.end, .length = 1 }, "\""));
+    return .{ .start = source.offset(), .length = item.start + span.end - source.offset() };
 }
 
 /// One object's members in order, each with its raw `"key":value` bytes.
@@ -1029,8 +1021,9 @@ fn stringIs(window: *Window, value: Range, expected: []const u8) !bool {
 /// becomes neutral only in exactly the expected shape, so the bags keep
 /// everything else the model saw. `created_by` is dropped, as replay drops
 /// it.
-fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind) !NeutralItem {
+fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind, answer_hash: *std.crypto.hash.sha2.Sha256) !NeutralItem {
     var result: NeutralItem = .{};
+    var answer: Answer = .{ .hash = answer_hash };
     var bag: Bag = .{ .scope = .item };
     var members = try Members.init(window, item);
     var key: protocol.Bounded(max_evidence_bytes) = .{};
@@ -1051,13 +1044,13 @@ fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64,
                 }
                 break :phase false;
             } else if (key.eql("content"))
-                try splitParts(response, window, member.value, ordinal, kind, .content)
+                try splitParts(response, window, member.value, ordinal, kind, .content, &answer)
             else
                 false,
             .reasoning => if (key.eql("summary"))
-                try splitParts(response, window, member.value, ordinal, kind, .summary)
+                try splitParts(response, window, member.value, ordinal, kind, .summary, null)
             else if (key.eql("content"))
-                try splitParts(response, window, member.value, ordinal, kind, .content)
+                try splitParts(response, window, member.value, ordinal, kind, .content, null)
             else
                 false,
             .function_call => key.eql("name") or key.eql("call_id") or key.eql("arguments"),
@@ -1066,15 +1059,26 @@ fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64,
         if (!neutral) try bag.add(response, window, ordinal, kind, member.whole);
     }
     try bag.close(response, ordinal, kind);
+    result.non_whitespace = answer.non_whitespace;
     return result;
 }
 
-const NeutralItem = struct { phase: output_format.NeutralPhase = .unphased };
+const NeutralItem = struct {
+    phase: output_format.NeutralPhase = .unphased,
+    /// A message: whether its answer has any non-whitespace text.
+    non_whitespace: bool = false,
+};
+
+/// A message's answer: its text parts back to back.
+const Answer = struct {
+    hash: *std.crypto.hash.sha2.Sha256,
+    non_whitespace: bool = false,
+};
 
 
 /// Records each block of a nonempty array as a part, or returns false (the
 /// whole array stays in the item bag) for any other value.
-fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, kind: output_format.OutputItemKind, array_kind: output_format.PartArray) !bool {
+fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, kind: output_format.OutputItemKind, array_kind: output_format.PartArray, answer: ?*Answer) !bool {
     var source = try FileSource.init(window, value);
     if (try source.peek() != '[' or !try isNonemptyArray(window, value)) return false;
     var array = try Array.init(window, value);
@@ -1107,9 +1111,10 @@ fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, 
         } else {
             const text_value = (if (std.mem.eql(u8, text_key, "text")) block_fields.?.get("text") else block_fields.?.get("refusal")) catch unreachable;
             var hash = protocol.contentHasher();
-            var decoded = Decoded{ .hash = &hash };
+            var decoded = Decoded{ .hash = &hash, .also = if (answer) |whole| whole.hash else null };
             var text_source = try FileSource.init(window, text_value.?);
             const text = try parseString(&text_source, &decoded);
+            if (answer) |whole| whole.non_whitespace = whole.non_whitespace or text.non_whitespace;
             try response.metadata.append(.{
                 .tag = .part,
                 .kind = kind,
@@ -1133,15 +1138,6 @@ fn splitParts(response: *Response, window: *Window, value: Range, ordinal: u64, 
     return true;
 }
 
-/// The encoded contents of a top-level string value inside `item`, between
-/// the quotes after its key's colon and its closing quote.
-fn stringContents(window: *Window, item: Range, span: OutputItemCheck.Span) !Range {
-    var source = try FileSource.init(window, .{ .start = item.start + span.after_key, .length = span.end - span.after_key });
-    try source.expect(':');
-    try source.expect('"');
-    std.debug.assert(try rangeEquals(window, .{ .start = item.start + span.end, .length = 1 }, "\""));
-    return .{ .start = source.offset(), .length = item.start + span.end - source.offset() };
-}
 
 /// The one output item grammar: acceptance stores an item only when this
 /// pass does, with the replay rule it judged. Replay applies that rule
@@ -1181,8 +1177,6 @@ pub const OutputItemCheck = struct {
     /// decoded field's encoded value.
     key_end: u64 = 0,
     encoded_spans: [decoded_names.len]Span = undefined,
-    /// The item's top-level `content` array, brackets included.
-    content_span: Range = undefined,
 
     /// From the end of a value's key to its closing quote.
     pub const Span = struct { after_key: u64, end: u64 };
@@ -1744,16 +1738,12 @@ pub const OutputItemCheck = struct {
                 .object_begin, .array_begin => {
                     if (self.depth > protocol.max_json_depth) return error.JsonTooDeep;
                     const object = token == .object_begin;
-                    if (self.depth == 1 and !object and self.frames[0].key == comptime index("content").?)
-                        self.content_span.start = self.diagnostics.getByteOffset() - 1;
                     const kind = self.childKind(object);
                     self.frames[self.depth] = .{ .kind = kind, .object = object };
                     self.depth += 1;
                 },
                 .object_end, .array_end => {
                     self.depth -= 1;
-                    if (self.depth == 1 and token == .array_end and self.frames[0].key == comptime index("content").?)
-                        self.content_span.length = self.diagnostics.getByteOffset() - self.content_span.start;
                     self.accept(self.finishFrame(&self.frames[self.depth]));
                 },
                 .partial_number => {},
@@ -2979,7 +2969,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var root_buffer: [protocol.max_store_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var used: std.atomic.Value(u64) = .init(raw.len);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 5 * output_format.output_metadata_record_bytes - shortfall };
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 4 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
@@ -2997,7 +2987,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
             try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
-            try std.testing.expectEqual(raw.len + done.len + 5 * output_format.output_metadata_record_bytes, used.load(.acquire));
+            try std.testing.expectEqual(raw.len + done.len + 4 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
         try std.testing.expectEqual(raw.len, try source.readPositionalAll(std.testing.io, &buffer, 0));

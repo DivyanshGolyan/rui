@@ -186,8 +186,6 @@ def main():
                 db.backup(saved)
             faults = [
                 "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1 LIMIT 1)",
-                "UPDATE content SET payload=CAST(replace(CAST(payload AS TEXT),'\\u00e9','\\q00e9') AS BLOB) WHERE content_id IN "
-                "(SELECT source_content_id FROM answer_text_projection WHERE answer_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1 LIMIT 1))",
             ]
             for index, fault in enumerate(faults):
                 with sqlite3.connect(store / "rui.sqlite3") as db:
@@ -196,8 +194,8 @@ def main():
                     db.execute(fault)
                 process, fields = start_host(store, provider)
                 data = caller(store, "field", items[1]["position"], "arguments", ok=False)
-                # Certified metadata and complete accepted-item authentication
-                # reject this damage before delivering any argument bytes.
+                # Certified metadata rejects this damage before delivering any
+                # argument bytes.
                 assert data == b"", ("corrupt proposal delivered a prefix", index, len(data))
                 assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"
                 stop_process(process)

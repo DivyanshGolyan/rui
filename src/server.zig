@@ -2184,7 +2184,7 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
     try reply.deliver(fd);
 }
 
-test "Conversation stream native delivery decodes once and closes on failed handoff" {
+test "Conversation stream native delivery reads each byte once and closes on failed handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -2238,7 +2238,7 @@ test "Conversation stream native delivery decodes once and closes on failed hand
         }
         try deliverConversationContent(&host, sockets[0], command);
     }
-    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect(!peer.failed);
@@ -2248,7 +2248,7 @@ test "Conversation stream native delivery decodes once and closes on failed hand
     // without traversing the rest of the content or keeping caller storage.
     storage.testing_content_work = .{};
     try deliverConversationContent(&host, -1, command);
-    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
 }

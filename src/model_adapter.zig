@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const execution = @import("execution.zig");
@@ -879,14 +878,12 @@ const writePlainJsonRun = request_encoding.writePlainJsonRun;
 // selects a bounded refill size first, and any short canonical read fails.
 const HistoricalSource = struct {
     reader: *store.HistoricalReader,
-    ranged: bool = false,
 
     pub fn contentLength(self: HistoricalSource) u64 {
         return self.reader.reference.length;
     }
 
     pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
-        if (self.ranged) return self.reader.readRange(offset, destination);
         return self.reader.read(offset, destination);
     }
 
@@ -953,36 +950,6 @@ const Piece = union(enum) {
     verbatim_content: store.HistoricalContent,
     history_memo,
 };
-
-const OutputOracle = struct { raw: store.HistoricalContent, start: u64 };
-
-const OracleWriter = struct {
-    bytes: std.ArrayList(u8) = .empty,
-
-    pub fn write(self: *OracleWriter, bytes: []const u8) !void {
-        try self.bytes.appendSlice(std.testing.allocator, bytes);
-    }
-};
-
-/// Parsed JSON equality: the same values, objects compared by key.
-fn jsonEqual(a: std.json.Value, b: std.json.Value) bool {
-    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
-    return switch (a) {
-        .object => |object| object.count() == b.object.count() and for (object.keys(), object.values()) |key, value| {
-            const other = b.object.get(key) orelse break false;
-            if (!jsonEqual(value, other)) break false;
-        } else true,
-        .array => |array| array.items.len == b.array.items.len and for (array.items, b.array.items) |x, y| {
-            if (!jsonEqual(x, y)) break false;
-        } else true,
-        .string => |text| std.mem.eql(u8, text, b.string),
-        .number_string => |text| std.mem.eql(u8, text, b.number_string),
-        .integer => |value| value == b.integer,
-        .float => |value| value == b.float,
-        .bool => |value| value == b.bool,
-        .null => true,
-    };
-}
 
 /// What the writer of one output item carries between its items: the item
 /// itself and the part array it has open.
@@ -1193,9 +1160,6 @@ pub const Preparation = struct {
         emission: Emission = .none,
         input_comma: bool = false,
         output: OutputWriting = .{},
-        /// Tests only: the raw item behind the output item being written,
-        /// and where it starts in the request.
-        oracle: if (builtin.is_test) ?OutputOracle else void = if (builtin.is_test) null else {},
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -1235,9 +1199,6 @@ pub const Preparation = struct {
         history,
         /// The parts of the output item being written, then its close.
         output_parts,
-        /// After an output item's close: tests check it against the raw
-        /// item it came from.
-        output_checked,
         tool_results,
         covered_tool_results,
         compaction_trigger,
@@ -1441,7 +1402,6 @@ pub const Preparation = struct {
                         // Unusable output stays private; no partial request
                         // can seal.
                         if (self.state.continuation_unavailable) return .pending;
-                        if (builtin.is_test) self.state.oracle = .{ .raw = entry.content.?, .start = self.writer.offset };
                         self.state.item = .{ .output_open = try self.view.openOutput(entry.position) };
                         self.state.stage = .output_parts;
                         return .item;
@@ -1453,13 +1413,9 @@ pub const Preparation = struct {
                     self.state.item = .{ .output_part = part };
                 } else {
                     self.state.item = .output_close;
-                    self.state.stage = .output_checked;
+                    self.state.stage = .history;
                 }
                 return .item;
-            },
-            .output_checked => {
-                if (builtin.is_test) try self.checkOutputOracle();
-                self.state.stage = .history;
             },
             .tool_results => {
                 const result = try self.view.nextToolResult() orelse {
@@ -1608,41 +1564,6 @@ pub const Preparation = struct {
 
     pub fn advanceStats(self: *const Preparation) PreparationAdvanceStats {
         return self.state.last_advance;
-    }
-
-    /// Tests only: the output item just written parses equal to the raw
-    /// item it was accepted as, replayed the way format 41 replayed it.
-    /// Every request test is thereby a proof that Rui's form loses nothing
-    /// the model saw.
-    noinline fn checkOutputOracle(self: *Preparation) !void {
-        const oracle = self.state.oracle orelse return;
-        self.state.oracle = null;
-        try self.writer.flush();
-        const allocator = std.testing.allocator;
-        const written = try allocator.alloc(u8, @intCast(self.writer.offset - oracle.start));
-        defer allocator.free(written);
-        _ = try self.readonly.readPositionalAll(self.writer.io, written, oracle.start);
-        // The input array's comma belongs to the item before.
-        const rebuilt = if (written.len != 0 and written[0] == ',') written[1..] else written;
-        var replayed: OracleWriter = .{};
-        defer replayed.bytes.deinit(allocator);
-        var reader: store.HistoricalReader = undefined;
-        try self.view.openContent(oracle.raw, &reader);
-        defer reader.close();
-        var cursor: request_encoding.ReplayCursor = .{ .omit_content = oracle.raw.item_identity.?.omit_reasoning_text };
-        var bytes_left: usize = std.math.maxInt(usize);
-        var items_left: usize = std.math.maxInt(usize);
-        _ = try cursor.advance(HistoricalSource{ .reader = &reader, .ranged = true }, &replayed, &bytes_left, &items_left);
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        // Both sides carry the provider's own members, duplicates included.
-        const options: std.json.ParseOptions = .{ .duplicate_field_behavior = .use_last };
-        const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), replayed.bytes.items, options);
-        const actual = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), rebuilt, options);
-        if (!jsonEqual(expected, actual)) {
-            std.debug.print("output item differs from its raw replay\n raw:     {s}\n rebuilt: {s}\n", .{ replayed.bytes.items, rebuilt });
-            return error.TestExpectedEqual;
-        }
     }
 
     fn startPiece(self: *Preparation, piece: Piece) !void {
@@ -3223,20 +3144,10 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     }
 }
 
-test "request preparation fences a saved output item that no longer parses" {
-    // Acceptance judges each item once; replay trusts that judgment and the
-    // content digest. Bytes rewritten with a matching digest are outside
-    // that boundary, but replay fences any whose top-level object it cannot
-    // frame. It does not judge values again, so a rewrite that frames is
-    // replayed as saved.
-    for ([_][]const u8{
-        "null",
-        "42",
-        "\"opaque\"",
-        "[]",
-        "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"",
-        "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"} {}",
-    }) |rewritten| {
+test "request preparation fences a saved provider bag whose bytes changed" {
+    // A saved bag is copied into the request as the provider sent it; the
+    // Store's digest is what keeps changed bytes out.
+    {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3246,7 +3157,7 @@ test "request preparation fences a saved output item that no longer parses" {
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", session.slice(), "next");
         try settleComposedForTesting(&setup, first, "saved-metadata", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
-        try setup.storage.rewriteOutputItemForTesting(first, rewritten);
+        try setup.storage.damageOutputBagForTesting(first);
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         var used: std.atomic.Value(u64) = .init(0);
