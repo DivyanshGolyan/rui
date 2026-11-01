@@ -47,6 +47,8 @@ status: Status = undefined,
 terminal: *Terminal,
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
+/// The overview that lent the terminal.
+lender: Lender = undefined,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
@@ -191,6 +193,30 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
     try self.reader.start(self.init.io, &self.job, worker);
 }
 
+/// The overview that lent the terminal decides what Ctrl-X does here and
+/// sends the stop, so a conversation stops its Session exactly as the
+/// Session's row does. Each call names the work the conversation shows.
+pub const Lender = struct {
+    context: *anyopaque,
+    /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
+    /// any other, which clears its notice and cancels its prompt.
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) anyerror!void,
+    /// Answers the overview's finished job and starts its next stop; true
+    /// when an answer came.
+    service: *const fn (context: *anyopaque) anyerror!bool,
+    /// What the overview says under the input, until its next step.
+    line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+
+    pub const Said = struct {
+        /// The stop prompt, or the overview's notice; null for neither.
+        text: ?[]const u8 = null,
+        /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
+        asking: bool = false,
+        /// Ctrl-X would ask to stop the work.
+        stoppable: bool = false,
+    };
+};
+
 /// How the frontend stopped. Either way it stopped only its own client waits;
 /// Host work it started continues. `returned` goes back to the overview that
 /// lent the terminal, which stays begun.
@@ -202,8 +228,8 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// caller restores the terminal before `leave` joins them, so a borrower that
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
-pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation) !Outcome {
-    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
     terminal.pump = .{ .context = self, .step = pump };
@@ -321,7 +347,7 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page };
-    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted);
+    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
     try std.testing.expectEqual(Outcome.detached, outcome);
     try std.testing.expect(terminal.active and terminal.pump == null);
     var written: [65536]u8 = undefined;
@@ -613,6 +639,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (try self.lender.service(self.lender.context)) self.dirty = true;
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         const admission = try self.submission.advance();
@@ -783,9 +810,14 @@ fn drawFrame(self: *Self) !void {
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status);
+    // The overview's stop prompt or notice, else the conversation's own.
+    const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
+    const notice = said.text orelse self.notice;
+    var facts = self.line.facts(&self.hint, self.session);
+    if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = notice orelse "", .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -929,6 +961,8 @@ const ConversationAction = enum {
     detach,
     /// Retries the uncertain original.
     recover,
+    /// Asks to stop the Session, and stops it at a second press.
+    stop,
 };
 
 /// The conversation's one key table.
@@ -940,7 +974,7 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_d = .detach,
     .ctrl_o = .expand,
     .ctrl_r = .recover,
-    .ctrl_x = null,
+    .ctrl_x = .stop,
     .up = .scroll_up,
     .down = .scroll_down,
     .shift_up = .scroll_up,
@@ -983,6 +1017,8 @@ fn perform(self: *Self, action: ConversationAction) !void {
             if (screen.browse(down, action == .page_up or action == .page_down)) try screen.latest();
         },
         .latest, .back, .close => {
+            // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
+            if (action == .close and self.overviewSays().asking) return;
             // Leaving also abandons a Message page not yet shown.
             self.dropMessageRequest();
             if (action == .close and self.settledView()) {
@@ -1015,8 +1051,27 @@ fn perform(self: *Self, action: ConversationAction) !void {
             screen.invalidateChoice();
             self.notice = self.decisionNotice();
         } else try self.submission.requestRecovery(null),
+        // Until the opening read the Session's work is unknown.
+        .stop => if (self.reading.opening) {
+            self.notice = "Ctrl-X stops the Session once it opens.";
+        } else try self.converse(true),
     }
     self.dirty = true;
+}
+
+/// Steps the overview with an input here, Ctrl-X or another.
+fn converse(self: *Self, ctrl_x: bool) !void {
+    try self.lender.step(self.lender.context, self.shownWork(), ctrl_x);
+}
+
+fn overviewSays(self: *const Self) Lender.Said {
+    return self.lender.line(self.lender.context, self.shownWork());
+}
+
+/// The work the conversation shows now.
+fn shownWork(self: *const Self) protocol.session_work.Kind {
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    return self.live.work.state.asOf(now_ms);
 }
 
 /// The latest view with nothing to dismiss: no Action, sub-view or command.
@@ -1125,6 +1180,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 }
 
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+    // As on the overview, every input clears the core's notice and cancels
+    // its stop prompt. An open prompt is cancelled after the input instead,
+    // so Ctrl-X can confirm it and Esc can see it.
+    const asked = self.overviewSays().asking;
+    if (!asked) try self.converse(false);
     // The editor the latest frame encodes takes the input; a transition
     // changes it only at the next frame. While approval is paused, typing
     // goes to the draft shown in the composer; it never decides, and
@@ -1137,6 +1197,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         }
         try self.draftEvent(decoded);
     }
+    if (asked and self.overviewSays().asking) try self.converse(false);
     if (self.leaving != null) screen.interruptConsent();
 }
 
@@ -1542,14 +1603,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
-        if (result.line) |*line| {
-            self.line = line.*;
-            self.shown.width = null;
-        }
-        if (result.hint) |*hint| {
-            self.hint = hint.*;
-            self.shown.width = null;
-        }
+        if (result.line) |*line| self.line = line.*;
+        if (result.hint) |*hint| self.hint = hint.*;
         self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
@@ -1662,7 +1717,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
     for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "status" }, .{ "a", "" } }) |line| {
         errdefer std.debug.print("change={s} line={s}|{s}\n", .{ @tagName(change), line[0], line[1] });
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
@@ -1763,7 +1818,7 @@ const HeldFrontend = struct {
         held.* = .{ .self = undefined, .screen = screen, .environ = try std.testing.environ.createMap(std.testing.allocator), .tmp = std.testing.tmpDir(.{}), .pipes = pipes };
         try screen.init(std.testing.io, &held.environ, false);
         const directory = try held.tmp.dir.realPath(std.testing.io, &held.directory);
-        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .colour = false, .reading = .{ .opening = false } };
+        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         held.self.init.io = std.testing.io;
         held.self.live.work = .{};
         held.self.input.init();
@@ -2180,4 +2235,108 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
         }
         try std.testing.expectEqual(case.recovery, recovers);
     }
+}
+
+/// An overview that lent the terminal and says nothing under its input.
+const quiet_overview: Lender = .{ .context = undefined, .step = struct {
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: bool) !void {}
+}.step, .service = struct {
+    fn service(_: *anyopaque) !bool {
+        return false;
+    }
+}.service, .line = struct {
+    fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
+        return .{};
+    }
+}.line };
+
+/// An overview that lent the terminal, reduced to one Session's stop
+/// prompt, stop and notice.
+const FakeOverview = struct {
+    asking: bool = false,
+    stopping: bool = false,
+    stops: usize = 0,
+    notice: ?[]const u8 = null,
+
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) !void {
+        const fake: *FakeOverview = @ptrCast(@alignCast(raw));
+        const asked = fake.asking;
+        fake.asking = false;
+        fake.notice = null;
+        if (!ctrl_x) return;
+        if (fake.stopping or work != .working) {
+            fake.notice = "unused: Stopping";
+        } else if (asked) {
+            fake.stops += 1;
+            fake.stopping = true;
+        } else fake.asking = true;
+    }
+
+    fn service(_: *anyopaque) !bool {
+        return false;
+    }
+
+    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+        const fake: *FakeOverview = @ptrCast(@alignCast(raw));
+        return .{ .text = if (fake.asking) "Stop unused? ctrl+x yes · esc no" else fake.notice, .asking = fake.asking, .stoppable = work == .working and !fake.stopping };
+    }
+
+    fn lender(fake: *FakeOverview) Lender {
+        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line };
+    }
+};
+
+test "Ctrl-X twice stops the open Session through the overview; any other key only cancels the ask" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    var overview: FakeOverview = .{};
+    held.self.lender = overview.lender();
+    held.self.line = .{ .read = .{ .revision = 1, .end = 1 } };
+    try held.self.line.model.set("gpt-6-sol");
+    const Bottom = struct {
+        fn row(frontend: *HeldFrontend, storage: []u8) ![]const u8 {
+            frontend.self.dirty = true;
+            try frontend.settle();
+            const window = frontend.screen.vx.window();
+            var length: usize = 0;
+            for (0..window.width) |column| {
+                const grapheme = (window.readCell(@intCast(column), window.height - 1) orelse break).char.grapheme;
+                @memcpy(storage[length..][0..grapheme.len], grapheme);
+                length += grapheme.len;
+            }
+            return std.mem.trimEnd(u8, storage[0..length], " ");
+        }
+    };
+    var storage: [512]u8 = undefined;
+    // The hint shows only while the overview says Ctrl-X would ask.
+    try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
+    held.self.live.work.state = .{ .working = .{ .since = 1 } };
+    try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqualStrings("Stop unused? ctrl+x yes · esc no", try Bottom.row(held, &storage));
+    // Ctrl-G, like Esc, cancels and stays in the conversation.
+    try sendKeys(&held.self, "\x07");
+    try std.testing.expect(held.self.leaving == null and !overview.asking);
+    try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
+    // Typing cancels too and still types, so the next Ctrl-X asks again.
+    try sendKeys(&held.self, "\x18x\x18");
+    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
+    try std.testing.expect(overview.asking and overview.stops == 0);
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqual(@as(usize, 1), overview.stops);
+    try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
+    // The overview's notice comes before the conversation's own.
+    held.self.notice = "Work continues while you compose.";
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqualStrings("unused: Stopping", try Bottom.row(held, &storage));
+    try sendKeys(&held.self, "y");
+    try std.testing.expectEqualStrings("Work continues while you compose.", try Bottom.row(held, &storage));
+    // Until the Session opens its work is unknown: Ctrl-X says so and asks
+    // nothing.
+    overview = .{};
+    held.self.notice = null;
+    held.self.reading.opening = true;
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expect(!overview.asking);
+    try std.testing.expectEqualStrings("Ctrl-X stops the Session once it opens.", try Bottom.row(held, &storage));
 }

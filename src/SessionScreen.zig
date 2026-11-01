@@ -556,7 +556,7 @@ pub const Footer = struct {
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
-/// wrote for them, which the caller resets when the facts change.
+/// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
 
 /// Encodes the selected projection and returns its receipt only after every
@@ -648,7 +648,9 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
+    // Cells borrow the rule's label until the frame is rendered too.
+    var rule_label: [64]u8 = undefined;
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     // Continuation rows align under the text; only the draft's first line
     // has a glyph. Each shown line is printed whole: draft_layout already
     // broke it to fit.
@@ -715,9 +717,8 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
-fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View) !void {
-    var buffer: [64]u8 = undefined;
-    const label = draft_layout.label(&buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
+fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
+    const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
     const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
     _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});
