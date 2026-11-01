@@ -1,5 +1,5 @@
 const std = @import("std");
-const protocol = @import("protocol.zig");
+const provider_name = @import("provider_name.zig");
 
 pub const Readiness = enum {
     configured,
@@ -14,7 +14,7 @@ pub const Readiness = enum {
 };
 
 /// Each built-in provider's local credential state.
-pub const Readinesses = std.EnumArray(protocol.Provider, Readiness);
+pub const Readinesses = std.enums.EnumArray(provider_name.Provider, Readiness);
 
 pub const Capability = struct {
     name: []const u8,

@@ -136,6 +136,7 @@ def key_entry(binary, typed):
                                    stdin=slave, stdout=slave, stderr=slave)
         deadline = time.monotonic() + 10
         output = read_until(master, process, b"(it is not shown): ", deadline)
+        # Typed the moment the prompt shows: echo must already be off.
         os.write(master, typed)
         process.wait(timeout=10)
         while select.select([master], [], [], 0.2)[0]:

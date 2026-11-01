@@ -755,8 +755,7 @@ fn saveApiKey(init: std.process.Init, update: DefaultUpdate) !void {
     defer std.crypto.secureZero(u8, &buffer);
     // A terminal does not echo the key, so it never lands in scrollback.
     const line: []const u8 = if (stdin.isTty(init.io) catch false) blk: {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Paste your OpenAI API key, then press Enter (it is not shown): ");
-        const entered = TerminalEditor.readSecretLine(init.io, &buffer) catch |err| {
+        const entered = TerminalEditor.readSecretLine(init.io, &buffer, "Paste your OpenAI API key, then press Enter (it is not shown): ") catch |err| {
             try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
             if (err == error.SecretEntryInterrupted) {
                 try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Key entry cancelled. Nothing was saved.\n");

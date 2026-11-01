@@ -51,7 +51,7 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
 /// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
 /// null. Ctrl+C arrives as a byte, not a signal, so the terminal's own
 /// settings are always restored before this returns.
-pub fn readSecretLine(io: std.Io, buffer: []u8) !?[]const u8 {
+pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     const original = try getAttributes();
     var mode = original;
     mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
@@ -59,6 +59,9 @@ pub fn readSecretLine(io: std.Io, buffer: []u8) !?[]const u8 {
     mode.c_cc[termios.VTIME] = 0;
     try setAttributes(.FLUSH, mode);
     defer setAttributes(.FLUSH, original) catch {};
+    // Prompt only once echo is off, so a key typed the moment the prompt
+    // shows is never echoed.
+    try std.Io.File.stdout().writeStreamingAll(io, prompt);
     var chunk: [64]u8 = undefined;
     defer std.crypto.secureZero(u8, &chunk);
     var length: usize = 0;

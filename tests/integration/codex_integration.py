@@ -718,7 +718,7 @@ def openai_journey():
             "API key rejection",
         )
         assert failure["result"]["code"] == "provider_http_401", failure
-        time.sleep(0.4)
+        # A resend would come before the Operation settles, so none came.
         assert len(endpoint.requests) == 3, "a rejected API key was resent"
         assert key_file.read_text() == OPENAI_KEY + "\n"
         # The Host holds its Store exclusively; inspect rows after it stops.

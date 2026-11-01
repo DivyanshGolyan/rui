@@ -1,5 +1,6 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
+const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
@@ -28,17 +29,7 @@ pub fn validLabel(bytes: []const u8) bool {
     comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
     return ToolPresentation.validDescription(bytes);
 }
-pub const Provider = enum {
-    codex,
-    openai,
-
-    /// The request and output grammar a new Session of this provider pins.
-    pub fn codec(self: Provider) Codec {
-        return switch (self) {
-            .codex, .openai => .@"openai-responses/1",
-        };
-    }
-};
+pub const Provider = provider_name.Provider;
 /// How a Host serves a provider: not at all, at a development endpoint
 /// that takes no credential, or at its own endpoint with its credential.
 pub const Route = enum { unserved, endpoint, chatgpt_device, key_file };
@@ -65,9 +56,7 @@ pub fn servesModel(routes: Routes) bool {
     return false;
 }
 
-/// A provider grammar and its version, as a Session pins it. A version's
-/// requests never change shape, so a pinned Session's prompt cache holds.
-pub const Codec = enum { @"openai-responses/1" };
+pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.

@@ -4,7 +4,7 @@
 //! table at compile time, so this module stays a functional core.
 const std = @import("std");
 const product_defaults = @import("product_defaults.zig");
-const protocol = @import("protocol.zig");
+const provider_name = @import("provider_name.zig");
 const provider_selection = @import("provider_selection.zig");
 
 /// Codex identifier syntax admits 1 to this many bytes.
@@ -115,7 +115,7 @@ pub fn validModelSyntax(model: []const u8) bool {
     return true;
 }
 
-const provider_count = @typeInfo(protocol.Provider).@"enum".field_names.len;
+const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len;
 
 /// Every built-in provider, in declaration order. They share one catalog.
 /// Selection of a Session binding or saved pin admits any exact ID with valid
@@ -132,7 +132,7 @@ pub fn supportedCapabilities(readiness: *const provider_selection.Readinesses) [
 
 fn withPolicy(readiness: *const provider_selection.Readinesses, admits: *const fn ([]const u8) bool) [provider_count]provider_selection.Capability {
     var out: [provider_count]provider_selection.Capability = undefined;
-    for (&out, std.enums.values(protocol.Provider)) |*entry, provider|
+    for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
         entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = admits, .readiness = readiness.get(provider) };
     return out;
 }
