@@ -2502,7 +2502,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
-    const wire = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
+    const wire = "{\"version\":\"3\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
     var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
@@ -2519,8 +2519,8 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"2\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
-    const failed_wire = "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"3\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const failed_wire = "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
     const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
@@ -2563,7 +2563,7 @@ test "mutation presentation complete modes preserve escaped original context" {
 }
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
-    const wire = "{\"version\":\"2\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
+    const wire = "{\"version\":\"3\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
     var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
