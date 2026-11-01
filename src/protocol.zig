@@ -690,6 +690,27 @@ pub const CallActivity = struct {
     }
 };
 
+/// The Messages a person or script sent that a Session admitted and had not
+/// taken at a page's boundary: not applied, and not excluded by a stop. A
+/// stop and an input boundary both take an admission-order prefix, so they
+/// are the newest such admissions. Zero when none waits.
+pub const Queued = struct {
+    count: u64 = 0,
+    /// The oldest one's Admission position.
+    oldest_position: u64 = 0,
+    /// The newest one's admission ID and Admission position.
+    newest_admission: u64 = 0,
+    newest_position: u64 = 0,
+
+    /// Holes: count, oldest position, newest admission, newest position.
+    pub const shape = .{ "{\"count\":\"", Hole.decimal, "\",\"oldest_position\":\"", Hole.decimal, "\",\"newest_admission\":\"", Hole.decimal, "\",\"newest_position\":\"", Hole.decimal, "\"}" };
+    pub const max_json_bytes = shapeBytes(shape);
+
+    pub fn writeJson(self: *const Queued, out: *std.Io.Writer) !void {
+        try writeShape(out, shape, .{ self.count, self.oldest_position, self.newest_admission, self.newest_position });
+    }
+};
+
 pub const session_work = @import("session_work.zig");
 pub const WorkState = session_work.WorkState;
 pub const change_ring = @import("change_ring.zig");
@@ -883,12 +904,15 @@ pub const ActivityFacts = struct {
     count: usize = 0,
     more: bool = false,
     call_activity: CallActivity = .{},
+    /// At the same boundary as `call_activity`. A running Host that predates
+    /// it omits it, and a reader then has none.
+    queued: ?Queued = null,
     work: PageWork = .{},
 
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    /// Holes: more, call activity, queued, work.
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .optional_json = Queued }, ",\"work\":", Hole{ .json = PageWork }, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
@@ -897,7 +921,7 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, self.queued, &self.work });
     }
 };
 

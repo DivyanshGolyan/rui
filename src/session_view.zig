@@ -9,7 +9,6 @@ const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
-const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -1498,32 +1497,26 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
     }
 }
 
-/// What live output has shown of the Messages people and scripts sent. A
-/// live read updates it as it renders.
-pub const Following = struct {
-    /// Those waiting behind the work.
-    queue: *queued_line.Queue,
-    /// The newest Message the opening showed queued: it and older ones show
-    /// in the opening, never live.
+/// What a live page needs to show the Messages people and scripts sent as
+/// they are taken.
+pub const Taking = struct {
+    /// The newest Message the opening showed queued: it and older ones never
+    /// show live.
     opened: u64,
-    /// Lowered to the Admission position of each Message a stop shows.
-    lowest: *?u64,
+    /// A position before the Admission of every such Message that waits at
+    /// the page's start, where a stop's search for those it excluded begins;
+    /// null when none waits.
+    from: ?u64,
 };
 
-/// The most queued Messages one read shows at a stop. A stop that excluded
-/// more ends its read before it; the next read shows the rest.
-pub const stop_batch = 16;
-
-/// Renders a page. A live page returns the index of the item it ended
-/// before, when a stop excluded more queued Messages than one read shows;
-/// null once every item rendered.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, following: Following) !?usize {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !void {
     const historical = page.facts.direction == .backward;
+    var from = taking.from;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
         if (!historical and item.value == .stop) {
             compact_tools.* = false;
-            if (!try excludedAtStop(requests, store, session, page.facts.end, item.value.stop.cutoff, following, sink, colour)) return index;
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, taking.opened, sink, colour);
         }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
@@ -1536,7 +1529,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     // A person's or script's Message shows live when it is
                     // taken: as its row, or at the stop that excluded it.
                     // Until then it waits above the input.
-                    if (value.state != .applied) following.queue.admit(value.admission, item.position);
+                    if (from == null and value.state != .applied) from = item.position - 1;
                     continue;
                 }
                 compact_tools.* = false;
@@ -1545,11 +1538,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
                 // and one the opening showed queued never shows again.
-                if (!historical) {
-                    if (value.sender != null) continue;
-                    _ = following.queue.take(value.admission, item.position);
-                    if (value.admission <= following.opened) continue;
-                }
+                if (!historical and (value.sender != null or value.admission <= taking.opened)) continue;
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, .none, sink, colour);
             },
@@ -1609,37 +1598,31 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
         }
     }
-    return null;
 }
 
-/// Shows the queued Messages a stop excluded, oldest first, each labelled,
-/// before the stop's own line, at most `stop_batch` of them. Returns whether
-/// none is left. Their bytes belong to no item, so no transcript begins
-/// among them; a transcript that begins later lists them at its seam.
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, end: u64, cutoff: u64, following: Following, sink: anytype, colour: bool) !bool {
-    const queue = following.queue;
-    const span = queue.excluded(cutoff) orelse return true;
-    sink.detach();
-    var cursor: protocol_reply.ActivityCursor = .{ .end = end, .position = queue.from - 1 };
-    var shown: usize = 0;
+/// Shows the Messages a person or script sent that a live page's stop
+/// excluded, oldest first and labelled, before the stop's own line: those
+/// waiting just before it, at or below its cutoff and admitted after `from`,
+/// except ones the opening showed. Their bytes belong to no item.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, opened: u64, sink: anytype, colour: bool) !void {
+    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from };
+    var first = true;
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
             .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
-            const value = switch (item.value) {
+            var value = switch (item.value) {
                 .admission => |value| value,
                 else => continue,
             };
-            if (value.sender != null or value.admission < span.low) continue;
-            if (value.admission > span.high) return true;
-            if (shown == stop_batch) return false;
+            if (value.sender != null or value.state != .queued or value.admission <= opened or value.admission > stop.value.stop.cutoff) continue;
+            if (first) sink.excluding(item.position);
+            first = false;
+            value.state = .excluded;
             try message(requests, store, session, item, value, .lasting(false), sink, colour);
-            following.lowest.* = @min(following.lowest.* orelse item.position, item.position);
-            _ = queue.take(value.admission, item.position + 1);
-            shown += 1;
         }
-        cursor = page.continuation() orelse return true;
+        cursor = page.continuation() orelse return;
     }
 }

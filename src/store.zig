@@ -3547,6 +3547,7 @@ pub const Store = struct {
         try self.validateAssistantEntries(request.session.slice(), lower, upper);
         const last = if (request.direction == .forward) boundary else null;
         page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
+        page.queued = try self.readQueuedLocked(request.session.slice(), if (last) |item| item.position else end);
         // Work as of this same read, so the footer, consent and first Action
         // always describe the page they arrive with.
         const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
@@ -3589,6 +3590,39 @@ pub const Store = struct {
             result.count += 1;
         }
         return result;
+    }
+
+    /// The Messages a person or script sent that were admitted at or before
+    /// `position` and not taken there. Selection and a stop's exclusion take
+    /// admission-order prefixes, so the walk goes from the newest down and
+    /// ends at the first one taken: it reads only those waiting, those
+    /// admitted after `position` and one more. Every Message at `position`
+    /// precedes its tool completions, so a boundary's ordinal changes nothing.
+    fn readQueuedLocked(self: *Store, session: []const u8, position: u64) !protocol.Queued {
+        const statement = try self.cached("SELECT m.admission_id,m.admission_position," ++
+            "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
+            "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) " ++
+            "FROM message_admission m INDEXED BY message_admission_person WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL " ++
+            "AND m.admission_position<=?2 ORDER BY m.admission_id DESC");
+        defer resetCached(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        var queued: protocol.Queued = .{};
+        while (true) {
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.ActivityReadFailed;
+            if (c.sqlite3_column_int(statement, 2) == 1) break;
+            const admission: u64 = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore);
+            const admitted: u64 = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
+            if (queued.count == 0) {
+                queued.newest_admission = admission;
+                queued.newest_position = admitted;
+            }
+            queued.count += 1;
+            queued.oldest_position = admitted;
+        }
+        return queued;
     }
 
     fn validateActivitySequence(self: *Store, session: []const u8) !void {
@@ -19249,6 +19283,43 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPageForTesting(request)).count);
+}
+
+test "an activity page reports the queued Messages at its end, until applied or stopped" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "queued-config");
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    try std.testing.expectEqual(@as(?protocol.Queued, .{}), (try storage.activityPageForTesting(request)).queued);
+    try submitTestMessage(&storage, &tmp, "queued-a", "a", session.slice(), "first");
+    try submitTestMessage(&storage, &tmp, "queued-b", "b", session.slice(), "second");
+    const waiting = try storage.activityPageForTesting(request);
+    const first = waiting.items[0];
+    const second = waiting.items[1];
+    try std.testing.expectEqual(@as(?protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
+    // Taken at an input boundary: none waits at the latest end, both still
+    // do at the earlier one.
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    _ = try admitted.permit.consume();
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.?.count);
+    var frozen = request;
+    frozen.end = waiting.end;
+    try std.testing.expectEqual(waiting.queued, (try storage.activityPageForTesting(frozen)).queued);
+    // One sent behind the work waits until a stop excludes it.
+    try submitTestMessage(&storage, &tmp, "queued-c", "c", session.slice(), "third");
+    const behind = try storage.activityPageForTesting(request);
+    try std.testing.expectEqual(@as(u64, 1), behind.queued.?.count);
+    try std.testing.expectEqual(behind.end, behind.queued.?.oldest_position);
+    try std.testing.expectEqual(behind.end, behind.queued.?.newest_position);
+    var stop = try completeSessionStop("queued-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.?.count);
+    frozen.end = behind.end;
+    try std.testing.expectEqual(behind.queued, (try storage.activityPageForTesting(frozen)).queued);
 }
 
 test "every activity row is dated by the fact that owns it" {

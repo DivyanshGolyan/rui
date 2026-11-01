@@ -5402,9 +5402,9 @@ def renderer_cases():
             first_release.set()
         print("renderer: Messages a Stop excluded are listed once, labelled, after later output evicts them", flush=True)
 
-        # A stop that excluded more Messages than one read shows: reads show
-        # them 16 at a time, the third from the stop's own page again, and
-        # the stop's line follows the last, each Message once, oldest first.
+        # A stop that excluded more Messages than one Activity page holds
+        # shows each once, oldest first, labelled, and its line follows the
+        # last.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
@@ -5430,7 +5430,7 @@ def renderer_cases():
                 tty.finish()
         finally:
             first_release.set()
-        print("renderer: a stop that excluded more Messages than one read shows labels each once, before its line", flush=True)
+        print("renderer: a stop that excluded more Messages than a page holds labels each once, before its line", flush=True)
 
         # A queued Message older than the opening's page, which holds only
         # its turn's commentary and held calls, is applied in the same read

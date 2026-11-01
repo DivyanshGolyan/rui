@@ -246,7 +246,10 @@ pub const ActivityPage = struct {
             }
         };
         const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, work: Work };
+        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
+        // A running Host survives a Rui upgrade, so a reader still meets a
+        // page from a Host that predates `queued`.
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: OmittableJson(?Queued) = .{}, work: Work };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -323,6 +326,16 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
+        if (wire.queued.value) |present| if (present) |queued| {
+            const value: protocol.Queued = .{ .count = try id(queued.count, true), .oldest_position = try id(queued.oldest_position, true), .newest_admission = try id(queued.newest_admission, true), .newest_position = try id(queued.newest_position, true) };
+            // None, or a span of Admissions at or before the boundary.
+            if (if (value.count == 0)
+                !std.meta.eql(value, protocol.Queued{})
+            else
+                value.newest_admission == 0 or value.oldest_position == 0 or value.oldest_position > value.newest_position or
+                    value.newest_position > boundary_position or value.count > value.newest_position - value.oldest_position + 1) return error.InvalidActivityPage;
+            page.facts.queued = value;
+        };
         const facts = &page.facts.work;
         const work = &facts.work;
         work.state = wire.work.state.value;
@@ -1781,7 +1794,9 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
-    var facts: protocol.ActivityFacts = .{ .end = 16, .count = 16 };
+    // The widest boundary a call published after it still follows.
+    var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
+    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1 };
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
@@ -1805,12 +1820,50 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
     try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
+    try std.testing.expectEqualDeep(facts.queued, page.facts.queued);
     try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
     }
+}
+
+test "an activity page's queued Messages are none or a span at its boundary, and an older Host omits them" {
+    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
+    try facts.work.workspace.set("/w");
+    const Case = struct { queued: protocol.Queued, valid: bool };
+    for ([_]Case{
+        .{ .queued = .{}, .valid = true },
+        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        // None waits, yet a Message is named.
+        .{ .queued = .{ .newest_admission = 9 }, .valid = false },
+        // After the boundary, before the oldest, or more than fit the span.
+        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41 }, .valid = false },
+        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31 }, .valid = false },
+        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40 }, .valid = false },
+    }) |case| {
+        facts.queued = case.queued;
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        if (case.valid) {
+            try std.testing.expectEqualDeep(@as(?protocol.Queued, case.queued), (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+        } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+    }
+    // A Host that predates the fact omits it.
+    facts.queued = null;
+    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&writer);
+    const written = writer.buffered();
+    const field = ",\"queued\":null";
+    const at = std.mem.indexOf(u8, written, field).?;
+    var older: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    const omitted = try std.fmt.bufPrint(&older, "{s}{s}", .{ written[0..at], written[at + field.len ..] });
+    try std.testing.expectEqual(@as(?protocol.Queued, null), (try ActivityPage.parse(omitted, .{})).facts.queued);
 }
 
 test "an activity row carries its time, and a Message's rows carry its admission time" {

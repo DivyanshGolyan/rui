@@ -102,29 +102,25 @@ pub const Hint = union(enum) {
     line: Bounded(session_line.max_line_bytes),
 };
 
-/// Reads the hint from the first Message at `position`. A refusal or content
-/// that is not text answers it with the reference.
+/// Reads the hint from the first Message at `position`.
 fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
-    var line: queued_line.Line = undefined;
-    try readFirstLine(requests, job, position, &line);
+    const line = try readFirstLine(requests, job, position);
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
-/// Fills `line` with the first line of the Message at `position`,
-/// terminal-safe; empty when the Host refuses it or it is not text. A
-/// canonical Store, transport or cancellation failure fails the read, as the
-/// page's would.
-fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, line: *queued_line.Line) !void {
-    line.len = 0;
+/// The first line of the Message at `position`, terminal-safe; empty when
+/// the Host refuses it or it is not text. A canonical Store, transport or
+/// cancellation failure fails the read, as the page's would.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64) !queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
     const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
-        error.InvalidResponse => return,
+        error.InvalidResponse => return .{ .len = 0 },
         else => return err,
     };
-    switch (reply) {
-        .line => |bytes| plainInto(line, session_line.firstLine(bytes)),
-        .failure => |failure| if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure),
-    }
+    return switch (reply) {
+        .line => |bytes| plain(session_line.max_line_bytes, session_line.firstLine(bytes)),
+        .failure => |failure| if (failure.err() == error.CanonicalStoreFailure) requests.failRead(failure) else .{ .len = 0 },
+    };
 }
 
 /// Text the Host holds, without terminal controls and with its tabs and line
@@ -132,14 +128,6 @@ fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, line
 /// an ellipsis when longer. One pass, straight into the value.
 fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     var value: Bounded(limit) = .{ .len = 0 };
-    plainInto(&value, bytes);
-    return value;
-}
-
-/// Fills a `Bounded` value in place with `plain`'s text.
-fn plainInto(value: anytype, bytes: []const u8) void {
-    const limit = value.bytes.len;
-    value.len = 0;
     var text: TerminalText = .{ .mode = .multiline };
     // The longest kept text an ellipsis can still follow.
     var room: usize = 0;
@@ -153,12 +141,13 @@ fn plainInto(value: anytype, bytes: []const u8) void {
             value.len = room;
             @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
             value.len += session_line.ellipsis.len;
-            return;
+            return value;
         }
         for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
         value.len += shown.len;
         if (value.len + session_line.ellipsis.len <= limit) room = value.len;
     }
+    return value;
 }
 
 pub const Job = struct {
@@ -183,13 +172,11 @@ pub const Job = struct {
     held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
-    // Messages waiting behind the work, and the newest the opening showed
-    // queued (see View.Following): a live read updates both in place.
-    queue: queued_line.Queue = .{},
+    // The Messages waiting at the live cursor, as the Host reported them,
+    // and the newest the opening showed queued (see View.Taking), which the
+    // opening sets in place.
+    queued: ?protocol.Queued = null,
     opened: u64 = 0,
-    // Where a live read writes the newest queued Message's first line when
-    // the newest changes: storage the UI is not drawing.
-    newest_line: ?*queued_line.Line = null,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -232,8 +219,10 @@ pub const Job = struct {
         lowest: ?u64 = null,
         // The job's Messages after this read.
         messages: Messages = .{},
-        // `newest_line` holds the newest queued Message's line.
-        newest_read: bool = false,
+        // The Messages waiting at this read's cursor, and the newest one's
+        // first line when it is not the one waiting before.
+        queued: ?protocol.Queued = null,
+        queued_line: ?queued_line.Line = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -321,10 +310,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.hint = try readHint(requests, job, position);
     };
     job.result.live = View.Live.init(page.facts.call_activity);
-    // Admission ids follow Session positions, so the newest one shown
-    // means every earlier Message was delivered too.
+    // Selection and a stop take admission-order prefixes, so a row or a
+    // stop takes every earlier Message too.
     for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .admission, .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .stop => |stop| job.result.delivered = @max(job.result.delivered, stop.cutoff),
         else => {},
     };
     if (job.opening) {
@@ -344,9 +334,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end };
-    const queue = &job.queue;
-    const waiting = queue.waiting();
-    const newest = queue.newest;
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(page.facts.work.work.state.holdsQueue(), &output);
@@ -356,24 +343,27 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // listing, at the opening's seam. No later boundary may precede its
         // row, which shows nothing live.
         output.messages.shown = @max(output.messages.shown, pending.newest);
-    } else output.fence = stopFence(page.facts.items[0..page.facts.count], queue.count != 0);
-    const ended = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .queue = queue, .opened = job.opened, .lowest = &job.result.lowest });
+    }
+    // A Host that predates the fact says nothing of what waits, so a stop
+    // searches every Admission before it.
+    const from: ?u64 = if (job.queued) |queued| (if (queued.count != 0) queued.oldest_position - 1 else null) else 0;
+    try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .opened = job.opened, .from = from });
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
-    queue.settle(page.facts.work.work.state.holdsQueue(), waiting);
-    if (queue.count != 0 and queue.newest != newest) {
-        try readFirstLine(requests, job, queue.newest, job.newest_line.?);
-        job.result.newest_read = true;
-    }
+    if (output.lowest) |lowest| job.result.lowest = lowest;
+    job.result.queued = page.facts.queued;
+    if (page.facts.queued) |queued| if (queued.count != 0 and queued.newest_admission > job.opened and
+        queued.newest_admission != if (job.queued) |before| before.newest_admission else 0)
+    {
+        job.result.queued_line = try readFirstLine(requests, job, queued.newest_position);
+    };
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
-        if (readEnd(job.result.messages, page.facts.more or ended != null, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
+        if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
     }
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
-    } else if (ended) |index| {
-        job.result.cursor = resumeBefore(&page.facts, index, cursor);
     } else {
         job.result.cursor = page.continuation() orelse .{ .position = page.facts.end };
         if (!page.facts.more) job.result.cursor.end = null;
@@ -472,34 +462,6 @@ fn listed(item: protocol.ActivityItem, all: bool, opened: u64) ?protocol.Activit
     };
 }
 
-/// Where a live page's stop fences read boundaries: a stop shows the queued
-/// Messages it excluded before its own line, and once they are excluded a
-/// transcript beginning earlier in this read would list them at its seam
-/// too. Only a stop that may show some fences: one while Messages wait above
-/// the input, or after a person's or script's Admission on this page that
-/// is not applied.
-fn stopFence(items: []const protocol.ActivityItem, waiting: bool) u64 {
-    var excluding = waiting;
-    for (items) |item| switch (item.value) {
-        .admission => |value| if (value.sender == null and value.state != .applied) {
-            excluding = true;
-        },
-        .stop => return if (excluding) item.position else 0,
-        else => {},
-    };
-    return 0;
-}
-
-/// Where the next live read starts when this one ended before the item at
-/// `index`, a stop with more excluded Messages than one read shows: right
-/// after the item before it, at this page's end, or this read's own cursor
-/// again when the stop is the page's first item.
-fn resumeBefore(facts: *const protocol.ActivityFacts, index: usize, cursor: protocol_reply.ActivityCursor) protocol_reply.ActivityCursor {
-    if (index == 0) return cursor;
-    const before = facts.items[index - 1];
-    return .{ .end = facts.end, .position = before.position, .ordinal = before.ordinal };
-}
-
 test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
     const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
     const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
@@ -537,40 +499,6 @@ test "a range lists the Messages live output showed, never queued Messages still
     try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, true, opened) == null);
 }
 
-test "a stop fences boundaries only when queued Messages may show before its line" {
-    const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
-    const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 9, .completion = .completed } } };
-    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null } } };
-    const admitted = struct {
-        fn at(position: u64, state: @FieldType(protocol.ActivityItem.Message, "state"), sender: ?protocol.Peer) protocol.ActivityItem {
-            return .{ .position = position, .at = 1, .value = .{ .admission = .{ .admission = position, .key = .{}, .turn = null, .state = state, .content = .{ .length = 1, .digest = @splat(0) }, .admitted_at = 1, .sender = sender } } };
-        }
-    };
-    // Nothing waits and the page admitted nothing it could exclude: a
-    // transcript may begin anywhere.
-    try std.testing.expectEqual(@as(u64, 0), stopFence(&.{ outcome, stop }, false));
-    try std.testing.expectEqual(@as(u64, 0), stopFence(&.{ admitted.at(8, .applied, null), admitted.at(9, .excluded, peer), stop }, false));
-    try std.testing.expectEqual(@as(u64, 0), stopFence(&.{}, true));
-    // Messages wait above the input, or the page admitted one the stop
-    // excluded: no transcript begins before the stop.
-    try std.testing.expectEqual(@as(u64, 20), stopFence(&.{ outcome, stop }, true));
-    try std.testing.expectEqual(@as(u64, 20), stopFence(&.{ admitted.at(9, .excluded, null), outcome, stop }, false));
-    // One admitted after the stop is not its to show.
-    try std.testing.expectEqual(@as(u64, 0), stopFence(&.{ stop, admitted.at(21, .queued, null) }, false));
-}
-
-test "a read that ends before a stop's queued Messages resumes at the stop" {
-    var facts: protocol.ActivityFacts = .{ .end = 40 };
-    facts.items[0] = .{ .position = 30, .ordinal = 2, .at = 1, .value = .{ .outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null } } };
-    facts.items[1] = .{ .position = 31, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 9, .completion = .completed } } };
-    facts.count = 2;
-    const cursor: protocol_reply.ActivityCursor = .{ .position = 29 };
-    // After the item before the stop, at this page's end.
-    try std.testing.expectEqualDeep(protocol_reply.ActivityCursor{ .end = 40, .position = 30, .ordinal = 2 }, resumeBefore(&facts, 1, cursor));
-    // The stop first: this read's own cursor again, which reaches it first.
-    try std.testing.expectEqualDeep(cursor, resumeBefore(&facts, 0, cursor));
-}
-
 test "a stop answers every Message up to its cutoff, and no boundary precedes queued Messages it shows" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -590,31 +518,52 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try answered.feed("! Session stopped.\n");
     try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
     try std.testing.expect(answered.finish().settled());
-    // Fenced at the stop: the excluded Messages it shows belong to no item,
-    // and nothing before the stop begins a transcript.
-    var fenced: DisplayCapture = .{ .task = &task, .file = file, .end = 30, .fence = 20 };
-    fenced.item(outcome);
-    try fenced.feed("✓ done\n");
-    fenced.detach();
-    try fenced.feed("! Stopped before it ran · send it again to run it\n› later\n");
-    try std.testing.expectEqual(@as(usize, 0), fenced.boundaries.count);
-    try std.testing.expectEqual(@as(usize, 0), fenced.echoes.count);
-    fenced.item(stop);
-    try fenced.feed("! Session stopped.\n");
-    try std.testing.expectEqual(@as(usize, 1), fenced.boundaries.count);
-    try std.testing.expectEqual(@as(u64, 20), fenced.boundaries.items[0].admitted);
+    // The Messages a stop shows belong to no item, and nothing before the
+    // stop in this read begins a transcript: once they are excluded, one
+    // beginning there would list them at its seam too.
+    var shown: DisplayCapture = .{ .task = &task, .file = file, .end = 30 };
+    shown.item(outcome);
+    try shown.feed("✓ done\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    shown.excluding(12);
+    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
+    try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
+    try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
+    shown.item(stop);
+    try shown.feed("! Session stopped.\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
 }
 
-/// The collapsed blocks one read writes: a page shows each item at most
-/// once, and a stop on it at most `View.stop_batch` Messages besides.
+/// The collapsed blocks one read writes, oldest first. A page shows each
+/// item at most once, but its stop also shows every queued Message it
+/// excluded: beyond capacity only the newest blocks are kept, and older ones
+/// are only counted, as `View.Blocks` keeps them.
 pub const Collected = struct {
-    items: [@max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items) + View.stop_batch]View.Collapsed = undefined,
+    pub const capacity = @max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items);
+    items: [capacity]View.Collapsed = undefined,
     count: usize = 0,
 
-    pub fn slice(self: *const Collected) []const View.Collapsed {
-        return self.items[0..self.count];
+    fn add(self: *Collected, value: View.Collapsed) void {
+        self.items[self.count % capacity] = value;
+        self.count += 1;
+    }
+
+    /// The block at `index` in write order, if kept.
+    pub fn at(self: *const Collected, index: usize) ?View.Collapsed {
+        std.debug.assert(index < self.count);
+        return if (self.count - index > capacity) null else self.items[index % capacity];
     }
 };
+
+test "a read's collapsed blocks keep the newest beyond capacity, as a stop's queued Messages may need" {
+    var blocks: Collected = .{};
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    for (0..Collected.capacity + 3) |index| blocks.add(.{ .source = .activity, .position = index, .ordinal = 0, .content = content, .row = false });
+    for (0..3) |index| try std.testing.expect(blocks.at(index) == null);
+    for (3..blocks.count) |index| try std.testing.expectEqual(@as(u64, index), blocks.at(index).?.position);
+}
 
 const DisplayCapture = struct {
     task: *Task,
@@ -627,8 +576,8 @@ const DisplayCapture = struct {
     end: u64 = 0,
     /// Messages shown before the current item.
     messages: Messages = .{},
-    /// No transcript begins at an item before this position.
-    fence: u64 = 0,
+    /// The lowest Admission position of a Message a stop showed.
+    lowest: ?u64 = null,
     /// Shown items where a transcript may begin.
     boundaries: Boundaries = .{},
     /// Shown Messages.
@@ -646,17 +595,18 @@ const DisplayCapture = struct {
         self.current_start = self.offset;
     }
 
-    /// Bytes until the next item belong to none: no transcript begins at
-    /// them, and no Message is recorded there.
-    pub fn detach(self: *@This()) void {
+    /// A stop shows the queued Messages it excluded next, from the one
+    /// admitted at `position`. Their bytes, until the stop's own item, belong
+    /// to no item, and no transcript begins earlier in this read: once they
+    /// are excluded, it would list them at its seam too.
+    pub fn excluding(self: *@This(), position: u64) void {
         _ = self.finish();
+        self.boundaries.count = 0;
+        self.lowest = @min(self.lowest orelse position, position);
     }
 
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
-        const blocks = self.blocks orelse return;
-        if (blocks.count == blocks.items.len) return error.TooManyCollapsedBlocks;
-        blocks.items[blocks.count] = value;
-        blocks.count += 1;
+        if (self.blocks) |blocks| blocks.add(value);
     }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -666,7 +616,7 @@ const DisplayCapture = struct {
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
-        if (self.messages.settled() and current.position >= self.fence)
+        if (self.messages.settled())
             self.boundaries.add(.{ .output = self.current_start, .cursor = beginningBefore(current, self.end), .admitted = current.position });
     }
 
