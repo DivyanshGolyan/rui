@@ -743,8 +743,7 @@ fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
     const waiting = screen.consent != null;
     const view = self.input.composition();
-    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
-    const queued = self.queuedRow(now_ms);
+    const queued = self.queuedRow();
     // A waiting Action says how to decide it under the input, not here. A
     // sent Message reads Sent until live output shows it: as its row, at
     // its stop, or in the queued row.
@@ -756,6 +755,7 @@ fn drawFrame(self: *Self) !void {
     } else if (self.admission.echo) |echo| (if (queued != null and echo <= queued.?.newest_admission) "" else "Sent") else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
     var live_words: [work_line.max_words_bytes]u8 = undefined;
     const live = if (waiting) null else work_line.of(&live_words, &self.live.work.state, self.live.work.operation, now_ms);
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
@@ -1243,21 +1243,14 @@ fn settleReader(self: *Self) !void {
     try self.applyReader(end);
 }
 
-/// The Messages the queued row shows at `now_ms`, if it shows: some wait,
-/// the newest is not one the opening showed queued, and the work holds them
-/// or has left them waiting in its state for `queued_after_s`.
-fn queuedRow(self: *const Self, now_ms: u64) ?protocol.Queued {
+/// The Messages the queued row shows, if it shows: some wait, the newest is
+/// not one the opening showed queued, and the work holds them. A Session
+/// that holds nothing takes a Message at once, so its row would only flash.
+fn queuedRow(self: *const Self) ?protocol.Queued {
     const queued = self.live.queued orelse return null;
-    const state = self.live.work.state;
-    if (queued.count == 0 or queued.newest_admission <= self.live.opened) return null;
-    return if (state.holdsQueue() or now_ms / std.time.ms_per_s -| state.since() >= queued_after_s) queued else null;
+    if (queued.count == 0 or queued.newest_admission <= self.live.opened or !self.live.work.state.holdsQueue()) return null;
+    return queued;
 }
-
-/// A Session that does not hold its queue takes a Message at once, so its
-/// row would only flash; one that still has not after a whole second shows
-/// it. Its work state's `since` is whole seconds, so two of them are at
-/// least one.
-const queued_after_s = 2;
 
 /// Appends a joined read's staged live output; none of it showed before.
 /// Its boundaries and echoes take the live offsets where writing reaches
@@ -1546,20 +1539,17 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
-test "the queued row shows what waits while the work holds it, or once it has waited a whole second" {
-    const now_ms: u64 = 1_792_937_000_000;
-    const now_s = now_ms / std.time.ms_per_s;
+test "the queued row shows what waits while the work holds it" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
     const Case = struct { queued: ?protocol.Queued, state: protocol.WorkState, opened: u64 = 0, shown: bool };
     for ([_]Case{
         // Work under way holds them, however new.
-        .{ .queued = some, .state = .{ .working = .{ .since = now_s } }, .shown = true },
-        .{ .queued = some, .state = .{ .approval = .{ .since = now_s } }, .shown = true },
-        // A pending Session takes them at once: no row until it has not for
-        // a whole second, which whole-second times make two.
-        .{ .queued = some, .state = .{ .pending = .{ .since = now_s } }, .shown = false },
-        .{ .queued = some, .state = .{ .pending = .{ .since = now_s - 1 } }, .shown = false },
-        .{ .queued = some, .state = .{ .pending = .{ .since = now_s - 2 } }, .shown = true },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
+        // A pending or idle Session takes them at once, however long ago it
+        // became so.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = false },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = false },
         // Nothing waits, the Host does not say, or the newest is one the
         // opening showed queued.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
@@ -1577,7 +1567,7 @@ test "the queued row shows what waits while the work holds it, or once it has wa
             .colour = false,
             .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .opened = case.opened },
         };
-        try std.testing.expectEqual(if (case.shown) case.queued else null, self.queuedRow(now_ms));
+        try std.testing.expectEqual(if (case.shown) case.queued else null, self.queuedRow());
     }
 }
 

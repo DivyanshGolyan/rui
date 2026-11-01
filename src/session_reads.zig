@@ -344,9 +344,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // row, which shows nothing live.
         output.messages.shown = @max(output.messages.shown, pending.newest);
     }
-    // A Host that predates the fact says nothing of what waits, so a stop
-    // searches every Admission before it.
-    const from: ?u64 = if (job.queued) |queued| (if (queued.count != 0) queued.oldest_position - 1 else null) else 0;
+    // A stop searches only from the oldest Message that waited at the last
+    // read: queued input joins the work at its next input boundary, so that
+    // is at most one model step back, never the history. A Host that
+    // predates the fact says nothing of what waits; its stop labels only
+    // the Messages this page admitted.
+    const from: ?u64 = if (job.queued) |queued| (if (queued.count != 0) queued.oldest_position - 1 else null) else null;
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .opened = job.opened, .from = from });
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
