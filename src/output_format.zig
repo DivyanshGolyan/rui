@@ -136,6 +136,29 @@ pub const OutputMetadataWriter = struct {
         // A failed write ends validation; retain the complete fixed-record
         // reservation until deinit so a partial OS write is never uncharged.
         self.charged += output_metadata_record_bytes;
+        const bytes = encode(record);
+        try self.file.writeStreamingAll(self.io, &bytes);
+        self.records += 1;
+        try self.count(record);
+    }
+
+    /// Replace the record at `index`, already charged, with `record`: a
+    /// part whose text arrives after its bag's members.
+    pub fn rewrite(self: *OutputMetadataWriter, index: u64, record: OutputMetadataRecord) !void {
+        std.debug.assert(!self.sealed and index < self.records);
+        if (self.fail_writes) return error.InjectedMetadataFailure;
+        const bytes = encode(record);
+        try self.file.writePositionalAll(self.io, &bytes, index * output_metadata_record_bytes);
+        try self.count(record);
+    }
+
+    fn count(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
+        if (record.tag == .part and record.kind == .message) {
+            self.decoded_length = try std.math.add(u64, self.decoded_length, record.decoded_length);
+        }
+    }
+
+    fn encode(record: OutputMetadataRecord) [output_metadata_record_bytes]u8 {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(record.tag);
         bytes[1] = @backingInt(record.kind);
@@ -167,11 +190,7 @@ pub const OutputMetadataWriter = struct {
             std.mem.writeInt(u64, bytes[48..56], usage.output, .little);
         }
         @memcpy(bytes[72..104], &record.content_digest);
-        try self.file.writeStreamingAll(self.io, &bytes);
-        self.records += 1;
-        if (record.tag == .part and record.kind == .message) {
-            self.decoded_length = try std.math.add(u64, self.decoded_length, record.decoded_length);
-        }
+        return bytes;
     }
 
     pub fn sealForRead(self: *OutputMetadataWriter) !void {
