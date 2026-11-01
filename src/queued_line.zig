@@ -17,11 +17,12 @@ pub const Line = Bounded(session_line.max_line_bytes);
 /// A first line and the Message it was read from.
 pub const Shown = struct { admission: u64, line: Line };
 
-/// Whether the row shows: some wait, the newest is not one the opening
-/// showed queued, and the work holds them. A Session that holds nothing
-/// takes a Message at once, so its row would only flash.
-pub fn shows(queued: protocol.Queued, opened: u64, holds: bool) bool {
-    return queued.count != 0 and queued.newest_admission > opened and holds;
+/// Whether the row shows: some wait and the newest is not one the opening
+/// showed queued. Live output shows such a Message only once it is taken,
+/// so the row shows it until then, whatever the work is doing: a pending
+/// Session can wait a long time before it takes one.
+pub fn shows(queued: protocol.Queued, opened: u64) bool {
+    return queued.count != 0 and queued.newest_admission > opened;
 }
 
 /// What the row shows: the newest Message's first line, and how many wait.

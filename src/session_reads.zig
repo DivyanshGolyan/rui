@@ -357,7 +357,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (output.lowest) |lowest| job.result.lowest = lowest;
     const queued = page.facts.queued;
     job.result.queued = queued;
-    if (queued_line.shows(queued, job.opened, page.facts.work.work.state.holdsQueue()) and queued.newest_admission != job.queued_line) {
+    if (queued_line.shows(queued, job.opened) and queued.newest_admission != job.queued_line) {
         job.result.queued_line = .{ .admission = queued.newest_admission, .line = try readFirstLine(requests, job, queued.newest_position) };
     }
     if (!job.opening) {

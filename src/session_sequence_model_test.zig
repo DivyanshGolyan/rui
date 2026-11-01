@@ -645,13 +645,13 @@ fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest:
         };
         for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
             .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
-                // The row shows while the work holds the Messages the Host
-                // reports waiting, newest last, past the opening's, by the
-                // newest one's own line. This Message is among those it
-                // counts: admitted at or after the oldest.
+                // The row shows the Messages the Host reports waiting,
+                // newest last, past the opening's, by the newest one's own
+                // line. This Message is among those it counts: admitted at
+                // or after the oldest.
                 const queued = front.live.queued;
                 const line = front.live.queued_line orelse return false;
-                return message.state == .queued and queued_line.shows(queued, front.live.opened, front.live.work.state.holdsQueue()) and
+                return message.state == .queued and queued_line.shows(queued, front.live.opened) and
                     line.admission == queued.newest_admission and front.live.opened < message.admission and
                     message.admission <= queued.newest_admission and item.position >= queued.oldest_position;
             },

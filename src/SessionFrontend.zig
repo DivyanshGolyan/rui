@@ -1252,7 +1252,7 @@ fn settleReader(self: *Self) !void {
 /// newest waiting Message, by the line read from it, and how many wait.
 fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    if (!queued_line.shows(queued, self.live.opened, self.live.work.state.holdsQueue())) return null;
+    if (!queued_line.shows(queued, self.live.opened)) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
     return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
@@ -1545,19 +1545,19 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
-test "the queued row shows what waits while the work holds it" {
+test "the queued row shows what waits until it is taken, whatever the work is doing" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
     const Case = struct { queued: protocol.Queued, state: protocol.WorkState, opened: u64 = 0, line: ?u64 = 9, shown: bool };
     var line: queued_line.Line = .{ .len = 0 };
     try line.set("check the cache");
     for ([_]Case{
-        // Work under way holds them, however new.
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
         .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
-        // A pending or idle Session takes them at once, however long ago it
-        // became so.
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = false },
-        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = false },
+        // Live output shows a Message only once it is taken, and a pending
+        // Session can wait long before it takes one, as after Ctrl-R
+        // recovery: the row is the only place the Message shows meanwhile.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
         // Nothing waits, or the newest is one the opening showed queued.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .opened = 9, .shown = false },
