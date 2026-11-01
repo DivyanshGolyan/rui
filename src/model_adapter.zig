@@ -1901,7 +1901,7 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
-    const configured = storage.configure(&configuration, protocol.routesAll(.endpoint), .{});
+    const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
 
@@ -1919,7 +1919,7 @@ test "real preparation consumes the configured allowance across multiple advance
         .digest = protocol.contentDigest(text),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, protocol.routesAll(.endpoint), .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -2038,7 +2038,7 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
-        const configured = self.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+        const configured = self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
         return configured.accepted.session;
@@ -2068,7 +2068,7 @@ const PreparationTestSetup = struct {
             .digest = protocol.contentDigest(text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(self.storage.submitMessageWithModel(&command, protocol.routesAll(.endpoint), .{}) == .accepted);
+        try std.testing.expect(self.storage.submitMessageWithModel(&command, .{}) == .accepted);
     }
 };
 
@@ -2084,7 +2084,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     configuration.configuration.tools = .{ .state = .value, .count = 1, .values = .{.bash} };
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(setup.storage.configure(&configuration, protocol.routesAll(.endpoint), .{}) == .accepted);
+    try std.testing.expect(setup.storage.configure(&configuration, .{}) == .accepted);
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
@@ -2415,7 +2415,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
             .digest = protocol.contentDigest(schema_json),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+        const reply = setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2480,7 +2480,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
             try ingress.feed(bytes);
             const request = try ingress.finish();
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-            const reply = storage.submitMessageWithModel(&request.message, protocol.routesAll(.endpoint), .{});
+            const reply = storage.submitMessageWithModel(&request.message, .{});
             try std.testing.expect(reply == .accepted);
             try std.testing.expect(!reply.accepted.replayed);
             admitted = true;
@@ -2587,7 +2587,7 @@ test "request preparation minimal golden is exact across schedules" {
             update.session = golden_session;
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
-            try std.testing.expect(setup.storage.configure(&update, protocol.routesAll(.endpoint), .{}) == .accepted);
+            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
         }
         var file_name: [32]u8 = undefined;
         const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
@@ -2710,7 +2710,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+        const reply = setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2765,7 +2765,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup_two.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+        const reply = setup_two.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2838,7 +2838,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
         }
-        const configured = setup.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+        const configured = setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
@@ -2854,7 +2854,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
                 update.session = session;
                 update.configuration.reasoning_effort.state = .value;
                 try update.configuration.reasoning_effort.value.set("low");
-                try std.testing.expect(setup.storage.configure(&update, protocol.routesAll(.endpoint), .{}) == .accepted);
+                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
             }
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
@@ -2907,7 +2907,7 @@ test "request preparation freezes settings at admission" {
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 1;
         update.configuration.tools.values[0] = .bash;
-        try std.testing.expect(setup.storage.configure(&update, protocol.routesAll(.endpoint), .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", session.slice(), "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2921,7 +2921,7 @@ test "request preparation freezes settings at admission" {
         update.session = session;
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 0;
-        try std.testing.expect(setup.storage.configure(&update, protocol.routesAll(.endpoint), .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
     }
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
@@ -3414,7 +3414,7 @@ test "request preparation authenticates the historical requested model binding" 
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
-    try std.testing.expect(setup.storage.configure(&revision, protocol.routesAll(.endpoint), .{}) == .accepted);
+    try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
@@ -3756,13 +3756,13 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var revision: protocol.ConfigureCommand = .{};
         try revision.key.set("binding-revision-two");
         revision.session = session;
-        try std.testing.expect(setup.storage.configure(&revision, protocol.routesAll(.endpoint), .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
         try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
-        try std.testing.expect(setup.storage.configure(&revision, protocol.routesAll(.endpoint), .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
@@ -3916,7 +3916,7 @@ fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounde
     command.configuration.tools.values[0] = .bash;
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const reply = setup.storage.configure(&command, protocol.routesAll(.endpoint), .{});
+    const reply = setup.storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }

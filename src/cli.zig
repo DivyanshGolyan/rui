@@ -1265,16 +1265,20 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var served: providers.Providers = .{ .ca_file = provider_ca_file };
     for (parsed.all("provider")) |label| {
         const named = std.meta.stringToEnum(protocol.Provider, label) orelse {
-            stderr.diagnostic("rui: --provider names no built-in provider; they are " ++ provider_labels ++ ".\n", .{});
+            // A label is short lowercase text; anything else is not echoed.
+            const printable = label.len <= protocol.max_provider_bytes and for (label) |byte| {
+                if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') break false;
+            } else true;
+            stderr.diagnostic("rui: --provider {s} is not a built-in provider; they are " ++ provider_labels ++ ".\n", .{if (printable) label else "(unprintable)"});
             return error.UnsupportedProvider;
         };
         if (served.serves(named)) return error.DuplicateArgument;
-        served.served.set(named, .{ .endpoint = providers.endpoint(named), .credential = switch (named) {
+        served.table.set(named, .{ .endpoint = providers.endpoint(named), .credential = switch (named) {
             .codex => .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } },
         } });
     }
-    if (fixture_endpoint) |endpoint| served.served.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
-    if (provider_endpoint) |endpoint| served.served.set(.codex, .{ .endpoint = endpoint, .credential = .none });
+    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
+    if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return server.serve(
         io,
@@ -1283,7 +1287,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         active_capacity,
         limits,
         hooks,
-        served,
+        &served,
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),

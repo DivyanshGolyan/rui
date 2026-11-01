@@ -255,7 +255,8 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
     limits: Limits = .{},
-    providers: providers_module.Providers = .{},
+    /// What this Host serves, owned by its caller for the Host's life.
+    providers: *const providers_module.Providers = &providers_module.none,
     auth_worker: ?*AuthWorker = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.

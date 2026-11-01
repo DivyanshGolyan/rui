@@ -724,7 +724,7 @@ pub fn serve(
     active_capacity: usize,
     limits: Limits,
     hooks: Hooks,
-    served: providers.Providers,
+    served: *const providers.Providers,
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
@@ -895,7 +895,7 @@ pub fn serve(
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
     if (served.any()) {
-        for (served.served.values) |entry| if (entry) |value| {
+        for (served.table.values) |entry| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
             switch (value.credential) {
                 .none => {},
@@ -1189,7 +1189,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = host.store.configure(command, host.providers.routes(), host.hooks.storeFaults(.command));
+            const result = host.store.configure(command, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -1202,7 +1202,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = host.store.submitMessageWithModel(command, host.providers.routes(), host.hooks.storeFaults(.command));
+            const result = host.store.submitMessageWithModel(command, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -3537,7 +3537,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
-        const configured = storage.configure(&configure, protocol.routesAll(.endpoint), .{});
+        const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);

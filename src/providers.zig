@@ -32,25 +32,28 @@ pub const Served = struct {
     credential: Credential,
 };
 
+/// A Host that serves no provider.
+pub const none: Providers = .{};
+
 /// What this Host serves, fixed at startup.
 pub const Providers = struct {
-    served: std.EnumArray(Provider, ?Served) = .initFill(null),
+    table: std.EnumArray(Provider, ?Served) = .initFill(null),
     /// Trust for every served endpoint; null is the system's.
     ca_file: ?[]const u8 = null,
 
     pub fn get(self: *const Providers, provider: Provider) ?*const Served {
-        return if (self.served.getPtrConst(provider).*) |*served| served else null;
+        return if (self.table.getPtrConst(provider).*) |*served| served else null;
     }
 
     /// Whether any provider is served, so the Host makes model requests.
     pub fn any(self: *const Providers) bool {
-        for (self.served.values) |served| if (served != null) return true;
+        for (self.table.values) |served| if (served != null) return true;
         return false;
     }
 
     /// The one ChatGPT sign-in this Host's authentication worker serves.
     pub fn chatgpt(self: *const Providers) ?model_adapter.Authentication {
-        for (self.served.values) |served| if (served) |value| switch (value.credential) {
+        for (self.table.values) |served| if (served) |value| switch (value.credential) {
             .chatgpt_device => |authentication| return authentication,
             else => {},
         };
@@ -74,11 +77,11 @@ test "a Host's routes name each provider it serves and its credential" {
     var providers: Providers = .{};
     try std.testing.expect(!providers.any());
     try std.testing.expectEqual(protocol.Route.unserved, providers.routes().codex);
-    providers.served.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
+    providers.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
     try std.testing.expect(providers.any() and providers.serves(.codex));
     try std.testing.expectEqual(protocol.Route.endpoint, providers.routes().codex);
     try std.testing.expectEqual(@as(?model_adapter.Authentication, null), providers.chatgpt());
-    providers.served.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
+    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.routes().codex);
     try std.testing.expectEqualStrings("/c", providers.chatgpt().?.path);
 }

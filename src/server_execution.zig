@@ -449,7 +449,7 @@ pub fn executionMain(host: *Host) void {
     // transport (h2 requires a positive stream capacity).
     const reactor: ?*provider.Reactor = if (slots.len != 0 and host.providers.any()) reactor: {
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
-        for (host.providers.served.values, &endpoints.values) |served, *endpoint| {
+        for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
             if (served) |value| endpoint.* = value.endpoint;
         }
         reactor_storage.init(host.allocator, host.io, .{
@@ -2839,7 +2839,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            const configured = storage.configure(&command, protocol.routesAll(.endpoint), .{});
+            const configured = storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -2854,7 +2854,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, protocol.routesAll(.endpoint), .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3060,7 +3060,7 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, protocol.routesAll(.endpoint), .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3075,7 +3075,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, protocol.routesAll(.endpoint), .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3381,7 +3381,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, protocol.routesAll(.endpoint), .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3396,7 +3396,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, protocol.routesAll(.endpoint), .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
 
     var records: [1]execution.CustodyRecord = @splat(.{});
