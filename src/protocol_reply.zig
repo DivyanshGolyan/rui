@@ -350,6 +350,48 @@ pub const ActivityPage = struct {
     }
 };
 
+pub const PersonMessageReply = union(enum) { found: protocol.PersonMessage, failure: ReadFailure };
+
+/// The reply to `request`: its end, and a Message on the asked side of its
+/// position within that end, or none.
+pub fn parsePersonMessage(bytes: []const u8, request: protocol.ReadPersonMessage) !protocol.PersonMessage {
+    if (bytes.len > protocol.max_person_message_response_bytes) return error.InvalidPersonMessage;
+    const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+    const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), message: ?struct { position: JsonString(20), content: Ref } };
+    var storage: [2 * protocol.max_person_message_response_bytes]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidPersonMessage;
+    if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("person_message")) return error.InvalidPersonMessage;
+    var reply: protocol.PersonMessage = .{ .end = try ActivityPage.id(wire.end, true) };
+    if ((request.end != null and request.end.? != reply.end) or request.position > reply.end) return error.InvalidPersonMessage;
+    const message = wire.message orelse return reply;
+    const position = try ActivityPage.id(message.position, false);
+    const outside = if (request.direction == .backward) request.position != 0 and position >= request.position else position <= request.position;
+    if (outside or position > reply.end) return error.InvalidPersonMessage;
+    reply.message = .{ .position = position, .content = try ActivityPage.content(message.content) };
+    return reply;
+}
+
+test "a person Message reply reads back within its request, at its bound" {
+    const max = std.math.maxInt(i64);
+    const longest: protocol.PersonMessage = .{ .end = std.math.maxInt(u64), .message = .{ .position = std.math.maxInt(u64), .content = .{ .length = std.math.maxInt(u64), .digest = @splat(0xab) } } };
+    var buffer: [protocol.max_person_message_response_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try longest.writeJson(&writer);
+    try std.testing.expectEqual(protocol.max_person_message_response_bytes, writer.end);
+    const found: protocol.PersonMessage = .{ .end = max, .message = .{ .position = 7, .content = .{ .length = 5, .digest = @splat(0xab) } } };
+    writer = .fixed(&buffer);
+    try found.writeJson(&writer);
+    try std.testing.expectEqual(found, try parsePersonMessage(writer.buffered(), .{ .position = 8 }));
+    try std.testing.expectEqual(found, try parsePersonMessage(writer.buffered(), .{ .end = max, .position = 6, .direction = .forward }));
+    for ([_]protocol.ReadPersonMessage{ .{ .position = 7 }, .{ .position = 7, .direction = .forward }, .{ .end = 9, .position = 8 } }) |request|
+        try std.testing.expectError(error.InvalidPersonMessage, parsePersonMessage(writer.buffered(), request));
+    const none: protocol.PersonMessage = .{ .end = 3 };
+    writer = .fixed(&buffer);
+    try none.writeJson(&writer);
+    try std.testing.expectEqual(none, try parsePersonMessage(writer.buffered(), .{}));
+}
+
 pub const HostStatus = union(enum) {
     ready: struct {
         store: protocol.Bounded(protocol.max_store_bytes),
@@ -428,7 +470,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}";
+    const golden = "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
@@ -459,15 +501,15 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {

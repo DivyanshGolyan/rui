@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
+import base64
 import errno
 import json
 import fcntl
@@ -12,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -2335,6 +2337,92 @@ def persistent_empty_answer_case():
             shutil.rmtree(state)
         else:
             retain_failure_state("empty answer failure state", state)
+
+
+def persistent_copy_case():
+    """/copy sends the last answer, and /copy code its last code block, to the
+    clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
+    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
+    a link at its name without following it."""
+    state = screen_fixture_root("rui-copy.")
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    here = state / "here"
+    here.mkdir()
+    answer = "Run:\n```sh\nzig build\n```\nThen:\n```py\nprint('é')\n```\nDone."
+    # The code block is the clipboard's limit exactly; the answer is over it.
+    limit = 75_000
+    block = ("x" * 99 + "\n") * 749 + "x" * 100
+    large = "```\n" + block + "\n```\nLarge done."
+    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("copy-0", "r-0", "m-0", answer)[0],
+                                        fixture.sse_answer("copy-1", "r-1", "m-1", large)[0]])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        session = create_session(home, "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
+            read_terminal(master, "› ")
+            capture = terminal_capture(master)
+            terminal_step(master, "/copy", "No answer to copy yet.", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
+            assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
+            terminal_step(master, "Copy request", "Done.", composer=True)
+
+            def sent(command):
+                before = len(capture.clipboard)
+                frame = terminal_step(master, command, "Sent to clipboard", composer=True)
+                assert "Sent to clipboard" in frame.split("\n"), frame
+                assert len(capture.clipboard) == before + 1, capture.clipboard
+                return capture.clipboard[-1]
+
+            def osc52(text):
+                return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
+
+            assert sent("/copy") == osc52(answer)
+            assert sent("/copy code") == osc52("print('é')")
+            name = f"rui-{session}-answer.md"
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            saved = here / name
+            assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            terminal_step(master, "Large request", "Large done.", composer=True)
+            before = len(capture.clipboard)
+            terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
+            assert len(capture.clipboard) == before, "an answer over the limit is never sent"
+            assert len(block) == limit
+            started = time.monotonic()
+            assert sent("/copy code") == osc52(block)
+            print(f"persistent copy: /copy code of {limit} bytes took {time.monotonic() - started:.3f}s to its frame", flush=True)
+            saved.chmod(0o644)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            # A link at the export name is replaced, never followed.
+            sentinel = state / "sentinel"
+            sentinel.write_bytes(b"sentinel")
+            sentinel.chmod(0o640)
+            saved.unlink()
+            saved.symlink_to(sentinel)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert sentinel.read_bytes() == b"sentinel" and sentinel.stat().st_mode & 0o777 == 0o640, sentinel
+            assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
+            assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
+            assert list(here.iterdir()) == [saved], list(here.iterdir())
+            terminal_step(master, "/exit", "Detached.")
+            assert caller.wait(timeout=5) == 0
+        completed = True
+        print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("copy failure state", state)
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
@@ -4795,6 +4883,45 @@ def renderer_cases():
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
 
+        # Ctrl-P on an empty draft brings back the Messages the person sent,
+        # newest first and never a peer's; Ctrl-N walks forward, and past
+        # the newest the draft is empty again. An edit makes it an ordinary
+        # draft. Up still scrolls throughout. Recalling sends nothing.
+        session = configure()
+        with terminal(session) as tty:
+            peer = 'printf %s RECALL-PEER | rui session send --to "$RUI_ADDRESS" > /dev/null'
+            endpoint.responses.append(fixture.sse_tool_calls("recall-peer", [("bash", "recall-peer-call", json.dumps(
+                {"cmd": peer, "description": "Send a Message to itself", "timeout_ms": None}))]))
+            tty.send("RECALL-ONE\r", answer("recall one"))
+            assert "RECALL-PEER" in endpoint.requests[-1].decode(), endpoint.requests[-1]
+            tty.send("RECALL-TWO\r", answer("recall two"))
+            # A script's Message the draft cannot hold as typed text.
+            marker = answer("recall control")
+            admit(home, "session", "send", "--store", store, "--to", session, input="RECALL-\x01-CONTROL")
+            tty.wait(marker)
+            tty.send("//RECALL-SLASH\r", answer("recall slash"))
+            submitted("/RECALL-SLASH")
+            requests = len(endpoint.requests)
+            older, newer = "\x10", "\x0e"
+            passed = "Passed over a sent message the draft cannot hold."
+            for step, (key, draft) in enumerate(((older, "//RECALL-SLASH"), ("\x1b[112;5u", "RECALL-TWO"), ("\x1b[27;5;112~", "RECALL-ONE"),
+                    (newer, "RECALL-TWO"), ("\x1b[110;5u", "//RECALL-SLASH"), (newer, ""), (older, "//RECALL-SLASH"))):
+                tty.send(key, predicate=lambda: tty.capture.draft(draft, 2 + len(draft)))
+                # Only a step over the control Message says it passed one, either way.
+                assert (passed in tty.capture.completed) == (step in (1, 4)), (step, tty.capture.completed)
+            # Up on a recalled draft scrolls, and the draft stays recalled.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[B", predicate=lambda: "Browsing" not in tty.capture.completed and tty.capture.draft("//RECALL-SLASH", 16))
+            # Presses made while a step is read add up; Ctrl-P stops at the oldest.
+            tty.send(older * 4, predicate=lambda: "No earlier message." in tty.capture.completed and tty.capture.draft("RECALL-ONE", 12))
+            tty.send("!", predicate=lambda: tty.capture.draft("RECALL-ONE!", 13))
+            tty.send(older, predicate=lambda: "Ctrl-P recalls sent messages once the draft is empty." in tty.capture.completed)
+            assert tty.capture.draft("RECALL-ONE!", 13), tty.capture.completed
+            assert len(endpoint.requests) == requests, endpoint.requests
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: Ctrl-P and Ctrl-N recall only the person's sent Messages, and an edit ends recall", flush=True)
+
         # An ESC inside a marked paste rejects the paste, and the end marker
         # right after it still ends it: the keys typed next are the draft's,
         # not more paste waiting for a fatal timeout.
@@ -5492,10 +5619,14 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy"), selected
     if selected in ("all", "callers", "caller-core", "empty-answers"):
         persistent_empty_answer_case()
     if selected == "empty-answers":
+        return
+    if selected in ("all", "callers", "caller-core", "copy"):
+        persistent_copy_case()
+    if selected == "copy":
         return
     if selected == "session-ids":
         help_case()
@@ -5656,7 +5787,7 @@ def main(selected="all"):
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         missing_setup = defaults(preferences_home)
         assert (missing_setup["store"], missing_setup["store_source"]) == (str(store.resolve()), "saved"), missing_setup
-        assert missing_setup["local_credential"] == "missing" and missing_setup["next_session"] == {
+        assert missing_setup["local_credentials"]["codex"] == "missing" and missing_setup["next_session"] == {
             "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
         assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
@@ -5694,7 +5825,7 @@ def main(selected="all"):
         assert not credential.exists() and not lock.exists()
         codex_fixture.credentials(credential)
         configured_setup = defaults(preferences_home)
-        assert configured_setup["local_credential"] == "configured", configured_setup
+        assert configured_setup["local_credentials"]["codex"] == "configured", configured_setup
         assert configured_setup["next_session"]["local_credential"] == "configured", configured_setup
         assert not lock.exists(), "status must not create a credential lock"
         fresh_provider_home = state / "fresh-provider-home"
@@ -5709,14 +5840,14 @@ def main(selected="all"):
             blocked = subprocess.run([str(fixture.RUI), "defaults", "inspect"],
                 env={**os.environ, "HOME": str(preferences_home)},
                 capture_output=True, text=True, timeout=2)
-            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credential"] == "credential_error", blocked
+            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credentials"]["codex"] == "credential_error", blocked
         finally:
             dispose_all(credential.unlink)
         codex_fixture.credentials(credential, state="refresh_pending")
-        assert defaults(preferences_home)["local_credential"] == "refresh_required"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "refresh_required"
         assert "state=refresh_pending" in credential.read_text(), "status must not refresh"
         credential.chmod(0o644)
-        assert defaults(preferences_home)["local_credential"] == "credential_error"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "credential_error"
         credential.unlink()
         defaults(preferences_home, "--provider", "other", success=False)
         defaults(preferences_home, "--model", "gpt-5.5")
@@ -5747,7 +5878,7 @@ def main(selected="all"):
         codex_fixture.credentials(credential)
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
-        assert stale["local_credential"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
+        assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
@@ -5869,8 +6000,8 @@ def main(selected="all"):
                 ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
                 ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
                 ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
-                ("d\x1b[114;999u", "Rui: Choose c or d. No login or preference change.", None),
-                ("d\x1b[27;2;13;1~", "Rui: Choose c or d. No login or preference change.", None)):
+                ("d\x1b[114;999u", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("d\x1b[27;2;13;1~", "Rui: Choose c, o or d. No login or preference change.", None)):
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -5951,7 +6082,7 @@ def main(selected="all"):
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
-            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credential"] == "renewal_due"
+            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
             welcome = overview_frame(master, overview_title, keys=b"d\n")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
