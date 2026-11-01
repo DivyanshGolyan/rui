@@ -468,7 +468,6 @@ const Reason = codec_abi.Reason;
 
 /// A verdict while it is being reached, as the error that `Reason` names.
 const Failure = error{
-    InvalidJson,
     ContradictoryProviderOutput,
     LateProviderOutput,
     ProviderConnectionClosed,
@@ -489,7 +488,7 @@ const Failure = error{
     TemporaryProviderFailure,
     ContextOverflow,
     ReportedProviderFailure,
-} || Judge.Incompatibility;
+} || Judge.Incompatibility || json.Error;
 
 comptime {
     // Every reason is a failure and every failure a reason.
@@ -1212,7 +1211,8 @@ pub const Interpreter = struct {
     /// The bytes of `[DONE]` the event has matched; past its length once
     /// the event differs.
     done_match: u8,
-    syntax_failed: bool,
+    /// Why the event's data is not JSON, once the reader found it.
+    syntax: ?json.Error,
     /// The event's type, when a first pass found it only after a value
     /// that needs it, so this pass reads the event again knowing it.
     known: ?EventType,
@@ -1224,10 +1224,6 @@ pub const Interpreter = struct {
     raw: std.EnumArray(codec_abi.Span, Cursor),
     string_field: codec_abi.Field,
     string_span: Cursor,
-    /// The reader as the item, and as the block, that may be read again
-    /// began.
-    item_snapshot: json.Reader,
-    block_snapshot: json.Reader,
     /// The judge's open frames outside the block that may be read again.
     block_judge_depth: u8,
 
@@ -1254,7 +1250,10 @@ pub const Interpreter = struct {
         usage: std.EnumArray(UsageKey, Named),
         cached: Named,
         codes: std.EnumArray(enum { event, nested, response }, Code),
-        item_mode: enum { none, judged, identity },
+        /// How the item is read: judged in a done event, for its identity
+        /// in an added event, and for its kind alone before the event's
+        /// type is known.
+        item_mode: enum { none, judged, identity, kind },
     };
 
     /// An item's records, as the split gives them.
@@ -1350,30 +1349,46 @@ pub const Interpreter = struct {
             return self.answer();
         }
         var consumed: usize = 0;
-        while (consumed < fed.bytes.len and Ops.capacity - ops.length >= reserve) {
-            const byte = fed.bytes[consumed];
-            self.done_match = if (self.done_match < done_marker_bytes.len and done_marker_bytes[self.done_match] == byte) self.done_match + 1 else done_marker_bytes.len + 1;
-            if (!self.syntax_failed) self.reader.feed(fed.bytes[consumed..][0..1], self) catch {
-                self.syntax_failed = true;
-            };
-            consumed += 1;
+        while (consumed < fed.bytes.len) {
+            var run = fed.bytes[consumed..];
+            // The marker is matched byte by byte while the event may be it.
+            if (self.done_match <= done_marker_bytes.len) {
+                const byte = run[0];
+                self.done_match = if (self.done_match < done_marker_bytes.len and done_marker_bytes[self.done_match] == byte) self.done_match + 1 else done_marker_bytes.len + 1;
+                run = run[0..1];
+            }
+            if (self.syntax != null) {
+                consumed += run.len;
+            } else if (self.reader.feedUntil(run, self)) |count| {
+                consumed += count;
+            } else |err| {
+                self.syntax = err;
+                consumed += run.len;
+            }
             if (self.seek) |seek| {
                 self.flush(fed.offset + consumed);
                 self.seek = null;
                 switch (seek.level) {
                     .event => unreachable,
-                    .item => self.reader = self.item_snapshot,
-                    .block => self.reader = self.block_snapshot,
+                    .item => self.reader.resumeValue(seek.offset, &.{.object}),
+                    .block => self.reader.resumeValue(seek.offset, &.{ .object, .object, .array }),
                 }
                 self.position = self.event_start + seek.offset;
                 try self.emit(.{ .need = self.position });
                 return self.answer();
             }
+            if (self.paused()) break;
         }
         self.position = fed.offset + consumed;
-        if (!self.syntax_failed) self.flush(self.position);
+        if (self.syntax == null) self.flush(self.position);
         if (consumed < fed.bytes.len) try self.emit(.{ .need = self.position });
         return self.answer();
+    }
+
+    /// Whether the reader stops after the byte just read: a value is to be
+    /// read again, or `Ops` has less room than one byte may need.
+    pub fn paused(self: *const Interpreter) bool {
+        return self.seek != null or Ops.capacity - self.ops.length < reserve;
     }
 
     fn answer(self: *const Interpreter) Error!Status {
@@ -1383,7 +1398,7 @@ pub const Interpreter = struct {
     fn startPass(self: *Interpreter) void {
         self.reader.init();
         self.done_match = 0;
-        self.syntax_failed = false;
+        self.syntax = null;
         self.seek = null;
         self.raw = .initFill(.{});
         self.string_span = .{};
@@ -1493,6 +1508,7 @@ pub const Interpreter = struct {
                     scan.identity.getPtr(name).begin(reader);
                     if (name == .id and kind == .string and scan.identity.get(.id).count == 1) self.openString(.added_id, self.at(reader.offset + 1));
                 },
+                .kind => if (depth == 2 and path[2] == .type) scan.identity.getPtr(.type).begin(reader),
                 .none => {},
             }
             return;
@@ -1504,10 +1520,12 @@ pub const Interpreter = struct {
                 member.begin(reader);
                 if (member.count != 1) return;
                 switch (outer) {
-                    .item => switch (scan.type orelse return self.needsType()) {
+                    .item => switch (scan.type orelse {
+                        scan.item_mode = .kind;
+                        return self.needsType();
+                    }) {
                         .done => {
                             scan.item_mode = .judged;
-                            self.item_snapshot = reader.*;
                             self.judge.reset(self.operation);
                             self.judge.begin(kind);
                             self.splitStart(reader, kind);
@@ -1569,6 +1587,7 @@ pub const Interpreter = struct {
                     scan.identity.getPtr(name).end(reader, kind);
                     if (name == .id and kind == .string and scan.identity.get(.id).count == 1) self.closeString(self.at(reader.offset));
                 },
+                .kind => if (depth == 2 and path[2] == .type) scan.identity.getPtr(.type).end(reader, kind),
                 .none => {},
             }
             return;
@@ -1904,7 +1923,6 @@ pub const Interpreter = struct {
         const replaying = block.replaying and block.start == start;
         if (!replaying) {
             block.word = null;
-            self.block_snapshot = reader.*;
             // The judge has opened the block's frame.
             self.block_judge_depth = self.judge.depth - 1;
         }
@@ -1920,8 +1938,9 @@ pub const Interpreter = struct {
     }
 
     fn openPart(self: *Interpreter) void {
-        const block = &self.split.block;
-        self.give(.{ .part = self.split.array });
+        const split = &self.split;
+        const block = &split.block;
+        self.give(.{ .part = .{ .array = split.array, .kind = partKind(split.kind.?, split.array, block.word).? } });
         block.open = true;
         for (block.pending.members[0..block.pending.count]) |range| self.giveMember(range);
         block.pending.clear();
@@ -1930,10 +1949,10 @@ pub const Interpreter = struct {
     fn blockEnd(self: *Interpreter) bool {
         const split = &self.split;
         const block = &split.block;
-        const word = block.word orelse {
+        if (block.word == null) {
             split.live = false;
             return false;
-        };
+        }
         if (block.replay) {
             block.replaying = true;
             split.elements -= 1;
@@ -1941,7 +1960,7 @@ pub const Interpreter = struct {
             self.seek = .{ .level = .block, .offset = block.start - self.event_start };
             return true;
         }
-        self.give(.{ .part_end = partKind(split.kind.?, split.array, word).? });
+        self.give(.part_end);
         block.replaying = false;
         return false;
     }
@@ -1974,6 +1993,7 @@ pub const Interpreter = struct {
                 return;
             }
             self.known = self.scan.type;
+            self.knowKind();
             self.startPass();
             self.position = self.event_start;
             try self.emit(.{ .need = self.event_start });
@@ -1984,6 +2004,21 @@ pub const Interpreter = struct {
                 try self.emit(.{ .failed = reasonOf(failure) });
             },
         }
+    }
+
+    /// The kind a first pass found for a done event's item, if one string
+    /// type named it, so the pass that reads the event again gives the
+    /// item's members as they come instead of reading it a third time.
+    fn knowKind(self: *Interpreter) void {
+        const scan = &self.scan;
+        if (scan.type != .done or scan.item_mode != .kind) return;
+        const item = scan.outer.get(.item);
+        const kind = scan.identity.getPtrConst(.type);
+        if (item.count != 1 or kind.count != 1 or kind.shape != .string) return;
+        const split = &self.split;
+        split.kind = Word.kind(kind.word) orelse return;
+        split.start = self.at(item.range.start);
+        split.replaying = true;
     }
 
     /// The event's verdict, in the order acceptance has always checked:
@@ -1997,7 +2032,8 @@ pub const Interpreter = struct {
         if (self.done_marker) return error.LateProviderOutput;
         try self.emit(.{ .at = .{ .stage = .event, .output_index = null } });
         if (self.completed) return error.LateProviderOutput;
-        if (self.syntax_failed or !self.reader.complete()) return error.InvalidJson;
+        if (self.syntax) |err| return err;
+        if (!self.reader.complete()) return self.reader.unfinished();
         const scan = &self.scan;
         if (scan.replay and self.known == null and scan.type != null) return true;
         _ = try (try scan.outer.getPtrConst(.type).required()).compared();
@@ -2173,3 +2209,210 @@ pub const Interpreter = struct {
         return (reason.compared() catch return false) == .context_length_exceeded;
     }
 };
+
+/// Interpret `events`, each one event's data, as the shell feeds them: in
+/// windows of at most `most` bytes from where the interpreter reads next,
+/// then each event's end, then the stream's. `out` gets one line per
+/// record, and `fed` how many bytes the interpreter was fed.
+fn interpretForTesting(events: []const []const u8, operation: codec_abi.Operation, most: usize, out: *std.ArrayList(u8), fed: *u64) !void {
+    const allocator = std.testing.allocator;
+    const interpreter = try allocator.create(Interpreter);
+    defer allocator.destroy(interpreter);
+    interpreter.init(operation);
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    var ops: Ops = .{};
+    fed.* = 0;
+    for (events) |event| {
+        try data.appendSlice(allocator, event);
+        var next: u64 = data.items.len - event.len;
+        while (true) {
+            const event_end = next == data.items.len;
+            const bytes = data.items[@intCast(next)..@intCast(@min(data.items.len, next + most))];
+            ops.length = 0;
+            try std.testing.expectEqual(Status.next, try interpreter.interpret(&.{ .offset = next, .bytes = bytes, .event_end = event_end, .end = false }, &ops));
+            fed.* += bytes.len;
+            const need = try describeForTesting(&ops, out);
+            if (need) |offset| {
+                next = offset;
+            } else if (event_end) break else next += bytes.len;
+        }
+    }
+    ops.length = 0;
+    const status = try interpreter.interpret(&.{ .offset = data.items.len, .bytes = &.{}, .event_end = false, .end = true }, &ops);
+    _ = try describeForTesting(&ops, out);
+    try out.print(allocator, "{t}\n", .{status});
+}
+
+/// One line per record in `ops`; the offset of a `need`, if any.
+fn describeForTesting(ops: *const Ops, out: *std.ArrayList(u8)) !?u64 {
+    const allocator = std.testing.allocator;
+    var need: ?u64 = null;
+    var records = ops.records();
+    while (try records.next()) |record| {
+        switch (record) {
+            .raw => |raw| try out.print(allocator, "raw {t} {d}+{d}", .{ raw.span, raw.start, raw.length }),
+            .string => |text| try out.print(allocator, "string {t} {d}+{d}{s}", .{ text.field, text.start, text.length, if (text.last) " last" else "" }),
+            .item, .added, .terminal => |kind| try out.print(allocator, "{t} {t}", .{ record, kind }),
+            .part => |part| try out.print(allocator, "part {t} {t}", .{ part.array, part.kind }),
+            .item_end => |item| try out.print(allocator, "item_end {t} {t}{s}", .{ item.answer_phase, item.phase, if (item.omit_reasoning_text) " omit" else "" }),
+            .terminal_failed, .failed => |reason| try out.print(allocator, "{t} {t}", .{ record, reason }),
+            .usage => |usage| if (usage) |counts| {
+                try out.print(allocator, "usage {d} {d} {d} {d}", .{ counts.uncached, counts.cache_read, counts.cache_write, counts.output });
+            } else try out.print(allocator, "usage unusable", .{}),
+            .at => |at| try out.print(allocator, "at {t} {?d}", .{ at.stage, at.output_index }),
+            .need => |offset| {
+                need = offset;
+                try out.print(allocator, "need {d}", .{offset});
+            },
+            .refusal => |code| try out.print(allocator, "refusal {s}", .{code}),
+            .report => |range| try out.print(allocator, "report {t} {d}+{d}", .{ range.field, range.start, range.length }),
+            .member_end, .part_end, .completed, .terminal_end, .finish => try out.print(allocator, "{t}", .{record}),
+        }
+        try out.append(allocator, '\n');
+    }
+    return need;
+}
+
+/// The lines `events` give with whole windows, and the bytes fed. Smaller
+/// windows cut spans into more pieces and need more feeds; every other
+/// record is the same.
+fn expectInterpreted(events: []const []const u8, operation: codec_abi.Operation, expected: []const u8) !u64 {
+    const allocator = std.testing.allocator;
+    var fed: u64 = 0;
+    var whole: std.ArrayList(u8) = .empty;
+    defer whole.deinit(allocator);
+    try interpretForTesting(events, operation, 4096, &whole, &fed);
+    try std.testing.expectEqualStrings(expected, whole.items);
+    for ([_]usize{ 64, 3, 1 }) |most| {
+        var cut: std.ArrayList(u8) = .empty;
+        defer cut.deinit(allocator);
+        var bytes: u64 = undefined;
+        try interpretForTesting(events, operation, most, &cut, &bytes);
+        var left: std.ArrayList(u8) = .empty;
+        defer left.deinit(allocator);
+        var right: std.ArrayList(u8) = .empty;
+        defer right.deinit(allocator);
+        try structureForTesting(whole.items, &left);
+        try structureForTesting(cut.items, &right);
+        try std.testing.expectEqualStrings(left.items, right.items);
+    }
+    return fed;
+}
+
+/// The lines that name no bytes.
+fn structureForTesting(lines: []const u8, out: *std.ArrayList(u8)) !void {
+    var iterator = std.mem.splitScalar(u8, lines, '\n');
+    while (iterator.next()) |line| {
+        if (std.mem.startsWith(u8, line, "raw ") or std.mem.startsWith(u8, line, "string ") or std.mem.startsWith(u8, line, "need ")) continue;
+        try out.appendSlice(std.testing.allocator, line);
+        try out.append(std.testing.allocator, '\n');
+    }
+}
+
+const completed_for_testing = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}";
+
+test "the interpreter names an item's spans and structure as it reads them" {
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}],\"x\":1}}";
+    const fed = try expectInterpreted(&.{ done, completed_for_testing }, .assistant_response,
+        \\item message
+        \\string item_id 84+1 last
+        \\raw member 78+8
+        \\member_end
+        \\part content output_text
+        \\string part_text 147+2 last
+        \\raw member 151+16
+        \\member_end
+        \\part_end
+        \\raw member 170+5
+        \\member_end
+        \\raw item 60+116
+        \\need 176
+        \\at event null
+        \\at item 0
+        \\item_end unphased unphased
+        \\string response_id 224+1 last
+        \\at event null
+        \\at response null
+        \\completed
+        \\terminal_end
+        \\finish
+        \\done
+        \\
+    );
+    // Its ops nearly full, the interpreter stopped one byte before the
+    // event's end, which it is fed again.
+    try std.testing.expectEqual(done.len + completed_for_testing.len + 1, fed);
+}
+
+/// Interpret one event and expect `line` among its records.
+fn expectRecord(event: []const u8, operation: codec_abi.Operation, line: []const u8) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    var fed: u64 = undefined;
+    try interpretForTesting(&.{event}, operation, 4096, &out, &fed);
+    if (std.mem.indexOf(u8, out.items, line) == null) {
+        std.debug.print("expected \"{s}\" in:\n{s}", .{ line, out.items });
+        return error.TestExpectedRecord;
+    }
+}
+
+test "an event that is not JSON fails for the reason validation names" {
+    const deep = "{\"a\":" ++ @as([json.max_depth]u8, @splat('[')) ++ "1" ++ @as([json.max_depth]u8, @splat(']')) ++ "}";
+    const cases = [_][2][]const u8{
+        .{ "{\"type\":", "unexpected_json_end" },
+        .{ "{\"a\":1,}", "expected_json_string" },
+        .{ "{\"a\" 1}", "unexpected_json_delimiter" },
+        .{ "[1]", "unexpected_json_delimiter" },
+        .{ "{}x", "trailing_json" },
+        .{ "{\"a\":}", "invalid_json_value" },
+        .{ "{\"a\":01}", "invalid_json_number" },
+        .{ "{\"a\":nul}", "invalid_json_literal" },
+        .{ "{\"a\":\"\x01\"}", "invalid_json_string" },
+        .{ "{\"a\":\"\\q\"}", "invalid_json_escape" },
+        .{ "{\"a\":\"\\udc00\"}", "invalid_json_surrogate" },
+        .{ "{\"a\":\"\xff\"}", "invalid_json_utf8" },
+        .{ deep, "json_too_deep" },
+    };
+    var line: [64]u8 = undefined;
+    for (cases) |case| try expectRecord(case[0], .assistant_response, try std.fmt.bufPrint(&line, "at event null\nfailed {s}\n", .{case[1]}));
+}
+
+test "the judge's verdict on an item reaches the shell as its reason or replay rule" {
+    const head = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":";
+    const cases = [_][2][]const u8{
+        .{ "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", "item_end unphased unphased omit\n" },
+        .{ "{\"type\":\"reasoning\",\"id\":\"r\",\"id\":\"s\",\"encrypted_content\":\"opaque\"}", "failed duplicate_json_field\n" },
+        .{ "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", "failed unsupported_item_type\n" },
+        .{ "{\"type\":\"message\",\"id\":\"m\",\"role\":\"user\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", "failed unsupported_message_role\n" },
+        .{ "{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", "item_end final_answer final_answer\n" },
+    };
+    var event: [512]u8 = undefined;
+    for (cases) |case| try expectRecord(try std.fmt.bufPrint(&event, "{s}{s}}}", .{ head, case[0] }), .assistant_response, case[1]);
+}
+
+test "an event read again because its types came last gives the records it gives in order" {
+    const allocator = std.testing.allocator;
+    const first = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}],\"id\":\"m\",\"role\":\"assistant\"}}";
+    const block = "{\"text\":\"ok\",\"type\":\"output_text\"}";
+    const last = "{\"output_index\":0,\"item\":{\"content\":[" ++ block ++ "],\"id\":\"m\",\"role\":\"assistant\",\"type\":\"message\"},\"type\":\"response.output_item.done\"}";
+    var structures: [2]std.ArrayList(u8) = @splat(.empty);
+    defer for (&structures) |*structure| structure.deinit(allocator);
+    var fed: [2]u64 = undefined;
+    for ([_][]const u8{ first, last }, &structures, &fed) |event, *structure, *bytes| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        try interpretForTesting(&.{ event, completed_for_testing }, .assistant_response, 4096, &out, bytes);
+        try structureForTesting(out.items, structure);
+    }
+    // Only the first pass's coordinates come before them.
+    try std.testing.expectEqualStrings("at event null\n", structures[1].items[0 .. structures[1].items.len - structures[0].items.len]);
+    try std.testing.expectEqualStrings(structures[0].items, structures[1].items["at event null\n".len..]);
+    // The first pass finds the event's and the item's types; the second
+    // reads the block again once its type follows its text. The window in
+    // which the block ends runs on to the event's end, so those bytes are
+    // fed once more after the block.
+    const tail = last.len - (std.mem.indexOf(u8, last, block).? + block.len);
+    try std.testing.expectEqual(first.len + completed_for_testing.len, fed[0]);
+    try std.testing.expectEqual(2 * last.len + block.len + tail + completed_for_testing.len, fed[1]);
+}

@@ -373,15 +373,24 @@ pub const AnswerSelection = struct {
     phased: bool = false,
     finals: u64 = 0,
 
-    /// A message at `ordinal`, with the phase answer selection reads and its
-    /// text's decoded `length` and `digest`, is accepted.
-    pub fn accept(self: *AnswerSelection, phase: codec_abi.Phase, non_whitespace: bool, length: u64, digest: [32]u8, ordinal: u64) void {
+    /// An accepted message, as answer selection reads it.
+    pub const Message = struct {
+        ordinal: u64,
+        phase: codec_abi.Phase,
+        /// Its text's decoded length and digest.
+        length: u64,
+        digest: [32]u8,
+        non_whitespace: bool,
+    };
+
+    pub fn accept(self: *AnswerSelection, message: *const Message) void {
+        const phase = message.phase;
         if (phase != .unphased) self.phased = true;
         if (phase == .final_answer) self.finals += 1;
         if (phase == .final_answer or (!self.phased and phase == .unphased)) {
-            self.ordinal = ordinal;
-            self.length = if (non_whitespace) length else 0;
-            self.digest = if (non_whitespace) digest else protocol.contentDigest("");
+            self.ordinal = message.ordinal;
+            self.length = if (message.non_whitespace) message.length else 0;
+            self.digest = if (message.non_whitespace) message.digest else protocol.contentDigest("");
         } else if (self.phased and self.finals == 0) {
             // Mixed phased/unphased text is visible, but only an explicit
             // final can terminate a phased response without Tool Calls.
@@ -410,7 +419,9 @@ pub const Feed = struct { most: usize = protocol.content_window_bytes };
 /// hashes and decodes them, writes `metadata` from them, and keeps every
 /// rule that compares items with each other, the answer selection and the
 /// completion gate. A failure leaves `rejection` at its coordinates and
-/// `provider_failure` with what a provider error event said.
+/// `provider_failure` with what a provider error event said. A codec that
+/// names bytes outside the event it is fed, or asks to be fed outside it,
+/// fails `error.CodecBadOp`.
 pub fn interpret(
     storage: *Interpret,
     interpreter: *const codecs.Interpreter,
@@ -423,7 +434,8 @@ pub fn interpret(
     rejection: *Rejection,
     provider_failure: *ProviderFailure,
     cut: Feed,
-) !Validated {
+    validated: *Validated,
+) !void {
     std.debug.assert(cut.most != 0);
     provider_failure.clear();
     rejection.* = .{};
@@ -433,7 +445,7 @@ pub fn interpret(
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
-    var stream: Stream = .{ .job = &storage.job, .grammar = grammar, .event_data = event_data, .most = cut.most, .fed = event_data.length };
+    var stream: Stream = .{ .job = &storage.job, .grammar = grammar, .event_data = event_data, .most = cut.most, .fed = event_data.length, .event_start = event_data.length, .high = event_data.length, .again = null };
     const capture = &storage.capture;
     capture.io = io;
     capture.file = source_file;
@@ -481,6 +493,7 @@ pub fn interpret(
             if (shown.len > skip and shown[skip] == ' ') skip += 1;
             if (data == null) {
                 data = event_data.length;
+                stream.beginEvent();
                 grammar.raw_start = line_start + skip;
             } else try stream.append("\n");
             var offset = line_start + skip;
@@ -496,7 +509,7 @@ pub fn interpret(
     if (data != null) return error.IncompleteSseEvent;
     try stream.end();
     try event_data.seal();
-    return .{
+    validated.* = .{
         .source = event_data.window.file,
         .source_length = event_data.length,
         .item_count = grammar.item_count,
@@ -509,7 +522,12 @@ pub fn interpret(
 }
 
 /// Feeds the codec the event data as it is written, and hands each record
-/// it answers to the grammar.
+/// it answers to the grammar. A codec reads only the open event: every span
+/// it names lies in the event's bytes fed so far, and it asks to be fed on
+/// from within them. A `need` that does not move past the start of the
+/// window it answers names a later offset than the last such `need`, and
+/// any other moves the next window's start on, so the Host feeds each event
+/// a bounded number of times.
 const Stream = struct {
     job: *codecs.InterpretJob,
     grammar: *Grammar,
@@ -517,6 +535,19 @@ const Stream = struct {
     most: usize,
     /// Where the codec reads next.
     fed: u64,
+    /// Where the open event's data begins, and the end of its bytes fed so
+    /// far.
+    event_start: u64,
+    high: u64,
+    /// The last `need` in the event that did not move past its window's
+    /// start.
+    again: ?u64,
+
+    fn beginEvent(self: *Stream) void {
+        self.event_start = self.event_data.length;
+        self.high = self.event_start;
+        self.again = null;
+    }
 
     fn append(self: *Stream, bytes: []const u8) !void {
         try self.event_data.append(bytes);
@@ -535,65 +566,101 @@ const Stream = struct {
     }
 
     /// The open event's data is whole: the codec judges it, and may read it
-    /// again first.
+    /// again first. Nothing it names afterwards lies in the event.
     fn endEvent(self: *Stream) !void {
         while (true) {
             try self.pump();
-            const length = self.event_data.length;
-            _ = try self.step(&.{ .offset = length, .bytes = &.{}, .event_end = true, .end = false });
-            if (!self.job.needed) return;
-            if (self.fed == length) return error.CodecBadOp;
+            _ = try self.step(&.{ .offset = self.event_data.length, .bytes = &.{}, .event_end = true, .end = false });
+            if (!self.job.needed) break;
         }
+        self.beginEvent();
     }
 
     fn end(self: *Stream) !void {
-        if (try self.step(&.{ .offset = self.event_data.length, .bytes = &.{}, .event_end = false, .end = true })) return;
         // A codec that is not done at the end has failed the stream.
-        return error.CodecBadOp;
+        if (!try self.step(&.{ .offset = self.event_data.length, .bytes = &.{}, .event_end = false, .end = true }) or self.job.needed) return error.CodecBadOp;
     }
 
     fn step(self: *Stream, fed: *const codec_abi.EventFed) !bool {
         const done = try self.job.step(fed);
-        var next = fed.offset + fed.bytes.len;
+        const fed_end = fed.offset + fed.bytes.len;
+        self.high = @max(self.high, fed_end);
+        var next = fed_end;
         while (try self.job.next()) |record| switch (record) {
             .need => |offset| {
-                if (offset > self.event_data.length) return error.CodecBadOp;
+                if (offset < self.event_start or offset > fed_end) return error.CodecBadOp;
+                if (offset <= fed.offset) {
+                    if (self.again) |previous| if (offset <= previous) return error.CodecBadOp;
+                    self.again = offset;
+                }
                 next = offset;
             },
-            else => try self.grammar.take(record),
+            else => {
+                switch (record) {
+                    .raw => |raw| try self.within(raw.start, raw.length),
+                    .string => |text| try self.within(text.start, text.length),
+                    .report => |range| try self.within(range.start, range.length),
+                    else => {},
+                }
+                try self.grammar.take(record);
+            },
         };
         self.fed = next;
         if (done) try self.grammar.drained();
         return done;
     }
+
+    /// The `length` bytes at `start` are in the open event and were fed.
+    fn within(self: *const Stream, start: u64, length: u64) error{CodecBadOp}!void {
+        if (start < self.event_start or start > self.high or length > self.high - start) return error.CodecBadOp;
+    }
+};
+
+/// Where the bytes of one span are, as they are given: each piece follows
+/// the one before it.
+const Run = struct {
+    open: bool,
+    start: u64,
+    length: u64,
+
+    /// Take the `length` bytes at `start`, which the Host bounded to the
+    /// open event; true when they open the run.
+    fn extend(self: *Run, start: u64, length: u64) error{CodecBadOp}!bool {
+        if (!self.open) {
+            self.* = .{ .open = true, .start = start, .length = length };
+            return true;
+        }
+        if (start != self.start + self.length) return error.CodecBadOp;
+        self.length += length;
+        return false;
+    }
 };
 
 /// Bytes of one span, hashed as they are given.
 const Spanned = struct {
-    open: bool,
-    start: u64,
-    length: u64,
-    hash: Sha256,
-
-    const closed: Spanned = .{ .open = false, .start = 0, .length = 0, .hash = undefined };
+    run: Run,
+    hash: Sha256 = undefined,
 
     fn extend(self: *Spanned, window: *Window, start: u64, length: u64) !void {
-        if (!self.open) {
-            self.* = .{ .open = true, .start = start, .length = 0, .hash = protocol.contentHasher() };
-        } else if (start != self.start + self.length) return error.CodecBadOp;
+        if (try self.run.extend(start, length)) self.hash = protocol.contentHasher();
         try hashRange(window, start, length, &self.hash);
-        self.length += length;
     }
 };
 
+/// Hash the `length` bytes at `start`, which lie in the event data.
 fn hashRange(window: *Window, start: u64, length: u64, hash: *Sha256) !void {
-    const end = try std.math.add(u64, start, length);
+    const end = start + length;
     var offset = start;
     while (offset < end) {
         const bytes = try window.bytesAt(offset, end);
         hash.update(bytes);
         offset += bytes.len;
     }
+}
+
+/// A sum of lengths a codec names: one that cannot be held is its fault.
+fn sum(a: u64, b: u64) error{CodecBadOp}!u64 {
+    return std.math.add(u64, a, b) catch error.CodecBadOp;
 }
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -613,7 +680,7 @@ const Bag = struct {
     fn separate(self: *Bag) !void {
         if (self.members == 0) return;
         self.hash.update(",");
-        self.length = try std.math.add(u64, self.length, 1);
+        self.length = try sum(self.length, 1);
     }
 
     /// Records the trailer, even for an empty bag: every item and part has
@@ -678,12 +745,30 @@ const Grammar = struct {
         id_digest: ?[32]u8,
         bag: Bag,
         part_bag: Bag,
-        member: struct { open: bool, start: u64, length: u64 },
-        part: ?struct { index: u64, array: output_format.PartArray, text: ?Encoded },
-        calls: [3]?Encoded,
+        member: Run,
+        part_open: bool,
+        part: Part,
+        /// A call's name, call id and arguments, each given once.
+        calls: [3]Encoded,
+        calls_given: std.bit_set.IntegerBitSet(3),
         text_hash: Sha256,
         text_length: u64,
         non_whitespace: bool,
+    };
+
+    /// The open part. Its record comes before its bag's members, and its
+    /// text may follow them, so the record is written once the first member
+    /// or the part's end comes, and a record written before its text is
+    /// completed at the part's end.
+    const Part = struct {
+        array: output_format.PartArray,
+        kind: output_format.PartKind,
+        has_text: bool,
+        text: Encoded = undefined,
+        /// Where the record was written, if it was.
+        written: ?u64,
+        /// The record was written without its text.
+        held: bool,
     };
 
     const Terminal = struct {
@@ -704,15 +789,19 @@ const Grammar = struct {
         self.call_count = 0;
         self.compaction_count = 0;
         self.answer = .{ .digest = protocol.contentDigest("") };
-        self.evidence = .{};
+        self.evidence.response_id.len = 0;
+        self.evidence.served_model.len = 0;
         self.completed = false;
         self.latched = null;
         self.added = null;
         self.added_id = null;
         self.item.open = false;
         self.text.open = false;
-        self.terminal = .{ .index = 0, .reader = null, .content = .closed, .id_digest = null };
-        self.usage = .closed;
+        self.terminal.index = 0;
+        self.terminal.reader = null;
+        self.terminal.content.run.open = false;
+        self.terminal.id_digest = null;
+        self.usage.run.open = false;
         self.refusal = null;
         self.report = .initFill(null);
     }
@@ -739,8 +828,8 @@ const Grammar = struct {
             .string => |text| self.takeString(text.field, text.last, text.start, text.length) catch |err| self.latch(err),
             .item => |kind| self.openItem(outputKind(kind)),
             .member_end => self.memberEnd() catch |err| self.latch(err),
-            .part => |array| self.openPart(@fromBackingInt(@intCast(@backingInt(array)))) catch |err| self.latch(err),
-            .part_end => |kind| self.closePart(kind) catch |err| self.latch(err),
+            .part => |part| self.openPart(@fromBackingInt(@intCast(@backingInt(part.array))), @fromBackingInt(@intCast(@backingInt(part.kind)))) catch |err| self.latch(err),
+            .part_end => self.closePart() catch |err| self.latch(err),
             .item_end => |end| try self.closeItem(end.answer_phase, end.phase, end.omit_reasoning_text),
             .added => |kind| {
                 if (self.latched) |err| return err;
@@ -784,15 +873,13 @@ const Grammar = struct {
             .member => {
                 const item = &self.item;
                 if (!item.open) return error.CodecBadOp;
-                const bag = if (item.part != null) &item.part_bag else &item.bag;
-                const member = &item.member;
-                if (!member.open) {
-                    member.* = .{ .open = true, .start = start, .length = 0 };
+                const bag = if (item.part_open) &item.part_bag else &item.bag;
+                if (try item.member.extend(start, length)) {
+                    if (item.part_open) try self.writePart();
                     try bag.separate();
-                } else if (start != member.start + member.length) return error.CodecBadOp;
+                }
                 try hashRange(self.window, start, length, &bag.hash);
-                member.length += length;
-                bag.length = try std.math.add(u64, bag.length, length);
+                bag.length = try sum(bag.length, length);
             },
             .terminal => try self.terminal.content.extend(self.window, start, length),
             .usage => try self.usage.extend(self.window, start, length),
@@ -806,24 +893,25 @@ const Grammar = struct {
             text.field = field;
             text.start = start;
             text.length = 0;
-            text.decoder = .{};
+            text.decoder.reset();
             text.hash = protocol.contentHasher();
             text.decoded_length = 0;
             text.non_whitespace = false;
             text.kept.len = 0;
             text.answer = field == .part_text and self.item.open and self.item.kind == .message;
         } else if (field != text.field or start != text.start + text.length) return error.CodecBadOp;
-        const end = try std.math.add(u64, start, length);
+        const end = start + length;
         var offset = start;
         while (offset < end) {
             const bytes = try self.window.bytesAt(offset, end);
             offset += bytes.len;
-            try text.decoder.pushSlice(bytes, self);
+            // The codec's reader judged these bytes as this decoder does.
+            text.decoder.pushSlice(bytes, self) catch return error.CodecBadOp;
         }
         text.length += length;
         if (!last) return;
         text.open = false;
-        if (text.decoder.pending()) return error.InvalidJson;
+        if (text.decoder.pending()) return error.CodecBadOp;
         const encoded: Encoded = .{ .start = text.start, .length = text.length, .decoded_length = text.decoded_length, .digest = text.hash.finalResult() };
         const item = &self.item;
         switch (field) {
@@ -831,14 +919,23 @@ const Grammar = struct {
             .added_id => self.added_id = encoded.digest,
             .terminal_id => self.terminal.id_digest = encoded.digest,
             .part_text => {
-                const part = if (item.part) |*part| part else return error.CodecBadOp;
+                if (!item.open or !item.part_open) return error.CodecBadOp;
+                const part = &item.part;
+                // A part has one text, which a record written whole holds.
+                if (part.has_text or (part.written != null and !part.held)) return error.CodecBadOp;
+                part.has_text = true;
                 part.text = encoded;
                 if (text.answer) {
-                    item.text_length = try std.math.add(u64, item.text_length, encoded.decoded_length);
+                    item.text_length = try sum(item.text_length, encoded.decoded_length);
                     item.non_whitespace = item.non_whitespace or text.non_whitespace;
                 }
             },
-            .call_name, .call_id, .call_arguments => item.calls[@backingInt(field) - @backingInt(codec_abi.Field.call_name)] = encoded,
+            .call_name, .call_id, .call_arguments => {
+                if (!item.open) return error.CodecBadOp;
+                const index = @backingInt(field) - @backingInt(codec_abi.Field.call_name);
+                item.calls[index] = encoded;
+                item.calls_given.set(index);
+            },
             .response_id => try self.evidence.response_id.set(text.kept.slice()),
             .served_model => try self.evidence.served_model.set(text.kept.slice()),
         }
@@ -871,12 +968,12 @@ const Grammar = struct {
         item.open = true;
         item.kind = kind;
         item.ordinal = self.item_count;
-        item.content = .closed;
+        item.content.run.open = false;
         item.id_digest = null;
         item.bag.reset(.item);
         item.member.open = false;
-        item.part = null;
-        item.calls = @splat(null);
+        item.part_open = false;
+        item.calls_given = .empty;
         item.text_hash = protocol.contentHasher();
         item.text_length = 0;
         item.non_whitespace = false;
@@ -886,40 +983,60 @@ const Grammar = struct {
         const item = &self.item;
         if (!item.open or !item.member.open) return error.CodecBadOp;
         item.member.open = false;
-        const bag = if (item.part != null) &item.part_bag else &item.bag;
+        const bag = if (item.part_open) &item.part_bag else &item.bag;
         bag.members += 1;
         try self.metadata.append(.{ .tag = .member, .kind = item.kind, .ordinal = item.ordinal, .start = item.member.start, .length = item.member.length, .scope = bag.scope });
     }
 
-    /// The part record comes before its bag's members, and its text may
-    /// follow them: it is written now and completed at the part's end.
-    fn openPart(self: *Grammar, array: output_format.PartArray) !void {
+    fn openPart(self: *Grammar, array: output_format.PartArray, kind: output_format.PartKind) !void {
         const item = &self.item;
-        if (!item.open or item.part != null or item.member.open or array == .none) return error.CodecBadOp;
-        item.part = .{ .index = self.metadata.records, .array = array, .text = null };
+        // Only an item the grammar rejects holds an opaque block.
+        if (!item.open or item.part_open or item.member.open or array == .none or kind == .opaque_block) return error.CodecBadOp;
+        item.part_open = true;
+        item.part = .{ .array = array, .kind = kind, .has_text = false, .written = null, .held = false };
         item.part_bag.reset(.part);
-        try self.metadata.append(.{ .tag = .part, .kind = item.kind, .ordinal = item.ordinal, .start = 0, .length = 0, .part_array = array });
     }
 
-    fn closePart(self: *Grammar, kind: codec_abi.PartKind) !void {
+    /// The open part's record, once its text has come.
+    fn partRecord(self: *const Grammar) output_format.OutputMetadataRecord {
         const item = &self.item;
-        const part = item.part orelse return error.CodecBadOp;
-        // Only an item the grammar rejects holds an opaque block.
-        const text = part.text orelse return error.CodecBadOp;
-        if (kind == .opaque_block or item.member.open) return error.CodecBadOp;
-        try self.metadata.rewrite(part.index, .{
+        const part = &item.part;
+        std.debug.assert(part.has_text);
+        return .{
             .tag = .part,
             .kind = item.kind,
             .ordinal = item.ordinal,
-            .start = text.start,
-            .length = text.length,
-            .decoded_length = text.decoded_length,
-            .content_digest = text.digest,
-            .part_kind = @fromBackingInt(@intCast(@backingInt(kind))),
+            .start = part.text.start,
+            .length = part.text.length,
+            .decoded_length = part.text.decoded_length,
+            .content_digest = part.text.digest,
+            .part_kind = part.kind,
             .part_array = part.array,
-        });
+        };
+    }
+
+    /// The part's first member comes: its record goes first.
+    fn writePart(self: *Grammar) !void {
+        const part = &self.item.part;
+        if (part.written != null) return;
+        if (part.has_text) {
+            part.written = self.metadata.records;
+            try self.metadata.append(self.partRecord());
+        } else {
+            part.written = try self.metadata.hold();
+            part.held = true;
+        }
+    }
+
+    fn closePart(self: *Grammar) !void {
+        const item = &self.item;
+        if (!item.open or !item.part_open or item.member.open or !item.part.has_text) return error.CodecBadOp;
+        const part = &item.part;
+        if (part.written) |index| {
+            if (part.held) try self.metadata.fill(index, self.partRecord());
+        } else try self.metadata.append(self.partRecord());
         try item.part_bag.close(self.metadata, item.ordinal, item.kind);
-        item.part = null;
+        item.part_open = false;
     }
 
     /// The codec accepted the open item: the Host's own rules on it, in the
@@ -929,16 +1046,16 @@ const Grammar = struct {
         if (!item.open) return error.CodecBadOp;
         item.open = false;
         if (self.latched) |err| return err;
-        if (!item.content.open or item.member.open or item.part != null) return error.CodecBadOp;
+        if (!item.content.run.open or item.member.open or item.part_open) return error.CodecBadOp;
         if (item.kind != .message and phase != .unphased) return error.CodecBadOp;
         const id_digest = item.id_digest orelse return error.CodecBadOp;
         const text_digest = item.text_hash.finalResult();
         try item.bag.close(self.metadata, item.ordinal, item.kind);
         switch (item.kind) {
             .function_call => {
+                if (item.calls_given.count() != item.calls.len) return error.CodecBadOp;
                 const tags = [_]output_format.OutputRecordTag{ .name, .call_id, .arguments };
-                for (tags, item.calls) |tag, call| {
-                    const field = call orelse return error.CodecBadOp;
+                for (tags, &item.calls) |tag, *field| {
                     try self.metadata.append(.{ .tag = tag, .kind = .function_call, .ordinal = item.ordinal, .start = field.start, .length = field.length, .decoded_length = field.decoded_length, .content_digest = field.digest });
                 }
             },
@@ -952,7 +1069,7 @@ const Grammar = struct {
                 self.compaction_count += 1;
                 if (self.compaction_count > 1) return error.UnsupportedProviderOutput;
             },
-            .message => self.answer.accept(answer_phase, item.non_whitespace, item.text_length, text_digest, item.ordinal),
+            .message => self.answer.accept(&.{ .ordinal = item.ordinal, .phase = answer_phase, .length = item.text_length, .digest = text_digest, .non_whitespace = item.non_whitespace }),
             .function_call => self.call_count += 1,
             .reasoning => {},
         }
@@ -960,8 +1077,8 @@ const Grammar = struct {
             .tag = .item,
             .kind = item.kind,
             .ordinal = item.ordinal,
-            .start = item.content.start,
-            .length = item.content.length,
+            .start = item.content.run.start,
+            .length = item.content.run.length,
             .id_digest = id_digest,
             .content_digest = item.content.hash.finalResult(),
             .omit_reasoning_text = omit_reasoning_text,
@@ -984,11 +1101,11 @@ const Grammar = struct {
     fn terminalItem(self: *Grammar, kind: output_format.OutputItemKind) !void {
         const terminal = &self.terminal;
         defer {
-            terminal.content = .closed;
+            terminal.content.run.open = false;
             terminal.id_digest = null;
         }
         if (self.latched != null) return;
-        if (!terminal.content.open) return error.CodecBadOp;
+        if (!terminal.content.run.open) return error.CodecBadOp;
         const id_digest = terminal.id_digest orelse return error.CodecBadOp;
         if (terminal.reader == null) terminal.reader = try output_format.OutputMetadataReader.init(self.metadata.io, self.metadata.file, self.item_count);
         const record = try terminal.reader.?.nextItem() orelse return error.ContradictoryProviderOutput;
@@ -1011,11 +1128,11 @@ const Grammar = struct {
 
     fn recordUsage(self: *Grammar, counts: ?codec_abi.Usage) !void {
         if (self.latched) |err| return err;
-        if (!self.usage.open) return error.CodecBadOp;
+        if (!self.usage.run.open) return error.CodecBadOp;
         try self.metadata.append(.{
             .tag = .usage,
-            .start = self.usage.start,
-            .length = self.usage.length,
+            .start = self.usage.run.start,
+            .length = self.usage.run.length,
             .content_digest = self.usage.hash.finalResult(),
             .usage = if (counts) |usage| .{ .uncached = usage.uncached, .cache_read = usage.cache_read, .cache_write = usage.cache_write, .output = usage.output } else null,
         });
@@ -1287,9 +1404,9 @@ const CountingInterpreter = struct {
     }
 };
 
-/// Interpret `sse` through `CountingInterpreter` into fresh event data and `metadata`,
-/// which the caller closes with `testing_events`.
-fn interpretForTesting(tmp: *std.testing.TmpDir, sse: []const u8, used: *std.atomic.Value(u64), metadata: *output_format.OutputMetadataWriter) !Validated {
+/// Interpret `sse` through `interpreter` into fresh event data and
+/// `metadata`, which the caller closes with `testing_events`.
+fn interpretForTesting(tmp: *std.testing.TmpDir, interpreter: *const codecs.Interpreter, sse: []const u8, cut: Feed, used: *std.atomic.Value(u64), metadata: *output_format.OutputMetadataWriter, validated: *Validated) !void {
     const io = std.testing.io;
     const source = try tmp.dir.createFile(io, "capture", .{ .read = true, .truncate = true });
     defer source.close(io);
@@ -1307,7 +1424,7 @@ fn interpretForTesting(tmp: *std.testing.TmpDir, sse: []const u8, used: *std.ato
     CountingInterpreter.longest = 0;
     var rejection: Rejection = .{};
     var failure: ProviderFailure = undefined;
-    return interpret(&testing_interpret, &CountingInterpreter.interpreter, io, source, sse.len, metadata, &testing_events, .assistant_response, &rejection, &failure, .{});
+    try interpret(&testing_interpret, interpreter, io, source, sse.len, metadata, &testing_events, .assistant_response, &rejection, &failure, cut, validated);
 }
 
 const completed_event = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n";
@@ -1319,9 +1436,10 @@ test "an event whose type follows its item is judged after a seek" {
     const done = head ++ "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"type\":\"response.output_item.done\"}";
     var used: std.atomic.Value(u64) = .init(0);
     var metadata: output_format.OutputMetadataWriter = undefined;
-    const validated = try interpretForTesting(&tmp, "data: " ++ done ++ "\n\n" ++ completed_event, &used, &metadata);
+    var validated: Validated = undefined;
     defer testing_events.window.file.close(std.testing.io);
     defer metadata.file.close(std.testing.io);
+    try interpretForTesting(&tmp, &CountingInterpreter.interpreter, "data: " ++ done ++ "\n\n" ++ completed_event, .{}, &used, &metadata, &validated);
     try std.testing.expectEqual(@as(u64, 1), validated.item_count);
     try std.testing.expectEqual(@as(?u64, 0), validated.answer_item_ordinal);
     try std.testing.expectEqual(@as(u64, 2), validated.answer_length);
@@ -1332,6 +1450,49 @@ test "an event whose type follows its item is judged after a seek" {
     const item = (try reader.nextItem()).?;
     try std.testing.expectEqual(output_format.OutputItemKind.message, item.kind);
     try std.testing.expectEqual(@as(u64, head.len), item.start);
+}
+
+test "an event, item and block whose types follow what they decide are read twice and the block once more" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const block = "{\"text\":\"ok\",\"type\":\"output_text\"}";
+    const done = "{\"output_index\":0,\"item\":{\"content\":[" ++ block ++ "],\"id\":\"m\",\"role\":\"assistant\",\"type\":\"message\"},\"type\":\"response.output_item.done\"}";
+    var used: std.atomic.Value(u64) = .init(0);
+    var metadata: output_format.OutputMetadataWriter = undefined;
+    var validated: Validated = undefined;
+    defer testing_events.window.file.close(std.testing.io);
+    defer metadata.file.close(std.testing.io);
+    try interpretForTesting(&tmp, &CountingInterpreter.interpreter, "data: " ++ done ++ "\n\n" ++ completed_event, .{}, &used, &metadata, &validated);
+    try std.testing.expectEqual(@as(u64, 1), validated.item_count);
+    try std.testing.expectEqual(@as(u64, 2), validated.answer_length);
+    // The first pass finds the event's type and the item's; the second
+    // reads the block again once its type follows its text. The window in
+    // which the block ends runs on to the event's end, so those bytes are
+    // fed once more after the block.
+    const tail = done.len - (std.mem.indexOf(u8, done, block).? + block.len);
+    try std.testing.expectEqual(validated.source_length + done.len + block.len + tail, CountingInterpreter.bytes);
+}
+
+test "a part whose text follows a bag member is completed in place and counted once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"text\":\"ok\"}]}}";
+    var used: std.atomic.Value(u64) = .init(0);
+    var metadata: output_format.OutputMetadataWriter = undefined;
+    var validated: Validated = undefined;
+    defer testing_events.window.file.close(std.testing.io);
+    defer metadata.file.close(std.testing.io);
+    try interpretForTesting(&tmp, pinned_interpreter, "data: " ++ done ++ "\n\n" ++ completed_event, .{}, &used, &metadata, &validated);
+    try std.testing.expectEqual(@as(u64, 2), validated.answer_length);
+    try std.testing.expectEqual(@as(u64, 2), metadata.decoded_length);
+    var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, 1);
+    const part = while (try reader.next()) |record| {
+        if (record.tag == .part) break record;
+    } else return error.TestExpectedPart;
+    try std.testing.expectEqual(output_format.PartKind.output_text, part.part_kind);
+    try std.testing.expectEqual(@as(u64, 2), part.decoded_length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &part.content_digest);
+    try std.testing.expectEqual(output_format.OutputRecordTag.member, (try reader.next()).?.tag);
 }
 
 test "a 4 MiB reasoning item interprets in bounded windows with no text byte read twice" {
@@ -1349,9 +1510,10 @@ test "a 4 MiB reasoning item interprets in bounded windows with no text byte rea
     defer allocator.free(sse);
     var used: std.atomic.Value(u64) = .init(0);
     var metadata: output_format.OutputMetadataWriter = undefined;
-    const validated = try interpretForTesting(&tmp, sse, &used, &metadata);
+    var validated: Validated = undefined;
     defer testing_events.window.file.close(std.testing.io);
     defer metadata.file.close(std.testing.io);
+    try interpretForTesting(&tmp, &CountingInterpreter.interpreter, sse, .{}, &used, &metadata, &validated);
     try std.testing.expectEqual(@as(u64, 2), validated.item_count);
     try std.testing.expectEqual(validated.source_length, CountingInterpreter.bytes);
     try std.testing.expectEqual(protocol.content_window_bytes, CountingInterpreter.longest);
@@ -1362,4 +1524,75 @@ test "a 4 MiB reasoning item interprets in bounded windows with no text byte rea
     try std.testing.expectEqual(output_format.PartKind.summary_text, part.part_kind);
     try std.testing.expectEqual(@as(u64, text.len), part.decoded_length);
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &part.content_digest);
+}
+
+/// The pinned interpreter, except for its answers to the windows that
+/// begin at `offset`: it adds `ops` to them, or answers with `ops` alone.
+fn FaultyInterpreter(comptime offset: u64, comptime fault: enum { add, replace }, comptime ops: []const u8) type {
+    return struct {
+        const interpreter: codecs.Interpreter = .{ .init = pinned_interpreter.init, .step = step };
+
+        fn step(state: *codecs.InterpreterState, fed: *const codec_abi.EventFed, out: *codec_abi.Ops) codec_abi.Status {
+            const hit = fed.offset == offset and fed.bytes.len != 0;
+            if (hit and fault == .replace) {
+                @memcpy(out.bytes[0..ops.len], ops);
+                out.length = ops.len;
+                return .next;
+            }
+            const status = pinned_interpreter.step(state, fed, out);
+            if (hit) {
+                @memcpy(out.bytes[out.length..][0..ops.len], ops);
+                out.length += ops.len;
+            }
+            return status;
+        }
+    };
+}
+
+test "a codec naming bytes outside its event or asking to be fed outside it fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}";
+    const sse = "data: " ++ done ++ "\n\n" ++ completed_event;
+    // Each event is fed in windows of 16 bytes; the second event's data
+    // follows the first's in the event data.
+    const window = 16;
+    const second = done.len;
+    const int = struct {
+        fn of(value: u64) [8]u8 {
+            return std.mem.toBytes(std.mem.nativeToLittle(u64, value));
+        }
+    }.of;
+    const usage_span = [_]u8{ @backingInt(codec_abi.RecordTag.raw), @backingInt(codec_abi.Span.usage) };
+    const code_report = [_]u8{ @backingInt(codec_abi.FindingTag.report), @backingInt(codec_abi.ReportField.code), @backingInt(codec_abi.Escape.json_string_v1) };
+    const need = [_]u8{@backingInt(codec_abi.RecordTag.need)};
+    const cases = .{
+        // A span past the bytes fed, one whose end cannot be held, one in
+        // the event before, and a report range in the event before.
+        FaultyInterpreter(0, .add, &(usage_span ++ int(0) ++ int(window + 1))),
+        FaultyInterpreter(0, .add, &(usage_span ++ int(std.math.maxInt(u64)) ++ int(1))),
+        FaultyInterpreter(second, .add, &(usage_span ++ int(0) ++ int(1))),
+        FaultyInterpreter(second, .add, &(code_report ++ int(0) ++ int(2))),
+        // A need past the bytes fed, one before the event, and one that
+        // asks for the same window again and again.
+        FaultyInterpreter(0, .replace, &(need ++ int(window + 4))),
+        FaultyInterpreter(second, .replace, &(need ++ int(second - 1))),
+        FaultyInterpreter(0, .replace, &(need ++ int(0))),
+    };
+    inline for (cases) |Case| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var metadata: output_format.OutputMetadataWriter = undefined;
+        var validated: Validated = undefined;
+        defer testing_events.window.file.close(std.testing.io);
+        defer metadata.file.close(std.testing.io);
+        try std.testing.expectError(error.CodecBadOp, interpretForTesting(&tmp, &Case.interpreter, sse, .{ .most = window }, &used, &metadata, &validated));
+    }
+    // The pinned interpreter accepts the stream.
+    var used: std.atomic.Value(u64) = .init(0);
+    var metadata: output_format.OutputMetadataWriter = undefined;
+    var validated: Validated = undefined;
+    defer testing_events.window.file.close(std.testing.io);
+    defer metadata.file.close(std.testing.io);
+    try interpretForTesting(&tmp, pinned_interpreter, sse, .{ .most = window }, &used, &metadata, &validated);
+    try std.testing.expectEqual(@as(u64, 1), validated.item_count);
 }
