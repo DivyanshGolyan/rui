@@ -1,8 +1,10 @@
 const std = @import("std");
-const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Mode = enum { line, multiline };
+
+/// The most bytes one input byte becomes: an escaped byte is `\xNN`.
+pub const max_bytes_per_byte = "\\x00".len;
 
 mode: Mode,
 utf8: [4]u8 = undefined,
@@ -49,13 +51,6 @@ test "Session shell selectors use the complete bare ID" {
             try std.testing.expectEqualStrings(id, out.buffered()[prefix.len..]);
         }
     }
-}
-
-/// Optional fatal guidance cannot retain a restored caller on stderr credit.
-/// One bounded write is best-effort; its failure never replaces the real error.
-pub fn diagnostic(comptime format: []const u8, args: anytype) void {
-    // The preceding transcript may end mid-line, including a partial command.
-    stderr.print("\n" ++ format, args);
 }
 
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
@@ -109,7 +104,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
 
 fn escapeByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     _ = self;
-    var escaped: [4]u8 = undefined;
+    var escaped: [max_bytes_per_byte]u8 = undefined;
     try out.writeAll(try std.fmt.bufPrint(&escaped, "\\x{x:0>2}", .{value}));
 }
 

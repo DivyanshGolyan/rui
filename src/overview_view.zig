@@ -1149,7 +1149,8 @@ fn refuseStop(state: *State, row: *const Row) void {
     if (state.openStop(row.reference)) |held| if (held.status == .unknown)
         return state.say(.attention, "! {s} stop unsure; details on exit", .{&row.reference});
     if (rules.get(shownKind(state, row)).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &row.reference, word_ });
-    state.say(.quiet, "{s}: {s}", .{ &row.reference, workLine(state, row).?.words });
+    var words: [work_line.max_words_bytes]u8 = undefined;
+    state.say(.quiet, "{s}: {s}", .{ &row.reference, workLine(&words, state, row).?.words });
 }
 
 /// The kind a row shows: `stopping` while a stop of it is open, and a retry
@@ -1160,8 +1161,8 @@ fn shownKind(state: *const State, row: *const Row) Kind {
 
 /// What a row's work is doing now, as `shownKind` reads it; null for idle or
 /// ended work.
-fn workLine(state: *const State, row: *const Row) ?work_line.Line {
-    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(&row.state, null, state.now_ms);
+fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
+    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, &row.state, null, state.now_ms);
 }
 
 fn enter(state: *State, text: []const u8, effects: *Effects) void {
@@ -2309,7 +2310,8 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     painter.begin(selected);
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
-    const line = workLine(state, row);
+    var words: [work_line.max_words_bytes]u8 = undefined;
+    const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
     // A mark pulses while its change is fresh, from a phase its change
@@ -2651,6 +2653,17 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         };
         if (unselected.styleAt(5, 53)) |style| try std.testing.expectEqual(Style{ .colour = tone }, style);
     }
+}
+
+test "a description's controls read escaped in its row's words, as its call row shows them" {
+    const bash: WorkState = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
+    var state = try opened(&.{session("k7m2qx", bash, .{ .label = "Write the notes" })});
+    defer state.deinit();
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for (0..5) |_| _ = lines.next();
+    try std.testing.expectEqualStrings("  ● Write the notes                                Run\\t\\x1b[2J\\u202etests   1m", lines.next().?);
 }
 
 test "a retry that has fallen due reads as starting in its words, mark and colour" {

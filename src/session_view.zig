@@ -700,11 +700,11 @@ pub const Live = struct {
         return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
     }
 
-    // Worst terminal escaping is four bytes per input byte; allow glyph and
-    // suffix, or a running call's clock.
-    pub const line_bytes = 4 * protocol.max_tool_description_bytes + 96;
+    // The escaped description, then glyph and suffix, or a running call's
+    // clock.
+    pub const line_bytes = Text.max_bytes_per_byte * protocol.max_tool_description_bytes + 96;
     comptime {
-        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - 4 * protocol.max_tool_description_bytes);
+        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
     }
 
     /// The call's row; `running` is the clock after the words of the

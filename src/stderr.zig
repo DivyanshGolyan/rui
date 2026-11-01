@@ -53,3 +53,10 @@ pub noinline fn print(comptime format: []const u8, args: anytype) void {
     const bytes = std.fmt.bufPrint(&buffer, format, args) catch return;
     _ = write(bytes);
 }
+
+/// Optional fatal guidance cannot retain a restored caller on stderr credit.
+/// One bounded write is best-effort; its failure never replaces the real error.
+pub fn diagnostic(comptime format: []const u8, args: anytype) void {
+    // The preceding transcript may end mid-line, including a partial command.
+    print("\n" ++ format, args);
+}

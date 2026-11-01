@@ -774,6 +774,8 @@ const Memory = struct {
     }
 };
 
+var test_words: [work_line.max_words_bytes]u8 = undefined;
+
 test "wide resize preserves a growing combining draft" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1027,7 +1029,7 @@ test "actual overflow yields wording before clipping required status" {
     try std.testing.expectEqualStrings("›", window.readCell(0, 2).?.char.grapheme);
     // Work under way gives up its line rather than the frame.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 1 } };
-    _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle", .live = work_line.of(&waiting, null, 2_000) }, &live);
+    _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle", .live = work_line.of(&test_words, &waiting, null, 2_000) }, &live);
     try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
     try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
@@ -1063,35 +1065,35 @@ test "the running call's row carries the clock, in its place, and other work end
     var buffer: [256]u8 = undefined;
     for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "• Run zig build · 42s", "• Run zig build" }, .{ "• Run zig build", "• Run zig build · 42s" } }) |ordinal, rows| {
         const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
-        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&state, 7, 142_000) }, &calls);
+        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
         try std.testing.expectEqualStrings("› run the store tests", rowText(screen, 0, &buffer));
         try std.testing.expectEqualStrings("✓ Read the failing test output", rowText(screen, 1, &buffer));
         try std.testing.expectEqualStrings(rows[0], rowText(screen, 2, &buffer));
         try std.testing.expectEqualStrings(rows[1], rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
         // A call of another Operation is not the one running.
-        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&state, 8, 142_000) }, &calls);
+        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
         try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
         try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 4, &buffer));
     }
     // Other work under way is the conversation's last line, then goes.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&waiting, 7, 142_000) }, &calls);
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
     try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
     try std.testing.expectEqualStrings("• Waiting · 12s", rowText(screen, 4, &buffer));
     _ = try screen.render(&out.writer, size, "", 0, .{}, &calls);
     try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
-    _ = try screen.render(&out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&waiting, 7, 142_000) }, &calls);
+    _ = try screen.render(&out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
     try std.testing.expectEqualStrings("  build", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
     try std.testing.expectEqualStrings("─", screen.vx.window().readCell(0, 9).?.char.grapheme);
     // Stopping says so quietly, with no clock.
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 130 } };
     screen.colour = true;
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&stopping, 7, 142_000) }, &calls);
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &stopping, 7, 142_000) }, &calls);
     try std.testing.expectEqualStrings("Stopping…", rowText(screen, 4, &buffer));
     try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(0, 4).?.style.fg);
     try std.testing.expect(!std.meta.eql(screen.style(.normal).fg, screen.style(.quiet).fg));
@@ -1115,7 +1117,7 @@ test "a browsed page keeps the live line above the status" {
     calls.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try calls.entries[0].presentation.description.?.set("Run zig build");
     const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
-    const footer: Footer = .{ .status = "Opening…", .live = work_line.of(&state, 7, 142_000) };
+    const footer: Footer = .{ .status = "Opening…", .live = work_line.of(&test_words, &state, 7, 142_000) };
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
@@ -1126,6 +1128,36 @@ test "a browsed page keeps the live line above the status" {
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
     // The page moves by the rows it shows.
     try std.testing.expectEqual(screen.height, screen.browsing_height);
+}
+
+test "a description's controls read escaped alike on its call row and on the live line" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try screen.append("row\n");
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var calls: View.Live = .{ .count = 1, .total = 1 };
+    calls.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try calls.entries[0].presentation.description.?.set("Run\t\x1b[2J\u{202e}tests");
+    const shown = "• Run\\t\\x1b[2J\\u202etests · 42s";
+    var buffer: [256]u8 = undefined;
+    // On its call row.
+    const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    // On the live line: the call is not among the rows, as from an older
+    // Host that names no call.
+    const older: protocol.WorkState = .{ .bash = .{ .since = 100, .call = null, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    // Cut to a narrow line, the words are cut as shown, never as raw bytes.
+    _ = try screen.render(&out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", rowText(screen, 1, &buffer));
 }
 
 test "narrow browsing retains the complete return instruction" {

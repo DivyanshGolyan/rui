@@ -30,6 +30,7 @@ const cores = .{
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
+    .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "work_line.zig", @import("work_line.zig") },
@@ -53,7 +54,6 @@ test {
     _ = @import("TerminalFrame.zig");
     _ = @import("TerminalInput.zig");
     _ = @import("TerminalEditor.zig");
-    _ = @import("TerminalText.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
     inline for (cores) |core| _ = core[1];

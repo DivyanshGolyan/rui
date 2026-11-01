@@ -254,16 +254,16 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         self.writePendingDiagnostic(&out) catch unreachable;
-        TerminalText.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
+        stderr.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
     const cause: ?anyerror = if (ended) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
     if (plan.failure) |err| switch (err) {
-        error.TerminalTooSmall => TerminalText.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
-        error.TerminalTooLarge => TerminalText.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
-        error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => TerminalText.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
+        error.TerminalTooSmall => stderr.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
+        error.TerminalTooLarge => stderr.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
+        error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => stderr.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
         else => {},
     };
     const action_view = self.terminal.screen.action_view != null;
@@ -362,7 +362,7 @@ pub fn recoveryGuide(self: *const Self) void {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     self.writeRecoveryGuide(&out) catch unreachable;
-    if (out.buffered().len != 0) TerminalText.diagnostic("{s}", .{out.buffered()});
+    if (out.buffered().len != 0) stderr.diagnostic("{s}", .{out.buffered()});
 }
 
 fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
@@ -773,7 +773,8 @@ fn drawFrame(self: *Self) !void {
     // An Action's own instructions speak for its approval; elsewhere the
     // work says what it is doing now, on every view.
     const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
-    const live = if (projection.approval != .absent) null else work_line.of(&self.live.work.state, self.live.work.operation, now_ms);
+    var live_words: [work_line.max_words_bytes]u8 = undefined;
+    const live = if (projection.approval != .absent) null else work_line.of(&live_words, &self.live.work.state, self.live.work.operation, now_ms);
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
     if (choosing and screen.actionVisible())

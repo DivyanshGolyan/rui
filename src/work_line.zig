@@ -8,6 +8,7 @@ const std = @import("std");
 const session_work = @import("session_work.zig");
 const session_line = @import("session_line.zig");
 const failure_class = @import("failure_class.zig");
+const TerminalText = @import("TerminalText.zig");
 
 pub const WorkState = session_work.WorkState;
 pub const Method = session_line.Method;
@@ -31,7 +32,8 @@ pub const Line = struct {
     /// The conversation's glyph before the words; empty for none.
     mark: []const u8,
     tone: Tone,
-    /// Borrows the state's description, when it names one.
+    /// Display text: a call's description escaped as its call row shows
+    /// it, borrowing the caller's buffer, or the table's own words.
     words: []const u8,
     clock: Clock,
     /// The running Bash call the line is about, when the caller named the
@@ -66,10 +68,10 @@ const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .stopped = null,
 });
 const rate_limited = "Rate limited";
-/// Bytes a line's words take at most: a call's description, or the table's
-/// own words.
+/// Bytes a line's words take at most: a call's escaped description, or the
+/// table's own words.
 pub const max_words_bytes = max: {
-    var bytes = @max(session_work.max_description_bytes, rate_limited.len);
+    var bytes = @max(TerminalText.max_bytes_per_byte * session_work.max_description_bytes, rate_limited.len);
     for (looks.values) |look| if (look) |shown| {
         bytes = @max(bytes, shown.words.len);
     };
@@ -86,16 +88,18 @@ pub const stopping: Line = line: {
 /// The line for `state` at `now_ms`, or null when no work is under way.
 /// `operation` is the Work's Operation, which names a running Bash call;
 /// pass null when the screen places no calls. A retry that has fallen due
-/// reads as the work it became (`asOf`).
-pub fn of(state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
-    if (state.* == .retrying and state.retrying.due_at_ms <= now_ms) return of(&state.asOf(now_ms), null, now_ms);
+/// reads as the work it became (`asOf`). A call's description is escaped
+/// into `words` as its call row escapes it, so no screen draws its
+/// controls.
+pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
+    if (state.* == .retrying and state.retrying.due_at_ms <= now_ms) return of(words, &state.asOf(now_ms), null, now_ms);
     if (state.* == .stopping) return stopping;
     const look = looks.get(state.*) orelse return null;
     return .{
         .mark = look.mark,
         .tone = look.tone,
         .words = switch (state.*) {
-            .bash => |*bash| if (bash.description) |*text| text.slice() else look.words,
+            .bash => |*bash| if (bash.description) |*text| escaped(words, text.slice()) else look.words,
             .retrying => |*retry| if (failure_class.rateLimited(retry.cause.slice())) rate_limited else look.words,
             else => look.words,
         },
@@ -105,6 +109,15 @@ pub fn of(state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
         },
         .call = if (state.* == .bash and operation != null and state.bash.call != null) .{ .operation = operation.?, .ordinal = state.bash.call.? } else null,
     };
+}
+
+fn escaped(buffer: *[max_words_bytes]u8, text: []const u8) []const u8 {
+    std.debug.assert(text.len <= session_work.max_description_bytes);
+    var out = std.Io.Writer.fixed(buffer);
+    var line: TerminalText = .{ .mode = .line };
+    line.feed(&out, text) catch unreachable;
+    line.finish(&out) catch unreachable;
+    return out.buffered();
 }
 
 const ms_per_s = 1000;
@@ -185,6 +198,7 @@ pub fn fit(buffer: *[max_clock_bytes]u8, line: Line, width: usize, method: Metho
 }
 
 const test_now_ms = 1_792_937_000_000;
+var test_words: [max_words_bytes]u8 = undefined;
 const test_now_s = 1_792_937_000;
 
 fn bounded(comptime capacity: usize, text: []const u8) @import("bounded.zig").Bounded(capacity) {
@@ -197,7 +211,7 @@ fn conversation(state: WorkState, now_ms: u64) ![]const u8 {
     const S = struct {
         var bytes: [256]u8 = undefined;
     };
-    const line = of(&state, null, now_ms) orelse return "";
+    const line = of(&test_words, &state, null, now_ms) orelse return "";
     var buffer: [max_clock_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&S.bytes);
     if (line.mark.len != 0) try out.print("{s} ", .{line.mark});
@@ -209,7 +223,7 @@ fn row(state: WorkState, now_ms: u64, script: Script) ![]const u8 {
     const S = struct {
         var bytes: [256]u8 = undefined;
     };
-    const line = of(&state, null, now_ms) orelse return "";
+    const line = of(&test_words, &state, null, now_ms) orelse return "";
     var buffer: [max_clock_bytes]u8 = undefined;
     return std.fmt.bufPrint(&S.bytes, "{s}{s}", .{ line.words, clockText(&buffer, line.clock, .row, script) });
 }
@@ -237,12 +251,12 @@ test "every work state has the approved words on both screens, and ended work ha
         try std.testing.expectEqualStrings(case.row, try row(case.state, test_now_ms, .unicode));
         try std.testing.expectEqualStrings(case.ascii, try row(case.state, test_now_ms, .ascii));
         // A line exactly while work is under way.
-        try std.testing.expectEqual(case.state.progress() != null, of(&case.state, null, test_now_ms) != null);
-        if (of(&case.state, null, test_now_ms)) |line| try std.testing.expectEqual(case.tone, line.tone);
+        try std.testing.expectEqual(case.state.progress() != null, of(&test_words, &case.state, null, test_now_ms) != null);
+        if (of(&test_words, &case.state, null, test_now_ms)) |line| try std.testing.expectEqual(case.tone, line.tone);
     }
     try std.testing.expect(seen.eql(.full));
     // A stop the person asked for reads as the Host's stopping state does.
-    const host_stopping = of(&.{ .stopping = .{ .since = 1 } }, 7, test_now_ms).?;
+    const host_stopping = of(&test_words, &.{ .stopping = .{ .since = 1 } }, 7, test_now_ms).?;
     try std.testing.expectEqualStrings(stopping.words, host_stopping.words);
     try std.testing.expectEqual(stopping.tone, host_stopping.tone);
     try std.testing.expectEqual(Clock.ellipsis, host_stopping.clock);
@@ -254,20 +268,29 @@ test "every work state has the approved words on both screens, and ended work ha
     try std.testing.expectEqualStrings("• Waiting · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
 }
 
+test "a description's controls read escaped on both screens, as its call row shows them" {
+    const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
+    try std.testing.expectEqualStrings("• Run\\t\\x1b[2J\\u202etests · 42s", try conversation(state, test_now_ms));
+    try std.testing.expectEqualStrings("Run\\t\\x1b[2J\\u202etests", try row(state, test_now_ms, .unicode));
+    // The widest description escapes within the words' bound.
+    const widest: WorkState = .{ .bash = .{ .since = test_now_s, .call = 0, .description = bounded(session_work.max_description_bytes, &@as([session_work.max_description_bytes]u8, @splat(0x1b))), .running = 1, .approvals = 0 } };
+    try std.testing.expectEqual(max_words_bytes, of(&test_words, &widest, null, test_now_ms).?.words.len);
+}
+
 test "a running Bash line names its call only beside the Work's Operation and the call's ordinal" {
     const bash: WorkState = .{ .bash = .{ .since = test_now_s, .call = 3, .description = null, .running = 2, .approvals = 0 } };
-    try std.testing.expectEqual(@as(?Call, .{ .operation = 19, .ordinal = 3 }), of(&bash, 19, test_now_ms).?.call);
-    try std.testing.expectEqual(@as(?Call, null), of(&bash, null, test_now_ms).?.call);
+    try std.testing.expectEqual(@as(?Call, .{ .operation = 19, .ordinal = 3 }), of(&test_words, &bash, 19, test_now_ms).?.call);
+    try std.testing.expectEqual(@as(?Call, null), of(&test_words, &bash, null, test_now_ms).?.call);
     // A Host that predates `call` names no ordinal, so the line names no row.
     const older: WorkState = .{ .bash = .{ .since = test_now_s, .call = null, .description = null, .running = 2, .approvals = 0 } };
-    try std.testing.expectEqual(@as(?Call, null), of(&older, 19, test_now_ms).?.call);
-    try std.testing.expectEqual(@as(?Call, null), of(&.{ .working = .{ .since = test_now_s } }, 19, test_now_ms).?.call);
+    try std.testing.expectEqual(@as(?Call, null), of(&test_words, &older, 19, test_now_ms).?.call);
+    try std.testing.expectEqual(@as(?Call, null), of(&test_words, &.{ .working = .{ .since = test_now_s } }, 19, test_now_ms).?.call);
 }
 
 test "a retry counts down whole seconds to its due time and never shows zero before it" {
     for ([_]struct { u64, u64 }{ .{ 1, 1 }, .{ 999, 1 }, .{ 1_000, 1 }, .{ 1_001, 2 }, .{ 17_200, 18 }, .{ 18_000, 18 } }) |case| {
         const state: WorkState = .{ .retrying = .{ .since = test_now_s - 1, .due_at_ms = test_now_ms + case[0], .cause = .{}, .attempt = 1 } };
-        try std.testing.expectEqual(case[1], of(&state, null, test_now_ms).?.clock.retry.seconds);
+        try std.testing.expectEqual(case[1], of(&test_words, &state, null, test_now_ms).?.clock.retry.seconds);
     }
 }
 
@@ -292,7 +315,7 @@ test "a fitted line never takes more than its width and keeps the clock while wo
     for (descriptions) |description| for ([_]Method{ .unicode, .wcwidth }) |method| for (0..120) |width| {
         const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, description), .running = 1, .approvals = 0 } };
         var buffer: [max_clock_bytes]u8 = undefined;
-        const fitted = fit(&buffer, of(&state, null, test_now_ms).?, width, method);
+        const fitted = fit(&buffer, of(&test_words, &state, null, test_now_ms).?, width, method);
         const mark_cells: usize = 2;
         const clock_cells: usize = 6;
         const ellipsis_cells: usize = 1;
