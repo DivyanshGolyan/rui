@@ -48,7 +48,7 @@ RULES = (
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      "Frontend value decisions and native terminal/borrower handoffs"),
-    (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
+    (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/queued_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
     (("src/overview_view.zig",), ("test-logic",), ("test-logic",),

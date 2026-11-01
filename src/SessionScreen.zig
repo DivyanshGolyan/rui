@@ -9,6 +9,7 @@ const Frame = @import("TerminalFrame.zig");
 const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -597,7 +598,9 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
 /// What a frame shows around the input: the status above the rule, and under
 /// the input a notice until the next key, else the Session line. `live` is
 /// what work under way is doing now: its running call's row carries the
-/// clock, and any other work ends the shown text.
+/// clock, and any other work ends the shown text. `queued` is the newest
+/// Message waiting behind the work and how many wait; the latest view shows
+/// it dimmed, right above the status, when the frame has a row for it.
 pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
@@ -605,10 +608,15 @@ pub const Footer = struct {
     notice: []const u8 = "",
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
+    queued: ?Queued = null,
+
+    /// While its row draws, the frame shows `status` in place of the
+    /// footer's: the row confirms a send that status says `Sent` of.
+    pub const Queued = struct { waiting: queued_line.Waiting, status: []const u8 };
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
-/// wrote for them, which the caller resets when the facts change.
+/// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
 
 /// Adopts the frame's geometry, selects its projection, encodes it and
@@ -678,6 +686,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .total_calls = live.total,
         .live = footer.live != null,
         .clock_call = clock_call,
+        .queued = if (selected) null else if (footer.queued) |queued| queued.status else null,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -709,7 +718,19 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
+    // Cells borrow the row's bytes until the frame is rendered.
+    var queued_text: [queued_line.text_capacity]u8 = undefined;
+    var queued_label: [queued_line.label_capacity]u8 = undefined;
+    if (layout.queued_height != 0) {
+        const queued = footer.queued.?.waiting;
+        const row = queued_line.row(&queued_text, &queued_label, queued.line, queued.count, size.col, self.vx.caps.unicode);
+        const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
+        _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
+        _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
+    }
+    // Cells borrow the rule's label until the frame is rendered too.
+    var rule_label: [64]u8 = undefined;
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -845,9 +866,8 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
-fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View) !void {
-    var buffer: [64]u8 = undefined;
-    const label = draft_layout.label(&buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
+fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
+    const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
     const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
     _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});
@@ -1264,6 +1284,61 @@ test "a browsed page keeps the live line above the status" {
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
     // The page moves by the rows it shows.
     try std.testing.expectEqual(screen.height, screen.browsing_height);
+}
+
+test "a queued Message sits dimmed right above the status, in the latest view only" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const calls: View.Live = .{};
+    // The row confirms the send, so the status no longer says Sent.
+    const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("row39", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(column, 8).?.style.fg);
+    // A short terminal with a call, the live line and a multiline draft has
+    // no row for it: the status says Sent instead.
+    var running: View.Live = .{ .count = 1, .total = 1 };
+    running.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try running.entries[0].presentation.description.?.set("Run zig build");
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    var working = footer;
+    working.live = work_line.of(&test_words, &state, null, 142_000);
+    const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const draft = "one\ntwo\nthree";
+    _ = try screen.render(&out.writer, short, draft, draft.len, working, &running);
+    try std.testing.expect(!screenHas(screen, "queued", &buffer));
+    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+    try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
+    // With a one-line draft it has the row, and Sent goes.
+    _ = try screen.render(&out.writer, short, "one", 3, working, &running);
+    try std.testing.expect(screenHas(screen, "queued", &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    // A browsed page shows the conversation down to the status instead,
+    // and Sent with it.
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    try std.testing.expect(!screenHas(screen, "queued", &buffer));
+    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+}
+
+fn screenHas(screen: *Self, text: []const u8, buffer: *[256]u8) bool {
+    for (0..screen.vx.screen.height) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), buffer), text) != null) return true;
+    return false;
 }
 
 test "a description's controls read escaped alike on its call row and on the live line" {

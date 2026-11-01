@@ -443,7 +443,7 @@ def main():
                             read_request(connection)
                             connection.sendall(
                                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                b"Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\n{}"
+                                b"Content-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{}"
                             )
 
                 peer = threading.Thread(target=incompatible_peer)
@@ -495,7 +495,7 @@ def main():
                  "X-Rui-Wire-Version: 3\r\nTransfer-Encoding: chunked\r\n\r\n").encode() + valid_body,
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 3\r\n\r\n",
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
                 b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(noncanonical)}\r\n"

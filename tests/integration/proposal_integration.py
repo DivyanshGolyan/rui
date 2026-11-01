@@ -222,7 +222,9 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
-            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "3"', b'"version":"3","version":"3"'))
+            duplicated = encoded.replace(b'"version": "3"', b'"version":"3","version":"3"')
+            assert duplicated != encoded, "proposal fixture lost its wire version"
+            mock_reply(fields["socket"], store, "page", duplicated)
             assert mock_reply(fields["socket"], store, "field", b"abc", 9,
                 b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b""
             # A complete earlier window may be visible on failure; the final

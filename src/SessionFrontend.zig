@@ -25,6 +25,7 @@ const Self = @This();
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -46,6 +47,9 @@ status: Status = undefined,
 terminal: *Terminal,
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
+/// The overview that lent the terminal.
+/// `run` always supplies the overview; a frame drawn without one says nothing.
+lender: Lender = quiet_overview,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
@@ -88,7 +92,8 @@ admission: struct {
     // The newest accepted Message admission not yet in delivered output.
     // Admission order is Session order, so it stands for every earlier one.
     echo: ?u64 = null,
-    // The newest Message admission live pages have delivered.
+    // The newest Message admission live pages have taken: shown as its
+    // conversation row, or at the stop that excluded it.
     delivered: u64 = 0,
     /// Messages begun; a /details read begun before the latest one never covers it.
     sent: u64 = 0,
@@ -114,6 +119,13 @@ live: struct {
     // The lowest position of a Message seen unapplied, where a transcript's
     // search for them may stop; a stale value only costs reads.
     lowest: ?u64 = null,
+    // The Messages a person or script sent that wait behind the work, as
+    // the Host reported them at the cursor; the first line the queued row
+    // last read, with its Message; and the newest live output showed while
+    // it waited (see View.Taking).
+    queued: protocol.Queued = .{},
+    queued_line: ?queued_line.Shown = null,
+    drawn_waiting: u64 = 0,
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -177,7 +189,7 @@ const notice_capacity = @max(
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .drawn_waiting = self.live.drawn_waiting, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -198,6 +210,30 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
     try self.reader.start(self.init.io, &self.job, worker);
 }
 
+/// The overview that lent the terminal decides what Ctrl-X does here and
+/// sends the stop, so a conversation stops its Session exactly as the
+/// Session's row does. Each call names the work the conversation shows.
+pub const Lender = struct {
+    context: *anyopaque,
+    /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
+    /// any other, which clears its notice and cancels its prompt.
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) anyerror!void,
+    /// Answers the overview's finished job and starts its next stop; true
+    /// when an answer came.
+    service: *const fn (context: *anyopaque) anyerror!bool,
+    /// What the overview says under the input, until its next step.
+    line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+
+    pub const Said = struct {
+        /// The stop prompt, or the overview's notice; null for neither.
+        text: ?[]const u8 = null,
+        /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
+        asking: bool = false,
+        /// Ctrl-X would ask to stop the work.
+        stoppable: bool = false,
+    };
+};
+
 /// How the frontend stopped. Either way it stopped only its own client waits;
 /// Host work it started continues. `returned` goes back to the overview that
 /// lent the terminal, which stays begun.
@@ -209,8 +245,8 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// caller restores the terminal before `leave` joins them, so a borrower that
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
-pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation) !Outcome {
-    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
@@ -334,7 +370,7 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page };
-    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted);
+    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
     try std.testing.expectEqual(Outcome.detached, outcome);
     try std.testing.expect(terminal.active and terminal.pump == null);
     var written: [65536]u8 = undefined;
@@ -615,6 +651,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (try self.lender.service(self.lender.context)) self.dirty = true;
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         try self.admit();
@@ -766,13 +803,16 @@ fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
     const waiting = screen.consent != null;
     const view = self.input.composition();
-    // A waiting Action says how to decide it under the input, not here.
-    const base_status = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
+    // A waiting Action says how to decide it under the input, not here. A
+    // sent Message reads Sent until live output shows it: as its row, at
+    // its stop, or in the queued row, which the frame may drop.
+    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
         .not_started => "Not sent · Ctrl-R retries original",
         .submitting => "Sending…",
         .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
         .rejected => "Rejected · /discard",
-    } else if (self.admission.echo != null) "Sent" else "";
+    } else null;
+    const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
     const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
@@ -786,9 +826,19 @@ fn drawFrame(self: *Self) !void {
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status);
+    var queued_buffer: [Frame.status_capacity]u8 = undefined;
+    const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
+        .waiting = row.waiting,
+        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else ""),
+    } else null;
+    // The overview's stop prompt or notice, else the conversation's own.
+    const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
+    const notice = said.text orelse self.notice;
+    var facts = self.line.facts(&self.hint, self.session);
+    if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -919,6 +969,8 @@ const ConversationAction = enum {
     detach,
     /// Retries the uncertain original.
     recover,
+    /// Asks to stop the Session, and stops it at a second press.
+    stop,
 };
 
 /// The conversation's one key table.
@@ -932,7 +984,7 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_o = .expand,
     .ctrl_p = .older,
     .ctrl_r = .recover,
-    .ctrl_x = null,
+    .ctrl_x = .stop,
     .up = .scroll_up,
     .down = .scroll_down,
     .shift_up = .scroll_up,
@@ -952,6 +1004,8 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
         .latest, .back, .close => {
+            // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
+            if (action == .close and self.overviewSays().asking) return;
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
             self.dropMessageRequest();
@@ -985,8 +1039,27 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .recover => if (screen.consent != null) {
             self.notice = self.decisionNotice();
         } else try self.submission.requestRecovery(null),
+        // Until the opening read the Session's work is unknown.
+        .stop => if (self.reading.opening) {
+            self.notice = "Ctrl-X stops the Session once it opens.";
+        } else try self.converse(true),
     }
     self.dirty = true;
+}
+
+/// Steps the overview with an input here, Ctrl-X or another.
+fn converse(self: *Self, ctrl_x: bool) !void {
+    try self.lender.step(self.lender.context, self.shownWork(), ctrl_x);
+}
+
+fn overviewSays(self: *const Self) Lender.Said {
+    return self.lender.line(self.lender.context, self.shownWork());
+}
+
+/// The work the conversation shows now.
+fn shownWork(self: *const Self) protocol.session_work.Kind {
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    return self.live.work.state.asOf(now_ms);
 }
 
 fn scroll(self: *Self, down: bool, page: bool) !void {
@@ -1125,9 +1198,15 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 /// the Action, may use it. The input row the latest frame shows takes the
 /// input.
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+    // As on the overview, every input clears the core's notice and cancels
+    // its stop prompt. An open prompt is cancelled after the input instead,
+    // so Ctrl-X can confirm it and Esc can see it.
+    const asked = self.overviewSays().asking;
+    if (!asked) try self.converse(false);
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
+    if (asked and self.overviewSays().asking) try self.converse(false);
     if (self.leaving != null) screen.interruptConsent();
 }
 
@@ -1311,12 +1390,12 @@ fn settleReader(self: *Self) !void {
         if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
             const prepended = try screen.prependFile(self.init.io, self.files.inspection);
             // The page's newest blocks are those its kept rows show.
-            const collapsed = self.job.result.collapsed.slice();
-            var older: [@typeInfo(@FieldType(reads.Collected, "items")).array.len]?View.Collapsed = @splat(null);
+            const collapsed = &self.job.result.collapsed;
+            var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
             const kept = @min(prepended.older, older.len);
             for (0..kept) |index| {
                 const from_end = kept - index;
-                older[index] = if (from_end <= collapsed.len) collapsed[collapsed.len - from_end] else null;
+                older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
             }
             self.transcript.blocks.prepend(older[0..kept]);
             self.transcript.blocks.dropNewest(prepended.trimmed);
@@ -1347,6 +1426,16 @@ fn settleReader(self: *Self) !void {
         self.inspection.command_running = false; // Shown; exit no longer prints it.
     }
     try self.applyReader(end);
+}
+
+/// What the queued row shows, if it shows (see `queued_line.shows`): the
+/// newest waiting Message, by the line read from it, and how many wait.
+fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+    const queued = self.live.queued;
+    if (!queued_line.shows(queued.count, queued.newest_admission, self.live.drawn_waiting)) return null;
+    const shown = if (self.live.queued_line) |*shown| shown else return null;
+    if (shown.admission != queued.newest_admission) return null;
+    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -1397,7 +1486,7 @@ fn showStaged(self: *Self) !void {
         }
     }
     _ = try staged.to(staged.length);
-    for (result.collapsed.slice()) |block| self.live.blocks.append(block);
+    for (0..result.collapsed.count) |index| self.live.blocks.append(result.collapsed.at(index));
     if (staged.length != 0) self.reading.output_started = true;
 }
 
@@ -1577,19 +1666,17 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
+        self.live.work = result.work.work;
+        // A taken Message leaves the queued row in the frame that shows it.
+        self.live.queued = result.queued;
+        if (result.queued_line) |shown| self.live.queued_line = shown;
+        self.live.drawn_waiting = self.job.drawn_waiting;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
-        if (result.line) |*line| {
-            self.line = line.*;
-            self.shown.width = null;
-        }
-        if (result.hint) |*hint| {
-            self.hint = hint.*;
-            self.shown.width = null;
-        }
-        self.live.work = result.work.work;
+        if (result.line) |*line| self.line = line.*;
+        if (result.hint) |*hint| self.hint = hint.*;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
@@ -1633,6 +1720,47 @@ test "frontend commits spacing only for completed visible reads" {
         try self.applyReader(case.end);
         try std.testing.expectEqual(case.expected, self.live.compact_tools);
         try std.testing.expectEqual(@as(u64, if (case.end == .complete) 12 else 7), self.live.cursor.position);
+    }
+}
+
+test "the queued row shows what waits until it is taken, whatever the work is doing" {
+    const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn_waiting: u64 = 0, line: ?u64 = 9, shown: bool };
+    var line: queued_line.Line = .{ .len = 0 };
+    try line.set("check the cache");
+    for ([_]Case{
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
+        // A Message held back and then left pending, which live output
+        // shows only once taken: the row shows it meanwhile.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
+        // Nothing waits, or the newest showed while it waited.
+        .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .drawn_waiting = 9, .shown = false },
+        // The line held is another Message's, or none was read.
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
+    }) |case| {
+        var self: Self = .{
+            .init = undefined,
+            .store = "unused",
+            .session = "unused",
+            .directory = "unused",
+            .files = undefined,
+            .command = undefined,
+            .terminal = undefined,
+            .colour = false,
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn_waiting = case.drawn_waiting, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+        };
+        const row = self.queuedRow() orelse {
+            try std.testing.expect(!case.shown);
+            continue;
+        };
+        try std.testing.expect(case.shown);
+        try std.testing.expectEqual(@as(u64, 9), row.newest);
+        try std.testing.expectEqual(@as(u64, 2), row.waiting.count);
+        try std.testing.expectEqualStrings("check the cache", row.waiting.line);
     }
 }
 
@@ -1729,7 +1857,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
     for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "/status" }, .{ "a", "a" } }) |line| {
         errdefer std.debug.print("change={s} line={s}\n", .{ @tagName(change), line[1] });
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
@@ -1843,7 +1971,7 @@ const HeldFrontend = struct {
         held.* = .{ .self = undefined, .screen = screen, .environ = try std.testing.environ.createMap(std.testing.allocator), .tmp = std.testing.tmpDir(.{}), .pipes = pipes };
         try screen.init(std.testing.io, &held.environ, false);
         const directory = try held.tmp.dir.realPath(std.testing.io, &held.directory);
-        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .colour = false, .reading = .{ .opening = false } };
+        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         held.self.init.io = std.testing.io;
         held.self.live.work = .{};
         held.self.input.init();
@@ -2689,4 +2817,108 @@ test "choice readiness: a key with no use at the choice spends it, so the Enter 
         try held.settle();
         try std.testing.expect(held.screen.offered() != null);
     }
+}
+
+/// An overview that lent the terminal and says nothing under its input.
+const quiet_overview: Lender = .{ .context = undefined, .step = struct {
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: bool) !void {}
+}.step, .service = struct {
+    fn service(_: *anyopaque) !bool {
+        return false;
+    }
+}.service, .line = struct {
+    fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
+        return .{};
+    }
+}.line };
+
+/// An overview that lent the terminal, reduced to one Session's stop
+/// prompt, stop and notice.
+const FakeOverview = struct {
+    asking: bool = false,
+    stopping: bool = false,
+    stops: usize = 0,
+    notice: ?[]const u8 = null,
+
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) !void {
+        const fake: *FakeOverview = @ptrCast(@alignCast(raw));
+        const asked = fake.asking;
+        fake.asking = false;
+        fake.notice = null;
+        if (!ctrl_x) return;
+        if (fake.stopping or work != .working) {
+            fake.notice = "unused: Stopping";
+        } else if (asked) {
+            fake.stops += 1;
+            fake.stopping = true;
+        } else fake.asking = true;
+    }
+
+    fn service(_: *anyopaque) !bool {
+        return false;
+    }
+
+    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+        const fake: *FakeOverview = @ptrCast(@alignCast(raw));
+        return .{ .text = if (fake.asking) "Stop unused? ctrl+x yes · esc no" else fake.notice, .asking = fake.asking, .stoppable = work == .working and !fake.stopping };
+    }
+
+    fn lender(fake: *FakeOverview) Lender {
+        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line };
+    }
+};
+
+test "Ctrl-X twice stops the open Session through the overview; any other key only cancels the ask" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    var overview: FakeOverview = .{};
+    held.self.lender = overview.lender();
+    held.self.line = .{ .read = .{ .revision = 1, .end = 1 } };
+    try held.self.line.model.set("gpt-6-sol");
+    const Bottom = struct {
+        fn row(frontend: *HeldFrontend, storage: []u8) ![]const u8 {
+            frontend.self.dirty = true;
+            try frontend.settle();
+            const window = frontend.screen.vx.window();
+            var length: usize = 0;
+            for (0..window.width) |column| {
+                const grapheme = (window.readCell(@intCast(column), window.height - 1) orelse break).char.grapheme;
+                @memcpy(storage[length..][0..grapheme.len], grapheme);
+                length += grapheme.len;
+            }
+            return std.mem.trimEnd(u8, storage[0..length], " ");
+        }
+    };
+    var storage: [512]u8 = undefined;
+    // The hint shows only while the overview says Ctrl-X would ask.
+    try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
+    held.self.live.work.state = .{ .working = .{ .since = 1 } };
+    try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqualStrings("Stop unused? ctrl+x yes · esc no", try Bottom.row(held, &storage));
+    // Ctrl-G, like Esc, cancels and stays in the conversation.
+    try sendKeys(&held.self, "\x07");
+    try std.testing.expect(held.self.leaving == null and !overview.asking);
+    try std.testing.expectEqualStrings("unused · gpt-6-sol · ctrl+x stop", try Bottom.row(held, &storage));
+    // Typing cancels too and still types, so the next Ctrl-X asks again.
+    try sendKeys(&held.self, "\x18x\x18");
+    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
+    try std.testing.expect(overview.asking and overview.stops == 0);
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqual(@as(usize, 1), overview.stops);
+    try std.testing.expectEqualStrings("unused · gpt-6-sol", try Bottom.row(held, &storage));
+    // The overview's notice comes before the conversation's own.
+    held.self.notice = "Work continues while you compose.";
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expectEqualStrings("unused: Stopping", try Bottom.row(held, &storage));
+    try sendKeys(&held.self, "y");
+    try std.testing.expectEqualStrings("Work continues while you compose.", try Bottom.row(held, &storage));
+    // Until the Session opens its work is unknown: Ctrl-X says so and asks
+    // nothing.
+    overview = .{};
+    held.self.notice = null;
+    held.self.reading.opening = true;
+    try sendKeys(&held.self, "\x18");
+    try std.testing.expect(!overview.asking);
+    try std.testing.expectEqualStrings("Ctrl-X stops the Session once it opens.", try Bottom.row(held, &storage));
 }

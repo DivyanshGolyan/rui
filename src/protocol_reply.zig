@@ -246,7 +246,8 @@ pub const ActivityPage = struct {
             }
         };
         const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, work: Work };
+        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -323,6 +324,14 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
+        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true) };
+        // None, or a span of Admissions at or before the boundary.
+        if (if (queued.count == 0)
+            !std.meta.eql(queued, protocol.Queued{})
+        else
+            queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
+                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1) return error.InvalidActivityPage;
+        page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
         work.state = wire.work.state.value;
@@ -548,13 +557,13 @@ test "Host unavailable replies require a known complete error" {
     }) |body| try std.testing.expect(validHostUnavailable(body));
     for ([_][]const u8{
         "{}",
-        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"4\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
         "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
         "{\"version\":\"3\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
         "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
-        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"4\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
         // The previous wire version, as an older Host would answer.
-        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"3\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
         "{\"version\":\"3\",\"type\":\"busy\",\"nested\":{\"code\":\"discovery_capacity_exhausted\"}}",
@@ -1823,7 +1832,9 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
-    var facts: protocol.ActivityFacts = .{ .end = 16, .count = 16 };
+    // The widest boundary a call published after it still follows.
+    var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
+    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1 };
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
@@ -1847,11 +1858,38 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
     try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
+    try std.testing.expectEqualDeep(facts.queued, page.facts.queued);
     try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
+    }
+}
+
+test "an activity page's queued Messages are none or a span at its boundary" {
+    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
+    try facts.work.workspace.set("/w");
+    const Case = struct { queued: protocol.Queued, valid: bool };
+    for ([_]Case{
+        .{ .queued = .{}, .valid = true },
+        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        // None waits, yet a Message is named.
+        .{ .queued = .{ .newest_admission = 9 }, .valid = false },
+        // After the boundary, before the oldest, or more than fit the span.
+        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41 }, .valid = false },
+        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31 }, .valid = false },
+        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40 }, .valid = false },
+    }) |case| {
+        facts.queued = case.queued;
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        if (case.valid) {
+            try std.testing.expectEqualDeep(case.queued, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+        } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
     }
 }
 
@@ -2392,7 +2430,7 @@ test "canonical failure classifier validates complete string-only error envelope
 test "canonical failure classifier uses only authoritative invocation envelope" {
     for ([_][]const u8{
         "{\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
         "{\"version\":\"3\",\"type\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
         "{\"version\":\"3\",\"vers\\u0069on\":\"3\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
         "{\"version\":\"3\",\"type\":\"invocation_error\",\"ty\\u0070e\":\"message_reply\",\"code\":\"canonical_store_failure\"}",
@@ -2623,7 +2661,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     defer tmp.cleanup();
     const row = "{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
     inline for (.{
-        "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
+        "{\"version\":\"4\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
         "{\"version\":\"3\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
         "{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[]}",
         "{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}false",
@@ -2994,7 +3032,7 @@ test "keyed observation rejects malformed consequential fields before outcome in
     }) |suffix| try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ suffix }, "k"));
     inline for (.{ "0", "+7", "07", "18446744073709551616" }) |id|
         try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"" ++ id ++ "\"}}}" }, "k"));
-    inline for (.{ "{}", "[]", "{\"version\":\"2\"}", "{\"version\":\"3\",\"type\":\"wrong\"}" }) |body|
+    inline for (.{ "{}", "[]", "{\"version\":\"4\"}", "{\"version\":\"3\",\"type\":\"wrong\"}" }) |body|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"9\"}}}" }, "k"));
     var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
@@ -3297,7 +3335,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var prefix: [2048]u8 = undefined;
     try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
     inline for (.{
-        .{ "\"version\":\"3\"", "\"version\":\"2\"" },
+        .{ "\"version\":\"3\"", "\"version\":\"4\"" },
         .{ "\"tools\":[\"bash\"]", "\"tools\":[\"edit\"]" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },

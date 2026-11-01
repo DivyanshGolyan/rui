@@ -1,6 +1,7 @@
 //! The line under the conversation's input: the Session's name, model,
-//! effort, the context left before automatic compaction and, when Bash asks
-//! first, that. Narrow lines drop effort first, then shorten the name. This
+//! effort, the context left before automatic compaction, when Bash asks
+//! first, that, and while Ctrl-X would stop work, the key. Narrow lines drop
+//! effort first, then shorten the name, then drop it, then the key. This
 //! core takes the facts its shell read and the terminal's width method, and
 //! returns text; it holds no terminal, clock or Store fact.
 const std = @import("std");
@@ -19,6 +20,8 @@ pub const separator = " · ";
 pub const ellipsis = "…";
 const asks_text = "asks before Bash";
 const left_text = "100% left";
+/// The key that stops a Session, as both screens hint it.
+pub const stop_hint = "ctrl+x stop";
 
 /// A Session's name: its Label, else the first line of its first Message (a
 /// hint), else its reference (a hint). A blank first line is no first line.
@@ -75,6 +78,8 @@ pub const Facts = struct {
     /// decides the next model call.
     left: ?u8 = null,
     asks: bool = false,
+    /// Ctrl-X would ask to stop the Session's work.
+    stop: bool = false,
 };
 
 /// The longest name a shell passes: a first line, or a shorter Label or
@@ -89,7 +94,7 @@ const max_effort_bytes = blk: {
 
 /// Bytes the longest line takes: every part, the separators between them and
 /// the ellipsis that ends a shortened name.
-pub const capacity = max_name_bytes + ellipsis.len + model_capability.max_model_bytes + max_effort_bytes + left_text.len + asks_text.len + 4 * separator.len;
+pub const capacity = max_name_bytes + ellipsis.len + model_capability.max_model_bytes + max_effort_bytes + left_text.len + asks_text.len + stop_hint.len + 5 * separator.len;
 
 /// The line for `width` cells as `method` measures them. It never takes more
 /// than `width` cells.
@@ -99,8 +104,9 @@ pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) 
     const shown_left: ?[]const u8 = if (facts.left) |value| std.fmt.bufPrint(&percent, "{d}% left", .{value}) catch unreachable else null;
     const asks: ?[]const u8 = if (facts.asks) asks_text else null;
     const effort: ?[]const u8 = if (facts.effort) |value| @tagName(value) else null;
-    const tail = [_]?[]const u8{ facts.model, shown_left, asks };
-    var out = join(buffer, &.{ facts.name, facts.model, effort, shown_left, asks }, "");
+    const stop: ?[]const u8 = if (facts.stop) stop_hint else null;
+    const tail = [_]?[]const u8{ facts.model, shown_left, asks, stop };
+    var out = join(buffer, &.{ facts.name, facts.model, effort, shown_left, asks, stop }, "");
     if (cells(out, method) <= width) return out;
     out = join(buffer, &(.{facts.name} ++ tail), "");
     if (cells(out, method) <= width) return out;
@@ -114,26 +120,44 @@ pub fn write(buffer: *[capacity]u8, facts: Facts, width: usize, method: Method) 
     }
     out = join(buffer, &tail, "");
     if (cells(out, method) <= width) return out;
+    // The key goes whole: a cut one names no key.
+    if (facts.stop) {
+        out = join(buffer, tail[0 .. tail.len - 1], "");
+        if (cells(out, method) <= width) return out;
+    }
     if (width < 2) return buffer[0..0];
     const end = fit(out, width - 1, method).len;
     @memcpy(buffer[end..][0..ellipsis.len], ellipsis);
     return buffer[0 .. end + ellipsis.len];
 }
 
-/// The line as last written, kept until its facts or its width change, so
-/// a frame that changes neither writes nothing.
+/// The line as last written, kept until its facts, width or width method
+/// change, so a frame that changes none of them writes nothing.
 pub const Shown = struct {
-    /// Null until written, and after the facts change.
-    width: ?usize = null,
+    /// What the line was written for; null until written. Its name and model
+    /// are the caller's, which may change in place, so only their lengths
+    /// are read: their bytes are copied to `held`.
+    written: ?struct { facts: Facts, width: usize, method: Method } = null,
+    held: [max_name_bytes + model_capability.max_model_bytes]u8 = undefined,
     len: usize = 0,
     bytes: [capacity]u8 = undefined,
 
     pub fn text(self: *Shown, facts: Facts, width: usize, method: Method) []const u8 {
-        if (self.width != width) {
+        if (!self.same(facts, width, method)) {
             self.len = write(&self.bytes, facts, width, method).len;
-            self.width = width;
+            self.written = .{ .facts = facts, .width = width, .method = method };
+            @memcpy(self.held[0..facts.name.len], facts.name);
+            @memcpy(self.held[facts.name.len..][0..facts.model.len], facts.model);
         }
         return self.bytes[0..self.len];
+    }
+
+    fn same(self: *const Shown, facts: Facts, width: usize, method: Method) bool {
+        const was = self.written orelse return false;
+        const name_bytes = self.held[0..was.facts.name.len];
+        const model_bytes = self.held[name_bytes.len..][0..was.facts.model.len];
+        return was.width == width and was.method == method and std.mem.eql(u8, name_bytes, facts.name) and std.mem.eql(u8, model_bytes, facts.model) and
+            was.facts.effort == facts.effort and was.facts.left == facts.left and was.facts.asks == facts.asks and was.facts.stop == facts.stop;
     }
 };
 
@@ -223,25 +247,29 @@ test "the mock's line at its widths" {
     asks.asks = true;
     asks.left = null;
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · asks before Bash", write(&buffer, asks, 80, .unicode));
+    var working = facts;
+    working.stop = true;
+    try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left · ctrl+x stop", write(&buffer, working, 80, .unicode));
 }
 
 test "the longest facts fit the buffer" {
     var buffer: [capacity]u8 = undefined;
     const longest_name: [max_name_bytes]u8 = @splat('n');
     const longest_model: [model_capability.max_model_bytes]u8 = @splat('m');
-    const line = write(&buffer, .{ .name = &longest_name, .model = &longest_model, .effort = .medium, .left = 100, .asks = true }, std.math.maxInt(usize), .unicode);
+    const line = write(&buffer, .{ .name = &longest_name, .model = &longest_model, .effort = .medium, .left = 100, .asks = true, .stop = true }, std.math.maxInt(usize), .unicode);
     try std.testing.expectEqual(capacity - ellipsis.len, line.len);
 }
 
 /// Each line `write` prefers, in its order: the whole line, then without
 /// effort, then the name cut to fewer clusters one at a time, then without
-/// the name. Built by formatting, not by `write`'s joins and room.
+/// the name, then without the key. Built by formatting, not by `write`'s
+/// joins and room.
 fn candidates(storage: []u8, facts: Facts, method: Method, out: [][]const u8) usize {
     var used: usize = 0;
     var count: usize = 0;
     var percent: [12]u8 = undefined;
     const left_shown = if (facts.left) |value| std.fmt.bufPrint(&percent, "{d}% left", .{value}) catch unreachable else "";
-    const rest = std.fmt.bufPrint(storage[used..], "{s}{s}{s}{s}", .{ if (facts.left != null) " · " else "", left_shown, if (facts.asks) " · " else "", if (facts.asks) asks_text else "" }) catch unreachable;
+    const rest = std.fmt.bufPrint(storage[used..], "{s}{s}{s}{s}{s}{s}", .{ if (facts.left != null) " · " else "", left_shown, if (facts.asks) " · " else "", if (facts.asks) asks_text else "", if (facts.stop) " · " else "", if (facts.stop) stop_hint else "" }) catch unreachable;
     used += rest.len;
     if (facts.effort) |effort| {
         out[count] = std.fmt.bufPrint(storage[used..], "{s} · {s} · {s}{s}", .{ facts.name, facts.model, @tagName(effort), rest }) catch unreachable;
@@ -268,7 +296,12 @@ fn candidates(storage: []u8, facts: Facts, method: Method, out: [][]const u8) us
         count += 1;
     }
     out[count] = std.fmt.bufPrint(storage[used..], "{s}{s}", .{ facts.model, rest }) catch unreachable;
+    used += out[count].len;
     count += 1;
+    if (facts.stop) {
+        out[count] = std.fmt.bufPrint(storage[used..], "{s}", .{out[count - 1][0 .. out[count - 1].len - (separator.len + stop_hint.len)]}) catch unreachable;
+        count += 1;
+    }
     return count;
 }
 
@@ -277,8 +310,8 @@ test "every width keeps the most a line can hold, in its order, and never more t
     var storage: [16 * 1024]u8 = undefined;
     var lines: [80][]const u8 = undefined;
     const names = [_][]const u8{ "Fix flaky store tests", "a1b2c3", "修复测试 then more", "x", "e\u{301}e\u{301} combining", "\u{301}a", "\u{200d}中", "👩‍🚀 crew", "中中中" };
-    for ([_]Method{ .unicode, .wcwidth }) |method| for (names) |name_text| for ([_]?ReasoningEffort{ null, .high }) |effort| for ([_]?u8{ null, 0, 100 }) |percent| for ([_]bool{ false, true }) |asks| {
-        const facts: Facts = .{ .name = name_text, .model = "gpt-6.1-sol", .effort = effort, .left = percent, .asks = asks };
+    for ([_]Method{ .unicode, .wcwidth }) |method| for (names) |name_text| for ([_]?ReasoningEffort{ null, .high }) |effort| for ([_]?u8{ null, 0, 100 }) |percent| for ([_]bool{ false, true }) |asks| for ([_]bool{ false, true }) |stop| {
+        const facts: Facts = .{ .name = name_text, .model = "gpt-6.1-sol", .effort = effort, .left = percent, .asks = asks, .stop = stop };
         const count = candidates(&storage, facts, method, &lines);
         for (0..90) |width| {
             const line = write(&buffer, facts, width, method);
@@ -289,8 +322,9 @@ test "every width keeps the most a line can hold, in its order, and never more t
             if (preferred) |expected| {
                 try std.testing.expectEqualStrings(expected, line);
             } else {
-                // Nothing whole fits: the model and the rest are cut at the
-                // edge, ending in an ellipsis, or nothing shows.
+                // Nothing whole fits: the model and the rest but the key
+                // are cut at the edge, ending in an ellipsis, or nothing
+                // shows.
                 const whole = lines[count - 1];
                 if (width < 2) {
                     try std.testing.expectEqualStrings("", line);
@@ -304,13 +338,20 @@ test "every width keeps the most a line can hold, in its order, and never more t
     };
 }
 
-test "a line is written again only when its width or facts change" {
+test "a line is written again when its width or facts change" {
     var shown: Shown = .{};
     const facts: Facts = .{ .name = "Fix flaky store tests", .model = "gpt-6.1-sol", .effort = .low, .left = 69 };
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", shown.text(facts, 80, .unicode));
-    // Unchanged width: the kept text, even for other facts, until reset.
-    try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", shown.text(.{ .name = "x", .model = "y" }, 80, .unicode));
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · 69% left", shown.text(facts, 51, .unicode));
-    shown = .{};
     try std.testing.expectEqualStrings("x · y", shown.text(.{ .name = "x", .model = "y" }, 51, .unicode));
+    // A name or model changed in its caller's storage is a change too.
+    var model = "gpt-6.1-sol".*;
+    _ = shown.text(.{ .name = "x", .model = &model }, 51, .unicode);
+    model[4] = '7';
+    try std.testing.expectEqualStrings("x · gpt-7.1-sol", shown.text(.{ .name = "x", .model = &model }, 51, .unicode));
+    // Work that Ctrl-X may stop starts and ends between reads.
+    try std.testing.expectEqualStrings("x · y · ctrl+x stop", shown.text(.{ .name = "x", .model = "y", .stop = true }, 51, .unicode));
+    try std.testing.expectEqualStrings("x · y", shown.text(.{ .name = "x", .model = "y" }, 51, .unicode));
+    // On a line too narrow for the key, it goes whole.
+    try std.testing.expectEqualStrings("gpt-6.1-sol · 69% left", shown.text(.{ .name = "Fix flaky store tests", .model = "gpt-6.1-sol", .left = 69, .stop = true }, 30, .unicode));
 }
