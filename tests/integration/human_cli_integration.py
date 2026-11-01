@@ -2616,14 +2616,18 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, marker, composer=True)
                     narrow = current_screen(master)
                     shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                    # Every one of the four calls is either shown or counted;
-                    # the live line may name a counted call once more.
+                    # Every one of the four calls is either shown above the
+                    # overflow row or counted by it. The running call's row
+                    # does not fit, so the live line under the overflow row
+                    # names it once more.
                     label = re.search(r"\+(\d+)(?: more calls)? · /status", shown)
-                    calls = sum(row.lstrip().startswith(("✓ ", "• ", "! ")) for row in narrow.splitlines())
                     assert label, narrow
                     rows_shown = narrow.splitlines()
-                    above_rule = rows_shown[next(at for at, row in enumerate(rows_shown) if row.startswith(("─", "›"))) - 1]
-                    assert int(label[1]) + calls == 4 or (int(label[1]) + calls == 5 and above_rule.startswith("• ")), narrow
+                    overflow = next(at for at, row in enumerate(rows_shown) if re.match(r"\+\d", row))
+                    marked = [row.lstrip().startswith(("✓ ", "• ", "! ")) for row in rows_shown]
+                    assert int(label[1]) + sum(marked[:overflow]) == 4, narrow
+                    live_rows = [row for row, mark in zip(rows_shown[overflow:], marked[overflow:]) if mark]
+                    assert len(live_rows) == 1 and live_rows[0].startswith("• Wait"), narrow
                     if (rows, columns) == (6, 20):
                         assert LIVE_LINE.search(narrow), ("optional spacing or wording hid the live line", narrow)
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)

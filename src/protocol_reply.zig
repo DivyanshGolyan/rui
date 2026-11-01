@@ -1643,15 +1643,17 @@ pub const JsonWorkState = struct {
         };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         const kind = wire.kind.value;
-        const present = [_]bool{ wire.due_at_ms.isPresent(), wire.cause.isPresent(), wire.attempt.isPresent(), wire.call.isPresent(), wire.description.isPresent(), wire.running.isPresent(), wire.approvals.isPresent(), wire.code.isPresent(), wire.resets_at.isPresent() };
+        const present = [_]bool{ wire.due_at_ms.isPresent(), wire.cause.isPresent(), wire.attempt.isPresent(), wire.description.isPresent(), wire.running.isPresent(), wire.approvals.isPresent(), wire.code.isPresent(), wire.resets_at.isPresent() };
         const owned: [present.len]bool = switch (kind) {
-            .retrying => .{ true, true, true, false, false, false, false, false, false },
-            .bash => .{ false, false, false, true, true, true, true, false, false },
-            .failed => .{ false, false, false, false, false, false, false, true, true },
-            .stopped => .{ false, true, false, false, false, false, false, false, false },
+            .retrying => .{ true, true, true, false, false, false, false, false },
+            .bash => .{ false, false, false, true, true, true, false, false },
+            .failed => .{ false, false, false, false, false, false, true, true },
+            .stopped => .{ false, true, false, false, false, false, false, false },
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
+        // Only `bash` owns `call`, which a Host that predates it omits.
+        if (wire.call.isPresent() and kind != .bash) return error.InvalidCharacter;
         const since = number(wire.since, false) catch return error.InvalidCharacter;
         const value: protocol.WorkState = switch (kind) {
             .retrying => .{ .retrying = .{
@@ -1666,7 +1668,7 @@ pub const JsonWorkState = struct {
             } },
             .bash => .{ .bash = .{
                 .since = since,
-                .call = number(wire.call.value.?, true) catch return error.InvalidCharacter,
+                .call = if (wire.call.value) |text| number(text, true) catch return error.InvalidCharacter else null,
                 .description = if (wire.description.value.?) |text| description: {
                     if (!protocol.ToolPresentation.validDescription(text.slice())) return error.InvalidCharacter;
                     break :description text.value;
@@ -1863,6 +1865,7 @@ test "a work state reads back exactly the facts its kind owns" {
         .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
         .{ .bash = .{ .since = 5, .call = 0, .description = description, .running = 1, .approvals = 0 } },
         .{ .bash = .{ .since = 5, .call = 3, .description = null, .running = 2, .approvals = 3 } },
+        .{ .bash = .{ .since = 5, .call = null, .description = description, .running = 1, .approvals = 0 } },
         .{ .approval = .{ .since = 6 } },
         .{ .stopping = .{ .since = 7 } },
         .{ .finished = .{ .since = 8 } },
@@ -1883,12 +1886,22 @@ test "a work state reads back exactly the facts its kind owns" {
         try std.json.Stringify.value(parsed.value, .{}, &again_writer);
         try std.testing.expectEqualStrings(writer.buffered(), again_writer.buffered());
     }
+    // A running Host survives a Rui upgrade: a Host that predates `call`
+    // still reads, as a running call no row is known to carry.
+    for ([_][]const u8{
+        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"call\":\"3\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
+    }, [_]?u64{ null, 3 }) |bytes, call| {
+        const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(call, parsed.value.value.bash.call);
+    }
     for ([_][]const u8{
         // A fact the kind does not own, or one it is missing.
         "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
-        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"working\",\"since\":\"3\",\"call\":\"0\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
         // Values outside each fact's grammar.
         "{\"kind\":\"pending\",\"since\":\"0\"}",

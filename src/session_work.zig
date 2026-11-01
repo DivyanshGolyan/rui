@@ -46,9 +46,10 @@ pub const WorkState = union(Kind) {
     /// ordinal of the Attempt that failed; `cause` its failure code.
     retrying: Retrying,
     /// At least one Bash Action is running. `call` is the oldest running
-    /// call's ordinal among the calls of the Work's Operation, and
-    /// `description` its saved description; `approvals` counts sibling
-    /// Actions awaiting a Permission Decision.
+    /// call's ordinal among the calls of the Work's Operation, null only as
+    /// read from a Host that predates it, and `description` its saved
+    /// description; `approvals` counts sibling Actions awaiting a
+    /// Permission Decision.
     bash: Bash,
     /// Every unresolved Action awaits a Permission Decision.
     approval: Since,
@@ -61,7 +62,7 @@ pub const WorkState = union(Kind) {
 
     pub const Since = struct { since: u64 };
     pub const Retrying = struct { since: u64, due_at_ms: u64, cause: Bounded(max_code_bytes), attempt: u64 };
-    pub const Bash = struct { since: u64, call: u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
+    pub const Bash = struct { since: u64, call: ?u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
     pub const Stopped = struct { since: u64, cause: StopCause };
 

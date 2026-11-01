@@ -1173,7 +1173,7 @@ Message work follows its own processing binding or exclusion. Unbound queued inp
 | The active Turn's model Operation has an Attempt in flight | `working` | Attempt admission |
 | The active Turn's model Operation waits for a retry due in the future | `retrying`, with due time, cause and the failed Attempt's ordinal, which is below the retry policy's maximum | retry scheduling |
 | That retry is already due | `pending` | its due second, never before scheduling |
-| A Bash Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`) and saved description, the running count and the count awaiting permission | the oldest launch |
+| A Bash Action the active Turn's Operation proposed is launched and unresolved | `bash`, with the oldest running call's ordinal (`call`; a running Host that predates it omits it, and a reader then gives the clock to the live line) and saved description, the running count and the count awaiting permission | the oldest launch |
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |

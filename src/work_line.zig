@@ -66,6 +66,15 @@ const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .stopped = null,
 });
 const rate_limited = "Rate limited";
+/// Bytes a line's words take at most: a call's description, or the table's
+/// own words.
+pub const max_words_bytes = max: {
+    var bytes = @max(session_work.max_description_bytes, rate_limited.len);
+    for (looks.values) |look| if (look) |shown| {
+        bytes = @max(bytes, shown.words.len);
+    };
+    break :max bytes;
+};
 
 /// The line of work being stopped: the Host's `stopping` state, and a stop
 /// the person asked for before the Host reports it.
@@ -94,7 +103,7 @@ pub fn of(state: *const WorkState, operation: ?u64, now_ms: u64) ?Line {
             .retrying => |retry| .{ .retry = .{ .attempt = retry.attempt, .seconds = std.math.divCeil(u64, retry.due_at_ms - now_ms, ms_per_s) catch unreachable } },
             else => .{ .elapsed = now_ms / ms_per_s -| state.since() },
         },
-        .call = if (state.* == .bash) if (operation) |id| .{ .operation = id, .ordinal = state.bash.call } else null else null,
+        .call = if (state.* == .bash and operation != null and state.bash.call != null) .{ .operation = operation.?, .ordinal = state.bash.call.? } else null,
     };
 }
 
@@ -102,7 +111,7 @@ const ms_per_s = 1000;
 const s_per_min = 60;
 const s_per_hour = 60 * s_per_min;
 
-const max_dot_bytes = max: {
+pub const max_dot_bytes = max: {
     var bytes = 0;
     for (glyphs.values) |set| bytes = @max(bytes, set.dot.len);
     break :max bytes;
@@ -245,10 +254,13 @@ test "every work state has the approved words on both screens, and ended work ha
     try std.testing.expectEqualStrings("• Waiting · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
 }
 
-test "a running Bash line names its call only beside the Work's Operation" {
+test "a running Bash line names its call only beside the Work's Operation and the call's ordinal" {
     const bash: WorkState = .{ .bash = .{ .since = test_now_s, .call = 3, .description = null, .running = 2, .approvals = 0 } };
     try std.testing.expectEqual(@as(?Call, .{ .operation = 19, .ordinal = 3 }), of(&bash, 19, test_now_ms).?.call);
     try std.testing.expectEqual(@as(?Call, null), of(&bash, null, test_now_ms).?.call);
+    // A Host that predates `call` names no ordinal, so the line names no row.
+    const older: WorkState = .{ .bash = .{ .since = test_now_s, .call = null, .description = null, .running = 2, .approvals = 0 } };
+    try std.testing.expectEqual(@as(?Call, null), of(&older, 19, test_now_ms).?.call);
     try std.testing.expectEqual(@as(?Call, null), of(&.{ .working = .{ .since = test_now_s } }, 19, test_now_ms).?.call);
 }
 

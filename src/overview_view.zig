@@ -2334,7 +2334,8 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     } else "";
     // A word longer than its column, such as a retry's countdown, starts
     // early and takes from the title's room, down to `min_title` cells.
-    const text = if (columns.word != columns.end) try word(painter.arena, state, row, rule, line, painter.script()) else "";
+    var word_bytes: [max_word_bytes]u8 = undefined;
+    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, painter.script()) else "";
     const word_end = columns.end -| Columns.age_cells -| 1;
     const overflow = painter.measure(text) -| (word_end -| columns.word);
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
@@ -2374,21 +2375,31 @@ fn toneColour(tone: work_line.Tone, neutral: Colour) Colour {
     };
 }
 
+/// Bytes the row's word takes at most: work's words and its clock, or an
+/// ended state's word naming its starter by quoted Label or reference.
+const max_word_bytes = max: {
+    var said = 0;
+    for (rules.values) |rule| if (rule.word) |text| {
+        said = @max(said, text.len);
+    };
+    const starter = said + " ".len + work_line.max_dot_bytes + " for ".len + @max("\"\"".len + max_label_bytes, @sizeOf(Reference));
+    break :max @max(work_line.max_words_bytes + work_line.max_clock_bytes, starter);
+};
+
 /// What the row says beside its title, unless its group heading says it:
 /// work under way in the conversation's words, else the state's word.
-fn word(arena: Allocator, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) error{OutOfMemory}![]const u8 {
+fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
     if (rule.said_by_group and row.group() == rule.group) return "";
     if (line) |shown| {
-        var buffer: [work_line.max_clock_bytes]u8 = undefined;
-        const clock = work_line.clockText(&buffer, shown.clock, .row, script);
-        return if (clock.len == 0) shown.words else std.mem.concat(arena, u8, &.{ shown.words, clock });
+        var clock: [work_line.max_clock_bytes]u8 = undefined;
+        return std.fmt.bufPrint(buffer, "{s}{s}", .{ shown.words, work_line.clockText(&clock, shown.clock, .row, script) }) catch unreachable;
     }
     const said = rule.word.?;
     if (!rule.starter) return said;
     const dot = work_line.glyphs.get(script).dot;
     const sender = (row.first orelse return said).sender orelse return said;
-    if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.allocPrint(arena, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() });
-    return std.fmt.allocPrint(arena, "{s} {s} for {s}", .{ said, dot, &sender });
+    if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.bufPrint(buffer, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{s} {s} for {s}", .{ said, dot, &sender }) catch unreachable;
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.

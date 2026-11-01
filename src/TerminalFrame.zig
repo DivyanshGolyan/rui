@@ -91,6 +91,15 @@ fn rows(text: anytype, layout: Viewport.Layout) !u16 {
     return @intCast(text.measure(layout, .{}, std.math.maxInt(u16)).rows);
 }
 
+/// Sets the heading to the overflow row counting `omitted` calls and
+/// returns its rows.
+fn overflow(self: *Self, layout: Viewport.Layout, omitted: u64, compact: bool) !u16 {
+    self.heading.clear();
+    var storage: [128]u8 = undefined;
+    try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
+    return rows(&self.heading, layout);
+}
+
 /// Plans rows for vaxis to fill. Decisions borrow only the supplied document
 /// and draft; the shell consumes the plan before pumping input or changing them.
 pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
@@ -154,11 +163,17 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     var heading_height: u16 = 0;
     // Work under way keeps a row for its live line ahead of call rows, which
     // the overflow row counts, but never ahead of a required row: when even
-    // the overflow row needs it, the live line goes.
-    var live_reserve: u16 = @intFromBool(input.live and available != 0);
-    const listed = self.used;
+    // the overflow row needs it, the live line goes. A page keeps a readable
+    // row besides it.
+    const live_fits = input.live and if (input.selected)
+        document.text().len != 0 and available >= 2
+    else
+        available > if (input.total_calls != 0) try self.overflow(layout, input.total_calls, true) else 0;
     while (true) {
-        const budget = available - live_reserve;
+        // The line draws unless the running call's own row shows its clock.
+        const said = if (input.clock_call) |index| index < self.used else false;
+        self.live_height = @intFromBool(live_fits and !said);
+        const budget = available - self.live_height;
         call_rows = 0;
         for (self.call_heights[0..self.used]) |height| call_rows += height;
         const omitted = if (input.selected) 0 else input.total_calls - self.used;
@@ -166,9 +181,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         while (true) {
             self.heading.clear();
             if (omitted != 0) {
-                var storage: [128]u8 = undefined;
-                try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
-                heading_height = try rows(&self.heading, layout);
+                heading_height = try self.overflow(layout, omitted, compact);
             } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.measure(layout, .{}, budget -| (needed - 1)).next.order(.end) != .eq) and budget -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= budget) break;
             if (omitted != 0 and !compact) {
@@ -178,12 +191,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
             break;
         }
         if (@as(u32, call_rows) + heading_height <= budget) break;
-        if (self.used == 0) {
-            if (live_reserve == 0) return error.TerminalTooSmall;
-            live_reserve = 0;
-            self.used = listed;
-            continue;
-        }
+        if (self.used == 0) return error.TerminalTooSmall;
         self.used -= 1;
     }
     if (self.heading.length == 0 and heading_height != 0) {
@@ -193,19 +201,16 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
             try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
-    const budget = available - live_reserve;
+    const budget = available - self.live_height;
     // A selected page needs a readable row so browsing can still advance.
     const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and budget > heading_height + call_rows);
-    // The reserved row goes back to the text while the running call's own
-    // row shows the clock, or when a page would keep no readable row.
-    const said = if (input.clock_call) |index| index < self.used else false;
-    self.live_height = @intFromBool(live_reserve != 0 and !said and (document_reserve != 0 or !input.selected));
     const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve;
     self.draft = draft_layout.fit(pieces, input.width - 2, input.cursor, shape, @min(draft_layout.cap(input.height), room), &self.draft_lines);
     const unreserved = input.height - self.draft.rows - self.rule_height - footer;
-    // A transcript shows the live line under its heading and a readable row.
+    // A transcript of this text shows the live line under its heading and a
+    // readable row.
     const navigation: u16 = @intFromBool(unreserved > 1);
-    self.browsing_height = unreserved - navigation - @intFromBool(input.live and unreserved > navigation + 1);
+    self.browsing_height = unreserved - navigation - @intFromBool(input.live and document.text().len != 0 and unreserved > navigation + 1);
     available = unreserved - self.live_height;
     self.height = available - heading_height - call_rows;
     self.first = document.first(layout, self.height);
@@ -341,6 +346,49 @@ test "the live line takes a row after every required row and before call rows" {
     try std.testing.expectEqual(@as(u16, 1), frame.overflow_height);
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     try std.testing.expectEqual(frame.live_row, frame.calls_row + 2);
+}
+
+test "the live row is kept only while the live line draws" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    const calls = [_][]const u8{ "• First", "• Second", "• Third" };
+    // The input leaves 80×5 two rows for calls, 80×6 three and 80×7 four.
+    // While the clock call's row shows, first or last, no live line takes a
+    // row; while it does not, the live line takes one and the overflow row
+    // counts the calls it displaces.
+    const cases = [_]struct { height: u16, total: u64, clock_call: ?usize, used: usize, live: u16 }{
+        .{ .height = 6, .total = 3, .clock_call = 0, .used = 3, .live = 0 },
+        .{ .height = 6, .total = 3, .clock_call = 2, .used = 3, .live = 0 },
+        .{ .height = 6, .total = 3, .clock_call = null, .used = 1, .live = 1 },
+        .{ .height = 7, .total = 5, .clock_call = 0, .used = 3, .live = 0 },
+        .{ .height = 7, .total = 5, .clock_call = 2, .used = 3, .live = 0 },
+        .{ .height = 7, .total = 5, .clock_call = null, .used = 2, .live = 1 },
+        .{ .height = 5, .total = 3, .clock_call = 0, .used = 1, .live = 0 },
+        .{ .height = 5, .total = 3, .clock_call = 1, .used = 0, .live = 1 },
+        .{ .height = 5, .total = 3, .clock_call = 2, .used = 0, .live = 1 },
+    };
+    for (cases) |case| {
+        try frame.plan(&document, .{ .width = 80, .height = case.height, .status = "", .cursor = 0, .approval = false, .calls = &calls, .total_calls = case.total, .live = true, .clock_call = case.clock_call, .selected = false, .action_visible = false, .preview_complete = true });
+        try std.testing.expectEqual(case.used, frame.used);
+        try std.testing.expectEqual(case.live, frame.live_height);
+        try std.testing.expectEqual(@as(u16, @intFromBool(case.total > case.used)), frame.overflow_height);
+        // The calls, overflow and live rows fill the rows above the rule.
+        try std.testing.expectEqual(frame.draft_top - 1, frame.live_row + frame.live_height);
+    }
+    // A page or transcript with no text draws no live line, so it keeps no
+    // row for one.
+    for ([_]bool{ false, true }) |selected| {
+        const input: Input = .{ .width = 80, .height = 24, .status = "", .cursor = 0, .approval = false, .calls = &.{}, .total_calls = 0, .live = true, .selected = selected, .action_visible = false, .preview_complete = true };
+        try frame.plan(&document, input);
+        const height = frame.height;
+        const browsing = frame.browsing_height;
+        try std.testing.expectEqual(@as(u16, @intFromBool(!selected)), frame.live_height);
+        var idle = input;
+        idle.live = false;
+        try frame.plan(&document, idle);
+        try std.testing.expectEqual(browsing, frame.browsing_height);
+        if (selected) try std.testing.expectEqual(frame.height, height);
+    }
 }
 
 test "the Session line shows once three rows remain under the status, then the rule once four remain above the line" {
