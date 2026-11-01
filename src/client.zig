@@ -290,6 +290,31 @@ pub const Requests = struct {
         };
     }
 
+    /// One step over the Messages without a Session sender: the one next to
+    /// `request.position`, older or newer, at `request.end`.
+    pub fn personMessage(self: Requests, store_path: []const u8, request: protocol.ReadPersonMessage) !protocol_reply.PersonMessageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", request.session.slice());
+        try request.validate();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.person_message_request, .{ paths.store.slice(), request.session.slice(), request.end, request.position, request.direction });
+        const fd = try openRead(self, &paths, "/v1/person-message", body.slice());
+        defer closeSocket(self.io, fd);
+        const Sink = struct {
+            buffer: protocol.FixedJsonBuffer(protocol.max_person_message_response_bytes) = .{},
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                try s.buffer.append(bytes);
+            }
+        };
+        var sink: Sink = .{};
+        var buffer: ReplyBuffer = .{};
+        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
+            .report => .{ .found = try protocol_reply.parsePersonMessage(sink.buffer.slice(), request) },
+            .command => |reply| .{ .failure = try protocol_reply.decodeReadFailure(reply, false) },
+        };
+    }
+
     /// Complete scoped bytes once; callers still use readProposalField for calls.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
@@ -2904,6 +2929,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.proposal_field_request, .{ &store, &session, id, protocol.ProposalField.arguments }, protocol.max_proposal_field_request_bytes },
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.person_message_request, .{ &store, &session, optional_id, id, Direction.backward }, protocol.max_person_message_request_bytes },
     };
     var largest: usize = 0;
     inline for (cases, 0..) |case, index| {

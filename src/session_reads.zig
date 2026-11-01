@@ -10,6 +10,7 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
+const Editor = @import("TerminalEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -167,6 +168,7 @@ pub const Job = struct {
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
     message_target: ?View.Collapsed = null,
+    recall: ?Input.Step = null,
     // The latest live work held queued input: a listed echo, whose read
     // was earlier, is labelled by it.
     held: bool = false,
@@ -239,7 +241,91 @@ pub const Job = struct {
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
+        // The sent Message a recall step found, its text staged in scratch.
+        recalled: ?Input.Found = null,
+        // The step passed over a sent Message the draft cannot hold.
+        recall_passed: bool = false,
     } = .{},
+};
+
+/// One step over the Messages the person sent, from the one the draft
+/// shows or from the newest: one Store row, then that Message's content
+/// staged in scratch. One the draft cannot hold as typed text (over its
+/// capacity, or with a control character) is passed over, its content read
+/// at most once, and the result says so.
+pub fn recall(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const step = job.recall.?;
+    std.debug.assert(step.older or step.from != null);
+    var request: protocol.ReadPersonMessage = .{
+        .end = if (step.from) |from| from.end else null,
+        .position = if (step.from) |from| from.position else 0,
+        .direction = if (step.older) .backward else .forward,
+    };
+    try request.session.set(job.session);
+    while (true) {
+        const reply = switch (try requests.personMessage(job.store, request)) {
+            .found => |reply| reply,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        const message = reply.message orelse return;
+        const at: Input.Recalled = .{ .position = message.position, .end = reply.end };
+        if (message.content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, message.content)) |found| {
+            job.result.recalled = found;
+            return;
+        };
+        job.result.recall_passed = true;
+        request.end = reply.end;
+        request.position = message.position;
+    }
+}
+
+/// Stages a sent Message's text in scratch; null when the draft cannot hold
+/// it as typed text.
+fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
+    try job.files.scratch.setLength(io, 0);
+    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
+    if (try requests.readActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
+    if (staging.offset != content.length) return error.ContentLengthMismatch;
+    const slash = staging.first == '/';
+    if (!staging.editable or staging.need != 0 or staging.offset + @intFromBool(slash) > Input.capacity) return null;
+    return .{ .at = at, .length = @intCast(staging.offset), .slash = slash };
+}
+
+/// A sent Message's text in scratch, checked scalar by scalar as the
+/// editor checks literal text.
+const RecallStaging = struct {
+    io: std.Io,
+    file: std.Io.File,
+    offset: u64 = 0,
+    first: ?u8 = null,
+    editable: bool = true,
+    scalar: [4]u8 = undefined,
+    have: u3 = 0,
+    need: u3 = 0,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        try self.file.writePositionalAll(self.io, bytes, self.offset);
+        self.offset += bytes.len;
+        if (self.first == null and bytes.len != 0) self.first = bytes[0];
+        for (bytes) |byte| {
+            if (!self.editable) return;
+            if (self.need == 0) self.need = std.unicode.utf8ByteSequenceLength(byte) catch {
+                self.editable = false;
+                return;
+            };
+            self.scalar[self.have] = byte;
+            self.have += 1;
+            if (self.have != self.need) continue;
+            Editor.validateText(self.scalar[0..self.have]) catch {
+                self.editable = false;
+            };
+            self.have = 0;
+            self.need = 0;
+        }
+    }
 };
 
 /// Host commands keep their one-shot output owners. Their complete stdout and
@@ -1217,7 +1303,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);

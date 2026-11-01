@@ -3574,6 +3574,39 @@ pub const Store = struct {
         page.work.revision = session.revision;
     }
 
+    /// The Message with no Session sender next to `position` at `end`: one
+    /// seek in the index of those Messages, then its content's metadata.
+    pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
+        try request.validate();
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.page, self.personMessageLocked(request));
+    }
+
+    fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
+        const next_position = (try self.sessionNextPosition(request.session.slice())) orelse return error.SessionNotFound;
+        const end = request.end orelse next_position - 1;
+        if (end >= next_position or request.position > end) return error.InvalidCursor;
+        const select = "SELECT admission_position,content_id FROM message_admission INDEXED BY message_admission_person " ++
+            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND admission_position>?2 AND admission_position<?3 ORDER BY admission_position";
+        const backward = request.direction == .backward;
+        const statement = if (backward) try self.cached(select ++ " DESC LIMIT 1") else try self.cached(select ++ " LIMIT 1");
+        defer resetCached(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, if (backward) 0 else request.position);
+        try bindU64(statement, 3, if (backward and request.position != 0) request.position else end + 1);
+        var reply: protocol.PersonMessage = .{ .end = end };
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return reply,
+            c.SQLITE_ROW => {},
+            else => return error.ActivityReadFailed,
+        }
+        const position: u64 = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore);
+        const metadata = try self.readPublicContentMetadata(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
+        reply.message = .{ .position = position, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+        return reply;
+    }
+
     // This projection shares the page's canonical capture, not Current's active
     // Turn lifetime. It is staged until the frontend acknowledges that page.
     fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
@@ -10479,6 +10512,48 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     defer report.deinit();
     try std.testing.expectEqual(created_at, try std.fmt.parseInt(u64, report.value.object.get("session").?.object.get("created_at").?.string, 10));
     try std.testing.expectEqualStrings("2000", report.value.object.get("peers").?.object.get("from_person_at").?.string);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a person's Message next to a position is one indexed row, at a fixed end" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "person-config");
+    var request: protocol.ReadPersonMessage = .{ .direction = .backward };
+    try request.session.set(session.slice());
+    try std.testing.expectEqual(protocol.PersonMessage{ .end = 0 }, try storage.personMessage(&request));
+    for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    var positions: [3]u64 = undefined;
+    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
+    const newest = try storage.personMessage(&request);
+    try std.testing.expectEqual(positions[2], newest.message.?.position);
+    try std.testing.expectEqual(protocol.contentDigest("three"), newest.message.?.content.digest);
+    try std.testing.expectEqual(@as(u64, 5), newest.message.?.content.length);
+    request.end = newest.end;
+    // Older from each one, then newer back: each step names its neighbour.
+    for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
+        request.position = from;
+        const found = try storage.personMessage(&request);
+        try std.testing.expectEqual(expected, if (found.message) |message| message.position else null);
+    }
+    request.direction = .forward;
+    try submitTestMessage(&storage, &tmp, "four", "four", session.slice(), "four");
+    for ([_]?u64{ positions[1], positions[2], null }, positions) |expected, from| {
+        request.position = from;
+        try std.testing.expectEqual(expected, if ((try storage.personMessage(&request)).message) |message| message.position else null);
+    }
+    // A later Message waits beyond the end it was read at.
+    request.end = null;
+    request.position = positions[2];
+    try std.testing.expect((try storage.personMessage(&request)).message.?.position > positions[2]);
+    request.end = try queryU64(storage.database, "SELECT next_position FROM session");
+    try std.testing.expectError(error.InvalidCursor, storage.personMessage(&request));
+    try request.session.set("nosuch");
+    request.end = null;
+    try std.testing.expectError(error.SessionNotFound, storage.personMessage(&request));
     try std.testing.expect(!storage.isFenced());
 }
 

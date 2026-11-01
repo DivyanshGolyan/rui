@@ -1137,6 +1137,7 @@ const Route = enum {
     proposal_field,
     activity_page,
     activity_content,
+    person_message,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -1416,6 +1417,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
+        .person_message => |*command| {
+            const found = host.store.personMessage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "person message", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
+        },
     }
 }
 
@@ -1429,6 +1440,10 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
+}
+
+fn renderPersonMessage(out: protocol.JsonOut, found: *const protocol.PersonMessage) error{BufferTooLarge}!void {
+    found.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -1531,6 +1546,8 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/person-message"))
+            .person_message
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
