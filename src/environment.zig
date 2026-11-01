@@ -26,6 +26,68 @@ pub const Value = []const u8;
 
 pub const Block = [:null]?[*:0]const u8;
 
+/// A client environment as the Host received it, checked and cleaned in
+/// place: each entry is `NAME=VALUE\0` with a non-empty NAME, and no NAME
+/// appears twice. Entries whose NAME starts with `RUI_` are removed, because
+/// Rui's overlay owns that prefix; `RUIX`, `rui_x` and `XRUI_` are ordinary
+/// names. `scratch` is borrowed for the duplicate check and freed before
+/// return. The result is a prefix of `bytes`.
+pub fn received(scratch: std.mem.Allocator, bytes: []u8) error{ OutOfMemory, InvalidEnvironment }!Value {
+    if (bytes.len != 0 and bytes[bytes.len - 1] != 0) return error.InvalidEnvironment;
+    var kept: usize = 0;
+    var count: usize = 0;
+    var start: usize = 0;
+    while (start < bytes.len) {
+        const end = std.mem.indexOfScalarPos(u8, bytes, start, 0).?;
+        const equals = std.mem.indexOfScalar(u8, bytes[start..end], '=') orelse return error.InvalidEnvironment;
+        if (equals == 0) return error.InvalidEnvironment;
+        if (!std.mem.startsWith(u8, bytes[start..end], "RUI_")) {
+            std.mem.copyForwards(u8, bytes[kept..], bytes[start .. end + 1]);
+            kept += end + 1 - start;
+            count += 1;
+        }
+        start = end + 1;
+    }
+    const value = bytes[0..kept];
+    // Sorted names put a repeat beside its first copy.
+    const starts = try scratch.alloc(u32, count);
+    defer scratch.free(starts);
+    var next: usize = 0;
+    for (starts) |*entry| {
+        entry.* = @intCast(next);
+        next = std.mem.indexOfScalarPos(u8, value, next, 0).? + 1;
+    }
+    std.mem.sort(u32, starts, value, nameLessThan);
+    for (starts[0..count -| 1], starts[@min(1, count)..]) |left, right| {
+        if (std.mem.eql(u8, entryName(value, left), entryName(value, right))) return error.InvalidEnvironment;
+    }
+    return value;
+}
+
+fn entryName(value: []const u8, start: u32) []const u8 {
+    return value[start..std.mem.indexOfScalarPos(u8, value, start, '=').?];
+}
+
+fn nameLessThan(value: []const u8, left: u32, right: u32) bool {
+    return std.mem.lessThan(u8, entryName(value, left), entryName(value, right));
+}
+
+/// Which Message an environment came with, to choose between two for one
+/// Session. A person's outranks a peer Session's; between equal origins the
+/// later Store admission wins. Admission positions are unique in a Store, so
+/// two different Messages never tie.
+pub const Rank = struct {
+    origin: Origin,
+    admission: u64,
+
+    pub const Origin = enum(u8) { peer, person };
+
+    pub fn outranks(self: Rank, other: Rank) bool {
+        if (self.origin != other.origin) return @backingInt(self.origin) > @backingInt(other.origin);
+        return self.admission > other.admission;
+    }
+};
+
 /// The child's `envp`. PATH comes first: the base's PATH, or the system PATH
 /// when there is no base or the base has none, led by this `rui`'s
 /// directory. Then the base's other entries, or, with no base, the Host's
@@ -195,4 +257,63 @@ test "leadPath puts the directory first once and is idempotent" {
     // A longer name that starts with the directory is another entry.
     try std.testing.expectEqualStrings("PATH=/opt/rui:/opt/ruin:/bin", try leadPath(arena, "/opt/rui", "/opt/ruin:/bin"));
     try std.testing.expectEqualStrings("PATH=/opt/rui", try leadPath(arena, "/opt/rui", ""));
+}
+
+test "received keeps well-formed entries in order and strips only RUI_ names" {
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "", "" },
+        .{ "A=1\x00", "A=1\x00" },
+        .{ "A=\x00", "A=\x00" },
+        .{ "A==b=c\x00", "A==b=c\x00" },
+        .{ "RUI_X=1\x00", "" },
+        .{ "RUI_=1\x00", "" },
+        .{ "B=2\x00RUI_STORE=/s\x00A=1\x00RUI_ADDRESS=k\x00", "B=2\x00A=1\x00" },
+        .{ "RUIX=1\x00rui_x=2\x00XRUI_=3\x00RUI=4\x00Rui_X=5\x00", "RUIX=1\x00rui_x=2\x00XRUI_=3\x00RUI=4\x00Rui_X=5\x00" },
+        // A repeat of a stripped name is no repeat: neither copy is kept.
+        .{ "RUI_X=1\x00RUI_X=2\x00A=1\x00", "A=1\x00" },
+        .{ "PATH=/bin\x00path=/usr/bin\x00", "PATH=/bin\x00path=/usr/bin\x00" },
+        .{ "AB=1\x00A=1\x00B=1\x00", "AB=1\x00A=1\x00B=1\x00" },
+    };
+    for (cases) |case| {
+        const bytes = try std.testing.allocator.dupe(u8, case[0]);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectEqualStrings(case[1], try received(std.testing.allocator, bytes));
+    }
+}
+
+test "received rejects every malformed shape" {
+    const cases = [_][]const u8{
+        "A=1",
+        "A=1\x00B=2",
+        "A\x00",
+        "\x00",
+        "=1\x00",
+        "A=1\x00\x00",
+        "A=1\x00A=2\x00",
+        "A=1\x00B=1\x00A=1\x00",
+        "RUI_X=1\x00A=1\x00A=1\x00",
+        "A=1\x00RUI_X\x00",
+    };
+    for (cases) |case| {
+        const bytes = try std.testing.allocator.dupe(u8, case);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectError(error.InvalidEnvironment, received(std.testing.allocator, bytes));
+    }
+}
+
+test "Rank.outranks is a strict total order: a person first, then the later admission" {
+    var ranks: [2 * 3]Rank = undefined;
+    for (&ranks, 0..) |*rank, index| rank.* = .{ .origin = @fromBackingInt(@intCast(index / 3)), .admission = index % 3 };
+    for (ranks) |a| {
+        try std.testing.expect(!a.outranks(a));
+        for (ranks) |b| {
+            const same = a.origin == b.origin and a.admission == b.admission;
+            // Total and antisymmetric: exactly one of two different ranks outranks the other.
+            if (!same) try std.testing.expect(a.outranks(b) != b.outranks(a));
+            // The rule, read independently of `outranks`.
+            const expected = if (a.origin != b.origin) a.origin == .person else a.admission > b.admission;
+            try std.testing.expectEqual(expected, a.outranks(b));
+            for (ranks) |c| if (a.outranks(b) and b.outranks(c)) try std.testing.expect(a.outranks(c));
+        }
+    }
 }
