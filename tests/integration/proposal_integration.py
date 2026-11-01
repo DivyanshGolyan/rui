@@ -211,7 +211,7 @@ def main():
                 row.update(action=str(item["action"]) if item["action"] else None, rejection=item["rejection"])
                 row["fields"] = {name: {"bytes": str(ref["length"]), "sha256": bytes(ref["digest"]).hex()} for name, ref in zip(FIELDS, item["fields"])}
                 wire_items.append(row)
-            valid = dict(version="2", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
+            valid = dict(version="3", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
             for change in ("order", "digest", "missing", "authority", "type"):
                 wire = copy.deepcopy(valid)
                 if change == "order": wire["items"][1]["position"] = wire["items"][0]["position"]
@@ -222,7 +222,9 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
-            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "3"', b'"version":"3","version":"3"'))
+            duplicated = encoded.replace(b'"version": "3"', b'"version":"3","version":"3"')
+            assert duplicated != encoded, "proposal fixture lost its wire version"
+            mock_reply(fields["socket"], store, "page", duplicated)
             assert mock_reply(fields["socket"], store, "field", b"abc", 9,
                 b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b""
             # A complete earlier window may be visible on failure; the final
