@@ -622,8 +622,9 @@ def cmd_restart_host(args):
     run = Run(args.run)
     old = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
            and process_start(r["pid"])[0] == r["lstart"]]
-    stop = run.rui_cmd("host", "stop", "--store", run.store)
-    if stop.returncode != 0:
+    # A Host that is already stopped is simply started again.
+    stop = run.rui_cmd("host", "stop", "--store", run.store) if old else None
+    if stop and stop.returncode != 0:
         die(f"host stop failed: {stop.stderr}")
     deadline = time.monotonic() + 15
     while any(process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"] for r in old):

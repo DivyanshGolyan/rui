@@ -40,7 +40,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
 
-   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host and starts a fresh one on the same Store, fixture and `--host-setenv` options.
+   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host (when it is running) and starts a fresh one on the same Store, fixture and `--host-setenv` options.
 
 3. **Open a terminal: one Rui client per name.**
 
