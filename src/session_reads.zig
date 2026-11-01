@@ -173,11 +173,11 @@ pub const Job = struct {
     // Messages shown in live output before this read.
     messages: Messages = .{},
     // The Messages waiting at the live cursor, as the Host reported them;
-    // the newest the opening showed queued (see View.Taking), which the
-    // opening sets in place; and the Message whose first line the queued
-    // row holds.
+    // the newest live output showed while it waited (see View.Taking),
+    // which each read sets in place; and the Message whose first line the
+    // queued row holds.
     queued: protocol.Queued = .{},
-    opened: u64 = 0,
+    drawn_waiting: u64 = 0,
     queued_line: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
@@ -340,7 +340,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(page.facts.work.work.state.holdsQueue(), &output);
         job.result.lowest = pending.lowest;
-        job.opened = pending.newest;
+        job.drawn_waiting = pending.newest;
         // A queued Message older than the page shows only in a transcript's
         // listing, at the opening's seam. No later boundary may precede its
         // row, which shows nothing live.
@@ -350,14 +350,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
     const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
-    try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .opened = job.opened, .from = from });
+    job.drawn_waiting = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn_waiting = job.drawn_waiting, .from = from });
+    // One shown at its Admission is delivered too.
+    job.result.delivered = @max(job.result.delivered, job.drawn_waiting);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     if (output.lowest) |lowest| job.result.lowest = lowest;
     const queued = page.facts.queued;
     job.result.queued = queued;
-    if (queued_line.shows(queued, job.opened) and queued.newest_admission != job.queued_line) {
+    if (queued_line.shows(queued, job.drawn_waiting) and queued.newest_admission != job.queued_line) {
         job.result.queued_line = .{ .admission = queued.newest_admission, .line = try readFirstLine(requests, job, queued.newest_position) };
     }
     if (!job.opening) {
@@ -428,7 +430,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 };
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
-                    const value = listed(item, range.all, job.opened) orelse continue;
+                    const value = listed(item, range.all, job.drawn_waiting) orelse continue;
                     try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
@@ -447,19 +449,20 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
 
 /// Whether a range lists this item, and its Message: every Message the live
 /// output of the range showed (`all`), or each one not applied at the
-/// range's end. Live output shows a person's or script's Message as its row,
-/// or at the stop that excluded it, and another Session's as its Admission.
-/// One admitted after the opening and still queued shows live later, so it
-/// is never listed.
-fn listed(item: protocol.ActivityItem, all: bool, opened: u64) ?protocol.ActivityItem.Message {
+/// range's end. Live output shows another Session's Message as its
+/// Admission, and a person's or script's at its Admission when it showed
+/// while it waited (`drawn_waiting`), otherwise as its row or at the stop
+/// that excluded it. One still queued that has not shown shows live later,
+/// so it is never listed.
+fn listed(item: protocol.ActivityItem, all: bool, drawn_waiting: u64) ?protocol.ActivityItem.Message {
     return switch (item.value) {
         .admission => |value| if (all)
-            (if (value.sender != null) value else null)
-        else if (value.state == .applied or (value.sender == null and value.state == .queued and value.admission > opened))
+            (if (value.sender != null or value.admission <= drawn_waiting) value else null)
+        else if (value.state == .applied or (value.sender == null and value.state == .queued and value.admission > drawn_waiting))
             null
         else
             value,
-        .user => |value| if (all and value.sender == null and value.admission > opened) value else null,
+        .user => |value| if (all and value.sender == null and value.admission > drawn_waiting) value else null,
         else => null,
     };
 }
@@ -468,15 +471,18 @@ test "a range lists the Messages live output showed, never queued Messages still
     const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
     const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
     const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, all: bool, listed: bool };
-    // The opening showed admissions up to 10 queued.
-    const opened = 10;
+    // Live output showed admissions up to 10 while they waited.
+    const drawn_waiting = 10;
     for ([_]Case{
         // A dropped live span: what live output showed. Another Session's
         // Admission and a person's or script's row after the opening.
         .{ .kind = .admission, .sender = true, .state = .applied, .admission = 12, .all = true, .listed = true },
         .{ .kind = .user, .sender = false, .state = .applied, .admission = 12, .all = true, .listed = true },
-        // Not the person's Admission, another Session's row, or a row the
-        // opening's Message gained, which live output never showed.
+        // A person's Message that showed at its Admission, taken next.
+        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 10, .all = true, .listed = true },
+        // Not the Admission of a person's Message that waited above the
+        // input, another Session's row, or the row of a Message that showed
+        // while it waited, which live output never showed.
         .{ .kind = .admission, .sender = false, .state = .queued, .admission = 12, .all = true, .listed = false },
         .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 12, .all = true, .listed = false },
         .{ .kind = .user, .sender = true, .state = .applied, .admission = 12, .all = true, .listed = false },
@@ -496,9 +502,9 @@ test "a range lists the Messages live output showed, never queued Messages still
             .admission => .{ .admission = message },
             .user => .{ .user = message },
         } };
-        try std.testing.expectEqual(case.listed, listed(item, case.all, opened) != null);
+        try std.testing.expectEqual(case.listed, listed(item, case.all, drawn_waiting) != null);
     }
-    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, true, opened) == null);
+    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, true, drawn_waiting) == null);
 }
 
 test "a stop answers every Message up to its cutoff, and no boundary precedes queued Messages it shows" {

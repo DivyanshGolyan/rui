@@ -17,12 +17,12 @@ pub const Line = Bounded(session_line.max_line_bytes);
 /// A first line and the Message it was read from.
 pub const Shown = struct { admission: u64, line: Line };
 
-/// Whether the row shows: some wait and the newest is not one the opening
-/// showed queued. Live output shows such a Message only once it is taken,
-/// so the row shows it until then, whatever the work is doing: a pending
-/// Session can wait a long time before it takes one.
-pub fn shows(queued: protocol.Queued, opened: u64) bool {
-    return queued.count != 0 and queued.newest_admission > opened;
+/// Whether the row shows: some wait and live output has not shown the
+/// newest while it waited (`View.Taking`). Live output shows such a Message
+/// only once it is taken, so the row shows it until then, whatever the
+/// work is doing.
+pub fn shows(queued: protocol.Queued, drawn_waiting: u64) bool {
+    return queued.count != 0 and queued.newest_admission > drawn_waiting;
 }
 
 /// What the row shows: the newest Message's first line, and how many wait.
