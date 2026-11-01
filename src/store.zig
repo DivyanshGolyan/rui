@@ -17334,6 +17334,19 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     try std.testing.expectEqual(@as(u64, 3), try queryU64(storage.database, "SELECT count(*) FROM model_output_part WHERE text_content_id IS NULL"));
     try std.testing.expectEqual(@as(u64, 4 + 0 + 4), try queryU64(storage.database, "SELECT sum(text_length) FROM model_output_part"));
     try std.testing.expectEqual(try queryU64(storage.database, "SELECT content_id FROM conversation_entry WHERE entry_kind=3"), try queryU64(storage.database, "SELECT message_content_id FROM model_output_item WHERE item_kind=2"));
+    // Each part kind holds exactly its text shape, and a message names its text.
+    for ([_]struct { ConstraintProbe, [:0]const u8 }{
+        .{ .check_violation, "UPDATE model_output_part SET text_length=NULL WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_part SET text_content_id=extras_content_id WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_part SET text_length=-1 WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_part SET part_kind=0 WHERE part_ordinal=0" },
+        .{ .accepted, "UPDATE model_output_part SET part_kind=0,text_length=NULL WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_part SET part_kind=3,part_array=2,text_length=NULL WHERE part_ordinal=0" },
+        .{ .accepted, "UPDATE model_output_part SET part_kind=3,part_array=2,text_length=NULL,text_content_id=extras_content_id WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_part SET part_kind=4,text_content_id=extras_content_id WHERE part_ordinal=0" },
+        .{ .check_violation, "UPDATE model_output_item SET message_content_id=NULL WHERE item_kind=2" },
+        .{ .check_violation, "UPDATE model_output_item SET item_kind=1,phase=0 WHERE item_kind=2" },
+    }) |case| try std.testing.expectEqual(case[0], try probeConstraint(storage.database, case[1]));
     try submitTestMessage(&storage, &tmp, "text-once-next", "text-once-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
