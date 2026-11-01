@@ -220,6 +220,7 @@ def fixture_main(args):
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
+      * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
       * text containing "rate limit": HTTP 429 with Retry-After 8 the first time, then the echo answer
@@ -296,6 +297,11 @@ def fixture_main(args):
                     bash(f"c{n}a", "ls", "List project files"),
                     bash(f"c{n}b", "exit 127", "Fail with exit 127"),
                     bash(f"c{n}c", "printf 'usage: example\\nunknown option --help\\n' >&2; exit 1", "Fail with an excerpt")])
+            elif user_text and "parallel bash" in user_text:
+                kind = "parallel-bash"
+                payload = fixture.sse_tool_calls(f"r{n}", [
+                    bash(f"c{n}a", "sleep 12; echo built", "Build the docs"),
+                    bash(f"c{n}b", "sleep 20; echo tested", "Run the slow tests")])
             elif user_text and "long bash" in user_text:
                 kind = "long-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", "sleep 8; echo slept", "Sleep eight seconds")])

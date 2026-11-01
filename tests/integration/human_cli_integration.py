@@ -31,6 +31,12 @@ TIMED_ROW = re.compile(r"^(.*?) +(\d\d:\d\d)$")
 def untimed(row):
     match = TIMED_ROW.match(row)
     return match.group(1) if match else row
+
+
+# What work under way says: the running call's row, "• Run tests · 42s", or
+# the conversation's last line, "• Waiting · 12s",
+# "! Rate limited · retry 2 in 18s", "Stopping…".
+LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
 from terminal_process import open_pty, terminal_process
 import terminal_process as terminal_process_module
 import model_fixture as fixture
@@ -2580,6 +2586,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
                 assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
+                assert re.search(rf"^• {bypass_description} · \d+s$", live, re.M), ("the running call's row carries the clock", live)
                 assert "Check final sibling" not in live, live
                 assert "? Run Bash" not in live and "allow once" not in live, live
                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
@@ -2596,6 +2603,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
+                # The running call's row is not shown, so the live line says it.
+                assert re.search(rf"^• {bypass_description} · \d+s$", short, re.M), short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
                 # Sizes below the required status and draft refuse the
                 # terminal instead (TerminalTooSmall); these must still fit.
@@ -2607,12 +2616,20 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, marker, composer=True)
                     narrow = current_screen(master)
                     shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                    # Every one of the four calls is either shown or counted.
+                    # Every one of the four calls is either shown above the
+                    # overflow row or counted by it. The running call's row
+                    # does not fit, so the live line under the overflow row
+                    # names it once more.
                     label = re.search(r"\+(\d+)(?: more calls)? · /status", shown)
-                    calls = sum(row.lstrip().startswith(("✓ ", "• ", "! ")) for row in narrow.splitlines())
-                    assert label and int(label[1]) + calls == 4, narrow
+                    assert label, narrow
+                    rows_shown = narrow.splitlines()
+                    overflow = next(at for at, row in enumerate(rows_shown) if re.match(r"\+\d", row))
+                    marked = [row.lstrip().startswith(("✓ ", "• ", "! ")) for row in rows_shown]
+                    assert int(label[1]) + sum(marked[:overflow]) == 4, narrow
+                    live_rows = [row for row, mark in zip(rows_shown[overflow:], marked[overflow:]) if mark]
+                    assert len(live_rows) == 1 and live_rows[0].startswith("• Wait"), narrow
                     if (rows, columns) == (6, 20):
-                        assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
+                        assert LIVE_LINE.search(narrow), ("optional spacing or wording hid the live line", narrow)
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
                     os.write(master, b"\x7f")
                     read_terminal(master, "› live", composer=True)
@@ -4261,7 +4278,7 @@ def renderer_cases():
         with terminal(session) as tty:
             frames = tty.every_frame()
             tty.send("run the tool demonstration\n", marker)
-            assert any("Working" in frame for frame in frames), frames
+            assert any(LIVE_LINE.search(frame) for frame in frames), frames
             for frame in frames:
                 for label in labels:
                     assert frame.count(label) <= 1, (label, frame)
@@ -4493,8 +4510,8 @@ def renderer_cases():
         proxy = None
         print("renderer: a page spanning several windows commits with its footer as one capture", flush=True)
 
-        # The composer status comes from the capture its history does: an
-        # ended Turn's answer never sits beside Working….
+        # The live line comes from the capture its history does: an ended
+        # Turn's answer never sits beside it.
         session = configure()
         endpoint.responses.append(fixture.sse_tool_calls("renderer-status-capture", [
             ("bash", "status-capture-call", json.dumps({"cmd": "sleep 1", "description": "Wait for the capture", "timeout_ms": None}))]))
@@ -4508,17 +4525,17 @@ def renderer_cases():
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "turn ended", timeout=20)
             release.set()
             tty.wait(marker, timeout=20)
-            tty.wait(predicate=lambda: "Working…" not in tty.capture.completed, timeout=5)
+            tty.wait(predicate=lambda: not LIVE_LINE.search(tty.capture.completed), timeout=5)
             for frame in frames:
-                assert not (marker in frame and "Working…" in frame), frame
+                assert not (marker in frame and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: the composer status and history come from one capture", flush=True)
+        print("renderer: the live line and history come from one capture", flush=True)
 
-        # /status opens from the capture the composer status shows: a Turn
-        # that ended unseen never reads completed beside Working….
+        # /status opens from the capture the live line shows: a Turn that
+        # ended unseen never reads completed beside it.
         session = configure()
         endpoint.responses.append(fixture.sse_tool_calls("renderer-status-open", [
             ("bash", "status-open-call", json.dumps({"cmd": "sleep 1", "description": "Wait to open status", "timeout_ms": None}))]))
@@ -4535,12 +4552,12 @@ def renderer_cases():
             release.set()
             tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
             for frame in frames:
-                assert not ("Session: " in frame and "Working…" in frame), frame
+                assert not ("Session: " in frame and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: /status opens from the capture the composer status shows", flush=True)
+        print("renderer: /status opens from the capture the live line shows", flush=True)
 
         # A /status not yet shown yields to a later page request: the page
         # asked for last is the one that stays on screen, even when the read

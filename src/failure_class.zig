@@ -55,6 +55,12 @@ pub fn of(code: []const u8) Class {
     return .other;
 }
 
+/// A retry's saved cause is a provider's temporary HTTP 429: the provider
+/// asked for fewer requests, and the retry waits it out.
+pub fn rateLimited(cause: []const u8) bool {
+    return std.mem.eql(u8, cause, "provider_temporary_http_429");
+}
+
 test "saved failure codes name what the person can do" {
     const cases = .{
         .{ "provider_cyber_policy", Class.policy },
@@ -75,4 +81,9 @@ test "saved failure codes name what the person can do" {
         .{ "provider_authentication_backend_failed", Class.other },
     };
     inline for (cases) |case| try std.testing.expectEqual(case[1], of(case[0]));
+}
+
+test "only a temporary 429 is a rate limit" {
+    try std.testing.expect(rateLimited("provider_temporary_http_429"));
+    for ([_][]const u8{ "provider_temporary_http_503", "provider_http_429", "provider_temporary_http_4290", "" }) |cause| try std.testing.expect(!rateLimited(cause));
 }

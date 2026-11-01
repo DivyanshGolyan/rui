@@ -8,7 +8,9 @@ const Position = Viewport.Position;
 const Frame = @import("TerminalFrame.zig");
 const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
+const work_line = @import("work_line.zig");
 const View = @import("session_view.zig");
+const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const ChoiceLine = @import("ChoiceLine.zig");
 const Editor = @import("TerminalEditor.zig");
@@ -543,11 +545,14 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
 }
 
 /// What a frame shows around the input: the status above the rule, and under
-/// the input a notice until the next key, else the Session line.
+/// the input a notice until the next key, else the Session line. `live` is
+/// what work under way is doing now: its running call's row carries the
+/// clock, and any other work ends the shown text.
 pub const Footer = struct {
     status: []const u8 = "",
     notice: []const u8 = "",
     session: ?SessionLine = null,
+    live: ?work_line.Line = null,
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
@@ -591,8 +596,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var call_storage: [3][View.Live.line_bytes]u8 = undefined;
     var calls: [3][]const u8 = undefined;
     const selected = self.view != .live;
-    if (!selected) for (0..live.count) |index| {
-        calls[index] = try live.line(index, &call_storage[index]);
+    // Calls keep their places. While the work is a running Bash call, that
+    // call's own row carries the clock; the live line says it only when the
+    // row is not shown.
+    var clock: [work_line.max_clock_bytes]u8 = undefined;
+    const running: ?work_line.Call = if (footer.live) |line| line.call else null;
+    var clock_call: ?usize = null;
+    if (!selected) for (live.entries[0..live.count], 0..) |entry, index| {
+        const named = if (running) |call| entry.operation == call.operation and entry.ordinal == call.ordinal else false;
+        if (named) clock_call = index;
+        calls[index] = try live.line(index, &call_storage[index], if (named) work_line.clockText(&clock, footer.live.?.clock, .conversation, .unicode) else "");
     };
     const document = self.viewed();
     var layout: Frame = undefined;
@@ -608,6 +621,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .approval = approval,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
+        .live = footer.live != null,
+        .clock_call = clock_call,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -624,12 +639,15 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (approval) .attention else .quiet));
     // Only a failure's own line is marked; standing notices below stay quiet.
     if (failure and !approval) _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure));
-    var call_row = layout.status_row + layout.status_height;
+    var call_row = layout.calls_row;
     for (0..layout.used) |index| {
         _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)));
         call_row += layout.call_heights[index];
     }
     _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
+    // Cells borrow the clock's bytes until the frame is rendered.
+    var live_clock: [work_line.max_clock_bytes]u8 = undefined;
+    if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
     // Continuation rows align under the text; only the draft's first line
     // has a glyph. Each shown line is printed whole: draft_layout already
@@ -670,6 +688,29 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     try out.writeAll(frame.written());
     try out.flush();
     return .{ .frame = self.frames };
+}
+
+/// The live line: its mark and words in the line's tone, then its clock,
+/// quiet.
+fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line.Line, clock: *[work_line.max_clock_bytes]u8) void {
+    const fitted = work_line.fit(clock, line, width, self.vx.caps.unicode);
+    const words: View.Style = switch (line.tone) {
+        .normal => .normal,
+        .quiet => .quiet,
+        .attention => .attention,
+    };
+    var column: u16 = 0;
+    for ([_]struct { []const u8, View.Style }{
+        .{ fitted.mark, if (line.tone == .attention) .attention else .quiet },
+        .{ if (fitted.mark.len == 0) "" else " ", .normal },
+        .{ fitted.words, words },
+        .{ if (fitted.cut) session_line.ellipsis else "", words },
+        .{ fitted.clock, .quiet },
+    }) |piece| {
+        if (piece[0].len == 0) continue;
+        const end = window.child(.{ .x_off = column }).printSegment(.{ .text = piece[0], .style = self.style(piece[1]) }, .{ .wrap = .none });
+        column += end.col;
+    }
 }
 
 /// The rule above the input. It names the draft lines hidden above or
@@ -732,6 +773,8 @@ const Memory = struct {
         std.heap.page_allocator.rawFree(bytes, alignment, address);
     }
 };
+
+var test_words: [work_line.max_words_bytes]u8 = undefined;
 
 test "wide resize preserves a growing combining draft" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -836,19 +879,19 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("l", window.readCell(2, 22).?.char.grapheme);
     try std.testing.expectEqualStrings("F", window.readCell(0, 23).?.char.grapheme);
     // Status sits directly above the rule.
-    _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Working…", .session = session }, &.{});
-    try std.testing.expectEqualStrings("W", window.readCell(0, 20).?.char.grapheme);
+    _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Sending…", .session = session }, &.{});
+    try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 20).?.style.fg);
     try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
     // A notice takes the line until the next key, in the failure colour
     // when it reports one; the input does not move.
     for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · /help" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
-        _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Working…", .notice = notice, .session = session }, &.{});
+        _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
         try std.testing.expectEqualStrings(notice, rowText(screen, 23, &storage));
         try std.testing.expectEqual(colour, window.readCell(0, 23).?.style.fg);
         try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
-        try std.testing.expectEqualStrings("W", window.readCell(0, 20).?.char.grapheme);
+        try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
     }
     for ([_]u16{ 51, 40 }, [_][]const u8{ "Fix flaky store tests · gpt-6.1-sol · 69% left", "Fix flaky stor… · gpt-6.1-sol · 69% left" }) |columns, expected| {
         _ = try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});
@@ -956,14 +999,16 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try live.entries[0].presentation.description.?.set("12345中Z");
     _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Idle" }, &live);
-    // Status, then the call, sit right above the rule on row 9. The
-    // continuation aligns under the call's text, after its glyph.
-    try std.testing.expectEqualStrings("5", window.readCell(6, 7).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 8).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(4, 8).?.char.grapheme);
+    // The call follows the empty conversation from the top; the status
+    // stays right above the rule on row 9. The continuation aligns under
+    // the call's text, after its glyph.
+    try std.testing.expectEqualStrings("5", window.readCell(6, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(4, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("I", window.readCell(0, 8).?.char.grapheme);
     _ = try screen.render(&out.writer, size, "", 0, .{ .status = "́Z" }, &live);
-    // The status row sits above the call's two rows.
-    try std.testing.expectEqualStrings("\\", window.readCell(0, 6).?.char.grapheme);
+    try std.testing.expectEqualStrings("\\", window.readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
 }
 
 test "actual overflow yields wording before clipping required status" {
@@ -978,10 +1023,15 @@ test "actual overflow yields wording before clipping required status" {
     const live: View.Live = .{ .total = 100 };
     _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live);
     const window = screen.vx.window();
-    try std.testing.expectEqualStrings("I", window.readCell(0, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("+", window.readCell(0, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("/", window.readCell(7, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("/", window.readCell(7, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 2).?.char.grapheme);
+    // Work under way gives up its line rather than the frame.
+    const waiting: protocol.WorkState = .{ .working = .{ .since = 1 } };
+    _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle", .live = work_line.of(&test_words, &waiting, null, 2_000) }, &live);
+    try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
     try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
     try std.testing.expectError(error.TerminalTooSmall, renderChoice(screen, &out.writer, .{ .row = 3, .col = 12, .xpixel = 0, .ypixel = 0 }, Frame.approval_choice ++ "\n! Original retained"));
     var calls: View.Live = .{ .count = 3, .total = 4 };
@@ -991,8 +1041,123 @@ test "actual overflow yields wording before clipping required status" {
     }
     const before = out.written().len;
     screen.vx.queueRefresh();
-    _ = try screen.render(&out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, .{ .status = "Working…\nCommand still running." }, &calls);
+    _ = try screen.render(&out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, .{ .status = "Sending…\nCommand still running." }, &calls);
     try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "+3 more calls") != null);
+}
+
+test "the running call's row carries the clock, in its place, and other work ends the conversation" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try screen.append("› run the store tests\n");
+    var calls: View.Live = .{ .count = 3, .total = 3 };
+    // Two running calls share a description; ordinals tell them apart.
+    for ([_][]const u8{ "Read the failing test output", "Run zig build", "Run zig build" }, [_]protocol.ToolPresentation.Code{ .succeeded, .unresolved, .unresolved }, 0..) |label, code, index| {
+        calls.entries[index] = .{ .operation = 7, .ordinal = index, .presentation = .{ .description = .{}, .code = code, .publication_position = null } };
+        try calls.entries[index].presentation.description.?.set(label);
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 52, .xpixel = 0, .ypixel = 0 };
+    var buffer: [256]u8 = undefined;
+    for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "• Run zig build · 42s", "• Run zig build" }, .{ "• Run zig build", "• Run zig build · 42s" } }) |ordinal, rows| {
+        const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
+        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
+        try std.testing.expectEqualStrings("› run the store tests", rowText(screen, 0, &buffer));
+        try std.testing.expectEqualStrings("✓ Read the failing test output", rowText(screen, 1, &buffer));
+        try std.testing.expectEqualStrings(rows[0], rowText(screen, 2, &buffer));
+        try std.testing.expectEqualStrings(rows[1], rowText(screen, 3, &buffer));
+        try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
+        // A call of another Operation is not the one running.
+        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
+        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
+        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+        try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 4, &buffer));
+    }
+    // Other work under way is the conversation's last line, then goes.
+    const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+    try std.testing.expectEqualStrings("• Waiting · 12s", rowText(screen, 4, &buffer));
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &calls);
+    try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
+    // A narrow line cuts the words and keeps the clock, under the
+    // conversation and calls that now wrap.
+    _ = try screen.render(&out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("  build", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
+    try std.testing.expectEqualStrings("─", screen.vx.window().readCell(0, 9).?.char.grapheme);
+    // Stopping says so quietly, with no clock.
+    const stopping: protocol.WorkState = .{ .stopping = .{ .since = 130 } };
+    screen.colour = true;
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &stopping, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("Stopping…", rowText(screen, 4, &buffer));
+    try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(0, 4).?.style.fg);
+    try std.testing.expect(!std.meta.eql(screen.style(.normal).fg, screen.style(.quiet).fg));
+}
+
+test "a browsed page keeps the live line above the status" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var calls: View.Live = .{ .count = 1, .total = 1 };
+    calls.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try calls.entries[0].presentation.description.?.set("Run zig build");
+    const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+    const footer: Footer = .{ .status = "Opening…", .live = work_line.of(&test_words, &state, 7, 142_000) };
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    var buffer: [256]u8 = undefined;
+    // Calls are not drawn on a page, so the line says the running call.
+    try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
+    // The page moves by the rows it shows.
+    try std.testing.expectEqual(screen.height, screen.browsing_height);
+}
+
+test "a description's controls read escaped alike on its call row and on the live line" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try screen.append("row\n");
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var calls: View.Live = .{ .count = 1, .total = 1 };
+    calls.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try calls.entries[0].presentation.description.?.set("Run\t\x1b[2J\u{202e}tests");
+    const shown = "• Run\\t\\x1b[2J\\u202etests · 42s";
+    var buffer: [256]u8 = undefined;
+    // On its call row.
+    const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    // On the live line: the call is not among the rows, as from an older
+    // Host that names no call.
+    const older: protocol.WorkState = .{ .bash = .{ .since = 100, .call = null, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    // Cut to a narrow line, the words are cut as shown, never as raw bytes.
+    _ = try screen.render(&out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", rowText(screen, 1, &buffer));
 }
 
 test "narrow browsing retains the complete return instruction" {
@@ -1008,7 +1173,7 @@ test "narrow browsing retains the complete return instruction" {
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
     for ([_]u16{ 8, 20 }) |columns| {
-        for ([_][]const u8{ "", "Working…" }) |status| {
+        for ([_][]const u8{ "", "Sending…" }) |status| {
             const before = out.written().len;
             screen.vx.queueRefresh();
             _ = try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = status }, &.{});
@@ -1180,12 +1345,12 @@ test "an unchanged frame writes nothing" {
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
     try screen.append("hello\n");
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Working…" }, &.{});
+    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
     const before = out.written().len;
     // Observation polls redraw several times a second while idle.
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Working…" }, &.{});
+    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
     try std.testing.expectEqual(before, out.written().len);
-    _ = try screen.render(&out.writer, size, "a", 1, .{ .status = "Working…" }, &.{});
+    _ = try screen.render(&out.writer, size, "a", 1, .{ .status = "Sending…" }, &.{});
     try std.testing.expect(out.written().len > before);
 }
 

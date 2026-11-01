@@ -10,11 +10,16 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const turn_policy = @import("turn_policy.zig");
 const transport_policy = @import("transport_policy.zig");
+const retry_policy = @import("retry_policy.zig");
 
 /// The saved code bound (`turn.outcome_code`, `model_operation.last_failure_code`).
 pub const max_code_bytes = 96;
 /// The saved Tool Call description bound (`model_tool_call.description`).
 pub const max_description_bytes = 100;
+
+/// The greatest ordinal a retrying state's failed Attempt has: the last
+/// Attempt is never retried.
+pub const max_retried_attempt = retry_policy.maximum_attempts - 1;
 
 /// The closed set that frontends, scripts and agents switch on.
 pub const Kind = enum { idle, pending, working, retrying, bash, approval, stopping, finished, failed, stopped };
@@ -40,9 +45,11 @@ pub const WorkState = union(Kind) {
     /// The model Operation waits for a future retry time. `attempt` is the
     /// ordinal of the Attempt that failed; `cause` its failure code.
     retrying: Retrying,
-    /// At least one Bash Action is running. `description` is the oldest
-    /// running call's saved description; `approvals` counts sibling Actions
-    /// awaiting a Permission Decision.
+    /// At least one Bash Action is running. `call` is the oldest running
+    /// call's ordinal among the calls of the Work's Operation, null only as
+    /// read from a Host that predates it, and `description` its saved
+    /// description; `approvals` counts sibling Actions awaiting a
+    /// Permission Decision.
     bash: Bash,
     /// Every unresolved Action awaits a Permission Decision.
     approval: Since,
@@ -55,7 +62,7 @@ pub const WorkState = union(Kind) {
 
     pub const Since = struct { since: u64 };
     pub const Retrying = struct { since: u64, due_at_ms: u64, cause: Bounded(max_code_bytes), attempt: u64 };
-    pub const Bash = struct { since: u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
+    pub const Bash = struct { since: u64, call: ?u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
     pub const Stopped = struct { since: u64, cause: StopCause };
 
@@ -170,7 +177,7 @@ pub const Inputs = struct {
         /// proposal and is not a decision.
         latest_decision_at: ?u64 = null,
 
-        pub const Running = struct { at: u64, description: ?[]const u8 };
+        pub const Running = struct { at: u64, call: u64, description: ?[]const u8 };
     };
 };
 
@@ -214,7 +221,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     }
     work.state = switch (latest.op) {
         .in_flight => |attempt| .{ .working = .{ .since = attempt.attempt_at } },
-        .waiting => |retry| (WorkState{ .retrying = .{
+        .waiting => |retry| if (retry.attempt == 0 or retry.attempt > max_retried_attempt) return error.CorruptStore else (WorkState{ .retrying = .{
             .since = retry.scheduled_at,
             .due_at_ms = retry.due_at_ms,
             .cause = try bounded(max_code_bytes, retry.cause),
@@ -226,6 +233,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
             if (resolution != .tool_proposals) break :state .{ .pending = .{ .since = resolved.at } };
             if (actions.oldest_running) |running| break :state .{ .bash = .{
                 .since = running.at,
+                .call = running.call,
                 .description = if (running.description) |text| try bounded(max_description_bytes, text) else null,
                 .running = actions.running,
                 .approvals = actions.awaiting,
@@ -309,6 +317,7 @@ fn expectState(expected: WorkState, inputs: Inputs) !void {
             try std.testing.expectEqual(retry.attempt, actual.retrying.attempt);
         },
         .bash => |bash| {
+            try std.testing.expectEqual(bash.call, actual.bash.call);
             try std.testing.expectEqual(bash.running, actual.bash.running);
             try std.testing.expectEqual(bash.approvals, actual.bash.approvals);
             try std.testing.expectEqual(bash.description == null, actual.bash.description == null);
@@ -378,10 +387,10 @@ test "a proposal group is Bash, approval or pending by its Actions" {
         .awaiting = 1,
         .first_awaiting = 41,
         .running = 2,
-        .oldest_running = .{ .at = 350, .description = "Run the resize tests" },
+        .oldest_running = .{ .at = 350, .call = 2, .description = "Run the resize tests" },
         .latest_resolution_at = 360,
     };
-    try expectState(.{ .bash = .{ .since = 350, .description = fixed(max_description_bytes, "Run the resize tests"), .running = 2, .approvals = 1 } }, .{
+    try expectState(.{ .bash = .{ .since = 350, .call = 2, .description = fixed(max_description_bytes, "Run the resize tests"), .running = 2, .approvals = 1 } }, .{
         .now_ms = 0,
         .created_at = 1,
         .latest = activeTurn(proposals(340), running),
@@ -389,7 +398,7 @@ test "a proposal group is Bash, approval or pending by its Actions" {
     try std.testing.expectEqual(@as(?u64, 41), (try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), running) })).first_action);
     var undescribed = running;
     undescribed.oldest_running.?.description = null;
-    try expectState(.{ .bash = .{ .since = 350, .description = null, .running = 2, .approvals = 1 } }, .{
+    try expectState(.{ .bash = .{ .since = 350, .call = 2, .description = null, .running = 2, .approvals = 1 } }, .{
         .now_ms = 0,
         .created_at = 1,
         .latest = activeTurn(proposals(340), undescribed),
@@ -434,7 +443,7 @@ test "a stop that selected the active Turn outranks its Operation" {
         .total = 2,
         .unresolved = 1,
         .running = 1,
-        .oldest_running = .{ .at = 350, .description = null },
+        .oldest_running = .{ .at = 350, .call = 0, .description = null },
         .latest_resolution_at = 350,
     });
     turn.stopped_at = 400;
@@ -512,13 +521,16 @@ test "inputs no writer produces are corrupt" {
         // Counts that disagree with themselves.
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 2 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1 }),
-        activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 1, .description = null } }),
+        activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 1, .call = 0, .description = null } }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .running = 1 }),
         // A resolved Action without its time, or a time with none resolved.
         activeTurn(proposals(340), .{ .total = 1 }),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41, .latest_resolution_at = 1 }),
         // A terminal Turn whose Operation never resolved.
         .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .terminal = .{ .outcome = .completed, .code = "completed", .at = 500, .position = 40 }, .op = unresolved },
+        // A retry after an Attempt that is never retried.
+        activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = "c", .attempt = max_retried_attempt + 1 } }, .{}),
+        activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = "c", .attempt = 0 } }, .{}),
         // A saved code beyond its bound.
         activeTurn(.{ .waiting = .{ .scheduled_at = 1, .due_at_ms = 2, .cause = &@as([max_code_bytes + 1]u8, @splat('x')), .attempt = 1 } }, .{}),
     }) |turn| {
@@ -542,7 +554,7 @@ test "progress follows the work table" {
     inline for (comptime std.enums.values(Kind)) |kind| {
         const state = @unionInit(WorkState, @tagName(kind), switch (kind) {
             .retrying => .{ .since = 1, .due_at_ms = 5_000, .cause = .{}, .attempt = 1 },
-            .bash => .{ .since = 1, .description = null, .running = 1, .approvals = 0 },
+            .bash => .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 },
             .failed => .{ .since = 1, .code = .{}, .resets_at = null },
             .stopped => .{ .since = 1, .cause = .stop },
             else => .{ .since = 1 },

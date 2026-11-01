@@ -25,6 +25,7 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const work_line = @import("work_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -253,16 +254,16 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         self.writePendingDiagnostic(&out) catch unreachable;
-        TerminalText.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
+        stderr.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
     const cause: ?anyerror = if (ended) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
     if (plan.failure) |err| switch (err) {
-        error.TerminalTooSmall => TerminalText.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
-        error.TerminalTooLarge => TerminalText.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
-        error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => TerminalText.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
+        error.TerminalTooSmall => stderr.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
+        error.TerminalTooLarge => stderr.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
+        error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => stderr.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
         else => {},
     };
     const action_view = self.terminal.screen.action_view != null;
@@ -361,7 +362,7 @@ pub fn recoveryGuide(self: *const Self) void {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     self.writeRecoveryGuide(&out) catch unreachable;
-    if (out.buffered().len != 0) TerminalText.diagnostic("{s}", .{out.buffered()});
+    if (out.buffered().len != 0) stderr.diagnostic("{s}", .{out.buffered()});
 }
 
 fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
@@ -767,8 +768,13 @@ fn drawFrame(self: *Self) !void {
             .submitting => "Sending…",
             .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
             .rejected => "Rejected · /discard",
-        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.state),
+        } else if (self.admission.echo != null) "Sent" else "",
     };
+    // An Action's own instructions speak for its approval; elsewhere the
+    // work says what it is doing now, on every view.
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    var live_words: [work_line.max_words_bytes]u8 = undefined;
+    const live = if (projection.approval != .absent) null else work_line.of(&live_words, &self.live.work.state, self.live.work.operation, now_ms);
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
     if (choosing and screen.actionVisible())
@@ -779,7 +785,7 @@ fn drawFrame(self: *Self) !void {
     const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -864,27 +870,6 @@ test "a paged Action keeps what runs, where and for how long beside the choice" 
     try summary.workspace.set("/work");
     try approvalContext(&out, true, summary);
     try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
-}
-
-fn workStatus(state: protocol.WorkState) []const u8 {
-    return switch (state.progress() orelse return "") {
-        .runnable, .in_flight => "Working…",
-        .waiting_for_permission => "Needs approval",
-    };
-}
-
-test "the composer status shows only live work, not an ending the transcript already shows" {
-    // The ended Turn's line sits directly above the composer; a second
-    // copy pointing at /status would add nothing /status does not repeat.
-    for ([_]protocol.WorkState{
-        .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } },
-        .{ .stopped = .{ .since = 1, .cause = .stop } },
-        .{ .idle = .{ .since = 1 } },
-        .{ .finished = .{ .since = 1 } },
-    }) |ended| try std.testing.expectEqualStrings("", workStatus(ended));
-    try std.testing.expectEqualStrings("Working…", workStatus(.{ .working = .{ .since = 1 } }));
-    try std.testing.expectEqualStrings("Working…", workStatus(.{ .pending = .{ .since = 1 } }));
-    try std.testing.expectEqualStrings("Needs approval", workStatus(.{ .approval = .{ .since = 1 } }));
 }
 
 fn pump(raw: *anyopaque) !void {
