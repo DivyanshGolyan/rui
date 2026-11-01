@@ -419,7 +419,7 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
         errdefer std.debug.print("reason outcome={s}\n", .{@tagName(outcome)});
         var input: Input = undefined;
         input.init();
-        var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = directory, .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
+        var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = directory, .input = &input, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
         self.intent = .{ .message_then_deny = .{ .ticket = input.submitText("skip"), .action = 19 } };
         self.reply = Worker.reply(outcome == .accepted);
         try self.task.start(self.io, &self, if (outcome == .lost) Worker.lost else Worker.done);
