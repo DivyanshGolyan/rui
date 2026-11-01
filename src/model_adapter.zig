@@ -867,7 +867,9 @@ pub const preparation_item_allowance = 64;
 
 pub const PreparationProgress = union(enum) {
     pending,
-    prepared: PreparedRequest,
+    /// The sealed request, in the preparation's own storage, where it stays
+    /// until its owner sends or releases it; the preparation is spent.
+    prepared: *PreparedRequest,
     failed: anyerror,
 };
 
@@ -962,9 +964,10 @@ pub const Preparation = struct {
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
     /// The Session's codec, begun at the settings stage.
     job: codecs.Job = undefined,
-    /// The headers the codec asked for at the settings item, judged as
-    /// they are kept; emptied when the job begins.
-    headers: provider.RequestHeaders = undefined,
+    /// Built in place: the codec's headers as the settings item's ops run
+    /// (emptied when the job begins, judged as they are kept), the rest when
+    /// the request seals.
+    request: PreparedRequest = undefined,
     /// The current item's handles; `job.header.handles` says which exist.
     handles: [codec_abi.max_handles]Handle = undefined,
     /// The open output item's provider bag, written at its close.
@@ -1211,7 +1214,7 @@ pub const Preparation = struct {
                 if (self.state.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
                 try self.job.begin(self.state.faults.codec orelse codecs.encoder(self.settings.provider.codec()));
-                self.headers.count = 0;
+                self.request.headers.count = 0;
                 self.state.stage = .history_validation;
             },
             .history_validation => {
@@ -1527,7 +1530,7 @@ pub const Preparation = struct {
                     return true;
                 },
                 .content => |content| self.state.content = .{ .handle = content.handle, .escape = content.escape },
-                .header => |header| try self.headers.add(header),
+                .header => |header| try self.request.headers.add(header),
                 // The job keeps the item's carry.
                 .carry => unreachable,
             }
@@ -1703,13 +1706,11 @@ pub const Preparation = struct {
         self.view.close();
         self.state.active = false;
         self.state.stage = .complete;
-        return .{ .prepared = .{
-            .file = self.readonly,
-            .length = self.writer.offset,
-            .charged = self.writer.charged,
-            .structured_output = self.settings.output_schema != null,
-            .headers = self.headers,
-        } };
+        self.request.file = self.readonly;
+        self.request.length = self.writer.offset;
+        self.request.charged = self.writer.charged;
+        self.request.structured_output = self.settings.output_schema != null;
+        return .{ .prepared = &self.request };
     }
 
     pub fn cancel(self: *Preparation) void {
@@ -1898,7 +1899,7 @@ test "real preparation consumes the configured allowance across multiple advance
         // Fixture runaway guard, not a request limit: allow the full scratch
         // budget even if an advance makes only one byte of output progress.
         try std.testing.expect(advances < 4096);
-        var progress = preparation.advance(16, 2);
+        const progress = preparation.advance(16, 2);
         const stats = preparation.advanceStats();
         try std.testing.expect(stats.work_bytes <= 16);
         try std.testing.expect(stats.work_items <= 2);
@@ -1906,7 +1907,7 @@ test "real preparation consumes the configured allowance across multiple advance
         last_request = stats.request_bytes;
         switch (progress) {
             .pending => {},
-            .prepared => |*request| {
+            .prepared => |request| {
                 try std.testing.expect(advances > 1);
                 try std.testing.expect(request.length > 0);
                 request.deinit(std.testing.io, preparation.writer.budget);
@@ -2133,7 +2134,7 @@ test "a prepared request carries the Responses codec's headers with its Session'
     try setup.storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    const request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
     defer request.deinit(std.testing.io, preparation.writer.budget);
     // The settings the preparation read stay in place after it seals.
     const session_id = std.fmt.bytesToHex(preparation.settings.session_affinity, .lower);
@@ -2180,7 +2181,7 @@ fn drainPreparation(
     item_allowance: usize,
     step_bound: usize,
 ) !DrainedRequest {
-    var request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
+    const request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
     defer request.deinit(std.testing.io, preparation.writer.budget);
     const length: usize = @intCast(request.length);
     const bytes = try std.testing.allocator.alloc(u8, length);
@@ -2192,22 +2193,23 @@ fn drainPreparation(
     return .{ .bytes = bytes, .length = request.length, .digest = digest };
 }
 
-/// Drain to a live PreparedRequest the caller owns across later Store
-/// changes. The request stays readable until the caller releases it. The
-/// step bound limits completed advances, not attempted ones: a trip on the
-/// sealing advance still acquires its request first, so the terminal-result
-/// guard below must release it before the bound error escapes.
+/// Drain to a live PreparedRequest, in the preparation's storage, that the
+/// caller owns across later Store changes. The request stays readable until
+/// the caller releases it. The step bound limits completed advances, not
+/// attempted ones: a trip on the sealing advance still acquires its request
+/// first, so the terminal-result guard below must release it before the
+/// bound error escapes.
 fn drainLivePreparation(
     preparation: *Preparation,
     byte_allowance: usize,
     item_allowance: usize,
     step_bound: usize,
-) !PreparedRequest {
+) !*PreparedRequest {
     var steps: usize = 0;
     var last_request: u64 = 0;
     while (true) {
         steps += 1;
-        var progress = preparation.advance(byte_allowance, item_allowance);
+        const progress = preparation.advance(byte_allowance, item_allowance);
         // Guard an owning terminal result adjacent to acquisition, before
         // any fallible assertion below can drop it.
         switch (progress) {
@@ -2220,7 +2222,7 @@ fn drainLivePreparation(
                 last_request = stats.request_bytes;
                 try std.testing.expect(preparation.state.active);
             },
-            .prepared => |*request| {
+            .prepared => |request| {
                 var transferred = false;
                 errdefer if (!transferred) request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(steps <= step_bound);
@@ -2230,7 +2232,7 @@ fn drainLivePreparation(
                 try std.testing.expect(stats.request_bytes >= last_request);
                 try std.testing.expect(!preparation.state.active);
                 transferred = true;
-                return request.*;
+                return request;
             },
             .failed => |err| {
                 try std.testing.expect(steps <= step_bound);
@@ -2253,14 +2255,14 @@ fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: u
     while (true) {
         steps += 1;
         try std.testing.expect(steps <= step_bound);
-        var progress = preparation.advance(1, 1);
+        const progress = preparation.advance(1, 1);
         switch (progress) {
             .pending => {},
             // An unexpectedly sealed request is owned here: release it
             // before reporting the failed expectation so a statistics or
             // offset regression cannot leak the descriptor. The preparation
             // is inactive after sealing, so callers must not cancel it.
-            .prepared => |*request| {
+            .prepared => |request| {
                 request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(false);
                 unreachable;
@@ -2816,7 +2818,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             try setup.storage.openHistoricalView(binding, &preparation.view);
             try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
-            var sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
+            const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
             var buffer: [8192]u8 = undefined;
@@ -3032,10 +3034,10 @@ test "request preparation cancellation and failure release ownership" {
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
-            var progress = preparation.advance(64, 8);
+            const progress = preparation.advance(64, 8);
             switch (progress) {
                 .pending => {},
-                .prepared => |*request| {
+                .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
                     break;
                 },
@@ -3109,7 +3111,7 @@ test "request preparation completed request is fenced by later stop before hando
     try preparation.checkIntegrity(binding);
     // The sealed request stays owned and readable across the stop and the
     // refused handoff; only its release returns the charge.
-    var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    const request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
     var released = false;
     defer {
         if (!released) request.deinit(std.testing.io, preparation.writer.budget);
@@ -3170,12 +3172,12 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var count: usize = 0;
         while (count < 4096) {
             count += 1;
-            var progress = probe.advance(probe_allowance[0], probe_allowance[1]);
+            const progress = probe.advance(probe_allowance[0], probe_allowance[1]);
             switch (progress) {
                 .pending => {},
                 // The probe owns this terminal result with no fallible
                 // step before release, so a single scope holds cleanup.
-                .prepared => |*sealed| {
+                .prepared => |sealed| {
                     sealed.deinit(std.testing.io, probe.writer.budget);
                     break :blk count;
                 },
@@ -3254,8 +3256,7 @@ test "request preparation fences a saved provider bag whose bytes changed" {
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
-            var unexpected = request;
-            unexpected.deinit(std.testing.io, preparation.writer.budget);
+            request.deinit(std.testing.io, preparation.writer.budget);
             return error.ExpectedCorruptStore;
         } else |err| {
             try std.testing.expectEqual(error.CorruptStore, err);
@@ -3311,7 +3312,7 @@ test "request preparation replays a large private reasoning item within each adv
             try std.testing.expect(turns < 1000000);
             // Replay reads and writes no more than each advance charges.
             const written = preparation.writer.offset;
-            var progress = preparation.advance(7, 2);
+            const progress = preparation.advance(7, 2);
             try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
             try std.testing.expect(preparation.advanceStats().work_items <= 2);
             try std.testing.expect(preparation.writer.offset - written <= 7);
@@ -3319,7 +3320,7 @@ test "request preparation replays a large private reasoning item within each adv
             switch (progress) {
                 .pending => {},
                 .failed => |err| return err,
-                .prepared => |*request| {
+                .prepared => |request| {
                     defer request.deinit(std.testing.io, preparation.writer.budget);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
@@ -3378,7 +3379,7 @@ test "request preparation authenticates the historical requested model binding" 
         try setup.storage.openHistoricalView(binding, &prep.view);
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
-        var request = try drainLivePreparation(&prep, 1, 1, 32768);
+        const request = try drainLivePreparation(&prep, 1, 1, 32768);
         defer request.deinit(std.testing.io, prep.writer.budget);
     }
     try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
@@ -3387,8 +3388,7 @@ test "request preparation authenticates the historical requested model binding" 
     try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
     if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
-        var unexpected = prepared;
-        unexpected.deinit(std.testing.io, prep.writer.budget);
+        prepared.deinit(std.testing.io, prep.writer.budget);
         return error.ExpectedContinuationUnavailable;
     } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
     prep.cancel();
@@ -3727,7 +3727,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
             try setup.storage.openHistoricalView(binding, &prep.view);
             try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
             defer if (prep.state.active) prep.cancel();
-            var request = try drainLivePreparation(&prep, 1, 1, 32768);
+            const request = try drainLivePreparation(&prep, 1, 1, 32768);
             defer request.deinit(std.testing.io, prep.writer.budget);
         }
         try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
@@ -3736,8 +3736,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
-            var unexpected = prepared;
-            unexpected.deinit(std.testing.io, prep.writer.budget);
+            prepared.deinit(std.testing.io, prep.writer.budget);
             return error.ExpectedContinuationUnavailable;
         } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
         prep.cancel();
@@ -3799,11 +3798,11 @@ fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     // A rewound copy shrinks the request, so this drain does not require
     // monotonic growth as drainPreparation does.
     var steps: usize = 0;
-    var request = while (true) : (steps += 1) {
+    const request = while (true) : (steps += 1) {
         try std.testing.expect(steps < 1 << 16);
         switch (preparation.advance(7, 3)) {
             .pending => {},
-            .prepared => |value| break value,
+            .prepared => |sealed| break sealed,
             .failed => |err| return err,
         }
     };
@@ -4048,8 +4047,9 @@ const HeaderFault = struct {
     count: u8 = 1,
 };
 
-/// The pinned Responses encoder asking for `fault.count` copies of one
-/// header: in place of the settings item's ops, or after another item's.
+/// The pinned Responses encoder asking for `fault.count` headers of one
+/// value, named `fault.name`, then `fault.name` with "-1", "-2", ...: in
+/// place of the settings item's ops, or after another item's.
 fn HeaderCodec(comptime fault: HeaderFault) type {
     return struct {
         const pinned = codecs.encoder(.@"openai-responses/1");
@@ -4059,7 +4059,11 @@ fn HeaderCodec(comptime fault: HeaderFault) type {
             const status = pinned.step(state, header, ops);
             if (header.item != fault.item) return status;
             if (fault.item == .settings) ops.length = 0;
-            for (0..fault.count) |_| ops.header(fault.name, fault.value) catch unreachable;
+            for (0..fault.count) |index| {
+                var buffer: [64]u8 = undefined;
+                const name = if (index == 0) fault.name else std.fmt.bufPrint(&buffer, "{s}-{d}", .{ fault.name, index }) catch unreachable;
+                ops.header(name, fault.value) catch unreachable;
+            }
             return status;
         }
     };
@@ -4096,7 +4100,7 @@ test "a codec header naming a credential field fails provider_codec_failed" {
     try setup.storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = &HeaderCodec(.{ .count = codec_abi.max_request_headers }).encoder }, &retained);
     defer if (preparation.state.active) preparation.cancel();
-    var eight = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    const eight = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
     try std.testing.expectEqual(@as(u8, codec_abi.max_request_headers), eight.headers.count);
     eight.deinit(std.testing.io, preparation.writer.budget);
     // The same Session encodes through its pinned codec.
@@ -4339,7 +4343,7 @@ test "a cold history memo build yields under the preparation allowance" {
         var final_work: usize = 0;
         var last_request: u64 = 0;
         var steps: usize = 0;
-        var request = while (true) : (steps += 1) {
+        const request = while (true) : (steps += 1) {
             try std.testing.expect(steps < 1 << 12);
             const progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
             const stats = preparation.advanceStats();
@@ -4353,7 +4357,7 @@ test "a cold history memo build yields under the preparation allowance" {
             final_work += stats.work_bytes;
             switch (progress) {
                 .pending => {},
-                .prepared => |value| break value,
+                .prepared => |sealed| break sealed,
                 .failed => |err| return err,
             }
         };

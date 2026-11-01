@@ -41,10 +41,13 @@ pub const PreparedRequest = struct {
     }
 };
 
+/// The field every Transfer sends first, ahead of the codec's headers.
+const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
+
 /// The request fields the Host writes itself, which no codec header may
-/// name: `content-type` (`Transfer.start`) and model_adapter.Headers'
-/// credential, user-agent, FedRAMP and turn-state fields.
-pub const host_request_fields = [_][]const u8{ "content-type", "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
+/// name: `content_type` and model_adapter.Headers' credential, user-agent,
+/// FedRAMP and turn-state fields.
+pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
 
 /// A codec's request headers, in the order it asked for them, in storage
 /// the prepared request owns.
@@ -56,13 +59,17 @@ pub const RequestHeaders = struct {
     bytes: [codec_abi.max_request_header_bytes]u8 = undefined,
 
     /// Keep `header` if the Host can send it: a lowercase token naming no
-    /// field the Host or h2 writes itself, a header-safe value, and room
-    /// left under both bounds. Anything else is the codec's fault.
+    /// field the Host or h2 writes itself and no header already kept, a
+    /// header-safe value, and room left under both bounds. Anything else is
+    /// the codec's fault.
     pub fn add(self: *RequestHeaders, header: codec_abi.Header) error{CodecBadOp}!void {
         if (self.count == codec_abi.max_request_headers) return error.CodecBadOp;
         if (!codec_abi.lowercaseToken(header.name) or !codec_abi.headerValue(header.value)) return error.CodecBadOp;
         for (host_request_fields ++ h2.owned_fields) |owned| {
             if (std.mem.eql(u8, header.name, owned)) return error.CodecBadOp;
+        }
+        for (0..self.count) |index| {
+            if (std.mem.eql(u8, header.name, self.field(index).name)) return error.CodecBadOp;
         }
         const start = self.used();
         if (self.bytes.len - start < header.name.len + header.value.len) return error.CodecBadOp;
@@ -560,7 +567,7 @@ const Observed = struct {
 pub const Transfer = struct {
     stream: h2.Stream,
     reactor: *Reactor,
-    request: SentRequest,
+    request: RetainedRequest,
     /// Until h2 retires the request body or the Transfer ends.
     request_open: bool = true,
     response: ResponseCapture,
@@ -582,7 +589,7 @@ pub const Transfer = struct {
     };
 
     /// What a Transfer keeps of its request.
-    const SentRequest = struct {
+    const RetainedRequest = struct {
         file: std.Io.File,
         charged: u64,
         structured_output: bool,
@@ -606,7 +613,7 @@ pub const Transfer = struct {
         const count = 1 + request.headers.count + options.fields.len;
         if (count > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
-        fields[0] = .{ .name = "content-type", .value = "application/json", .borrowed = true };
+        fields[0] = content_type;
         for (fields[1..][0..request.headers.count], 0..) |*field, index| field.* = request.headers.field(index);
         @memcpy(fields[1 + request.headers.count ..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
@@ -835,7 +842,7 @@ test "a Transfer that fails to start releases its credential use" {
     try std.testing.expectEqual(@as(?*SharedCredential, null), reactor.credentials.head);
 }
 
-test "codec headers are bounded, header-safe, and never a field the Host writes" {
+test "codec headers are bounded, header-safe, distinct, and never a field the Host writes" {
     var headers: RequestHeaders = .{};
     for (0..codec_abi.max_request_headers) |index| {
         var name = "x-header-0".*;
@@ -847,6 +854,13 @@ test "codec headers are bounded, header-safe, and never a field the Host writes"
     try std.testing.expectEqualStrings("x-header-7", headers.field(7).name);
     try std.testing.expectEqualStrings("v", headers.field(7).value);
     try std.testing.expect(!headers.field(0).borrowed and !headers.field(0).sensitive);
+    // A name already kept, whatever its value.
+    headers = .{};
+    try headers.add(.{ .name = "x-a", .value = "1" });
+    try headers.add(.{ .name = "x-b", .value = "1" });
+    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x-b", .value = "2" }));
+    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x-a", .value = "1" }));
+    try std.testing.expectEqual(@as(u8, 2), headers.count);
     // Names and values share 192 bytes: exactly full, then one byte over.
     const value: [codec_abi.max_request_header_bytes - 2]u8 = @splat('v');
     headers = .{};

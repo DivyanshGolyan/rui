@@ -13319,14 +13319,14 @@ test "historical accepted assistant output completeness and provenance fence rea
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            var progress = preparation.advance(7, 2);
+            const progress = preparation.advance(7, 2);
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(case.failure, err);
                     break;
                 },
-                .prepared => |*request| {
+                .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCorruptionFailure;
                 },
@@ -13373,14 +13373,14 @@ test "historical preparation fences a served call that does not match its certif
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            var progress = preparation.advance(1, 1);
+            const progress = preparation.advance(1, 1);
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
                     break;
                 },
-                .prepared => |*request| {
+                .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCompatibilityFailure;
                 },
