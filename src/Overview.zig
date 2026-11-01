@@ -94,14 +94,25 @@ pub const Left = struct {
 pub const Reply = struct {
     outcome: enum { accepted, failed, unconfirmed } = .failed,
     session: view.Reference = undefined,
-    /// The failure code, or the handle that recovers an unconfirmed request.
-    text: protocol.Bounded(protocol.max_code_bytes) = .{},
+    /// The failure code, why an environment was refused, or the handle
+    /// that recovers an unconfirmed request.
+    text: protocol.Bounded(@max(protocol.max_code_bytes, client.Environment.too_large_bytes)) = .{},
     /// The request's handle, for guidance after an accepted start.
     handle: protocol.Bounded(protocol.max_key_bytes) = .{},
 
     fn refused(code: []const u8) Reply {
         var reply: Reply = .{};
         reply.text.set(code[0..@min(code.len, protocol.max_code_bytes)]) catch {};
+        return reply;
+    }
+
+    /// Nothing was sent: the environment is over what a Message carries.
+    fn environmentTooLarge(environment: client.Environment) Reply {
+        var reply: Reply = .{};
+        var buffer: [client.Environment.too_large_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        environment.describeTooLarge(&writer) catch unreachable;
+        reply.text.set(writer.buffered()) catch unreachable;
         return reply;
     }
 
@@ -885,7 +896,13 @@ fn startSession(self: *Self, requests: client.Requests, input: client.MessageInp
         return;
     };
     var buffer: client.ReplyBuffer = .{};
-    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
+    const environment: client.Environment = .{ .map = self.init.environ_map };
+    const sent = requests.sendCaptured(&captured, environment, &buffer);
+    if (sent == .failed and sent.failed.err == error.EnvironmentTooLarge) {
+        reply.* = .environmentTooLarge(environment);
+        return;
+    }
+    return reply.record(sent, captured.identity().key.slice());
 }
 
 fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
@@ -1273,6 +1290,16 @@ test "a captured request is unconfirmed until the Host answers it" {
     // Even a send that never connected leaves a saved request to recover.
     const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.FileNotFound } };
     try std.testing.expectEqualStrings("h1", recorded(unsent, "h1").start().unconfirmed);
+    // A refused environment sent nothing: the start failed, and says why.
+    var environ = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ.deinit();
+    const large = try std.testing.allocator.alloc(u8, 70000);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    try environ.put("LARGE_VARIABLE", large);
+    const too_large = Reply.environmentTooLarge(.{ .map = &environ }).start().failed;
+    try std.testing.expect(std.mem.indexOf(u8, too_large, "nothing was sent") != null);
+    try std.testing.expect(std.mem.endsWith(u8, too_large, "Largest variables: LARGE_VARIABLE."));
     const uploaded: Sent = .{ .failed = .{ .step = .upload, .err = error.Cancelled } };
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").start().unconfirmed);
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").stop().unconfirmed);

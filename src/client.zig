@@ -2,6 +2,8 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const environment_rule = @import("environment.zig");
+const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
 const test_poll = @import("test_poll");
 /// Reply grammar; public for callers built against this module alone.
@@ -1476,16 +1478,11 @@ pub const Environment = struct {
     pub const empty: Environment = .{ .map = &empty_map };
     const empty_map: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = undefined };
 
-    pub fn forwards(name: []const u8, value: []const u8) bool {
-        return name.len != 0 and !std.mem.startsWith(u8, name, "RUI_") and
-            std.mem.indexOfAny(u8, name, "=\x00") == null and std.mem.indexOfScalar(u8, value, 0) == null;
-    }
-
     /// Bytes of the entries.
     pub fn bytes(self: Environment) u64 {
         var total: u64 = 0;
         for (self.map.keys(), self.map.values()) |name, value| {
-            if (forwards(name, value)) total += name.len + value.len + 2;
+            if (environment_rule.forwards(name, value)) total += environment_rule.entryBytes(name, value);
         }
         return total;
     }
@@ -1495,8 +1492,8 @@ pub const Environment = struct {
         var names: [3]?[]const u8 = @splat(null);
         var sizes: [3]usize = @splat(0);
         for (self.map.keys(), self.map.values()) |name, value| {
-            if (!forwards(name, value)) continue;
-            var size = name.len + value.len + 2;
+            if (!environment_rule.forwards(name, value)) continue;
+            var size = environment_rule.entryBytes(name, value);
             var held: ?[]const u8 = name;
             for (&names, &sizes) |*slot_name, *slot_size| {
                 if (held == null or size <= slot_size.*) continue;
@@ -1507,11 +1504,31 @@ pub const Environment = struct {
         return names;
     }
 
+    /// How much of each largest variable's name `describeTooLarge` shows.
+    const shown_name_bytes = 32;
+    const too_large_head = "this shell's environment is {d} bytes, over the {d} a Message carries for Bash; nothing was sent. Largest variables:";
+    /// The most bytes `describeTooLarge` writes.
+    pub const too_large_bytes = too_large_head.len + 2 * 20 + 3 * (", ".len + TerminalText.max_bytes_per_byte * shown_name_bytes) + ".".len;
+
+    /// Why a Message refused this environment before sending it: its size,
+    /// the limit and its three largest variables, escaped for one terminal
+    /// line. Every caller that sends Messages reports it with these words.
+    pub fn describeTooLarge(self: Environment, writer: *std.Io.Writer) !void {
+        try writer.print(too_large_head, .{ self.bytes(), protocol.max_environment_bytes });
+        for (self.largest(), 0..) |name, index| if (name) |value| {
+            try writer.writeAll(if (index == 0) " " else ", ");
+            var text: TerminalText = .{ .mode = .line };
+            try text.feed(writer, value[0..@min(value.len, shown_name_bytes)]);
+            try text.finish(writer);
+        };
+        try writer.writeAll(".");
+    }
+
     /// Writes the entries through `buffer`, flushing it as it fills.
     fn upload(self: Environment, requests: Requests, fd: std.posix.fd_t, buffer: []u8, until: ?i128) !void {
         var used: usize = 0;
         for (self.map.keys(), self.map.values()) |name, value| {
-            if (!forwards(name, value)) continue;
+            if (!environment_rule.forwards(name, value)) continue;
             for ([_][]const u8{ name, "=", value, "\x00" }) |piece| {
                 var rest = piece;
                 while (rest.len != 0) {
@@ -2699,6 +2716,11 @@ test "a Message uploads its environment ahead of the unchanged record and other 
     try std.testing.expectEqualStrings("LARGE", largest[0].?);
     try std.testing.expectEqualStrings("MIDDLE", largest[1].?);
     try std.testing.expectEqualStrings("SMALL", largest[2].?);
+    var described: [Environment.too_large_bytes]u8 = undefined;
+    var described_writer = std.Io.Writer.fixed(&described);
+    try environment.describeTooLarge(&described_writer);
+    try std.testing.expect(std.mem.endsWith(u8, described_writer.buffered(), "Largest variables: LARGE, MIDDLE, SMALL."));
+    try std.testing.expect(std.mem.indexOf(u8, described_writer.buffered(), "over the 65536 a Message carries") != null);
 
     // Another mutation's route carries no environment, whatever its size.
     var stop = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .generated = root });
@@ -3883,4 +3905,23 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     const stopped = connectRequest(.{ .io = io, .cancellation = &token }, address, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s);
     if (stopped) |fd| closeTestDescriptor(fd) else |_| {}
     try std.testing.expectError(if (blocks) error.Cancelled else error.UnixConnectFailed, stopped);
+}
+
+test "a refused environment's reason fits its bound with the longest escaped names" {
+    var map = std.process.Environ.Map.init(std.testing.allocator);
+    defer map.deinit();
+    const value = try std.testing.allocator.alloc(u8, protocol.max_environment_bytes);
+    defer std.testing.allocator.free(value);
+    @memset(value, 'v');
+    // Names of control bytes escape to the most bytes each.
+    const names = [_][]const u8{ &@as([40]u8, @splat(1)), &@as([40]u8, @splat(2)), &@as([40]u8, @splat(3)), "SMALLEST" };
+    for (names, 0..) |name, index| try map.put(name, value[0 .. value.len - index]);
+    const environment: Environment = .{ .map = &map };
+    var buffer: [Environment.too_large_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try environment.describeTooLarge(&writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOfAny(u8, text, "\x01\x02\x03") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "SMALLEST") == null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "\\x03."));
 }

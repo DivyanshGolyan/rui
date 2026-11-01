@@ -162,9 +162,17 @@ shown: session_line.Shown = .{},
 /// A short command result shows as a notice up to this size.
 const short_result_bytes = 256;
 const rejection_suffix = " · /discard clears it";
+/// This process's environment cannot change, so the original goes from a
+/// shell with a smaller one.
+const too_large_advice = " Unset or shorten them in another shell, then run rui request recover there.";
 /// The longest built notice: a rejection with its code escaped (four bytes
-/// per byte at most), or a short result with a failure mark on each line.
-const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len, short_result_bytes + 2 * "! ".len);
+/// per byte at most), a refused environment, or a short result with a
+/// failure mark on each line.
+const notice_capacity = @max(
+    "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
+    "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
+    short_result_bytes + 2 * "! ".len,
+);
 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
@@ -1219,7 +1227,14 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
             try writer.writeAll(rejection_suffix);
             self.notice = writer.buffered();
         },
-        .absent, .failed => {},
+        .failed => |failed| if (failed.err == error.EnvironmentTooLarge) {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            try writer.writeAll("! ");
+            try self.submission.environment.describeTooLarge(&writer);
+            try writer.writeAll(too_large_advice);
+            self.notice = writer.buffered();
+        },
+        .absent => {},
     }
 }
 

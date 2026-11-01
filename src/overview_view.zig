@@ -453,7 +453,8 @@ pub const Request = struct {
 };
 
 pub const Notice = struct {
-    bytes: [256]u8 = undefined,
+    /// Room for a refused environment's reason, its longest notice.
+    bytes: [768]u8 = undefined,
     len: usize = 0,
     colour: Colour,
 
@@ -650,7 +651,11 @@ pub const State = struct {
         }
         const held = &self.requests[at];
         held.status = status;
-        held.text.set(text) catch unreachable;
+        // A long failure, such as a refused environment, keeps its start,
+        // cut between characters.
+        var end = @min(text.len, held.text.bytes.len);
+        while (end < text.len and end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+        held.text.set(text[0..end]) catch unreachable;
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.

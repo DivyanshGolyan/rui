@@ -131,16 +131,12 @@ noinline fn printHelp(io: std.Io, topic: union(enum) { resource: cli_args.Resour
 /// Names the variables that most likely pushed the environment past what a
 /// Message carries. The captured request stays recoverable.
 noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
-    var buffer: [512]u8 = undefined;
+    const advice = " Unset or shorten them, then recover the saved request with rui request recover.\n";
+    var buffer: ["rui: ".len + client.Environment.too_large_bytes + advice.len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    writer.print("rui: this shell's environment is {d} bytes, over the {d} a Message carries for Bash; nothing was sent. Largest variables:", .{ environment.bytes(), protocol.max_environment_bytes }) catch {};
-    for (environment.largest(), 0..) |name, index| if (name) |value| {
-        writer.print("{s} ", .{if (index == 0) "" else ","}) catch {};
-        var text: TerminalText = .{ .mode = .line };
-        text.feed(&writer, value[0..@min(value.len, 64)]) catch {};
-        text.finish(&writer) catch {};
-    };
-    writer.writeAll(". Unset or shorten them, then recover the saved request with rui request recover.\n") catch {};
+    writer.writeAll("rui: ") catch unreachable;
+    environment.describeTooLarge(&writer) catch unreachable;
+    writer.writeAll(advice) catch unreachable;
     stderr.diagnostic("{s}", .{writer.buffered()});
 }
 
