@@ -18,6 +18,10 @@ Load applicable guidance before acting; routes combine:
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
+## Code Review Rules
+
+PR reviewers, including Codex, apply [Review](CODING_STANDARDS.md#review). Write each finding's correction **Simplify first**: the simpler structure that removes the finding's whole class, with a point patch only as the fallback.
+
 ## Contract enforcement
 
 | Contract | Owning enforcement | Existing local and CI checks |
