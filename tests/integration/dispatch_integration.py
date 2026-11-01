@@ -1201,6 +1201,79 @@ def phased_message_cases(state, processes, endpoints):
     print("Synthetic commentary, partial_answer and unphased streams: exact replay, visible order, final result and crash recovery passed")
 
 
+def held_message_denial_cases(state, processes, endpoints):
+    """A Message admitted while a Bash call waits for approval is held until
+    its call group settles, then reaches the model in the same request as the
+    group's results, after them."""
+    def bash_call(label, ordinal, command_text):
+        return ("bash", f"{label}-call-{ordinal}", json.dumps(
+            {"cmd": command_text, "timeout_ms": None, "description": f"Run {label} command {ordinal}"},
+            separators=(",", ":")))
+
+    for label, siblings in (("single", 1), ("siblings", 2)):
+        store = state / f"{label}-held-store"
+        forbidden = state / f"{label}-held-must-not-launch"
+        calls = [bash_call(label, 0, f"touch {forbidden}")]
+        if siblings == 2:
+            calls.append(bash_call(label, 1, "printf sibling-ran"))
+        endpoint = SuccessEndpoint([
+            sse_tool_calls(f"{label}-tools", calls),
+            sse_answer(f"{label}-answer", f"{label}-reasoning", f"{label}-message", "Understood")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        processes.append(host)
+        session = configure(state, store, f"{label}-held-config", None, "gpt-6-sol")
+        message(state, store, f"{label}-start", session, "Run the command")
+        actions = wait_for(lambda: len(unresolved := command("session", "inspect", "--store", store, "--session", session)
+                                       ["actions"]["unresolved"]) == siblings and unresolved,
+                           "Bash Actions waiting for permission")
+        assert all(action["authorization"] == "pending" for action in actions), actions
+        actions.sort(key=lambda action: int(action["call_ordinal"]))
+
+        # The person's reason is admitted first, while every Action waits.
+        message(state, store, f"{label}-reason", session, "Don't run that; use the cached copy instead")
+        assert observe(store, f"{label}-reason").get("result") is None
+        assert len(endpoint.requests) == 1, endpoint.requests
+
+        command("action", "deny", "--store", store, "--session", session, "--action", actions[0]["action"],
+                "--record", state / f"{label}-deny.json", "--key", f"{label}-deny")
+        if siblings == 2:
+            # The group is incomplete: the reason stays held. Settle the
+            # sibling by running it; its output must precede the reason too.
+            assert len(endpoint.requests) == 1, endpoint.requests
+            assert observe(store, f"{label}-reason").get("result") is None
+            command("action", "allow", "--store", store, "--session", session, "--action", actions[1]["action"],
+                    "--record", state / f"{label}-allow.json", "--key", f"{label}-allow")
+
+        for key in (f"{label}-start", f"{label}-reason"):
+            wait_for(lambda key=key: completed_observation(store, key), f"{key} result")
+            assert read_result(store, key) == b"Understood"
+        assert not forbidden.exists(), "denied Bash was launched"
+        # One continuation request, carrying the denial and the reason together.
+        assert len(endpoint.requests) == 2, endpoint.requests
+        continuation = json.loads(endpoint.requests[1])["input"]
+        outputs = [item for item in continuation if item.get("type") == "function_call_output"]
+        tail = continuation[-(siblings + 1):]
+        assert tail[:siblings] == outputs, continuation
+        assert outputs[0] == {"type": "function_call_output", "call_id": f"{label}-call-0",
+                              "output": "Permission denied."}, outputs
+        if siblings == 2:
+            assert outputs[1]["call_id"] == f"{label}-call-1", outputs
+            assert "sibling-ran" in outputs[1]["output"], outputs
+        assert tail[-1] == {"role": "user", "content": [
+            {"type": "input_text", "text": "Don't run that; use the cached copy instead"}]}, continuation
+        users = [item for item in continuation if item.get("role") == "user"]
+        assert [item["content"][0]["text"] for item in users] == [
+            "Run the command", "Don't run that; use the cached copy instead"], users
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("Held Message: denial and pending reason share one continuation request, after the complete call group")
+
+
 def main(mode="all", correlation_case="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -1252,6 +1325,11 @@ def main(mode="all", correlation_case="all"):
         if mode in ("all", "failed-response-export"):
             failed_response_export_case(state, processes, endpoints)
             if mode == "failed-response-export":
+                completed = True
+                return
+        if mode in ("all", "held-message-denial"):
+            held_message_denial_cases(state, processes, endpoints)
+            if mode == "held-message-denial":
                 completed = True
                 return
         phased_message_cases(state, processes, endpoints)
@@ -5643,8 +5721,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)
