@@ -37,7 +37,7 @@ binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
 configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
-body = json.dumps({'version': '3', 'kind': 'configure', 'store': store,
+body = json.dumps({'version': '4', 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
     captured.write(body)
