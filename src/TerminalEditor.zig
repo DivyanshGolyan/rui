@@ -286,6 +286,84 @@ pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(key
     };
 }
 
+/// What one input means at a choice drawn in place of the draft, through the
+/// draft's own classification: a typed `Key` means what `keys` says, the
+/// arrows and Enter are the choice's own, typed text and a marked paste begin
+/// typing, a chord, control or malformed input is refused, and the draft's
+/// other unmodified edit keys do nothing. Nothing here edits.
+pub fn Selection(comptime A: type) type {
+    return union(enum) { none, action: A, left, right, enter, text, refused };
+}
+
+pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
+    const value = switch (decoded) {
+        .none, .report => return .none,
+        .invalid => return .refused,
+        .event => |value| value,
+    };
+    const pressed = switch (value.event) {
+        .paste_start => return .text,
+        .paste_end => return .refused,
+        .key_press => |pressed| pressed,
+        else => return .none,
+    };
+    if (value.pasted) return .text;
+    return switch (classify(pressed)) {
+        .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else .none,
+        .enter => .enter,
+        // The draft's other edit keys have no use at a choice; a Ctrl or
+        // Alt chord among them is refused like any other chord.
+        .edit => |command| switch (command) {
+            .left => .left,
+            .right => .right,
+            else => if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else .none,
+        },
+        .chord, .control => .refused,
+        .text => |text| if (text.len != 0) .text else .none,
+        .none => .none,
+    };
+}
+
+test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
+    const Name = keymap.Key;
+    const Case = struct { bytes: []const u8, expected: Selection(Name) };
+    for ([_]Case{
+        .{ .bytes = "\x1b[D", .expected = .left },
+        .{ .bytes = "\x1b[C", .expected = .right },
+        .{ .bytes = "\r", .expected = .enter },
+        .{ .bytes = "\x1b[A", .expected = .{ .action = .up } },
+        .{ .bytes = "\x1b[6~", .expected = .{ .action = .page_down } },
+        .{ .bytes = "\x07", .expected = .{ .action = .ctrl_g } },
+        .{ .bytes = "\x12", .expected = .{ .action = .ctrl_r } },
+        .{ .bytes = "a", .expected = .text },
+        .{ .bytes = "/", .expected = .text },
+        .{ .bytes = "\xc3\xa9", .expected = .text },
+        .{ .bytes = "\x1b[200~", .expected = .text },
+        .{ .bytes = "\x1ba", .expected = .refused },
+        .{ .bytes = "\x1c", .expected = .refused },
+        .{ .bytes = "\x1b[113;5u", .expected = .refused },
+        // The draft's other edit keys have no use at a choice; a chord
+        // among them is refused.
+        .{ .bytes = "\x01", .expected = .refused },
+        .{ .bytes = "\x1b[1;3D", .expected = .refused },
+        .{ .bytes = "\x1b\x7f", .expected = .refused },
+        .{ .bytes = "\x7f", .expected = .none },
+        .{ .bytes = "\t", .expected = .none },
+    }) |case| {
+        errdefer std.debug.print("bytes={any}\n", .{case.bytes});
+        var stream: Input = .{};
+        var last: Selection(Name) = .none;
+        for (case.bytes) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) {
+                const selection = select(keymap.every, decoded);
+                if (selection != .none) last = selection;
+            }
+        }
+        try std.testing.expectEqual(case.expected, last);
+    }
+}
+
 fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
     const value = switch (decoded) {
         .none, .report => return .none,
@@ -399,46 +477,92 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
         self.reject(.invalid);
         return .none;
     }
+    const press = classify(value);
+    switch (press) {
+        .key => |key_name| return self.edit(key_name) orelse .{ .action = key_name },
+        .enter => return if (self.rejected) |why| .{ .refused = why } else .submit,
+        else => {},
+    }
+    if (self.rejected != null) return .none;
+    switch (press) {
+        .key, .enter => unreachable,
+        .edit => |command| return switch (command) {
+            .tab => self.insert('\t', false),
+            .newline => self.insert('\n', true),
+            .left => self.move(self.previous(self.cursor)),
+            .right => self.move(self.next(self.cursor)),
+            .line_start => self.move(self.lineStart()),
+            .line_end => self.move(self.lineEnd()),
+            .delete_next => self.deleteNext(),
+            .delete_previous => self.deletePrevious(),
+            .delete_to_line_start => self.deleteTo(self.lineStart()),
+            .delete_to_line_end => self.deleteTo(self.lineEnd()),
+            .delete_word => self.backwardWord(true),
+            .delete_word_part => self.backwardWord(false),
+            .word_left => self.moveWord(false),
+            .word_right => self.moveWord(true),
+        },
+        .chord => return .{ .refused = .unbound },
+        .control => {
+            self.reject(.invalid);
+            return .none;
+        },
+        .text => |text| return self.insertText(text, false),
+        .none => return .none,
+    }
+}
+
+/// An edit the draft makes with a typed key.
+const Edit = enum { tab, newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
+
+/// What one typed (not pasted) key is, before the draft or a choice gives it
+/// a use: the one classification both share.
+const Press = union(enum) {
+    /// A named screen key.
+    key: Key,
+    enter,
+    edit: Edit,
+    /// An unbound Alt, Super, Hyper or Meta chord: dropped whole and reported.
+    chord,
+    /// An unbound Ctrl key, C0 control or invalid scalar: never text.
+    control,
+    text: []const u8,
+    none,
+};
+
+fn classify(value: vaxis.Key) Press {
     // Every binding matches exact modifiers. Vaxis's looser match accepts a
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
-    if (named(value)) |key_name| return self.edit(key_name) orelse .{ .action = key_name };
-    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return if (self.rejected) |why| .{ .refused = why } else .submit;
-    if (self.rejected != null) return .none;
-    if (value.matchExact(vaxis.Key.tab, .{})) return self.insert('\t', false);
+    if (named(value)) |key_name| return .{ .key = key_name };
+    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return .enter;
+    if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
-    if (value.matchExact(vaxis.Key.left, .{})) return self.move(self.previous(self.cursor));
-    if (value.matchExact(vaxis.Key.right, .{})) return self.move(self.next(self.cursor));
-    if (value.matchExact('a', .{ .ctrl = true })) return self.move(self.lineStart());
-    if (value.matchExact('e', .{ .ctrl = true })) return self.move(self.lineEnd());
-    if (value.matchExact(vaxis.Key.delete, .{})) return self.deleteNext();
-    if (value.matchExact(vaxis.Key.backspace, .{})) return self.deletePrevious();
-    if (value.matchExact('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
-    if (value.matchExact('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
-    if (value.matchExact('w', .{ .ctrl = true })) return self.backwardWord(true);
-    if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return self.backwardWord(false);
-    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return self.moveWord(false);
-    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return self.moveWord(true);
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return .{ .edit = .newline };
+    if (value.matchExact(vaxis.Key.left, .{})) return .{ .edit = .left };
+    if (value.matchExact(vaxis.Key.right, .{})) return .{ .edit = .right };
+    if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
+    if (value.matchExact('e', .{ .ctrl = true })) return .{ .edit = .line_end };
+    if (value.matchExact(vaxis.Key.delete, .{})) return .{ .edit = .delete_next };
+    if (value.matchExact(vaxis.Key.backspace, .{})) return .{ .edit = .delete_previous };
+    if (value.matchExact('u', .{ .ctrl = true })) return .{ .edit = .delete_to_line_start };
+    if (value.matchExact('k', .{ .ctrl = true })) return .{ .edit = .delete_to_line_end };
+    if (value.matchExact('w', .{ .ctrl = true })) return .{ .edit = .delete_word };
+    if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return .{ .edit = .delete_word_part };
+    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return .{ .edit = .word_left };
+    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return .{ .edit = .word_right };
     // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
     // on a character, a control or a named key such as Enter, is dropped
     // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
     // never typed, and the draft around it was: an Esc pressed just before
     // a key arrives as one chord.
-    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .{ .refused = .unbound };
+    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .chord;
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
     // those are not text, so an unbound one rejects the input.
     const control = value.codepoint < 0x20 and value.codepoint != vaxis.Key.enter and value.codepoint != vaxis.Key.tab and value.codepoint != vaxis.Key.escape;
-    if (value.mods.ctrl or control) {
-        self.reject(.invalid);
-        return .none;
-    }
-    if (!validScalar(value.codepoint, false)) {
-        self.reject(.invalid);
-        return .none;
-    }
-    if (value.text) |text| return self.insertText(text, false);
+    if (value.mods.ctrl or control or !validScalar(value.codepoint, false)) return .control;
+    if (value.text) |text| return .{ .text = text };
     return .none;
 }
 

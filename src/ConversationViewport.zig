@@ -85,7 +85,7 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
     var cells: usize = bytes;
-    for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$" }) |glyph| {
+    for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$", "│" }) |glyph| {
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
@@ -556,7 +556,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
 const TestScreen = struct {
     screen: vaxis.Screen,
-    cells: [40 * 12]vaxis.Cell = @splat(.{}),
+    cells: [40 * 14]vaxis.Cell = @splat(.{}),
 
     fn window(self: *TestScreen, width: u16, height: u16) vaxis.Window {
         @memset(&self.cells, .{});
@@ -579,11 +579,11 @@ const TestScreen = struct {
 
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n• one two three four\n中中中中中中中中Z");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n• one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
-    const drawn = view.draw(test_screen.window(16, 12), .{}, true, false, .{});
+    const drawn = view.draw(test_screen.window(16, 14), .{}, true, false, .{});
     const expected = [_][]const u8{
         "  The plain rui",  "  command isn't", "  on PATH",
         "0123456789abcdef", "next",
@@ -593,12 +593,15 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "  four",
         "中中中中中中中中",
         "Z",
+        // An Action's content mark hangs like a list marker.
+        "  │ alpha beta",
+        "    gamma",
     };
-    try std.testing.expectEqual(@as(usize, 12), drawn.rows);
+    try std.testing.expectEqual(@as(usize, 14), drawn.rows);
     try std.testing.expectEqual(Position.end, drawn.next);
     var storage: [64]u8 = undefined;
     for (expected, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
-    try std.testing.expectEqual(@as(usize, 12), view.measure(layout, .{}, 99).rows);
+    try std.testing.expectEqual(@as(usize, 14), view.measure(layout, .{}, 99).rows);
     // A word keeps its punctuation across a style change.
     var styled: Sized(64, true) = .{};
     try styled.append("ab \x1b[4mcd\x1b[0m.");

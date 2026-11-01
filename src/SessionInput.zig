@@ -65,8 +65,8 @@ pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput
     return .{ .message = self.seal(false) };
 }
 
-/// Queues one inspection command for the reader, from the draft or the
-/// choice. Each source admits a command only while none waits.
+/// Queues one inspection command for the draft's reader. The draft admits a
+/// command only while none waits.
 pub fn queueCommand(self: *Self, text: []const u8) void {
     std.debug.assert(self.command_length == null);
     @memcpy(self.command_buffer[0..text.len], text);

@@ -213,14 +213,14 @@ static void consent_hold(int fd, const void *bytes, size_t count, int last) {
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     static int choice = 0, choice_held = 0;
     if (screen != 1 || !fault || strncmp(fault, "consent-", 8)) return;
-    /* The renderer writes only changed cells, so whole status text never
-       appears; "Type" starts the choice status ("Type a + Enter to allow
-       once..."). Hold after the frame that draws it completes. */
+    /* The renderer writes only changed cells; "Allow" starts the choice's
+       highlighted option ("Allow once"). Hold after the frame that draws
+       it completes. */
     static size_t matched = 0;  /* Writes may split the word. */
     for (size_t i = 0; !choice && i < count; ++i) {
         char byte = ((const char *)bytes)[i];
-        matched = byte == "Type"[matched] ? matched + 1 : (byte == 'T' ? 1 : 0);
-        if (matched == 4) choice = 1;
+        matched = byte == "Allow"[matched] ? matched + 1 : (byte == 'A' ? 1 : 0);
+        if (matched == 5) choice = 1;
     }
     if (last && choice && !choice_held && count >= 8 &&
         !memcmp((const char *)bytes + count - 8, "\033[?2026l", 8)) {
@@ -1464,13 +1464,13 @@ def consent_boundary_cases(state, library):
                     "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
             human.read_terminal(master, "› ")
             os.write(master, b"propose command\n")
-            presentation = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
-            assert "Time limit: Host default" in presentation, presentation
+            presentation = human.read_terminal(master, human.CHOICE)
+            assert "Time limit" not in presentation, presentation
             fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
             records = home / ".config/rui/requests"
             before = set(records.glob("*.json"))
             stale = b"\x03" if case == "cancel" else (
-                b"a\n\x1b" if case.startswith("escape-") else b"\x1b[200~")
+                b"\x1b[C\n\x1b" if case.startswith("escape-") else b"\x1b[200~")
             os.write(master, stale)
             assert not select.select([read_ready], [], [], 0)[0], "held presentation opened consent"
             release.touch()
@@ -1484,18 +1484,19 @@ def consent_boundary_cases(state, library):
                 presentation += human.action_ready(read_ready, master)
                 assert set(records.glob("*.json")) == before, "expiry captured stale permission"
                 assert not (root / "effect").exists(), "stale input ran Bash"
-                os.write(master, b"a\n" if case == "escape-allow" else b"d\n")
+                os.write(master, human.ALLOW if case == "escape-allow" else human.DENY)
                 human.read_terminal(master, "Allowed." if case == "escape-allow" else "• Write consent effect marker — Denied")
                 assert len(set(records.glob("*.json")) - before) == 1, "first fresh choice was not captured"
                 os.write(master, b"\x03")
             else:
                 assert not select.select([read_ready], [], [], 0.2)[0], "paste prefix opened consent"
-                os.write(master, b"a\n")
+                os.write(master, b"\n")
                 assert not select.select([read_ready], [], [], 0.2)[0], "unfinished paste authorized"
                 assert set(records.glob("*.json")) == before
-                os.write(master, b"\x1b[201~")
+                # The paste went to the draft; Esc returns to the choice.
+                os.write(master, b"\x1b[201~\x07")
                 presentation += human.action_ready(read_ready, master)
-                os.write(master, b"d\n")
+                os.write(master, human.DENY)
                 human.read_terminal(master, "• Write consent effect marker — Denied")
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)
@@ -1644,15 +1645,14 @@ def command_interruption_cases(state, library, only=None):
                 if route != "":  # The probe signals at a "" command's return; nothing holds it.
                     # The command is held on the reader worker. The pending
                     # Action owns the input field and nothing is fresh until
-                    # the command completes: neither a Message nor a + Enter
-                    # is captured, sent or authorizes the Action.
+                    # the command completes: neither a Message nor Enter is
+                    # captured, sent or authorizes the Action.
                     for typed in (b"hello\r", b"a\r"):
                         os.write(master, typed)
                         fixture.wait_for(lambda: unread_input(slave) == 0, f"{case} read {typed!r} while held")
                     shown = human.settle_screen(master, quiet=0.5)
-                    composer = shown.splitlines()[human.terminal_capture(master).screen.cursor.y]
-                    assert composer.strip() in (">", "›") and "hello" not in shown, (case, shown)
-                    assert "Type a + Enter to allow once" not in shown, (case, "choice offered while command held", shown)
+                    assert "Command running…" in shown and "hello" not in shown, (case, shown)
+                    assert "Allow once" not in shown, (case, "choice offered while command held", shown)
                     held = set(records.glob("*.json")) - before
                     # Only the held Configure's own record (its capture may
                     # still be syncing); exact identity is checked after exit.
@@ -1933,9 +1933,9 @@ def decision_reporting_cases(state):
                 else:
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
                 os.write(master, b"propose exact decision\n")
-                proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+                proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(read_ready, master)
-                os.write(master, b"a\n" if decision == "allow_once" else b"d\n")
+                os.write(master, human.ALLOW if decision == "allow_once" else human.DENY)
                 if lost:
                     assert received.wait(10)
                     caller.send_signal(signal.SIGINT)
@@ -2101,9 +2101,9 @@ def detach_reporting_cases(state, library):
                 proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
                 os.write(master, b"accepted original\n")
                 if kind != "message":
-                    proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+                    proposal = human.read_terminal(master, human.CHOICE)
                     proposal += human.action_ready(read_ready, master)
-                    os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
+                    os.write(master, human.ALLOW if kind == "allow_once" else human.DENY)
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
                 status = human.terminal_step(master, "/status", "Session: ", composer=True)
                 assert "Original reserved request:" not in status, status
@@ -2207,10 +2207,10 @@ def startup_reporting_cases(state, library):
             human.return_to_live(master)
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
-                proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+                proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(ready_read, master)
                 proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-                event = b"a\n" if kind == "allow_once" else b"d\n"
+                event = human.ALLOW if kind == "allow_once" else human.DENY
             else:
                 if kind == "retry":
                     proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"")
