@@ -26,11 +26,25 @@ pub const Value = []const u8;
 
 pub const Block = [:null]?[*:0]const u8;
 
+/// Whether a client passes on the variable NAME=VALUE: a NAME that is not
+/// empty, holds no `=` or NUL and does not start with `RUI_`, because Rui's
+/// overlay owns that prefix, and a VALUE without NUL. `RUIX`, `rui_x` and
+/// `XRUI_` are ordinary names. The client sends only these and the Host
+/// keeps only these.
+pub fn forwards(name: []const u8, value: []const u8) bool {
+    return name.len != 0 and !std.mem.startsWith(u8, name, "RUI_") and
+        std.mem.indexOfAny(u8, name, "=\x00") == null and std.mem.indexOfScalar(u8, value, 0) == null;
+}
+
+/// The bytes the entry `NAME=VALUE\0` takes in a Value.
+pub fn entryBytes(name: []const u8, value: []const u8) usize {
+    return name.len + 1 + value.len + 1;
+}
+
 /// A client environment as the Host received it, checked and cleaned in
 /// place: each entry is `NAME=VALUE\0` with a non-empty NAME, and no NAME
-/// appears twice. Entries whose NAME starts with `RUI_` are removed, because
-/// Rui's overlay owns that prefix; `RUIX`, `rui_x` and `XRUI_` are ordinary
-/// names. `scratch` is borrowed for the duplicate check and freed before
+/// appears twice. Entries `forwards` refuses, those whose NAME starts with
+/// `RUI_`, are removed. `scratch` is borrowed for the duplicate check and freed before
 /// return. The result is a prefix of `bytes`.
 pub fn received(scratch: std.mem.Allocator, bytes: []u8) error{ OutOfMemory, InvalidEnvironment }!Value {
     if (bytes.len != 0 and bytes[bytes.len - 1] != 0) return error.InvalidEnvironment;
@@ -41,9 +55,11 @@ pub fn received(scratch: std.mem.Allocator, bytes: []u8) error{ OutOfMemory, Inv
         const end = std.mem.indexOfScalarPos(u8, bytes, start, 0).?;
         const equals = std.mem.indexOfScalar(u8, bytes[start..end], '=') orelse return error.InvalidEnvironment;
         if (equals == 0) return error.InvalidEnvironment;
-        if (!std.mem.startsWith(u8, bytes[start..end], "RUI_")) {
+        const name = bytes[start..][0..equals];
+        const value = bytes[start + equals + 1 .. end];
+        if (forwards(name, value)) {
             std.mem.copyForwards(u8, bytes[kept..], bytes[start .. end + 1]);
-            kept += end + 1 - start;
+            kept += entryBytes(name, value);
             count += 1;
         }
         start = end + 1;
