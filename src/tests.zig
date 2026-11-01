@@ -29,6 +29,7 @@ test {
     _ = @import("failed_responses.zig");
     _ = @import("provider.zig");
     _ = @import("provider_selection.zig");
+    _ = @import("providers.zig");
     _ = @import("preferences.zig");
     _ = @import("provider_output.zig");
     _ = @import("output_decode.zig");

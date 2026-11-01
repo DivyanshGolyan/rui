@@ -428,13 +428,13 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
+    const golden = "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
     try std.testing.expect(result.ready.capabilities.bash);
-    try std.testing.expect(!result.ready.capabilities.model);
+    try std.testing.expectEqual(protocol.Route.unserved, result.ready.capabilities.providers.codex);
     // The Host's start time and slots in use, which never exceed its capacity.
     try std.testing.expectEqual(@as(u64, 1792918800), result.ready.started_at);
     try std.testing.expectEqual(@as(usize, 17), result.ready.custody_occupied);
@@ -459,15 +459,15 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "{\"version\":\"2\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\"}}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {

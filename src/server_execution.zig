@@ -374,6 +374,15 @@ const Workspace = struct {
     settlement: store_module.ValidatedOutput,
 };
 
+/// The codec whose headers the Reactor observes: every provider's, so far.
+const observed_codec = blk: {
+    const codec = protocol.Provider.codex.codec();
+    for (std.enums.values(protocol.Provider)) |served| {
+        if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
+    }
+    break :blk codec;
+};
+
 pub fn executionMain(host: *Host) void {
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
@@ -381,7 +390,7 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
+    const auth_worker: ?*AuthWorker = if (host.providers.chatgpt()) |authentication| worker: {
         workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
         break :worker &workspace.auth_worker;
     } else null;
@@ -438,17 +447,19 @@ pub fn executionMain(host: *Host) void {
     var reactor_storage: provider.Reactor = undefined;
     // With no slots no Transfer can start, so a zero-capacity Host runs no
     // transport (h2 requires a positive stream capacity).
-    const endpoint_with_slots = if (slots.len == 0) null else host.provider_endpoint;
-    const reactor: ?*provider.Reactor = if (endpoint_with_slots) |endpoint| reactor: {
+    const reactor: ?*provider.Reactor = if (slots.len != 0 and host.providers.any()) reactor: {
+        var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
+        for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
+            if (served) |value| endpoint.* = value.endpoint;
+        }
         reactor_storage.init(host.allocator, host.io, .{
-            .endpoint = endpoint,
-            .ca_file = host.provider_ca_file,
+            .endpoints = endpoints,
+            .ca_file = host.providers.ca_file,
             .capacity = slots.len,
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
             .observation = .{
-                // The one served endpoint is the Codex route.
-                .names = codecs.manifest(protocol.Provider.codex.codec()).observe,
-                .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+                .names = codecs.manifest(observed_codec).observe,
+                .turn_state = if (host.providers.chatgpt() != null) host.turn_states.sink() else null,
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
@@ -587,7 +598,7 @@ const NativeTurn = struct {
     }
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
-        return self.host.provider_endpoint != null;
+        return self.host.providers.any();
     }
 
     pub fn freeSlots(self: *const NativeTurn) usize {
@@ -1389,7 +1400,7 @@ fn beginAdmittedAttempt(
         host.io,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
-        if (host.authentication != null) .managed else .endpoint,
+        host.providers.routes(),
         &host.history_memos,
         host.hooks.preparationFaults(),
         &retained_scratch,
@@ -1440,7 +1451,8 @@ fn advanceModelPreparation(
         .prepared => |request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
+            const route = protocol.routeOf(host.providers.routes(), request.provider);
+            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = route == .chatgpt_device } })) {
                 .authenticate => {
                     moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
@@ -1601,7 +1613,8 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, replay.value) catch |err| {
+        const served = host.providers.get(request.provider).?;
+        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
@@ -2203,6 +2216,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .length = 4,
             .charged = 4,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };
@@ -2312,7 +2326,7 @@ test "HTTP error capture retires before execution custody" {
         // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoint = "http://127.0.0.1:1/responses",
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses" }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
@@ -2325,6 +2339,7 @@ test "HTTP error capture retires before execution custody" {
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         }, binding, .{}, &retained);
@@ -2824,7 +2839,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            const configured = storage.configure(&command, true, .{});
+            const configured = storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -2839,7 +2854,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3045,7 +3060,7 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, true, .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3060,7 +3075,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3070,7 +3085,7 @@ test "preparing slots belong to their live preparations" {
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
     try storage.openHistoricalView(binding_a, &preparation.view);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3317,7 +3332,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             std.testing.io,
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
-            .endpoint,
+            protocol.routesAll(.endpoint),
             null,
             .{},
             &retained,
@@ -3366,7 +3381,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, true, .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3381,7 +3396,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
 
     var records: [1]execution.CustodyRecord = @splat(.{});
@@ -3402,7 +3417,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         std.testing.io,
         root,
         .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
-        .endpoint,
+        protocol.routesAll(.endpoint),
         null,
         // The codec declines at request_end: every earlier item has already
         // written request scratch.
@@ -3457,6 +3472,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };

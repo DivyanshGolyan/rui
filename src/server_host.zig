@@ -9,6 +9,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
+const providers_module = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -254,9 +255,8 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
     limits: Limits = .{},
-    provider_endpoint: ?[]const u8 = null,
-    provider_ca_file: ?[]const u8 = null,
-    authentication: ?model_adapter.Authentication = null,
+    /// What this Host serves, owned by its caller for the Host's life.
+    providers: *const providers_module.Providers = &providers_module.none,
     auth_worker: ?*AuthWorker = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
@@ -979,7 +979,7 @@ fn appendOptionalSigned(
 
 /// A managed Transfer's connection reuse and request correlation, for tests.
 pub inline fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.authentication != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
+    if (host.providers.chatgpt() != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
 }
 
 noinline fn writeCodexTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
