@@ -485,6 +485,12 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(combined["targets"], ["check"])
             self.assertEqual(combined["native_targets"], ["check"])
 
+    def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
+        result = select(["release/publish.sh"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["host-status-integration"])
+        self.assertEqual(result["native_targets"], ["host-status-integration"])
+        self.assertTrue(result["mac_required"])
+
     def test_existing_fixture_target_and_new_fixture_fallback(self):
         result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["host-stop-integration"])

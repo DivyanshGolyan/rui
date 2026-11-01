@@ -173,6 +173,8 @@ RULES = (
       ".github/actions/setup/action.yml"),
      ("transport-h2-integration", "codex-h2-integration"),
      ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
+    (("release/publish.sh",), ("host-status-integration",), ("host-status-integration",),
+     "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
 # Inputs to the Host's ReleaseSafe frames or to their gate. Frontend owners are
