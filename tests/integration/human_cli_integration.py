@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
+import base64
 import errno
 import json
 import fcntl
@@ -12,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -2313,6 +2315,92 @@ def persistent_empty_answer_case():
             shutil.rmtree(state)
         else:
             retain_failure_state("empty answer failure state", state)
+
+
+def persistent_copy_case():
+    """/copy sends the last answer, and /copy code its last code block, to the
+    clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
+    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
+    a link at its name without following it."""
+    state = screen_fixture_root("rui-copy.")
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    here = state / "here"
+    here.mkdir()
+    answer = "Run:\n```sh\nzig build\n```\nThen:\n```py\nprint('é')\n```\nDone."
+    # The code block is the clipboard's limit exactly; the answer is over it.
+    limit = 75_000
+    block = ("x" * 99 + "\n") * 749 + "x" * 100
+    large = "```\n" + block + "\n```\nLarge done."
+    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("copy-0", "r-0", "m-0", answer)[0],
+                                        fixture.sse_answer("copy-1", "r-1", "m-1", large)[0]])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        session = create_session(home, "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
+            read_terminal(master, "› ")
+            capture = terminal_capture(master)
+            terminal_step(master, "/copy", "No answer to copy yet.", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
+            assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
+            terminal_step(master, "Copy request", "Done.", composer=True)
+
+            def sent(command):
+                before = len(capture.clipboard)
+                frame = terminal_step(master, command, "Sent to clipboard", composer=True)
+                assert "Sent to clipboard" in frame.split("\n"), frame
+                assert len(capture.clipboard) == before + 1, capture.clipboard
+                return capture.clipboard[-1]
+
+            def osc52(text):
+                return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
+
+            assert sent("/copy") == osc52(answer)
+            assert sent("/copy code") == osc52("print('é')")
+            name = f"rui-{session}-answer.md"
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            saved = here / name
+            assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            terminal_step(master, "Large request", "Large done.", composer=True)
+            before = len(capture.clipboard)
+            terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
+            assert len(capture.clipboard) == before, "an answer over the limit is never sent"
+            assert len(block) == limit
+            started = time.monotonic()
+            assert sent("/copy code") == osc52(block)
+            print(f"persistent copy: /copy code of {limit} bytes took {time.monotonic() - started:.3f}s to its frame", flush=True)
+            saved.chmod(0o644)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            # A link at the export name is replaced, never followed.
+            sentinel = state / "sentinel"
+            sentinel.write_bytes(b"sentinel")
+            sentinel.chmod(0o640)
+            saved.unlink()
+            saved.symlink_to(sentinel)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert sentinel.read_bytes() == b"sentinel" and sentinel.stat().st_mode & 0o777 == 0o640, sentinel
+            assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
+            assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
+            assert list(here.iterdir()) == [saved], list(here.iterdir())
+            terminal_step(master, "/exit", "Detached.")
+            assert caller.wait(timeout=5) == 0
+        completed = True
+        print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("copy failure state", state)
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
@@ -5509,10 +5597,14 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy"), selected
     if selected in ("all", "callers", "caller-core", "empty-answers"):
         persistent_empty_answer_case()
     if selected == "empty-answers":
+        return
+    if selected in ("all", "callers", "caller-core", "copy"):
+        persistent_copy_case()
+    if selected == "copy":
         return
     if selected == "session-ids":
         help_case()
