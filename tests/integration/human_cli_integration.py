@@ -2165,6 +2165,9 @@ def persistent_input_cases():
         # composer under the same response budget before typing the next draft.
         diagnostic_deadline = time.monotonic() + 15
         os.write(master, b"/status\n")
+        read_terminal(master, "Session: ", timeout=diagnostic_deadline - time.monotonic(), composer=True)
+        # The page is taller than the screen, and the diagnostic ends it.
+        os.write(master, b"\x1b[6~")
         diagnostic = read_terminal(master, "Ctrl-R retries this exact original.",
             timeout=diagnostic_deadline - time.monotonic(), composer=True)
         reserved = diagnostic.split("Original reserved request: ", 1)[1].splitlines()[0]
@@ -4419,9 +4422,7 @@ def renderer_cases():
             tty.send("propose three Actions\n", "Type a + Enter to allow once · d + Enter to deny")
             actions = [row["action"] for row in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
             assert len(actions) == 3, actions
-            shown = tty.send("/status\n", "Session: ")
-            for action in actions:
-                assert f"Action requiring attention: {action}" in shown, shown
+            tty.send("/status\n", "Session: ")
             # The update replaces the page in place: what the user scrolled
             # to and was told stays, and nothing returns to the top.
             # Thirteen rows: the rule above the input takes one of them.
@@ -4434,7 +4435,9 @@ def renderer_cases():
                     break
                 tty.send("\x1b[1;2B", predicate=lambda: True)
             scrolled = tty.capture.completed
-            assert "Session: " not in scrolled and f"Action requiring attention: {actions[0]}" in scrolled, scrolled
+            assert "Session: " not in scrolled, scrolled
+            for action in actions:
+                assert f"Action requiring attention: {action}" in scrolled, scrolled
             tty.send("/foo\n", "! Unknown command /foo · /help")
             frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
