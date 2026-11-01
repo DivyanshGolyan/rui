@@ -675,8 +675,8 @@ fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest:
                 // or after the oldest.
                 const queued = front.live.queued;
                 const line = front.live.queued_line orelse return false;
-                return message.state == .queued and queued_line.shows(queued.count, queued.newest_admission, front.live.drawn_waiting) and
-                    line.admission == queued.newest_admission and front.live.drawn_waiting < message.admission and
+                return message.state == .queued and queued_line.unshown(queued.count, queued.oldest_position, front.live.drawn) != 0 and
+                    line.admission == queued.newest_admission and front.live.drawn.admission < message.admission and
                     message.admission <= queued.newest_admission and item.position >= queued.oldest_position;
             },
             else => {},

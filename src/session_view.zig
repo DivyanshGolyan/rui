@@ -9,6 +9,7 @@ const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -1053,28 +1054,10 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
-/// Exact fixed-end summary requires a metadata walk, not Current or the newest
-/// page. Retains no identity or payload: a transcript lists unapplied Messages
-/// in full where they belong (see `message`).
-pub const Pending = struct {
-    total: u64 = 0,
-    /// The newest queued Message's admission id. Once applied, its row shows
-    /// nothing live, so live reads count it shown (see session_reads.Messages).
-    newest: u64 = 0,
-    /// The lowest position of a Message not applied at the end, if any:
-    /// where a transcript's search for unapplied Messages may stop.
-    lowest: ?u64 = null,
-
-    /// Says nothing unless work under way holds the queue (see `Labels`).
-    pub fn render(self: *const Pending, held: bool, sink: anytype) !void {
-        if (self.total == 0 or !held) return;
-        if (self.total == 1) return sink.feed("1 message is queued behind the current work.\n");
-        try print(sink, "{d} messages are queued behind the current work.\n", .{self.total});
-    }
-};
-
-pub fn pending(requests: client.Requests, store: []const u8, session: []const u8, end: u64) !Pending {
-    var summary: Pending = .{};
+/// The lowest position of a Message not applied at `end`, if any: where a
+/// transcript's search for unapplied Messages may stop. A fixed-end metadata
+/// walk, not Current or the newest page, and it reads no content.
+pub fn lowestUnapplied(requests: client.Requests, store: []const u8, session: []const u8, end: u64) !?u64 {
     var cursor: protocol_reply.ActivityCursor = .{ .end = end };
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
@@ -1082,13 +1065,9 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
             .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
-            if (item.value != .admission or item.value.admission.state == .applied) continue;
-            if (summary.lowest == null) summary.lowest = item.position;
-            if (item.value.admission.state != .queued) continue;
-            summary.total += 1;
-            summary.newest = @max(summary.newest, item.value.admission.admission);
+            if (item.value == .admission and item.value.admission.state != .applied) return item.position;
         }
-        cursor = page.continuation() orelse return summary;
+        cursor = page.continuation() orelse return null;
     }
 }
 
@@ -1118,13 +1097,7 @@ pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), l
     };
 }
 
-test "a queued Message is labelled, and counted, only while work under way holds it" {
-    const Sink = struct {
-        out: std.Io.Writer,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            try self.out.writeAll(bytes);
-        }
-    };
+test "a queued Message is labelled only while work under way holds it" {
     const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
     // Opened between admission and the model request that reads it: the
     // Session is pending, so a label would be stale by the next frame.
@@ -1136,18 +1109,6 @@ test "a queued Message is labelled, and counted, only while work under way holds
     try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
     // Live output's next pages say what became of each Message.
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
-    for ([_]struct { total: u64, held: bool, expected: []const u8 }{
-        .{ .total = 1, .held = false, .expected = "" },
-        .{ .total = 0, .held = true, .expected = "" },
-        .{ .total = 1, .held = true, .expected = "1 message is queued behind the current work.\n" },
-        .{ .total = 24, .held = true, .expected = "24 messages are queued behind the current work.\n" },
-    }) |case| {
-        var buffer: [64]u8 = undefined;
-        var sink: Sink = .{ .out = .fixed(&buffer) };
-        const summary: Pending = .{ .total = case.total };
-        try summary.render(case.held, &sink);
-        try std.testing.expectEqualStrings(case.expected, sink.out.buffered());
-    }
 }
 
 /// One Message in full, labelled unless applied: live, in the opening and in
@@ -1503,9 +1464,9 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
 /// What a live page needs to show the Messages people and scripts sent as
 /// they are taken.
 pub const Taking = struct {
-    /// The newest such Message shown while it waited, at the opening or at
-    /// its Admission: its row never shows live.
-    drawn_waiting: u64,
+    /// The newest such Message shown while it waited, at its Admission: its
+    /// row never shows live.
+    drawn: queued_line.Drawn,
     /// A position before the Admission of every such Message that waits at
     /// the page's start, where a stop's search for those it excluded begins;
     /// null when none waits.
@@ -1540,32 +1501,32 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 }
 
 /// Writes a page and returns the newest Message a person or script sent
-/// that it or an earlier read showed while it waited (`Taking.drawn_waiting`).
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !u64 {
+/// that it or an earlier read showed while it waited (`Taking.drawn`).
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !queued_line.Drawn {
     const historical = page.facts.direction == .backward;
     var from = taking.from;
-    var drawn_waiting = taking.drawn_waiting;
+    var waited = taking.drawn;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
         if (!historical and item.value == .stop) {
             compact_tools.* = false;
-            if (from) |position| try excludedAtStop(requests, store, session, item, position, drawn_waiting, sink, colour);
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, waited.admission, sink, colour);
         }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
             .admission => |value| {
-                if (historical) {
-                    if (value.state == .applied) continue;
-                } else if (value.sender == null) {
-                    // A person's or script's Message shows live when it is
-                    // taken: as its row, or at the stop that excluded it.
-                    // Until then it waits above the input, unless it is
-                    // taken next.
-                    if (from == null and value.state != .applied) from = item.position - 1;
-                    if (!showsAtAdmission(item.position, value, drawn_waiting, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
-                    drawn_waiting = value.admission;
+                if (historical and value.state == .applied) continue;
+                // A person's or script's Message shows live when it is
+                // taken: as its row, or at the stop that excluded it. Until
+                // then it waits above the input, unless it is taken next;
+                // one waiting at the opening too. The opening shows one a
+                // stop excluded, labelled.
+                if (value.sender == null and (!historical or value.state == .queued)) {
+                    if (!historical and from == null and value.state != .applied) from = item.position - 1;
+                    if (!showsAtAdmission(item.position, value, waited.admission, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
+                    waited = .{ .admission = value.admission, .position = item.position };
                 }
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour);
@@ -1573,7 +1534,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
                 // and one shown while it waited never shows again.
-                if (!historical and (value.sender != null or value.admission <= drawn_waiting)) continue;
+                if (!historical and (value.sender != null or value.admission <= waited.admission)) continue;
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, .none, sink, colour);
             },
@@ -1633,7 +1594,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
         }
     }
-    return drawn_waiting;
+    return waited;
 }
 
 /// Shows the Messages a person or script sent that a live page's stop

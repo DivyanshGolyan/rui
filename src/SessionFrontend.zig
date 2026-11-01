@@ -122,7 +122,7 @@ live: struct {
     // it waited (see View.Taking).
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
-    drawn_waiting: u64 = 0,
+    drawn: queued_line.Drawn = .{},
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -178,7 +178,7 @@ const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .drawn_waiting = self.live.drawn_waiting, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -1351,14 +1351,16 @@ fn settleReader(self: *Self) !void {
     try self.applyReader(end);
 }
 
-/// What the queued row shows, if it shows (see `queued_line.shows`): the
-/// newest waiting Message, by the line read from it, and how many wait.
+/// What the queued row shows, if it shows (see `queued_line.unshown`): the
+/// newest waiting Message, by the line read from it, and how many wait
+/// that live output has not shown.
 fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    if (!queued_line.shows(queued.count, queued.newest_admission, self.live.drawn_waiting)) return null;
+    const count = queued_line.unshown(queued.count, queued.oldest_position, self.live.drawn);
+    if (count == 0) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
-    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
+    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -1593,7 +1595,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
-        self.live.drawn_waiting = self.job.drawn_waiting;
+        self.live.drawn = self.job.drawn;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
@@ -1654,7 +1656,7 @@ test "frontend commits spacing only for completed visible reads" {
 
 test "the queued row shows what waits until it is taken, whatever the work is doing" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
-    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn_waiting: u64 = 0, line: ?u64 = 9, shown: bool };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn: queued_line.Drawn = .{}, line: ?u64 = 9, count: u64 = 2, shown: bool };
     var line: queued_line.Line = .{ .len = 0 };
     try line.set("check the cache");
     for ([_]Case{
@@ -1664,9 +1666,12 @@ test "the queued row shows what waits until it is taken, whatever the work is do
         // shows only once taken: the row shows it meanwhile.
         .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
         .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
-        // Nothing waits, or the newest showed while it waited.
+        // Sent while the Session stayed pending: the first showed at its
+        // Admission and still waits, so the row counts only the second.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 7, .position = 30 }, .count = 1, .shown = true },
+        // Nothing waits, or the one waiting showed while it waited.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .drawn_waiting = 9, .shown = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 9, .position = 34 }, .shown = false },
         // The line held is another Message's, or none was read.
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
@@ -1680,7 +1685,7 @@ test "the queued row shows what waits until it is taken, whatever the work is do
             .command = undefined,
             .terminal = undefined,
             .colour = false,
-            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn_waiting = case.drawn_waiting, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn = case.drawn, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
         const row = self.queuedRow() orelse {
             try std.testing.expect(!case.shown);
@@ -1688,7 +1693,7 @@ test "the queued row shows what waits until it is taken, whatever the work is do
         };
         try std.testing.expect(case.shown);
         try std.testing.expectEqual(@as(u64, 9), row.newest);
-        try std.testing.expectEqual(@as(u64, 2), row.waiting.count);
+        try std.testing.expectEqual(case.count, row.waiting.count);
         try std.testing.expectEqualStrings("check the cache", row.waiting.line);
     }
 }

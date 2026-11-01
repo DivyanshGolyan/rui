@@ -196,7 +196,7 @@ pub const Job = struct {
     // which each read sets in place; and the Message whose first line the
     // queued row holds.
     queued: protocol.Queued = .{},
-    drawn_waiting: u64 = 0,
+    drawn: queued_line.Drawn = .{},
     queued_line: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
@@ -235,8 +235,8 @@ pub const Job = struct {
         echoes: Echoes = .{},
         // The Messages of the collapsed blocks in this read's output, in order.
         collapsed: Collected = .{},
-        // The opening's lowest unapplied position (see View.Pending), or the
-        // lowest a stop showed.
+        // The opening's lowest unapplied position (see
+        // View.lowestUnapplied), or the lowest a stop showed.
         lowest: ?u64 = null,
         // The job's Messages after this read.
         messages: Messages = .{},
@@ -434,36 +434,27 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // Nothing showed before the opening, so its start is a boundary even
         // when it shows nothing. Every Message it shows is at or after its
         // page's lowest item, a row included; one admitted before that page
-        // and not applied is listed there.
+        // and not applied is listed there, unless it waits above the input.
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end };
-    if (job.opening) {
-        const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(page.facts.work.work.state.holdsQueue(), &output);
-        job.result.lowest = pending.lowest;
-        job.drawn_waiting = pending.newest;
-        // A queued Message older than the page shows only in a transcript's
-        // listing, at the opening's seam. No later boundary may precede its
-        // row, which shows nothing live.
-        output.messages.shown = @max(output.messages.shown, pending.newest);
-    }
+    if (job.opening) job.result.lowest = try View.lowestUnapplied(requests, job.store, job.session, page.facts.end);
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
     const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
-    job.drawn_waiting = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn_waiting = job.drawn_waiting, .from = from });
+    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = from });
     // One shown at its Admission is delivered too.
-    job.result.delivered = @max(job.result.delivered, job.drawn_waiting);
+    job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     if (output.lowest) |lowest| job.result.lowest = lowest;
     const queued = page.facts.queued;
     job.result.queued = queued;
-    if (queued_line.shows(queued.count, queued.newest_admission, job.drawn_waiting) and queued.newest_admission != job.queued_line) {
+    if (queued_line.unshown(queued.count, queued.oldest_position, job.drawn) != 0 and queued.newest_admission != job.queued_line) {
         job.result.queued_line = .{ .admission = queued.newest_admission, .line = try readFirstLine(requests, job, queued.newest_position) };
     }
     if (!job.opening) {
@@ -534,7 +525,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 };
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
-                    const value = listed(item, range.all, job.drawn_waiting) orelse continue;
+                    const value = listed(item, range.all, job.drawn.admission) orelse continue;
                     try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
@@ -556,13 +547,15 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
 /// range's end. Live output shows another Session's Message as its
 /// Admission, and a person's or script's at its Admission when it showed
 /// while it waited (`drawn_waiting`), otherwise as its row or at the stop
-/// that excluded it. One still queued that has not shown shows live later,
-/// so it is never listed.
+/// that excluded it. A seam lists none of a person's or script's still
+/// queued at its end: one that showed at its Admission has its row before
+/// any later boundary (see `Messages`), and any other waits above the input
+/// and shows live once taken.
 fn listed(item: protocol.ActivityItem, all: bool, drawn_waiting: u64) ?protocol.ActivityItem.Message {
     return switch (item.value) {
         .admission => |value| if (all)
             (if (value.sender != null or value.admission <= drawn_waiting) value else null)
-        else if (value.state == .applied or (value.sender == null and value.state == .queued and value.admission > drawn_waiting))
+        else if (value.state == .applied or (value.sender == null and value.state == .queued))
             null
         else
             value,
@@ -591,10 +584,10 @@ test "a range lists the Messages live output showed, never queued Messages still
         .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 12, .all = true, .listed = false },
         .{ .kind = .user, .sender = true, .state = .applied, .admission = 12, .all = true, .listed = false },
         .{ .kind = .user, .sender = false, .state = .applied, .admission = 10, .all = true, .listed = false },
-        // A seam: each Message not applied at its end, except one sent
-        // after the opening that is still queued, which waits above the
-        // input and shows live once taken.
-        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .all = false, .listed = true },
+        // A seam: each Message not applied at its end, except a person's
+        // or script's still queued, which shows live once taken, at the
+        // opening too.
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .all = false, .listed = false },
         .{ .kind = .admission, .sender = false, .state = .queued, .admission = 11, .all = false, .listed = false },
         .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 11, .all = false, .listed = true },
         .{ .kind = .admission, .sender = true, .state = .queued, .admission = 11, .all = false, .listed = true },
@@ -748,13 +741,13 @@ const DisplayCapture = struct {
 };
 
 /// Messages shown in live output, by admission id. Another Session's Message
-/// shows first as its Admission, and one queued at the opening is listed at
-/// its seam; each gains its conversation row later: at model-attempt
+/// shows first as its Admission, as does a person's or script's taken next;
+/// each gains its conversation row later: at model-attempt
 /// admission, after a running tool's result when steered, or after the
 /// answer it queued behind. Admission ids follow Session positions, so the
 /// newest of each stands for every earlier one.
 pub const Messages = struct {
-    /// The newest Message shown as its Admission or listed at the opening's seam.
+    /// The newest Message shown as its Admission.
     shown: u64 = 0,
     /// The newest Message whose conversation row a read returned, or up to
     /// which a stop excluded every Message without one.
