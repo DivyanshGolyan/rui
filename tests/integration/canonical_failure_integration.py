@@ -416,7 +416,7 @@ def interactive_cases(state, binding=False, null_code=False):
         session = json.loads(configured.stdout)["answer"]["session"]
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
-                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "d"),
+                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "\x1b[C"),
                 ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
@@ -450,9 +450,8 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
-                        assert "\n? Run Bash · " in proposal and "\n  $ true\n" in proposal, proposal
-                        human.assert_permission_workspace(proposal, state)
+                        proposal = human.read_terminal(master, human.CHOICE)
+                        assert "\n? Check successful shell exit\n" in proposal and "\n  $ true\n" in proposal, proposal
                         proposal += human.action_ready(ready_read, master)
                     else:
                         human.read_terminal(master, "› ")
@@ -536,7 +535,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                         assert record.read_bytes() == original
                         if route == "/v1/message":
-                            output += human.await_screen(master, "Type a + Enter to allow once · d + Enter to deny")
+                            output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
@@ -681,7 +680,7 @@ def permission_read_cases(state):
                 screen = ScreenCapture(COLUMNS, ROWS)
                 screen.listener = lambda shown, x, y: frames.append(shown)
                 screen.feed(output)
-                assert not any("allow once" in frame or "? Run Bash" in frame for frame in frames), frames
+                assert not any("Allow once" in frame or "? Check successful shell exit" in frame for frame in frames), frames
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
                 assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
                 actual = termios.tcgetattr(slave)

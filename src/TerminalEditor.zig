@@ -286,6 +286,72 @@ pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(key
     };
 }
 
+/// What one input means at a choice drawn in place of the draft: a typed
+/// `Key` means what `keys` says, the arrows and Enter are the choice's own,
+/// typed text and a marked paste begin typing, a chord or malformed input is
+/// refused, and any other key does nothing. Nothing here edits.
+pub fn Selection(comptime A: type) type {
+    return union(enum) { none, action: A, left, right, enter, text, refused };
+}
+
+pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
+    const value = switch (decoded) {
+        .none, .report => return .none,
+        .invalid => return .refused,
+        .event => |value| value,
+    };
+    const pressed = switch (value.event) {
+        .paste_start => return .text,
+        .paste_end => return .refused,
+        .key_press => |pressed| pressed,
+        else => return .none,
+    };
+    if (value.pasted) return .text;
+    if (named(pressed)) |key_name| return if (keys.get(key_name)) |action| .{ .action = action } else .none;
+    if (pressed.matchExact(vaxis.Key.enter, .{}) or pressed.matchExact('j', .{ .ctrl = true })) return .enter;
+    if (pressed.matchExact(vaxis.Key.left, .{})) return .left;
+    if (pressed.matchExact(vaxis.Key.right, .{})) return .right;
+    if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) return .refused;
+    if (pressed.codepoint < 0x20) return .none;
+    const text = pressed.text orelse return .none;
+    return if (text.len != 0) .text else .none;
+}
+
+test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
+    const Name = keymap.Key;
+    const Case = struct { bytes: []const u8, expected: Selection(Name) };
+    for ([_]Case{
+        .{ .bytes = "\x1b[D", .expected = .left },
+        .{ .bytes = "\x1b[C", .expected = .right },
+        .{ .bytes = "\r", .expected = .enter },
+        .{ .bytes = "\x1b[A", .expected = .{ .action = .up } },
+        .{ .bytes = "\x1b[6~", .expected = .{ .action = .page_down } },
+        .{ .bytes = "\x07", .expected = .{ .action = .ctrl_g } },
+        .{ .bytes = "\x12", .expected = .{ .action = .ctrl_r } },
+        .{ .bytes = "a", .expected = .text },
+        .{ .bytes = "/", .expected = .text },
+        .{ .bytes = "\xc3\xa9", .expected = .text },
+        .{ .bytes = "\x1b[200~", .expected = .text },
+        .{ .bytes = "\x1ba", .expected = .refused },
+        .{ .bytes = "\x01", .expected = .refused },
+        .{ .bytes = "\x1b[1;3D", .expected = .refused },
+        .{ .bytes = "\x7f", .expected = .none },
+        .{ .bytes = "\t", .expected = .none },
+    }) |case| {
+        errdefer std.debug.print("bytes={any}\n", .{case.bytes});
+        var stream: Input = .{};
+        var last: Selection(Name) = .none;
+        for (case.bytes) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) {
+                const selection = select(keymap.every, decoded);
+                if (selection != .none) last = selection;
+            }
+        }
+        try std.testing.expectEqual(case.expected, last);
+    }
+}
+
 fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
     const value = switch (decoded) {
         .none, .report => return .none,
