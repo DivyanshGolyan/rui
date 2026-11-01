@@ -8,6 +8,7 @@ const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
+const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -699,9 +700,16 @@ pub const Live = struct {
         return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
     }
 
-    // Worst terminal escaping is four bytes per input byte; allow glyph/suffix.
+    // Worst terminal escaping is four bytes per input byte; allow glyph and
+    // suffix, or a running call's clock.
     pub const line_bytes = 4 * protocol.max_tool_description_bytes + 96;
-    pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8) ![]const u8 {
+    comptime {
+        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - 4 * protocol.max_tool_description_bytes);
+    }
+
+    /// The call's row; `running` is the clock after the words of the
+    /// running call the work line names, and empty for every other call.
+    pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8, running: []const u8) ![]const u8 {
         const entry = self.entries[index];
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
@@ -710,6 +718,7 @@ pub const Live = struct {
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
+        try writer.writeAll(running);
         return writer.buffered();
     }
 

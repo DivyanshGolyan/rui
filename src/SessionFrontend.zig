@@ -25,6 +25,7 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const work_line = @import("work_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -767,8 +768,12 @@ fn drawFrame(self: *Self) !void {
             .submitting => "Sending…",
             .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
             .rejected => "Rejected · /discard",
-        } else if (self.admission.echo != null) "Sent" else workStatus(self.live.work.state),
+        } else if (self.admission.echo != null) "Sent" else "",
     };
+    // An Action's own instructions speak for its approval; elsewhere the
+    // work says what it is doing now, on every view.
+    const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
+    const live = if (projection.approval != .absent) null else work_line.of(&self.live.work.state, self.live.work.operation, now_ms);
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
     if (choosing and screen.actionVisible())
@@ -779,7 +784,7 @@ fn drawFrame(self: *Self) !void {
     const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -864,27 +869,6 @@ test "a paged Action keeps what runs, where and for how long beside the choice" 
     try summary.workspace.set("/work");
     try approvalContext(&out, true, summary);
     try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
-}
-
-fn workStatus(state: protocol.WorkState) []const u8 {
-    return switch (state.progress() orelse return "") {
-        .runnable, .in_flight => "Working…",
-        .waiting_for_permission => "Needs approval",
-    };
-}
-
-test "the composer status shows only live work, not an ending the transcript already shows" {
-    // The ended Turn's line sits directly above the composer; a second
-    // copy pointing at /status would add nothing /status does not repeat.
-    for ([_]protocol.WorkState{
-        .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } },
-        .{ .stopped = .{ .since = 1, .cause = .stop } },
-        .{ .idle = .{ .since = 1 } },
-        .{ .finished = .{ .since = 1 } },
-    }) |ended| try std.testing.expectEqualStrings("", workStatus(ended));
-    try std.testing.expectEqualStrings("Working…", workStatus(.{ .working = .{ .since = 1 } }));
-    try std.testing.expectEqualStrings("Working…", workStatus(.{ .pending = .{ .since = 1 } }));
-    try std.testing.expectEqualStrings("Needs approval", workStatus(.{ .approval = .{ .since = 1 } }));
 }
 
 fn pump(raw: *anyopaque) !void {

@@ -1634,6 +1634,7 @@ pub const JsonWorkState = struct {
             due_at_ms: OmittableJson(JsonString(20)) = .{},
             cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             attempt: OmittableJson(JsonString(20)) = .{},
+            call: OmittableJson(JsonString(20)) = .{},
             description: OmittableJson(?JsonString(protocol.max_tool_description_bytes)) = .{},
             running: OmittableJson(JsonString(20)) = .{},
             approvals: OmittableJson(JsonString(20)) = .{},
@@ -1642,12 +1643,12 @@ pub const JsonWorkState = struct {
         };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         const kind = wire.kind.value;
-        const present = [_]bool{ wire.due_at_ms.isPresent(), wire.cause.isPresent(), wire.attempt.isPresent(), wire.description.isPresent(), wire.running.isPresent(), wire.approvals.isPresent(), wire.code.isPresent(), wire.resets_at.isPresent() };
+        const present = [_]bool{ wire.due_at_ms.isPresent(), wire.cause.isPresent(), wire.attempt.isPresent(), wire.call.isPresent(), wire.description.isPresent(), wire.running.isPresent(), wire.approvals.isPresent(), wire.code.isPresent(), wire.resets_at.isPresent() };
         const owned: [present.len]bool = switch (kind) {
-            .retrying => .{ true, true, true, false, false, false, false, false },
-            .bash => .{ false, false, false, true, true, true, false, false },
-            .failed => .{ false, false, false, false, false, false, true, true },
-            .stopped => .{ false, true, false, false, false, false, false, false },
+            .retrying => .{ true, true, true, false, false, false, false, false, false },
+            .bash => .{ false, false, false, true, true, true, true, false, false },
+            .failed => .{ false, false, false, false, false, false, false, true, true },
+            .stopped => .{ false, true, false, false, false, false, false, false, false },
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
@@ -1657,10 +1658,15 @@ pub const JsonWorkState = struct {
                 .since = since,
                 .due_at_ms = number(wire.due_at_ms.value.?, false) catch return error.InvalidCharacter,
                 .cause = try code(wire.cause.value.?),
-                .attempt = number(wire.attempt.value.?, false) catch return error.InvalidCharacter,
+                .attempt = attempt: {
+                    const attempt = number(wire.attempt.value.?, false) catch return error.InvalidCharacter;
+                    if (attempt > protocol.session_work.max_retried_attempt) return error.InvalidCharacter;
+                    break :attempt attempt;
+                },
             } },
             .bash => .{ .bash = .{
                 .since = since,
+                .call = number(wire.call.value.?, true) catch return error.InvalidCharacter,
                 .description = if (wire.description.value.?) |text| description: {
                     if (!protocol.ToolPresentation.validDescription(text.slice())) return error.InvalidCharacter;
                     break :description text.value;
@@ -1855,8 +1861,8 @@ test "a work state reads back exactly the facts its kind owns" {
         .{ .pending = .{ .since = 2 } },
         .{ .working = .{ .since = 3 } },
         .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
-        .{ .bash = .{ .since = 5, .description = description, .running = 1, .approvals = 0 } },
-        .{ .bash = .{ .since = 5, .description = null, .running = 2, .approvals = 3 } },
+        .{ .bash = .{ .since = 5, .call = 0, .description = description, .running = 1, .approvals = 0 } },
+        .{ .bash = .{ .since = 5, .call = 3, .description = null, .running = 2, .approvals = 3 } },
         .{ .approval = .{ .since = 6 } },
         .{ .stopping = .{ .since = 7 } },
         .{ .finished = .{ .since = 8 } },
@@ -1882,16 +1888,19 @@ test "a work state reads back exactly the facts its kind owns" {
         "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
         // Values outside each fact's grammar.
         "{\"kind\":\"pending\",\"since\":\"0\"}",
         "{\"kind\":\"pending\",\"since\":2}",
         "{\"kind\":\"later\",\"since\":\"2\"}",
-        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":\"\",\"running\":\"1\",\"approvals\":\"0\"}",
-        "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"0\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"call\":\"0\",\"description\":\"\",\"running\":\"1\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"call\":\"0\",\"description\":null,\"running\":\"0\",\"approvals\":\"0\"}",
+        "{\"kind\":\"bash\",\"since\":\"5\",\"call\":0,\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"\",\"resets_at\":null}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"provider_http_401\",\"resets_at\":\"5\"}",
         "{\"kind\":\"stopped\",\"since\":\"10\",\"cause\":\"timeout\"}",
+        "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\",\"attempt\":\"4\"}",
     }) |bytes| {
         try std.testing.expect(std.meta.isError(std.json.parseFromSlice(JsonWorkState, std.testing.allocator, bytes, .{})));
     }
@@ -2438,7 +2447,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
+        "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -2787,7 +2796,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try maximal.first_message.?.sender.?.session.set("zzzzzz");
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&text);
-    maximal.work = .{ .state = .{ .bash = .{ .since = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
+    maximal.work = .{ .state = .{ .bash = .{ .since = largest, .call = largest, .description = description, .running = largest, .approvals = largest } }, .turn = largest, .operation = largest, .first_action = largest };
     maximal.peers = .{ .from_person_at = largest };
     for (0..8) |index| {
         if (index != 0) try writer.writeAll(",");

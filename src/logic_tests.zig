@@ -32,6 +32,7 @@ const cores = .{
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "work_line.zig", @import("work_line.zig") },
 };
 
 test {
@@ -204,7 +205,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .pending => .{ .pending = .{ .since = since } },
             .working => .{ .working = .{ .since = since } },
             .retrying => .{ .retrying = .{ .since = since, .due_at_ms = (now_s + 30) * 1000, .cause = .{}, .attempt = 1 } },
-            .bash => .{ .bash = .{ .since = since, .description = null, .running = 1, .approvals = 0 } },
+            .bash => .{ .bash = .{ .since = since, .call = 0, .description = null, .running = 1, .approvals = 0 } },
             .approval => .{ .approval = .{ .since = since } },
             .stopping => .{ .stopping = .{ .since = since } },
             .finished => .{ .finished = .{ .since = since } },
