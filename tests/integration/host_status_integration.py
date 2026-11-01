@@ -467,7 +467,7 @@ def main():
             noncanonical = json.dumps({
                 "version": "3", "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
-                "capabilities": {"bash": True, "model": False, "managed_authentication": False},
+                "capabilities": {"bash": True, "providers": {"codex": "unserved"}},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
@@ -577,7 +577,7 @@ def main():
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--codex", "--test-phase-trace")
+            first, fields = start(store, 3, "--provider", "codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
             if os_semantics.PROC_FS:
@@ -588,7 +588,7 @@ def main():
                 before = wait_for_descriptors(first.pid)
                 before_fd = len(before)
             first_status = exchange("host_info", lambda: status(store))
-            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true ([1-9][0-9]*) 0", first_status)
+            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true chatgpt_device ([1-9][0-9]*) 0", first_status)
             assert match, first_status
             # The Host's start, not the call's: fixed for this Host's life.
             started_at = match.group(2)
@@ -607,7 +607,7 @@ def main():
                 "version": "3", "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "model": True, "managed_authentication": True},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
@@ -626,7 +626,7 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "model": True, "managed_authentication": True},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
@@ -659,14 +659,14 @@ def main():
         completed = False
         try:
             second_status = exchange("host_info", lambda: status(store))
-            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false ([1-9][0-9]*) 0", second_status)
+            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true unserved ([1-9][0-9]*) 0", second_status)
             assert match_second, second_status
             # A replacement Host starts no earlier than the one it replaced.
             assert int(match_second.group(2)) >= int(started_at), (first_status, second_status)
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
             assert selected["active_capacity"] == "7", selected
-            assert selected["capabilities"] == {"bash": True, "model": False, "managed_authentication": False}, selected
+            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved"}}, selected
             assert selected["instance"] == match_second.group(1), selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
             old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

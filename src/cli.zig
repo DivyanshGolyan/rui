@@ -12,6 +12,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
+const providers = @import("providers.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
@@ -324,10 +325,10 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     };
     // Host capabilities are startup facts, not credential or Session state.
     const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatus(init.io, paths.store.slice())) {
-        .ready => |current| if (current.capabilities.managed_authentication and current.capabilities.model)
+        .ready => |current| if (current.capabilities.providers.codex == .chatgpt_device)
             "Host: managed Codex enabled (credentials checked locally, not by status).\n"
         else
-            "Host: ready without managed Codex; use `rui host serve --codex` for new managed work.\n",
+            "Host: ready without managed Codex; use `rui host serve --provider codex` for new managed work.\n",
         .unavailable => "Host: unavailable; setup does not start it.\n",
         .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
         .incompatible => "Host: incompatible; inspect before submitting work.\n",
@@ -526,7 +527,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     // the only default.
     var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
     var argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex", null, null,
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--provider", "codex", null, null,
     };
     var argc: usize = argv.len - 2;
     if (capacity) |value| {
@@ -1141,7 +1142,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         .ready => |current| current,
         else => return error.HostReadinessUnconfirmed,
     };
-    if (!ready.capabilities.model) {
+    if (!protocol.servesModel(ready.capabilities.providers)) {
         stderr.diagnostic("rui: selected Host has no model capability; it was not restarted. Inspect rui host status before creating a Session.\n", .{});
         return error.HostModelUnavailable;
     }
@@ -1155,7 +1156,7 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
         _ = try platform.resolveClientPaths(io, destination);
     } else try platform.validateStoreDestination(io, destination);
     switch (client.hostStatus(io, destination)) {
-        .ready => |ready| if (!ready.capabilities.model) return error.HostModelUnavailable,
+        .ready => |ready| if (!protocol.servesModel(ready.capabilities.providers)) return error.HostModelUnavailable,
         .unavailable => {},
         .owned_unavailable => return error.HostReadinessUnconfirmed,
         .incompatible => return error.IncompatibleHost,
@@ -1163,12 +1164,17 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     }
 }
 
+const provider_labels = blk: {
+    var text: []const u8 = "";
+    for (@typeInfo(protocol.Provider).@"enum".field_names, 0..) |name, index| text = text ++ (if (index == 0) "" else ", ") ++ name;
+    break :blk text;
+};
+
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
     const store_path = parsed.get("store");
     const provider_endpoint = parsed.get("provider-endpoint");
     const provider_ca_file = parsed.get("provider-ca-file");
-    const managed = parsed.has("codex");
     const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
     const bash_path = parsed.get("bash-path") orelse server.default_bash_path;
     if (bash_path.len == 0) return error.InvalidBashPath;
@@ -1256,7 +1262,23 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const credential_path: ?[]const u8 = if (managed or fixture_endpoint != null) try credentialPath(init, &credential_path_buffer, false) else null;
+    var served: providers.Providers = .{ .ca_file = provider_ca_file };
+    for (parsed.all("provider")) |label| {
+        const named = std.meta.stringToEnum(protocol.Provider, label) orelse {
+            // A label is short lowercase text; anything else is not echoed.
+            const printable = label.len <= protocol.max_provider_bytes and for (label) |byte| {
+                if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') break false;
+            } else true;
+            stderr.diagnostic("rui: --provider {s} is not a built-in provider; they are " ++ provider_labels ++ ".\n", .{if (printable) label else "(unprintable)"});
+            return error.UnsupportedProvider;
+        };
+        if (served.serves(named)) return error.DuplicateArgument;
+        served.table.set(named, .{ .endpoint = providers.endpoint(named), .credential = switch (named) {
+            .codex => .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } },
+        } });
+    }
+    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
+    if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return server.serve(
         io,
@@ -1265,9 +1287,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         active_capacity,
         limits,
         hooks,
-        if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
-        provider_ca_file,
-        if (credential_path) |path| model_adapter.Authentication{ .path = path, .fixture = fixture_endpoint != null } else null,
+        &served,
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),

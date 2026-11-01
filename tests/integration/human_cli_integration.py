@@ -5697,7 +5697,7 @@ def main(selected="all"):
         assert missing_setup["local_credential"] == "missing" and missing_setup["next_session"] == {
             "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
-        assert missing_setup["host"]["capabilities"]["managed_authentication"] is False, missing_setup
+        assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
         linked_home = state / "linked-home"
         (linked_home / ".config").mkdir(parents=True)
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)

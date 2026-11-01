@@ -9,6 +9,7 @@ test {
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");
+    _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
@@ -28,8 +29,8 @@ test {
     _ = @import("failed_responses.zig");
     _ = @import("provider.zig");
     _ = @import("provider_selection.zig");
+    _ = @import("providers.zig");
     _ = @import("preferences.zig");
-    _ = @import("provider_output.zig");
     _ = @import("output_decode.zig");
     _ = @import("output_format.zig");
     _ = @import("request_encoding.zig");
