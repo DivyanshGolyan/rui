@@ -13,6 +13,7 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
+const codec_abi = @import("codec_abi.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
@@ -38,13 +39,6 @@ pub const PreparedRequest = struct {
     }
 };
 
-pub const ObservationNames = struct {
-    request_id: []const u8 = "",
-    model: []const u8 = "",
-    alternate_model: []const u8 = "",
-    turn_state: []const u8 = "",
-};
-
 pub const max_turn_state_bytes = 4096;
 
 /// Takes a routing value while its header block is decoded, so a Transfer
@@ -63,7 +57,7 @@ pub const TurnStateKey = struct {
 
 /// One per Reactor, so a Transfer holds a pointer instead of copies.
 pub const HeaderObservation = struct {
-    names: ObservationNames = .{},
+    names: codec_abi.ObservedHeaders = .{},
     turn_state: ?TurnStateSink = null,
 };
 
@@ -436,7 +430,8 @@ const HeaderContext = struct {
     /// An error refuses the block: an invalid value, or no memory for it.
     fn field(self: *HeaderContext, observation: *const HeaderObservation, name: []const u8, raw: []const u8, now_seconds: i64) error{ InvalidValue, OutOfMemory }!void {
         const value = std.mem.trim(u8, raw, " \t");
-        if (std.ascii.eqlIgnoreCase(name, "retry-after")) {
+        // h2 delivers field names lowercase (RFC 9113 8.2.1, enforced by nghttp2).
+        if (std.mem.eql(u8, name, "retry-after")) {
             if (transport_policy.parseRetryAfter(value, now_seconds)) |constraint| switch (constraint) {
                 .delay_ms => |delay| {
                     self.retry_after_ms = @max(self.retry_after_ms, delay);
@@ -450,7 +445,7 @@ const HeaderContext = struct {
             return;
         }
         const names = &observation.names;
-        if (names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, names.turn_state)) {
+        if (names.turn_state.len != 0 and std.mem.eql(u8, name, names.turn_state)) {
             if (!self.successful_block or self.turn_state_seen) return;
             self.turn_state_seen = true;
             if (value.len == 0 or value.len > max_turn_state_bytes) return;
@@ -458,11 +453,11 @@ const HeaderContext = struct {
             if (observation.turn_state) |sink| sink.capture(sink.context, self.turn_state, value);
             return;
         }
-        const observed: Observed.Name = if (names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, names.request_id))
+        const observed: Observed.Name = if (names.request_id.len != 0 and std.mem.eql(u8, name, names.request_id))
             .request_id
-        else if (names.model.len != 0 and std.ascii.eqlIgnoreCase(name, names.model))
+        else if (names.model.len != 0 and std.mem.eql(u8, name, names.model))
             .model
-        else if (names.alternate_model.len != 0 and std.ascii.eqlIgnoreCase(name, names.alternate_model))
+        else if (names.alternate_model.len != 0 and std.mem.eql(u8, name, names.alternate_model))
             .alternate_model
         else
             return;
