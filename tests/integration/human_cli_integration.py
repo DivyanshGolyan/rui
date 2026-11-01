@@ -179,7 +179,7 @@ def defaults(home, *args, success=True, environment=None):
         return None
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     value = json.loads(result.stdout)
-    assert value["version"] == "3" and value["type"] == "defaults", value
+    assert value["version"] == "4" and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
@@ -460,7 +460,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
     # exact bindings outside that list without inferring a context window.
-    body = {"version": "3", "kind": "configure", "store": str(store),
+    body = {"version": "4", "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
@@ -1234,7 +1234,7 @@ def overview_cases():
     Esc returns; the composer starts one with /configure's settings;
     `session resume` opens inside the overview; a start the process never
     sent recovers from its saved request; Ctrl-X twice stops a working
-    Session."""
+    Session, from its row and from its conversation."""
     state = screen_fixture_root("rui-overview.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -1243,10 +1243,12 @@ def overview_cases():
     workspace.mkdir()
     codex_fixture.credentials(home / ".config/rui/codex.json")
     held_release = threading.Event()
+    conversation_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([], {
         "Fix the flaky test": fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "Flaky test fixed.")[0],
         "captured then killed": fixture.sse_answer("killed-answer", "killed-reason", "killed-message", "Recovered start answered.")[0],
         "Hold for a stop": (fixture.sse_answer("held-answer", "held-reason", "held-message", "Never shown.")[0], held_release),
+        "Hold in the conversation": (fixture.sse_answer("talk-answer", "talk-reason", "talk-message", "Never shown.")[0], conversation_release),
     })
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -1355,14 +1357,35 @@ def overview_cases():
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
+        # In a conversation the line under the input offers ctrl+x stop
+        # while there is work, and Ctrl-X twice stops its Session there.
+        before = set(records.glob("*.json"))
+        sent = len(endpoint.requests)
+        os.write(master, b"Hold in the conversation\n")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == sent + 1), "conversation Turn sent")
+        record, = set(records.glob("*.json")) - before
+        talking = fixture.observe(store, record.stem)["target"]
+        session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
+        keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen) == f"Stop {talking}? ctrl+x yes · esc no")
+        # Esc only cancels the ask; the conversation stays open.
+        keyed_frame(master, b"\x1b", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen).startswith("Stop "))
+        os.write(master, b"\x18")
+        fixture.wait_for(draining(master, lambda: fixture.command("session", "inspect", "--store", store, "--session", talking)["work"]["state"]["kind"] == "stopped"), "conversation stop")
+        stopped = keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and "Session stopped." in screen)
+        assert "ctrl+x stop" not in session_line(stopped), stopped
+        overview_frame(master, lambda frame: re.search(r"[■#] Hold in the conversation", frame), keys=b"\x1b")
         held_release.set()
+        conversation_release.set()
         leave_overview(master)
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         completed = True
-        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop passed", flush=True)
+        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop from a row and a conversation passed", flush=True)
     finally:
         held_release.set()
+        conversation_release.set()
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
                     lambda: fixture.stop_host(host) if host is not None else None,
@@ -1874,7 +1897,7 @@ def persistent_opening_case():
                 # incomplete span remain buffered after a visible bold prefix.
                 body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
                 return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                    b"X-Rui-Wire-Version: 3\r\nContent-Length: " + str(len(body) + 1).encode()
+                    b"X-Rui-Wire-Version: 4\r\nContent-Length: " + str(len(body) + 1).encode()
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
@@ -3441,7 +3464,7 @@ int fsync(int fd) {
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
     # Every mutation kind, including Session stop, is a recoverable capture.
-    stop = {"version": "3", "kind": "session_stop", "store": str(store.resolve()),
+    stop = {"version": "4", "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
@@ -3545,7 +3568,7 @@ def opaque_session_commands_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for key, session in (("prefix", "human/nul"), ("opaque", "human/nul\x00' é\n--last")):
-            body = {"version": "3", "kind": "configure", "store": str(store), "key": key,
+            body = {"version": "4", "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
                            (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},

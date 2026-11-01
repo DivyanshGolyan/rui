@@ -54,7 +54,7 @@ def dispose_page(process, endpoint, thread, timeout):
 
 def request(socket_path, store, route, kind, session, **fields):
     body = json.dumps(
-        {"version": "3", "kind": kind, "store": str(store), "session": session, **fields},
+        {"version": "4", "kind": kind, "store": str(store), "session": session, **fields},
         separators=(",", ":"),
     ).encode()
     return raw_request(socket_path, route, body)
@@ -118,7 +118,7 @@ def main():
         head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 409 "), (head, body)
-        assert json.loads(body) == {"version": "3", "type": "invocation_error", "code": "wrong_store_identity"}, body
+        assert json.loads(body) == {"version": "4", "type": "invocation_error", "code": "wrong_store_identity"}, body
         head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
@@ -324,7 +324,7 @@ def whole_stream_shape(length):
             if length == 0:
                 # Empty CLI stdin intentionally sends nothing. The protocol
                 # still admits empty content for this stream-range contract.
-                wire = {"version": "3", "kind": "message", "store": str(store),
+                wire = {"version": "4", "kind": "message", "store": str(store),
                     "key": "stream-message", "session": session, "sender": None, "sender_handle": None,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())

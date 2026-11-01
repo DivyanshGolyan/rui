@@ -47,6 +47,7 @@ cases() {
     run_case execution bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case execution bash python3 "$directory/bash_integration.py" "$release_safe"
     run_case execution peer python3 "$directory/peer_integration.py" "$release_safe"
+    run_case execution bash-environment python3 "$directory/bash_environment_integration.py" "$release_safe"
     run_case execution sender-identity python3 "$directory/sender_identity_integration.py" "$release_safe"
     if [ "$part" = all ]; then
         run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe"

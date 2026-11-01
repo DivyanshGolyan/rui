@@ -307,7 +307,13 @@ pub const Event = union(enum) {
     host: ?Host,
     /// The person pressed a key, at this Unix millisecond.
     looked: u64,
+    conversed: Conversed,
 };
+
+/// An input in the open conversation of `reference`, whose work it shows as
+/// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
+/// Session's row does, and any other input cancels the prompt.
+pub const Conversed = struct { reference: Reference, work: Kind, stop: bool };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
 pub const Reads = struct {
@@ -439,6 +445,33 @@ pub const OwnedStart = struct {
 
 pub const Prompt = struct { stop: Reference };
 
+/// What both screens say while a stop waits for its second Ctrl-X: the
+/// Session's reference and a separator dot.
+const stop_prompt = "Stop {s}? ctrl+x yes {s} esc no";
+
+/// The bytes the conversation's stop prompt takes.
+pub const max_prompt_bytes = stop_prompt.len - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
+
+/// What the overview says under the input of the conversation of `ref`,
+/// whose work shows as `work`: its stop prompt for that Session, else its
+/// notice, and whether Ctrl-X would ask to stop the work.
+pub const Said = struct {
+    /// Null when the overview says nothing; the conversation's own notice
+    /// then shows.
+    text: ?[]const u8,
+    /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
+    asking: bool,
+    stoppable: bool,
+};
+
+pub fn conversation(state: *const State, ref: Reference, work: Kind, buffer: *[max_prompt_bytes]u8) Said {
+    const asking = if (state.prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
+    const text: ?[]const u8 = if (asking)
+        std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable
+    else if (state.notice) |*notice| notice.text() else null;
+    return .{ .text = text, .asking = asking, .stoppable = stoppable(state, ref, work) };
+}
+
 /// A start or stop `step` asked the shell to send. Only its answer removes
 /// it, and only while the overview shows that answer; one that may have
 /// reached the Host keeps its recover handle until departure. Nothing is
@@ -453,7 +486,8 @@ pub const Request = struct {
 };
 
 pub const Notice = struct {
-    bytes: [256]u8 = undefined,
+    /// Room for a refused environment's reason, its longest notice.
+    bytes: [768]u8 = undefined,
     len: usize = 0,
     colour: Colour,
 
@@ -650,7 +684,11 @@ pub const State = struct {
         }
         const held = &self.requests[at];
         held.status = status;
-        held.text.set(text) catch unreachable;
+        // A long failure, such as a refused environment, keeps its start,
+        // cut between characters.
+        var end = @min(text.len, held.text.bytes.len);
+        while (end < text.len and end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+        held.text.set(text[0..end]) catch unreachable;
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
@@ -792,6 +830,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
+        .conversed => |input| {
+            state.notice = null;
+            const prompt = state.prompt;
+            state.prompt = null;
+            if (input.stop) stopKey(state, prompt, input.reference, input.work, &effects);
+        },
         .stop => |result| {
             const at = state.pendingAt(.stop, result.reference).?;
             switch (result.outcome) {
@@ -1118,11 +1162,9 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
-            .stop => if (prompt) |asked| confirmStop(state, asked.stop, effects) else {
+            .stop => {
                 const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session first.", .{});
-                if (rules.get(shownKind(state, row)).stoppable) {
-                    state.prompt = .{ .stop = row.reference };
-                } else refuseStop(state, row);
+                stopKey(state, prompt, row.reference, row.state.asOf(state.now_ms), effects);
             },
         },
         .none, .append, .redraw => {},
@@ -1139,26 +1181,41 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
     }
 }
 
-fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
-    const row = state.find(ref) orelse return;
-    if (!rules.get(shownKind(state, row)).stoppable) return refuseStop(state, row);
-    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
+/// Ctrl-X on either screen, for the Session `ref` whose work shows as
+/// `work`: the first asks, and a second while `prompt` names it sends the stop.
+fn stopKey(state: *State, prompt: ?Prompt, ref: Reference, work: Kind, effects: *Effects) void {
+    const kind = kindShown(state, ref, work);
+    if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
+    const asked = if (prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
+    if (!asked) {
+        state.prompt = .{ .stop = ref };
+    } else if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
-/// Says why `row` takes no stop. An unconfirmed one says leaving gives the
-/// details; work being stopped says so in its row's words.
-fn refuseStop(state: *State, row: *const Row) void {
-    if (state.openStop(row.reference)) |held| if (held.status == .unknown)
-        return state.say(.attention, "! {s} stop unsure; details on exit", .{&row.reference});
-    if (rules.get(shownKind(state, row)).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &row.reference, word_ });
-    var words: [work_line.max_words_bytes]u8 = undefined;
-    state.say(.quiet, "{s}: {s}", .{ &row.reference, workLine(&words, state, row).?.words });
+/// Says why `ref` takes no stop. An unconfirmed one says leaving gives the
+/// details; work being stopped says so in its work line's words.
+fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
+    if (state.openStop(ref)) |held| if (held.status == .unknown)
+        return state.say(.attention, "! {s} stop unsure; details on exit", .{&ref});
+    if (rules.get(kind).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &ref, word_ });
+    std.debug.assert(kind == .stopping);
+    state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
 }
 
-/// The kind a row shows: `stopping` while a stop of it is open, and a retry
-/// that has fallen due as the work it became.
+/// The kind `ref` shows: `stopping` while a stop of it is open, else `work`.
+fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
+    return if (state.openStop(ref) != null) .stopping else work;
+}
+
+/// Ctrl-X would ask to stop `ref`, whose work shows as `work`.
+fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
+    return rules.get(kindShown(state, ref, work)).stoppable;
+}
+
+/// The kind a row shows, with a retry that has fallen due as the work it
+/// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
-    return if (state.openStop(row.reference) != null) .stopping else row.state.asOf(state.now_ms);
+    return kindShown(state, row.reference, row.state.asOf(state.now_ms));
 }
 
 /// What a row's work is doing now, as `shownKind` reads it; null for idle or
@@ -2159,7 +2216,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
     const room = painter.width -| 2;
     const dot = painter.glyphs.dot;
     if (state.prompt) |prompt| {
-        const text = try std.fmt.allocPrint(painter.arena, "Stop {s}? ctrl+x yes {s} esc no", .{ &prompt.stop, dot });
+        const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.notice) |*notice| {
         _ = try painter.put(1, notice.text(), room, .{ .colour = notice.colour });
@@ -2177,7 +2234,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         const text = try std.fmt.allocPrint(painter.arena, "enter start {s} esc clear", .{dot});
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
-        const stop = if (rules.get(shownKind(state, row)).stoppable) try std.fmt.allocPrint(painter.arena, " {s} ctrl+x stop", .{dot}) else "";
+        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
         const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}", .{ painter.glyphs.arrows, dot, stop });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     }
@@ -2912,6 +2969,42 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .stopped } }));
         try std.testing.expectEqual(@as(u64, 0), state.next_list_ms);
     }
+}
+
+fn expectSaid(text: ?[]const u8, asking: bool, stoppable_: bool, said: Said) !void {
+    try std.testing.expectEqualStrings(text orelse "", said.text orelse "");
+    try std.testing.expectEqual(text == null, said.text == null);
+    try std.testing.expectEqual(asking, said.asking);
+    try std.testing.expectEqual(stoppable_, said.stoppable);
+}
+
+test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
+    var state = try testState();
+    defer state.deinit();
+    const ref = "k7m2qx".*;
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .stop = true };
+    var buffer: [max_prompt_bytes]u8 = undefined;
+    try expectSaid(null, false, true, conversation(&state, ref, .working, &buffer));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectSaid("Stop k7m2qx? ctrl+x yes · esc no", true, true, conversation(&state, ref, .working, &buffer));
+    // Another Session's conversation does not show the prompt.
+    try std.testing.expect(!conversation(&state, "b4n8wd".*, .working, &buffer).asking);
+    // Any other input there cancels, and the next ctrl-x asks afresh.
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .stop = false } }));
+    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, &buffer).text);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
+    // Until its answer the work is stopping: no hint, and ctrl-x says so.
+    try std.testing.expect(!conversation(&state, ref, .working, &buffer).stoppable);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectNotice(&state, "k7m2qx: Stopping");
+    try expectSaid("k7m2qx: Stopping", false, false, conversation(&state, ref, .working, &buffer));
+    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
+    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
+    // Ended work takes no stop.
+    try std.testing.expect(conversation(&state, ref, .working, &buffer).stoppable and !conversation(&state, ref, .finished, &buffer).stoppable);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .stop = true } }));
+    try expectNotice(&state, "k7m2qx is already finished.");
 }
 
 test "a cancelled stop prompt sends nothing" {
