@@ -24,6 +24,8 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const slash_commands = @import("slash_commands.zig");
+const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
@@ -152,6 +154,8 @@ dirty: bool = true,
 leaving: ?Outcome = null,
 /// Shown under the input until the next key, in place of the Session line.
 notice: ?[]const u8 = null,
+/// The draft revision Esc closed the command list on; any edit reopens it.
+commands_closed: ?u64 = null,
 notice_buffer: [notice_capacity]u8 = undefined,
 /// The Session line's facts from the latest read that took them, the
 /// unlabelled Session's name, and the line as last written.
@@ -407,43 +411,43 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 const History = enum { older, latest };
 
-/// Every slash command the draft accepts.
+/// What each slash command does here.
 const Slash = union(enum) {
     exit,
     history: History,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
+    /// /effort alone: this model's efforts, from the Session line's facts.
+    efforts,
     discard,
     recover: []const u8,
     wait,
     login,
+    misused: slash_commands.Name,
     unknown,
 };
 
 fn parse(text: []const u8) Slash {
-    const exact = [_]struct { []const u8, Slash }{
-        .{ "/exit", .exit },
-        .{ "/history", .{ .history = .older } },
-        .{ "/details", .{ .history = .latest } },
-        .{ "/status", .{ .inspection = .status } },
-        .{ "/requests", .{ .inspection = .requests } },
-        .{ "/help", .{ .inspection = .help } },
-        .{ "/inspect-action", .{ .inspection = .command } },
-        .{ "/setup", .{ .inspection = .command } },
-        .{ "/configure", .{ .inspection = .command } },
-        .{ "/copy", .{ .inspection = .{ .copy = .answer } } },
-        .{ "/copy code", .{ .inspection = .{ .copy = .code } } },
-        .{ "/copy file", .{ .inspection = .{ .copy = .file } } },
-        .{ "/discard", .discard },
-        .{ "/wait", .wait },
-        .{ "/login", .login },
+    const command = switch (slash_commands.parse(text)) {
+        .unknown => return .unknown,
+        .misused => |name| return .{ .misused = name },
+        .command => |command| command,
     };
-    for (exact) |entry| if (std.mem.eql(u8, text, entry[0])) return entry[1];
-    for ([_][]const u8{ "/setup ", "/configure ", "/result " }) |prefix| {
-        if (std.mem.startsWith(u8, text, prefix)) return .{ .inspection = .command };
-    }
-    if (std.mem.startsWith(u8, text, "/recover ")) return .{ .recover = text["/recover ".len..] };
-    return .unknown;
+    return switch (command.name) {
+        .exit => .exit,
+        .history => .{ .history = .older },
+        .details => .{ .history = .latest },
+        .status => .{ .inspection = .status },
+        .requests => .{ .inspection = .requests },
+        .help => .{ .inspection = .help },
+        .copy => .{ .inspection = .{ .copy = std.meta.stringToEnum(reads.Copy, command.argument) orelse .answer } },
+        .effort => if (command.argument.len == 0) .efforts else .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename => .{ .inspection = .command },
+        .recover => .{ .recover = command.argument },
+        .discard => .discard,
+        .wait => .wait,
+        .login => .login,
+    };
 }
 
 /// The page asked for last is the one shown: a /status not yet rendered
@@ -473,8 +477,30 @@ fn slashCommand(self: *Self, text: []const u8) void {
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
         .login => self.notice = "Login uses rui auth login codex in your shell.",
+        .efforts => self.notice = self.efforts(),
+        .misused => |name| {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            writer.print("! Usage: {s}", .{slash_commands.usage.get(name)}) catch unreachable;
+            self.notice = writer.buffered();
+        },
         .unknown => self.unknownCommand(text),
     }
+}
+
+/// The efforts the Session's model supports, the effective one marked.
+fn efforts(self: *Self) []const u8 {
+    if (self.line.read == null) return "Efforts show once the Session is read.";
+    const model = self.line.model.slice();
+    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+    var listed = false;
+    for (std.enums.values(model_capability.ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+        const current = self.line.effort == effort;
+        writer.print("{s}{s}{s}{s}", .{ if (listed) " · " else "Efforts: ", if (current) "[" else "", @tagName(effort), if (current) "]" else "" }) catch unreachable;
+        listed = true;
+    };
+    if (!listed) return "Rui lists no efforts for this model.";
+    writer.writeAll(" · /effort LEVEL switches") catch unreachable;
+    return writer.buffered();
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
@@ -494,7 +520,11 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
         .{ "/\x1b[2J", "! Unknown command · /help" },
-        .{ "/result", "! Unknown command /result · /help" },
+        .{ "/result", "! Usage: /result KEY" },
+        .{ "/rename", "! Usage: /rename NAME" },
+        .{ "/rename lane four", "" },
+        .{ "/effort", "Efforts show once the Session is read." },
+        .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
         .{ "/configure --permission-mode ask", "" },
@@ -504,7 +534,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/copy", "" },
         .{ "/copy code", "" },
         .{ "/copy file", "" },
-        .{ "/copy all", "! Unknown command /copy · /help" },
+        .{ "/copy all", "! Usage: /copy [code|file]" },
     };
     inline for (cases) |case| {
         self.notice = null;
@@ -516,6 +546,24 @@ test "frontend answers local and unknown commands in place and keeps Host comman
             try std.testing.expect(self.notice == null);
             try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
+    }
+}
+
+test "frontend /effort alone lists the efforts the Session's model supports and marks the one in force" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.input.init();
+    const cases = .{
+        .{ "gpt-5.5", @as(?model_capability.ReasoningEffort, .medium), "Efforts: low · [medium] · high · xhigh · /effort LEVEL switches" },
+        .{ "gpt-6-luna", @as(?model_capability.ReasoningEffort, .max), "Efforts: low · medium · high · xhigh · [max] · /effort LEVEL switches" },
+        .{ "unlisted-model", @as(?model_capability.ReasoningEffort, null), "Rui lists no efforts for this model." },
+    };
+    inline for (cases) |case| {
+        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = case[1] };
+        try self.line.model.set(case[0]);
+        self.notice = null;
+        self.slashCommand("/effort");
+        try std.testing.expectEqualStrings(case[2], self.notice.?);
+        try std.testing.expect(self.input.queuedCommand() == null);
     }
 }
 
@@ -776,7 +824,15 @@ fn drawFrame(self: *Self) !void {
     const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .commands = self.commandList(), .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+}
+
+/// The commands the draft's command word starts, unless Esc closed the
+/// list on this draft.
+fn commandList(self: *const Self) ?slash_commands.Matches {
+    if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
+    const matches = slash_commands.Matches.of(self.input.composition().bytes) orelse return null;
+    return if (matches.count != 0) matches else null;
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -939,6 +995,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
         .latest, .back, .close => {
+            if (action == .close and screen.inputRow() == .draft and self.commandList() != null) {
+                self.commands_closed = self.input.revision;
+                self.dirty = true;
+                return;
+            }
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
             self.dropMessageRequest();

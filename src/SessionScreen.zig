@@ -9,6 +9,7 @@ const Frame = @import("TerminalFrame.zig");
 const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const slash_commands = @import("slash_commands.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -576,6 +577,8 @@ pub const Footer = struct {
     command: bool = false,
     status: []const u8 = "",
     notice: []const u8 = "",
+    /// The commands the draft's command word starts, listed above the input.
+    commands: ?slash_commands.Matches = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
 };
@@ -583,6 +586,26 @@ pub const Footer = struct {
 /// The Session line's facts, and the caller's copy of the line it last
 /// wrote for them, which the caller resets when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
+
+/// One row per command, its usage aligned and its description quiet. When
+/// more match than rows fit, the last row counts the rest.
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.Matches, more: *[32]u8) void {
+    var matches = commands;
+    const total = matches.count;
+    const rows: usize = if (total > layout.list_height) layout.list_height - 1 else total;
+    for (0..rows) |index| {
+        const name = matches.next().?;
+        const usage = slash_commands.usage.get(name);
+        _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index)), .height = 1 }).print(&.{
+            .{ .text = usage, .style = self.style(.user) },
+            .{ .text = slash_commands.padding[usage.len..] },
+            .{ .text = slash_commands.table.get(name).description.?, .style = self.style(.quiet) },
+        }, .{ .wrap = .none });
+    }
+    if (rows == total) return;
+    const text = std.fmt.bufPrint(more, "+{d} more · type to narrow", .{total - rows}) catch unreachable;
+    _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
+}
 
 /// Adopts the frame's geometry, selects its projection, encodes it and
 /// returns its receipt only after every byte is written and flushed.
@@ -647,6 +670,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
         .notice = footer.notice,
+        .commands = if (selector) 0 else if (footer.commands) |commands| commands.count else 0,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
         .live = footer.live != null,
@@ -682,7 +706,12 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
+    // Cells borrow the rule's label and the list's overflow row until the
+    // frame is rendered.
+    var rule_label: [64]u8 = undefined;
+    var more: [32]u8 = undefined;
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
+    if (layout.list_height != 0) self.drawCommands(window, &layout, footer.commands.?, &more);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -812,9 +841,9 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
-fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View) !void {
-    var buffer: [64]u8 = undefined;
-    const label = draft_layout.label(&buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
+/// Cells borrow the label in `buffer` until the frame is rendered.
+fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
+    const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
     const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
     _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});

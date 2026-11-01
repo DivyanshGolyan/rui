@@ -17,6 +17,7 @@ const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const model_capability = @import("model_capability.zig");
+const slash_commands = @import("slash_commands.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -1686,68 +1687,85 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
     const text = input_buffer;
-    if (std.mem.eql(u8, text, "/inspect-action")) {
-        const report = try inspectWork(init, requests_context, destination, reference);
-        defer report.file.close(init.io);
-        if (report.current.first_action) |action| {
-            var buffer: [20]u8 = undefined;
-            const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
-            try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
-            try inspectAction(init, requests_context, destination, reference, action, true);
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
-            inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
-                try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
-                try writeShellWord(init.io, destination);
-                var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
-                var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
-                try TerminalText.writeShellSession(&session_writer.interface, reference, false);
-                try session_writer.flush();
-                try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
-                try std.Io.File.stdout().writeStreamingAll(init.io, id);
-                try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-            }
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
-        return;
+    // The Session frontend queues only commands the table admits.
+    const command = slash_commands.parse(text).command;
+    const live: LiveAddress = .{ .store = destination, .session = reference };
+    switch (command.name) {
+        .@"inspect-action" => {
+            const report = try inspectWork(init, requests_context, destination, reference);
+            defer report.file.close(init.io);
+            if (report.current.first_action) |action| {
+                var buffer: [20]u8 = undefined;
+                const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
+                try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
+                try inspectAction(init, requests_context, destination, reference, action, true);
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
+                inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
+                    try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
+                    try writeShellWord(init.io, destination);
+                    var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
+                    var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
+                    try TerminalText.writeShellSession(&session_writer.interface, reference, false);
+                    try session_writer.flush();
+                    try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
+                    try std.Io.File.stdout().writeStreamingAll(init.io, id);
+                    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+                }
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
+        },
+        .setup => {
+            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
+            var setup_args: [6][]const u8 = undefined;
+            const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
+                return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+            var nothing = std.heap.FixedBufferAllocator.init(&.{});
+            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
+                stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+                return;
+            };
+            if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+            setup(init, &parsed, true) catch |err| {
+                if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            };
+        },
+        .result => {
+            const saved = protocol_reply.MessageAddress.init(destination, reference, command.argument) catch |err| {
+                stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
+                return;
+            };
+            showResult(init, requests_context, &saved) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
+            };
+        },
+        .configure => {
+            var arguments: [20][]const u8 = undefined;
+            const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch
+                return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+            return liveConfigure(init, requests_context, live, arguments[0..argument_count]);
+        },
+        // The short forms are their /configure flag, the argument one word.
+        .effort => return liveConfigure(init, requests_context, live, &.{ "--reasoning-effort", command.argument }),
+        .rename => return liveConfigure(init, requests_context, live, &.{ "--label", command.argument }),
+        // The Session frontend runs every other command itself.
+        else => return error.UnknownArgument,
     }
-    if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
-        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
-        var setup_args: [6][]const u8 = undefined;
-        const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-        var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-            stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-            return;
-        };
-        if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-        setup(init, &parsed, true) catch |err| {
-            if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-        };
-    } else if (std.mem.startsWith(u8, text, "/result ")) {
-        const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
-            stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
-            return;
-        };
-        showResult(init, requests_context, &saved) catch |err| {
-            if (err == error.CanonicalStoreFailure) return err;
-            stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
-        };
-    } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) {
-        var arguments: [20][]const u8 = undefined;
-        const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.live_configure.parse(arguments[0..argument_count], nothing.allocator()) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
-            return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
-        configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
-            if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
-            stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
-            if (err == error.CanonicalStoreFailure) return err;
-        };
-    } else return error.UnknownArgument; // The Session frontend admits only the commands above.
+}
+
+/// The live /configure: its checks, its usage and its messages, whichever
+/// command spelled the arguments.
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8) !void {
+    var nothing = std.heap.FixedBufferAllocator.init(&.{});
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch
+        return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
+        return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
+    configure(init, requests_context, &parsed, live, false) catch |err| {
+        if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
+        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+        if (err == error.CanonicalStoreFailure) return err;
+    };
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes

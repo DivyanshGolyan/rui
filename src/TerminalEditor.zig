@@ -16,6 +16,9 @@ partial: [4]u8 = undefined,
 partial_length: u3 = 0,
 partial_need: u3 = 0,
 allow_paste: bool = true,
+/// What a typed Tab adds to the draft at its end in place of a tab, or null
+/// to add the tab. Null by default: only the conversation completes commands.
+completion: ?*const fn (draft: []const u8) ?[]const u8 = null,
 /// Why the line is withheld until Enter, which reports it. It withholds
 /// edits, never changes what a key means.
 rejected: ?keymap.Refusal = null,
@@ -496,7 +499,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
     switch (press) {
         .key, .enter => unreachable,
         .edit => |command| return switch (command) {
-            .tab => self.insert('\t', false),
+            .tab => self.tab(),
             .newline => self.insert('\n', true),
             .left => self.move(self.previous(self.cursor)),
             .right => self.move(self.next(self.cursor)),
@@ -655,6 +658,17 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         try std.testing.expectEqualStrings("é🧑‍🌾kept", storage[0..editor.length]);
         try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
     }
+}
+
+fn tab(self: *Editor) KeyOutcome {
+    const completion = self.completion orelse return self.insert('\t', false);
+    const added = completion(self.buffer[0..self.length]) orelse return self.insert('\t', false);
+    if (added.len == 0 or self.partial_length != 0 or self.rejected != null) return .none;
+    self.cursor = self.length;
+    return switch (self.insertText(added, false)) {
+        .append => .redraw,
+        else => |outcome| outcome,
+    };
 }
 
 fn insertText(self: *Editor, text: []const u8, pasted_input: bool) KeyOutcome {

@@ -34,6 +34,7 @@ const cores = .{
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
+    .{ "slash_commands.zig", @import("slash_commands.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
