@@ -7,11 +7,22 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
+const protocol = @import("protocol.zig");
 
 pub const Method = session_line.Method;
 
 /// The newest queued Message's first line, terminal-safe.
 pub const Line = Bounded(session_line.max_line_bytes);
+
+/// A first line and the Message it was read from.
+pub const Shown = struct { admission: u64, line: Line };
+
+/// Whether the row shows: some wait, the newest is not one the opening
+/// showed queued, and the work holds them. A Session that holds nothing
+/// takes a Message at once, so its row would only flash.
+pub fn shows(queued: protocol.Queued, opened: u64, holds: bool) bool {
+    return queued.count != 0 and queued.newest_admission > opened and holds;
+}
 
 /// What the row shows: the newest Message's first line, and how many wait.
 pub const Waiting = struct { line: []const u8, count: u64 };

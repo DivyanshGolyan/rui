@@ -102,8 +102,10 @@ pub const Input = struct {
     /// work's clock.
     clock_call: ?usize = null,
     /// A Message waits behind the work: its row sits above the status in a
-    /// row no other region needs, and is the first row dropped.
-    queued: bool = false,
+    /// row no other region needs, and is the first row dropped. While it
+    /// draws, the frame shows this status in place of `status`: the row
+    /// confirms a send that `status` says `Sent` of.
+    queued: ?[]const u8 = null,
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
@@ -128,7 +130,22 @@ fn overflow(self: *Self, layout: Viewport.Layout, omitted: u64, compact: bool) !
 
 /// Plans rows for vaxis to fill. Decisions borrow only the supplied document
 /// and draft; the shell consumes the plan before pumping input or changing them.
+/// A queued Message's row and its status come as one: when the row does not
+/// fit, the frame is planned again without it, under `input.status`, which
+/// is never shorter than the row's.
 pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
+    if (input.queued) |status| {
+        var row = input;
+        row.status = status;
+        try self.fit(document, row);
+        if (self.queued_height != 0) return;
+    }
+    var plain = input;
+    plain.queued = null;
+    try self.fit(document, plain);
+}
+
+fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     try validateGeometry(input.width, input.height);
     const layout: Viewport.Layout = .{ .width = input.width, .method = input.method };
     self.* = .{
@@ -232,7 +249,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     self.draft = draft_layout.fit(pieces, input.width - 2, input.cursor, shape, @min(draft_layout.cap(input.height), room), &self.draft_lines);
     // A queued Message's row takes only a row the conversation's text would
     // have: it is dropped before any draft row.
-    self.queued_height = @intFromBool(input.queued and room > self.draft.rows);
+    self.queued_height = @intFromBool(input.queued != null and room > self.draft.rows);
     const unreserved = input.height - self.draft.rows - self.rule_height - footer;
     // A transcript of this text shows the live line under its heading and a
     // readable row.
@@ -389,11 +406,11 @@ test "a queued Message's row sits right above the status and is the first row dr
         var input: Input = .{ .width = 24, .height = @intCast(height), .draft = draft, .status = status, .cursor = draft.len, .calls = &calls, .total_calls = 3, .live = live, .selected = false, .action_visible = false, .preview_complete = true };
         // It never refuses a terminal the frame without it fits.
         base.plan(&document, input) catch |err| {
-            input.queued = true;
+            input.queued = status;
             try std.testing.expectError(err, frame.plan(&document, input));
             continue;
         };
-        input.queued = true;
+        input.queued = status;
         try frame.plan(&document, input);
         // It takes a row only from the conversation's text, never from
         // calls, their overflow row, the live line, the status or the
@@ -409,7 +426,7 @@ test "a queued Message's row sits right above the status and is the first row dr
         if (frame.queued_height != 0) try std.testing.expectEqual(frame.status_row - 1, frame.queued_row);
     };
     // A full conversation ends right above it.
-    try frame.plan(&document, .{ .width = 80, .height = 24, .status = "", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .queued = true, .selected = false, .action_visible = false, .preview_complete = true });
+    try frame.plan(&document, .{ .width = 80, .height = 24, .status = "", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .queued = "", .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(u16, 20), frame.queued_row);
     try std.testing.expectEqual(frame.queued_row, frame.live_row + 1);
     try std.testing.expectEqual(frame.draft_top - 1, frame.queued_row + 1);

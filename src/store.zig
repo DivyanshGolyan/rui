@@ -22,7 +22,7 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 44;
+pub const schema_version: u32 = 45;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -77,6 +77,12 @@ const activity_sql = public_tool_groups_sql ++
 const activity_sequence_guard_sql = "SELECT 1 FROM message_admission INDEXED BY message_admission_unpositioned WHERE session_ref=?1 AND admission_position IS NULL " ++
     "UNION ALL SELECT 1 FROM session_stop INDEXED BY session_stop_unpositioned WHERE session_ref=?1 AND position IS NULL " ++
     "UNION ALL SELECT 1 FROM turn INDEXED BY turn_unpositioned WHERE session_ref=?1 AND ((outcome_code IS NULL)!=(outcome_position IS NULL)) LIMIT 1";
+/// See `Store.readQueuedLocked`.
+const queued_sql = "SELECT m.admission_id,m.admission_position," ++
+    "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
+    "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) " ++
+    "FROM message_admission m INDEXED BY message_admission_person WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL " ++
+    "AND m.admission_position<=?2 ORDER BY m.admission_position DESC";
 const complete_tool_results_sql =
     resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
@@ -3594,16 +3600,13 @@ pub const Store = struct {
 
     /// The Messages a person or script sent that were admitted at or before
     /// `position` and not taken there. Selection and a stop's exclusion take
-    /// admission-order prefixes, so the walk goes from the newest down and
-    /// ends at the first one taken: it reads only those waiting, those
-    /// admitted after `position` and one more. Every Message at `position`
-    /// precedes its tool completions, so a boundary's ordinal changes nothing.
+    /// admission-order prefixes, and Admission positions follow admission
+    /// order, so the walk seeks `position` and goes down, ending at the first
+    /// one taken: it reads those waiting and one more. Every Message at
+    /// `position` precedes its tool completions, so a boundary's ordinal
+    /// changes nothing.
     fn readQueuedLocked(self: *Store, session: []const u8, position: u64) !protocol.Queued {
-        const statement = try self.cached("SELECT m.admission_id,m.admission_position," ++
-            "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
-            "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) " ++
-            "FROM message_admission m INDEXED BY message_admission_person WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL " ++
-            "AND m.admission_position<=?2 ORDER BY m.admission_id DESC");
+        const statement = try self.cached(queued_sql);
         defer resetCached(statement);
         try bindText(statement, 1, session);
         try bindU64(statement, 2, position);
@@ -4134,7 +4137,7 @@ pub const Store = struct {
     /// One seek: the latest Message with no Session sender.
     fn readPeerFactsLocked(self: *Store, session_ref: []const u8) !protocol.PeerFacts {
         const statement = try self.cached("SELECT admitted_at FROM message_admission INDEXED BY message_admission_person " ++
-            "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_id DESC LIMIT 1");
+            "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         return switch (c.sqlite3_step(statement)) {
@@ -8670,7 +8673,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
-        \\CREATE INDEX message_admission_person ON message_admission(session_ref,admission_id) WHERE sender_session_ref IS NULL;
+        \\CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL;
         \\CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position);
         \\CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;
@@ -9831,7 +9834,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
     var expected_empty: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -19294,32 +19297,65 @@ test "an activity page reports the queued Messages at its end, until applied or 
     const session = try configureTestSession(&storage, "queued-config");
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    try std.testing.expectEqual(@as(?protocol.Queued, .{}), (try storage.activityPageForTesting(request)).queued);
+    try std.testing.expectEqual(@as(protocol.Queued, .{}), (try storage.activityPageForTesting(request)).queued);
     try submitTestMessage(&storage, &tmp, "queued-a", "a", session.slice(), "first");
     try submitTestMessage(&storage, &tmp, "queued-b", "b", session.slice(), "second");
     const waiting = try storage.activityPageForTesting(request);
     const first = waiting.items[0];
     const second = waiting.items[1];
-    try std.testing.expectEqual(@as(?protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
+    try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
     // Taken at an input boundary: none waits at the latest end, both still
     // do at the earlier one.
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     _ = try admitted.permit.consume();
-    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.?.count);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.count);
     var frozen = request;
     frozen.end = waiting.end;
     try std.testing.expectEqual(waiting.queued, (try storage.activityPageForTesting(frozen)).queued);
     // One sent behind the work waits until a stop excludes it.
     try submitTestMessage(&storage, &tmp, "queued-c", "c", session.slice(), "third");
     const behind = try storage.activityPageForTesting(request);
-    try std.testing.expectEqual(@as(u64, 1), behind.queued.?.count);
-    try std.testing.expectEqual(behind.end, behind.queued.?.oldest_position);
-    try std.testing.expectEqual(behind.end, behind.queued.?.newest_position);
+    try std.testing.expectEqual(@as(u64, 1), behind.queued.count);
+    try std.testing.expectEqual(behind.end, behind.queued.oldest_position);
+    try std.testing.expectEqual(behind.end, behind.queued.newest_position);
     var stop = try completeSessionStop("queued-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.?.count);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.count);
     frozen.end = behind.end;
     try std.testing.expectEqual(behind.queued, (try storage.activityPageForTesting(frozen)).queued);
+}
+
+test "the queued Messages cost the queue, not the history after a page's end" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    // Messages 1..n wait at positions 2, 4, ...; a stop at 2n+1 excludes all
+    // but the newest. A page ending at the first Message has one waiting,
+    // as one ending after the stop does.
+    var steps: [2][2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        try exec(storage.database, "DELETE FROM message_admission; DELETE FROM session_stop");
+        const insert = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT value,'qu3u3d',printf('queued-%d',value),1,2*value,1 FROM sequence; " ++
+                "INSERT INTO session_stop(command_key,session_ref,admission_cutoff,position,stopped_at) VALUES('stop','qu3u3d',{0}-1,2*{0}+1,1)",
+            .{history},
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        const statement = try storage.cached(queued_sql);
+        for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
+            _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+            try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, try storage.readQueuedLocked("qu3u3d", end));
+            probe.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+        }
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
 }
 
 test "every activity row is dated by the fact that owns it" {

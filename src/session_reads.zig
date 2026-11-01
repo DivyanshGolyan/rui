@@ -172,11 +172,13 @@ pub const Job = struct {
     held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
-    // The Messages waiting at the live cursor, as the Host reported them,
-    // and the newest the opening showed queued (see View.Taking), which the
-    // opening sets in place.
-    queued: ?protocol.Queued = null,
+    // The Messages waiting at the live cursor, as the Host reported them;
+    // the newest the opening showed queued (see View.Taking), which the
+    // opening sets in place; and the Message whose first line the queued
+    // row holds.
+    queued: protocol.Queued = .{},
     opened: u64 = 0,
+    queued_line: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -220,9 +222,9 @@ pub const Job = struct {
         // The job's Messages after this read.
         messages: Messages = .{},
         // The Messages waiting at this read's cursor, and the newest one's
-        // first line when it is not the one waiting before.
-        queued: ?protocol.Queued = null,
-        queued_line: ?queued_line.Line = null,
+        // first line when the row shows it and does not hold it yet.
+        queued: protocol.Queued = .{},
+        queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -346,21 +348,18 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
-    // is at most one model step back, never the history. A Host that
-    // predates the fact says nothing of what waits; its stop labels only
-    // the Messages this page admitted.
-    const from: ?u64 = if (job.queued) |queued| (if (queued.count != 0) queued.oldest_position - 1 else null) else null;
+    // is at most one model step back, never the history.
+    const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .opened = job.opened, .from = from });
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     if (output.lowest) |lowest| job.result.lowest = lowest;
-    job.result.queued = page.facts.queued;
-    if (page.facts.queued) |queued| if (queued.count != 0 and queued.newest_admission > job.opened and
-        queued.newest_admission != if (job.queued) |before| before.newest_admission else 0)
-    {
-        job.result.queued_line = try readFirstLine(requests, job, queued.newest_position);
-    };
+    const queued = page.facts.queued;
+    job.result.queued = queued;
+    if (queued_line.shows(queued, job.opened, page.facts.work.work.state.holdsQueue()) and queued.newest_admission != job.queued_line) {
+        job.result.queued_line = .{ .admission = queued.newest_admission, .line = try readFirstLine(requests, job, queued.newest_position) };
+    }
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
         if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);

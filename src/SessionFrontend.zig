@@ -117,10 +117,10 @@ live: struct {
     // search for them may stop; a stale value only costs reads.
     lowest: ?u64 = null,
     // The Messages a person or script sent that wait behind the work, as
-    // the Host reported them at the cursor, the newest one's first line, and
-    // the newest the opening showed queued.
-    queued: ?protocol.Queued = null,
-    queued_line: queued_line.Line = .{ .len = 0 },
+    // the Host reported them at the cursor; the first line the queued row
+    // last read, with its Message; and the newest the opening showed queued.
+    queued: protocol.Queued = .{},
+    queued_line: ?queued_line.Shown = null,
     opened: u64 = 0,
 } = .{},
 // The transcript above live output.
@@ -177,7 +177,7 @@ const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .opened = self.live.opened, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .opened = self.live.opened, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -743,16 +743,16 @@ fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
     const waiting = screen.consent != null;
     const view = self.input.composition();
-    const queued = self.queuedRow();
     // A waiting Action says how to decide it under the input, not here. A
     // sent Message reads Sent until live output shows it: as its row, at
-    // its stop, or in the queued row.
-    const base_status = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
+    // its stop, or in the queued row, which the frame may drop.
+    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
         .not_started => "Not sent · Ctrl-R retries original",
         .submitting => "Sending…",
         .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
         .rejected => "Rejected · /discard",
-    } else if (self.admission.echo) |echo| (if (queued != null and echo <= queued.?.newest_admission) "" else "Sent") else "";
+    } else null;
+    const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
     const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
@@ -766,9 +766,14 @@ fn drawFrame(self: *Self) !void {
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status);
+    var queued_buffer: [Frame.status_capacity]u8 = undefined;
+    const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
+        .waiting = row.waiting,
+        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else ""),
+    } else null;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queued = if (queued) |row| .{ .line = self.live.queued_line.slice(), .count = row.count } else null }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1243,13 +1248,14 @@ fn settleReader(self: *Self) !void {
     try self.applyReader(end);
 }
 
-/// The Messages the queued row shows, if it shows: some wait, the newest is
-/// not one the opening showed queued, and the work holds them. A Session
-/// that holds nothing takes a Message at once, so its row would only flash.
-fn queuedRow(self: *const Self) ?protocol.Queued {
-    const queued = self.live.queued orelse return null;
-    if (queued.count == 0 or queued.newest_admission <= self.live.opened or !self.live.work.state.holdsQueue()) return null;
-    return queued;
+/// What the queued row shows, if it shows (see `queued_line.shows`): the
+/// newest waiting Message, by the line read from it, and how many wait.
+fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+    const queued = self.live.queued;
+    if (!queued_line.shows(queued, self.live.opened, self.live.work.state.holdsQueue())) return null;
+    const shown = if (self.live.queued_line) |*shown| shown else return null;
+    if (shown.admission != queued.newest_admission) return null;
+    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -1479,7 +1485,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.work = result.work.work;
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
-        if (result.queued_line) |line| self.live.queued_line = line;
+        if (result.queued_line) |shown| self.live.queued_line = shown;
         self.live.opened = self.job.opened;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
@@ -1541,7 +1547,9 @@ test "frontend commits spacing only for completed visible reads" {
 
 test "the queued row shows what waits while the work holds it" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
-    const Case = struct { queued: ?protocol.Queued, state: protocol.WorkState, opened: u64 = 0, shown: bool };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, opened: u64 = 0, line: ?u64 = 9, shown: bool };
+    var line: queued_line.Line = .{ .len = 0 };
+    try line.set("check the cache");
     for ([_]Case{
         // Work under way holds them, however new.
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
@@ -1550,11 +1558,12 @@ test "the queued row shows what waits while the work holds it" {
         // became so.
         .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = false },
         .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = false },
-        // Nothing waits, the Host does not say, or the newest is one the
-        // opening showed queued.
+        // Nothing waits, or the newest is one the opening showed queued.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = null, .state = .{ .working = .{ .since = 1 } }, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .opened = 9, .shown = false },
+        // The line held is another Message's, or none was read.
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
     }) |case| {
         var self: Self = .{
             .init = undefined,
@@ -1565,9 +1574,16 @@ test "the queued row shows what waits while the work holds it" {
             .command = undefined,
             .terminal = undefined,
             .colour = false,
-            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .opened = case.opened },
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .opened = case.opened, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
-        try std.testing.expectEqual(if (case.shown) case.queued else null, self.queuedRow());
+        const row = self.queuedRow() orelse {
+            try std.testing.expect(!case.shown);
+            continue;
+        };
+        try std.testing.expect(case.shown);
+        try std.testing.expectEqual(@as(u64, 9), row.newest);
+        try std.testing.expectEqual(@as(u64, 2), row.waiting.count);
+        try std.testing.expectEqualStrings("check the cache", row.waiting.line);
     }
 }
 

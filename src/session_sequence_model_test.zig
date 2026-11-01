@@ -9,6 +9,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
+const queued_line = @import("queued_line.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
@@ -645,10 +646,14 @@ fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest:
         for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
             .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
                 // The row shows while the work holds the Messages the Host
-                // reports waiting, newest last, past the opening's.
-                const queued = front.live.queued orelse return false;
-                return message.state == .queued and queued.count != 0 and front.live.work.state.holdsQueue() and
-                    front.live.opened < message.admission and message.admission <= queued.newest_admission;
+                // reports waiting, newest last, past the opening's, by the
+                // newest one's own line. This Message is among those it
+                // counts: admitted at or after the oldest.
+                const queued = front.live.queued;
+                const line = front.live.queued_line orelse return false;
+                return message.state == .queued and queued_line.shows(queued, front.live.opened, front.live.work.state.holdsQueue()) and
+                    line.admission == queued.newest_admission and front.live.opened < message.admission and
+                    message.admission <= queued.newest_admission and item.position >= queued.oldest_position;
             },
             else => {},
         };

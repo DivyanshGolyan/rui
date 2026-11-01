@@ -1852,7 +1852,7 @@ const empty_test_response =
     "Content-Type: application/json\r\n" ++
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n" ++
-    "X-Rui-Wire-Version: 2\r\n\r\n";
+    "X-Rui-Wire-Version: 3\r\n\r\n";
 
 fn socketPair() ![2]std.posix.fd_t {
     var sockets: [2]std.posix.fd_t = undefined;
@@ -1894,7 +1894,7 @@ test "Host-info first byte is bounded independently of normal processing waits" 
 }
 
 test "response deadlines include partial header and body" {
-    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nab";
+    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\n\r\nab";
     const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
     for ([_]bool{ false, true }) |mutation| {
         for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
@@ -1925,7 +1925,7 @@ test "mutation response progress renews inactivity through header and body" {
     const Producer = struct {
         fn run(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
-            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n") catch return;
+            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\n") catch return;
             std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
             writeAll(fd, "\r\n{") catch return;
             // Still exceeds five seconds overall, without a second long gap.
@@ -1991,7 +1991,7 @@ test "response closure and truncation stay explicit" {
         defer closeTestDescriptor(sockets[0]);
         try writeAll(
             sockets[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 3\r\n\r\nx",
         );
         closeTestDescriptor(sockets[1]);
         var buffer: ReplyBuffer = .{};
@@ -2014,23 +2014,23 @@ test "response framing rejects ambiguous or malformed fields before interpreting
         defer closeTestDescriptor(sockets[0]);
         defer closeTestDescriptor(sockets[1]);
         var response: [512]u8 = undefined;
-        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 2\r\n{s}\r\n", .{fields});
+        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n{s}\r\n", .{fields});
         try writeAll(sockets[1], bytes);
         try std.testing.expectError(error.InvalidResponse, readResponseHead(sockets[0]));
     }
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
-    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 2\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
+    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 3\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"2\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.append("{\"version\":\"3\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -2108,7 +2108,7 @@ test "client recovery rejects noncanonical Session references without retransmis
             // Empty Configure is creation intent, not an invalid reference.
             if (kind != .configure or session.len != 0) {
                 var body: protocol.RequestBuffer = .{};
-                try body.appendFmt("{{\"version\":\"2\",\"kind\":\"{s}\",\"store\":", .{@tagName(kind)});
+                try body.appendFmt("{{\"version\":\"3\",\"kind\":\"{s}\",\"store\":", .{@tagName(kind)});
                 try body.appendJsonString(root);
                 try body.append(",\"key\":\"" ++ handle ++ "\",");
                 try body.append(if (kind == .model_interruption) "\"target\":{\"session\":" else "\"session\":");
@@ -2292,7 +2292,7 @@ test "a peer capture preserves the full sender including self and leaves foreign
     var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own, .sender_handle = "0123456789abcdef0123456789abcdef" }, .{ .explicit = .{ .record = path, .key = "k" } }).get();
     defer captured.close(io);
     var expected_buffer: [1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"k7m2qx\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"3\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"k7m2qx\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
     var bytes: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
     const remote_path = try std.fmt.bufPrint(&path_buffer, "{s}/remote.json", .{root});
@@ -2464,7 +2464,7 @@ test "capture retransmits complete original bytes after a lost reply" {
     var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } }).get();
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"3\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
@@ -2517,7 +2517,7 @@ test "capture publication transfers original inode across pathname replacement" 
     var captured = try captureMessage(replaced_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } }).get();
     defer captured.close(io);
     var expected_buffer: [2048]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"3\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
     var bytes: [2048]u8 = undefined;
     const count = try captured.file.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings(expected, bytes[0..count]);
@@ -2602,12 +2602,12 @@ test "capture recovery closes rejected records and retains only its reader lifet
     for ([_][]const u8{
         "not json",
         // Control records are recoverable, but never with another kind's payload.
-        "{\"version\":\"2\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"x\",\"operation\":\"2\"}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
+        "{\"version\":\"3\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"3\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"x\",\"operation\":\"2\"}}",
+        "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"3\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
+        "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
     }) |bytes| {
         const file = try tmp.dir.createFile(io, filename, .{});
         try file.writeStreamingAll(io, bytes);
@@ -2631,7 +2631,7 @@ test "capture recovery closes rejected records and retains only its reader lifet
         replacement.close(io);
         var bytes: [2048]u8 = undefined;
         const n = try recovered.file.readPositionalAll(io, &bytes, 0);
-        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"2\",\"kind\":\"configure\""));
+        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"3\",\"kind\":\"configure\""));
     }
     try std.testing.expectEqual(Probe.opened, Probe.closed);
     try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
@@ -2842,7 +2842,7 @@ test "command reply borrows the caller buffer" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 2\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 3\r\n\r\n{\"status\":\"error\"}",
     );
     var buffer: ReplyBuffer = .{};
     const reply = try readCommandResponse(descriptors[0], &buffer);
@@ -2930,7 +2930,7 @@ test "Session list client renders each cursor's request exactly, within the boun
         var body: protocol.RequestBuffer = .{};
         try appendListSessions(&body, "/store", null, case[0]);
         var expected: [512]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
     }
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
@@ -3032,7 +3032,7 @@ test "response parsing rejects truncated head and command body" {
         defer closeTestDescriptor(descriptors[0]);
         try writeTestResponse(
             descriptors[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 2\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 3\r\n\r\n{}",
         );
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(descriptors[0], &buffer));
@@ -3056,7 +3056,7 @@ fn writeLargeTestResponse(context: *LargeResponseContext) void {
     var header_buffer: [256]u8 = undefined;
     const header = std.fmt.bufPrint(
         &header_buffer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 2\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 3\r\n\r\n",
         .{ context.content_type, context.length },
     ) catch |err| {
         context.failure = err;
@@ -3230,7 +3230,7 @@ test "a first-line read returns the Host's refusal" {
     {
         defer closeTestDescriptor(descriptors[1]);
         var head: [256]u8 = undefined;
-        try writeAll(descriptors[1], try std.fmt.bufPrint(&head, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{body.len}));
+        try writeAll(descriptors[1], try std.fmt.bufPrint(&head, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 3\r\n\r\n", .{body.len}));
         try writeAll(descriptors[1], body.slice());
     }
     var buffer: [4096]u8 = undefined;
@@ -3244,7 +3244,7 @@ test "read result returns bounded command errors without touching destination" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 2\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 3\r\n\r\n{\"status\":\"error\"}",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3267,7 +3267,7 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 2\r\n\r\nab",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 3\r\n\r\nab",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3283,7 +3283,7 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
 }
 
 test "result body publishes nothing unless EOF follows the advertised bytes" {
-    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 2\r\n\r\nX" }) |tail| {
+    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 3\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 3\r\n\r\nX" }) |tail| {
         const descriptors = try testPipe();
         defer closeTestDescriptor(descriptors[0]);
         try writeTestResponse(descriptors[1], "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" ++ tail);
@@ -3537,7 +3537,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         const length: u64 = if (kind == .list) 3 else 1;
         const content_type = if (kind == .result) "text/plain; charset=utf-8" else "application/json";
         var response: [256]u8 = undefined;
-        try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 2\r\n\r\na", .{ content_type, length }));
+        try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 3\r\n\r\na", .{ content_type, length }));
         // An answer's final window is delivered only after its EOF.
         if (kind == .result) try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(peer.socket.handle, std.c.SHUT.WR));
         try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(1)), &worker.sink.entered, test_poll.isSet);

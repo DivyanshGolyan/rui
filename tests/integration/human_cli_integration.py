@@ -410,7 +410,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
     # exact bindings outside that list without inferring a context window.
-    body = {"version": "2", "kind": "configure", "store": str(store),
+    body = {"version": "3", "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
@@ -1824,7 +1824,7 @@ def persistent_opening_case():
                 # incomplete span remain buffered after a visible bold prefix.
                 body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
                 return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                    b"X-Rui-Wire-Version: 2\r\nContent-Length: " + str(len(body) + 1).encode()
+                    b"X-Rui-Wire-Version: 3\r\nContent-Length: " + str(len(body) + 1).encode()
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
@@ -3268,7 +3268,7 @@ int fsync(int fd) {
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
     # Every mutation kind, including Session stop, is a recoverable capture.
-    stop = {"version": "2", "kind": "session_stop", "store": str(store.resolve()),
+    stop = {"version": "3", "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
@@ -3372,7 +3372,7 @@ def opaque_session_commands_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for key, session in (("prefix", "human/nul"), ("opaque", "human/nul\x00' é\n--last")):
-            body = {"version": "2", "kind": "configure", "store": str(store), "key": key,
+            body = {"version": "3", "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
                            (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},
