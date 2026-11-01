@@ -744,7 +744,7 @@ test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, std.testing.io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses" }),
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",

@@ -439,6 +439,9 @@ fn parse(text: []const u8) Slash {
         .{ "/inspect-action", .{ .inspection = .command } },
         .{ "/setup", .{ .inspection = .command } },
         .{ "/configure", .{ .inspection = .command } },
+        .{ "/copy", .{ .inspection = .{ .copy = .answer } } },
+        .{ "/copy code", .{ .inspection = .{ .copy = .code } } },
+        .{ "/copy file", .{ .inspection = .{ .copy = .file } } },
         .{ "/discard", .discard },
         .{ "/wait", .wait },
         .{ "/login", .login },
@@ -506,6 +509,10 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
         .{ "/inspect-action", "" },
         .{ "/status", "" },
+        .{ "/copy", "" },
+        .{ "/copy code", "" },
+        .{ "/copy file", "" },
+        .{ "/copy all", "! Unknown command /copy · /help" },
     };
     inline for (cases) |case| {
         self.notice = null;
@@ -645,7 +652,11 @@ fn driveActive(self: *Self) !void {
             job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
             // The newer inspection replaces a /status not yet shown.
             self.inspection.status_requested = false;
-            try self.launch(job, if (kind == .command) reads.runCommand else reads.inspectPage);
+            try self.launch(job, switch (kind) {
+                .command => reads.runCommand,
+                .copy => reads.copyAnswer,
+                else => reads.inspectPage,
+            });
             self.inspection.command_running = true;
         };
         // Scans continue during consent, so an Action decided elsewhere leaves.
@@ -1283,6 +1294,9 @@ fn settleReader(self: *Self) !void {
         try self.showRecalled();
     } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
         try self.showStaged();
+    } else if (end == .complete and self.reading.phase == .inspection and self.inspection.kind == .copy) {
+        try self.showCopy();
+        self.inspection.command_running = false;
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
         if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
@@ -1415,7 +1429,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     var out = std.Io.Writer.fixed(&bytes);
     const summary = switch (pending.phase) {
         .details => "! Details unavailable; draft retained.",
-        .inspection => "! Inspection unavailable; draft retained.",
+        .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
         .recall => "! Sent message unavailable; draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
     };
@@ -1499,7 +1513,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
                 .details => "! Details unavailable; draft retained.",
                 .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
                 .recall => "! Sent message unavailable; draft retained.",
-                .inspection => "! Inspection unavailable; draft retained.",
+                .inspection => if (self.inspection.kind == .copy) self.copyFailure(end.failed.err) else "! Inspection unavailable; draft retained.",
                 else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
         self.dirty = true;
@@ -1604,6 +1618,37 @@ fn showInspection(self: *Self) !void {
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
     // The page heading already says how to return.
     self.notice = null;
+}
+
+/// A joined /copy. The clipboard's bytes go out between frames, so no frame
+/// splits the sequence.
+fn showCopy(self: *Self) !void {
+    self.dirty = true;
+    self.notice = switch (self.job.result.copied) {
+        .no_answer => "No answer to copy yet.",
+        .no_code => "No code block in the last answer.",
+        .too_large => "Too large for the clipboard · /copy file",
+        // Rui cannot see whether the clipboard took it.
+        .clipboard => |range| sent: {
+            try self.terminal.clipboard(self.init.io, self.files.scratch, range.start, range.length);
+            break :sent if (self.tmux) "Sent to clipboard · tmux needs set-clipboard on" else "Sent to clipboard";
+        },
+        .saved => saved: {
+            var name: [reads.copy_name_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            writer.print("Saved to ./{s}", .{reads.copyName(&name, self.session)}) catch unreachable;
+            break :saved writer.buffered();
+        },
+    };
+}
+
+/// Only a failure the person can act on is named.
+fn copyFailure(self: *const Self, err: anyerror) []const u8 {
+    if (self.inspection.kind.copy == .file) switch (err) {
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
+        else => {},
+    };
+    return "! Copy unavailable; draft retained.";
 }
 
 /// A settled scan's /status: the page asked for, or the shown page updated in

@@ -1,4 +1,5 @@
 test {
+    _ = @import("api_key.zig");
     _ = @import("attempt.zig");
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");

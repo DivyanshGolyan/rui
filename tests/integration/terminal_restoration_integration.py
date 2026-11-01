@@ -1431,6 +1431,37 @@ def renderer_backpressure_case(state, library, home, store):
                 preserve_renderer_comparison(state, *comparison)
 
 
+def secret_entry_restore_case(state, library):
+    """An OpenAI key typed at the hidden prompt is refused, not saved, when
+    the terminal's own settings cannot be restored afterwards."""
+    root = state / "secret-entry-restore"
+    root.mkdir()
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    log = root / "probe.log"
+    env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
+    master, slave = open_pty()
+    try:
+        caller = subprocess.Popen([str(fixture.RUI), "auth", "login", "openai"], stdin=slave, stdout=slave,
+            stderr=subprocess.PIPE, env={**env, "HOME": str(home), os_semantics.PRELOAD: str(library),
+                                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "restore"})
+        shown, deadline = b"", time.monotonic() + 10
+        while b"(it is not shown): " not in shown:
+            assert time.monotonic() < deadline and caller.poll() is None, shown
+            if select.select([master], [], [], 0.1)[0]:
+                shown += os.read(master, 4096)
+        os.write(master, b"sk-refused\r")
+        assert caller.wait(timeout=10) != 0, "a key was accepted with the terminal unrestored"
+        errors = caller.stderr.read().decode()
+        assert "TerminalRestoreFailed" in errors, errors
+        assert "restore-flush" in log.read_text(), log.read_text()
+        assert not (home / ".config" / "rui" / "openai.key").exists(), "a key was saved with the terminal unrestored"
+    finally:
+        os.close(master)
+        os.close(slave)
+    print("secret entry restore passed: an unrestored terminal refuses the typed key and saves nothing")
+
+
 def consent_boundary_cases(state, library):
     """Input arriving during final presentation cannot consent or lose Ctrl-C."""
     for case in ("cancel", "paste", "escape-allow", "escape-deny"):
@@ -3067,6 +3098,11 @@ def main(selected=None):
         if selected in (None, "host-diagnostics"):
             host_diagnostic_cases(state, library)
         if selected == "host-diagnostics":
+            completed = True
+            return
+        if selected in (None, "secret-entry"):
+            secret_entry_restore_case(state, library)
+        if selected == "secret-entry":
             completed = True
             return
         if selected in (None, "consent"):
