@@ -12,6 +12,8 @@ pub const max_session_bytes = 128;
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 pub const max_sender_handle_bytes = 32;
+/// Most bytes of client environment entries one Message carries.
+pub const max_environment_bytes = 64 * 1024;
 pub const max_model_bytes = model_capability.max_model_bytes;
 // Resolution, rejection and failure codes.
 pub const max_code_bytes = 96;

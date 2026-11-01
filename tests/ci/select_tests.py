@@ -135,6 +135,8 @@ RULES = (
     (("src/environment.zig",), ("test-logic", "check", "bash-integration"),
      ("test-logic", "test", "bash-integration"),
      "The Bash child environment core; Bash and peer calls read what it builds"),
+    (("src/SessionEnvironments.zig",), ("test", "check"), ("test", "check"),
+     "The Host's per-Session client environment register; intake installs, Bash copies"),
     (("src/os/*",),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
