@@ -415,9 +415,11 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
         return error.InvalidCodexFixtureEndpoint;
 }
 
+/// The fields the credential path writes after the codec's headers:
+/// the credential, user-agent, FedRAMP and the Turn's turn state, each named
+/// in `provider.host_request_fields` so no codec header can name it.
 pub const Headers = struct {
-    session: [32]u8 = undefined,
-    entries: [8]h2.Field = undefined,
+    entries: [5]h2.Field = undefined,
     length: usize = 0,
     credentials: *provider.Credentials = undefined,
     /// A use of the Reactor's copy of this credential, owned until
@@ -429,7 +431,7 @@ pub const Headers = struct {
     /// the credential (its Transfer then holds the use) and the literals.
     /// A nonempty turn state comes from TurnStates.replay for this Attempt's
     /// Turn, and is borrowed too.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials, affinity: [16]u8, turn_state: []const u8) !void {
+    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials, turn_state: []const u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
         if (authentication.fixture) {
@@ -445,17 +447,13 @@ pub const Headers = struct {
         const shared = try shared_credentials.share(access, account_id);
         self.credentials = shared_credentials;
         self.credential = shared;
-        self.session = std.fmt.bytesToHex(affinity, .lower);
-        self.entries[0..6].* = .{
-            .{ .name = "accept", .value = "text/event-stream", .borrowed = true },
+        // Borrowed where two addresses (16 bytes) are smaller than a copy.
+        self.entries[0..3].* = .{
             .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
             .{ .name = "chatgpt-account-id", .value = shared.accountId(), .sensitive = true, .borrowed = true },
-            .{ .name = "session-id", .value = &self.session },
-            // Borrowed where two addresses (16 bytes) are smaller than a copy.
-            .{ .name = "originator", .value = "rui" },
             .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
         };
-        self.length = 6;
+        self.length = 3;
         if (credential.record.fedramp) {
             self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true", .borrowed = true };
             self.length += 1;
@@ -710,7 +708,7 @@ test "Codex headers carry turn state only when the Turn has one" {
         for ([_][]const u8{ "", "sticky value", &@as([provider.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
             var headers: Headers = .{};
             defer headers.deinit();
-            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials, @splat(0xab), turn_state);
+            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials, turn_state);
             const entries = headers.fields();
             var found: ?[]const u8 = null;
             var fedramp_found = false;
@@ -726,19 +724,26 @@ test "Codex headers carry turn state only when the Turn has one" {
                 if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
-                if (std.mem.eql(u8, entry.name, "session-id"))
-                    try std.testing.expectEqualStrings("abababababababababababababababab", entry.value);
+                // No codec header may name it.
+                var codec_header: provider.RequestHeaders = .{};
+                try std.testing.expectError(error.CodecBadOp, codec_header.add(.{ .name = entry.name, .value = "v" }));
             }
             // The credential is the Reactor's one copy, which h2 borrows;
             // only the per-request values are copied into each stream.
             for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16 and
-                !std.mem.eql(u8, entry.name, "session-id") and
                 !std.mem.eql(u8, entry.name, "x-codex-turn-state"), entry.borrowed);
+            // They follow the codec's headers: the credential, user-agent,
+            // FedRAMP, turn state.
             const shared = headers.credential.?;
-            try std.testing.expectEqual(shared.authorization().ptr, entries[1].value.ptr);
-            try std.testing.expectEqual(shared.accountId().ptr, entries[2].value.ptr);
+            try std.testing.expectEqualStrings("authorization", entries[0].name);
+            try std.testing.expectEqual(shared.authorization().ptr, entries[0].value.ptr);
+            try std.testing.expectEqualStrings("chatgpt-account-id", entries[1].name);
+            try std.testing.expectEqual(shared.accountId().ptr, entries[1].value.ptr);
+            try std.testing.expectEqualStrings("user-agent", entries[2].name);
+            if (fedramp) try std.testing.expectEqualStrings("x-openai-fedramp", entries[3].name);
+            if (turn_state.len != 0) try std.testing.expectEqualStrings("x-codex-turn-state", entries[entries.len - 1].name);
             try std.testing.expectEqual(fedramp, fedramp_found);
-            try std.testing.expectEqual(@as(usize, 6) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
+            try std.testing.expectEqual(@as(usize, 3) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
             try std.testing.expectEqualStrings(turn_state, found orelse "");
         }
     }
@@ -957,6 +962,9 @@ pub const Preparation = struct {
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
     /// The Session's codec, begun at the settings stage.
     job: codecs.Job = undefined,
+    /// The headers the codec asked for at the settings item, judged as
+    /// they are kept; emptied when the job begins.
+    headers: provider.RequestHeaders = undefined,
     /// The current item's handles; `job.header.handles` says which exist.
     handles: [codec_abi.max_handles]Handle = undefined,
     /// The open output item's provider bag, written at its close.
@@ -1203,6 +1211,7 @@ pub const Preparation = struct {
                 if (self.state.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
                 try self.job.begin(self.state.faults.codec orelse codecs.encoder(self.settings.provider.codec()));
+                self.headers.count = 0;
                 self.state.stage = .history_validation;
             },
             .history_validation => {
@@ -1370,6 +1379,7 @@ pub const Preparation = struct {
         header.handles = 0b1;
         header.item = .{ .settings = .{
             .effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null,
+            .session_affinity = self.settings.session_affinity,
             .model_length = @intCast(model.len),
         } };
         const settings = &header.item.settings;
@@ -1517,6 +1527,7 @@ pub const Preparation = struct {
                     return true;
                 },
                 .content => |content| self.state.content = .{ .handle = content.handle, .escape = content.escape },
+                .header => |header| try self.headers.add(header),
                 // The job keeps the item's carry.
                 .carry => unreachable,
             }
@@ -1690,16 +1701,15 @@ pub const Preparation = struct {
 
     fn finish(self: *Preparation) PreparationProgress {
         self.view.close();
-        const request = PreparedRequest{
+        self.state.active = false;
+        self.state.stage = .complete;
+        return .{ .prepared = .{
             .file = self.readonly,
             .length = self.writer.offset,
             .charged = self.writer.charged,
             .structured_output = self.settings.output_schema != null,
-            .session_affinity = self.settings.session_affinity,
-        };
-        self.state.active = false;
-        self.state.stage = .complete;
-        return .{ .prepared = request };
+            .headers = self.headers,
+        } };
     }
 
     pub fn cancel(self: *Preparation) void {
@@ -2107,6 +2117,35 @@ test "Codex affinity separates Sessions and Stores and survives reopening" {
     try std.testing.expect(!std.mem.eql(u8, &affinity_a, &settings.session_affinity));
     try std.testing.expectEqualStrings(other_session.slice(), settings.session.slice());
     other_view.close();
+}
+
+test "a prepared request carries the Responses codec's headers with its Session's affinity" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("codec-headers-config");
+    try setup.submit("codec-headers-file", "codec-headers-message", session.slice(), "work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    defer if (preparation.state.active) preparation.cancel();
+    var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    defer request.deinit(std.testing.io, preparation.writer.budget);
+    // The settings the preparation read stay in place after it seals.
+    const session_id = std.fmt.bytesToHex(preparation.settings.session_affinity, .lower);
+    // In the codec's order; Transfer.start sends them after content-type
+    // and before the credential path's fields.
+    const expected = [_][2][]const u8{ .{ "accept", "text/event-stream" }, .{ "session-id", &session_id }, .{ "originator", "rui" } };
+    try std.testing.expectEqual(@as(u8, expected.len), request.headers.count);
+    for (expected, 0..) |pair, index| {
+        const field = request.headers.field(index);
+        try std.testing.expectEqualStrings(pair[0], field.name);
+        try std.testing.expectEqualStrings(pair[1], field.value);
+    }
 }
 
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
@@ -3977,20 +4016,89 @@ test "a codec that emits a carry after history_end, names an absent handle, or f
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
     inline for (comptime std.enums.values(CodecFault)) |fault| {
-        var used: std.atomic.Value(u64) = .init(0);
-        var retained: ?named_scratch.Owner = null;
-        var preparation: Preparation = undefined;
-        try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = &FaultyCodec(fault).encoder }, &retained);
-        defer if (preparation.state.active) preparation.cancel();
         const expected = if (fault == .failure) error.CodecFailed else error.CodecBadOp;
-        // No request is prepared, so nothing can be sent.
-        try std.testing.expectError(expected, drainLivePreparation(&preparation, 16, 2, 1 << 16));
-        try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(expected));
-        preparation.cancel();
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(retained == null);
+        try expectCodecFailure(&setup, binding, &FaultyCodec(fault).encoder, expected);
     }
+    // The same Session encodes through its pinned codec.
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    std.testing.allocator.free(request.bytes);
+}
+
+/// Prepare with `encoder` and require it to fail with `expected`, which is
+/// provider_codec_failed, before any request exists to send.
+fn expectCodecFailure(setup: *PreparationTestSetup, binding: store.AttemptBinding, encoder: *const codecs.Encoder, expected: anyerror) !void {
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = encoder }, &retained);
+    defer if (preparation.state.active) preparation.cancel();
+    // No request is prepared, so nothing can be sent.
+    try std.testing.expectError(expected, drainLivePreparation(&preparation, 16, 2, 1 << 16));
+    try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(expected));
+    preparation.cancel();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained == null);
+}
+
+const HeaderFault = struct {
+    item: codec_abi.ItemKind = .settings,
+    name: []const u8 = "x-codec",
+    value: []const u8 = "v",
+    count: u8 = 1,
+};
+
+/// The pinned Responses encoder asking for `fault.count` copies of one
+/// header: in place of the settings item's ops, or after another item's.
+fn HeaderCodec(comptime fault: HeaderFault) type {
+    return struct {
+        const pinned = codecs.encoder(.@"openai-responses/1");
+        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
+
+        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
+            const status = pinned.step(state, header, ops);
+            if (header.item != fault.item) return status;
+            if (fault.item == .settings) ops.length = 0;
+            for (0..fault.count) |_| ops.header(fault.name, fault.value) catch unreachable;
+            return status;
+        }
+    };
+}
+
+test "a codec header naming a credential field fails provider_codec_failed" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("codec-header", "codec-header", session.slice(), "start");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    // The credential's fields and every other field the Host writes itself.
+    inline for (provider.host_request_fields) |name|
+        try expectCodecFailure(&setup, binding, &HeaderCodec(.{ .name = name, .value = "Bearer codec" }).encoder, error.CodecBadOp);
+    // A header outside settings, a ninth, two whose names and values pass
+    // 192 bytes, a name that is not a lowercase token, a value that is not
+    // header-safe.
+    inline for ([_]HeaderFault{
+        .{ .item = .instructions },
+        .{ .count = codec_abi.max_request_headers + 1 },
+        .{ .name = "x-a", .value = &@as([95]u8, @splat('v')), .count = 2 },
+        .{ .name = "Accept" },
+        .{ .name = "x codec" },
+        .{ .value = "a\r\nx-injected: b" },
+        .{ .value = "a\x00" },
+        .{ .value = " rui" },
+    }) |fault| try expectCodecFailure(&setup, binding, &HeaderCodec(fault).encoder, error.CodecBadOp);
+    // Eight are within the bound.
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try setup.storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = &HeaderCodec(.{ .count = codec_abi.max_request_headers }).encoder }, &retained);
+    defer if (preparation.state.active) preparation.cancel();
+    var eight = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    try std.testing.expectEqual(@as(u8, codec_abi.max_request_headers), eight.headers.count);
+    eight.deinit(std.testing.io, preparation.writer.budget);
     // The same Session encodes through its pinned codec.
     const request = try prepareMemoForTesting(&setup, binding, null, .{});
     std.testing.allocator.free(request.bytes);

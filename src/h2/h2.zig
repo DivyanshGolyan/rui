@@ -54,6 +54,9 @@ pub const max_endpoints = 4;
 /// Request fields a caller may set; pseudo-headers, content-length and
 /// accept-encoding are the client's own.
 pub const max_fields = 16;
+/// Request field names the client writes itself or HTTP/2 forbids; a
+/// caller's field may not use one.
+pub const owned_fields = [_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" };
 pub const max_field_block_bytes = 64 * 1024;
 /// Receive credit granted to each stream: the most response bytes the peer
 /// can have outstanding on it.

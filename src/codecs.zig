@@ -120,8 +120,10 @@ pub const Job = struct {
     }
 
     /// The item's next op, judged as it is read: well formed; content only
-    /// of the item's handles; a carry exactly once, as the last op, of each
-    /// item that ends a history element and of no other. The job keeps the
+    /// of the item's handles; a header only of the settings item (its name
+    /// and value are judged where they are kept); a carry exactly once, as
+    /// the last op, of each item that ends a history element and of no
+    /// other. The job keeps the
     /// carry and never returns it. Null once the item's ops end. Nothing
     /// is sent before request_end, so the ops that ran before a bad one
     /// wrote only request scratch, which the failure discards.
@@ -134,6 +136,7 @@ pub const Job = struct {
             switch (op) {
                 .literal => return op,
                 .content => |content| return if (self.header.has(content.handle)) op else error.CodecBadOp,
+                .header => return if (kind == .settings) op else error.CodecBadOp,
                 .carry => |state| {
                     if (!kind.endsElement()) return error.CodecBadOp;
                     self.carried = true;
@@ -167,7 +170,7 @@ fn encodeForTesting(job: *Job, items: []const TestItem, out: *std.Io.Writer) !vo
                 .verbatim => try out.writeAll(item.handles[content.handle].?),
                 .json_string_v1 => try std.json.Stringify.encodeJsonStringChars(item.handles[content.handle].?, .{}, out),
             },
-            .carry => unreachable,
+            .carry, .header => unreachable,
         };
     }
 }
@@ -232,6 +235,8 @@ test "codec ops are checked as they run and a bad op fails the job" {
     const carry_one = [_]u8{ 3, 1, 1 };
     const close = [_]u8{ 1, 1, 0, '}' };
     const oversized = [_]u8{ 3, codec_abi.max_carry_bytes + 1 } ++ @as([codec_abi.max_carry_bytes + 1]u8, @splat(0));
+    const header = [_]u8{ 4, 1, 2, 0, 'a', 'v', 'w' };
+    const settings: codec_abi.Item = .{ .settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 } };
     for ([_]Case{
         .{ .item = .tools_start, .ops = &.{ 1, 1, 0, '[' }, .expected = null },
         .{ .item = .tool_result, .handles = 0b11, .ops = &([_]u8{ 2, 0, 1, 2, 1, 0 } ++ carry_one), .expected = 1 },
@@ -248,10 +253,19 @@ test "codec ops are checked as they run and a bad op fails the job" {
         .{ .item = .text_format, .ops = &.{ 2, 0, 0 }, .expected = error.CodecBadOp },
         .{ .item = .{ .message = .user }, .handles = 0b01, .ops = &([_]u8{ 2, 1, 1 } ++ carry_one), .expected = error.CodecBadOp },
         .{ .item = .tool, .handles = 0xff, .ops = &.{ 2, codec_abi.max_handles, 1 }, .expected = error.CodecBadOp },
+        // A header of the settings item only.
+        .{ .item = settings, .ops = &header, .expected = null },
+        .{ .item = .instructions, .handles = 1, .ops = &header, .expected = error.CodecBadOp },
+        .{ .item = .history_end, .ops = &header, .expected = error.CodecBadOp },
+        .{ .item = .tool_result, .handles = 0b11, .ops = &(header ++ carry_one), .expected = error.CodecBadOp },
         // Malformed ops: an unknown tag or escape, an empty or cut literal,
-        // a cut content or carry, a carry past its bound.
+        // a cut content, carry or header, a carry past its bound, a header
+        // without a name.
         .{ .item = .tools_start, .ops = &.{0}, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &.{4}, .expected = error.CodecBadOp },
+        .{ .item = .tools_start, .ops = &.{5}, .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = header[0 .. header.len - 1], .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = header[0..3], .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = &.{ 4, 0, 1, 0, 'v' }, .expected = error.CodecBadOp },
         .{ .item = .tool, .handles = 1, .ops = &.{ 2, 0, 2 }, .expected = error.CodecBadOp },
         .{ .item = .tools_start, .ops = &.{ 1, 0, 0 }, .expected = error.CodecBadOp },
         .{ .item = .tools_start, .ops = &.{ 1, 2, 0, '[' }, .expected = error.CodecBadOp },
@@ -263,7 +277,7 @@ test "codec ops are checked as they run and a bad op fails the job" {
         .{ .item = .text_format, .status = .done, .ops = &.{}, .expected = error.CodecBadOp },
         .{ .item = .request_end, .ops = &close, .expected = error.CodecBadOp },
         .{ .item = .request_end, .status = .done, .ops = &close, .expected = null },
-        .{ .item = .{ .settings = .{ .effort = null, .model_length = 0 } }, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
+        .{ .item = settings, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
     }) |case| {
         var job: Job = undefined;
         job.header = .{ .item = case.item, .handles = case.handles };

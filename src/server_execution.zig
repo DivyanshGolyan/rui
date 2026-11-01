@@ -890,8 +890,10 @@ fn cancelSupersededTransfers(
 
 test "an execution slot is sized for a model Attempt, not for Bash" {
     // Bash keeps its large state in Host.bash_work, so no arm outgrows the
-    // provider arm every held model agent occupies.
-    try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
+    // model arms a held model agent occupies: the provider arm, or a
+    // request waiting for its credential or its forced refresh.
+    const model = @max(@sizeOf(ProviderSlot), @sizeOf(ModelAuthenticatingSlot), @sizeOf(ModelRefreshingSlot));
+    try std.testing.expect(@sizeOf(ExecutionSlot) <= model + @alignOf(ExecutionSlot));
 }
 
 test "zeroed pages are free slots and empty Turn and history memo entries" {
@@ -1416,7 +1418,7 @@ fn advanceModelPreparation(
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
-    const progress = preparation.advance(byte_allowance, item_allowance);
+    var progress = preparation.advance(byte_allowance, item_allowance);
     const stats = preparation.advanceStats();
     switch (progress) {
         .pending => {
@@ -1428,16 +1430,15 @@ fn advanceModelPreparation(
             preparation.cancel();
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
-        .prepared => |value| {
+        .prepared => |*request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            var request = value;
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
                 .authenticate => {
-                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner, .request = request });
+                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner, .request = request.* });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
                 },
-                .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
+                .launch => launchPreparedRequest(host, reactor.?, slot, owner, request, null),
                 else => unreachable,
             }
         },
@@ -1593,7 +1594,7 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, request.session_affinity, replay.value) catch |err| {
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
@@ -1607,7 +1608,7 @@ fn launchPreparedRequest(
         .credential_generation = if (credential) |value| value.record.generation else null,
     });
     const active = &slot.provider;
-    active.transfer.start(reactor, request.*, binding, .{
+    active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
         .turn_state = turn_state,
@@ -2198,7 +2199,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
                 .length = 4,
                 .charged = 4,
                 .structured_output = false,
-                .session_affinity = @splat(0),
+                .headers = .{},
             },
         } };
         defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, host.scratch_budget.?);
@@ -2311,12 +2312,12 @@ test "HTTP error capture retires before execution custody" {
         });
         defer reactor.deinit();
         var retained: ?named_scratch.Owner = null;
-        try slot.provider.transfer.start(&reactor, .{
+        try slot.provider.transfer.start(&reactor, &.{
             .file = request_file,
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .headers = .{},
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
@@ -3455,7 +3456,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .headers = .{},
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };

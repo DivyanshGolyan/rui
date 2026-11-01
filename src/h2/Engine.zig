@@ -382,7 +382,7 @@ fn validFieldName(name: []const u8) bool {
         'a'...'z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
         else => return false,
     };
-    for ([_][]const u8{ "content-length", "accept-encoding", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host" }) |owned| {
+    for (h2.owned_fields) |owned| {
         if (std.mem.eql(u8, name, owned)) return false;
     }
     return true;

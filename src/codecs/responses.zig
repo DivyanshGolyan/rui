@@ -52,6 +52,10 @@ pub const Encoder = struct {
     pub fn encodeItem(self: *Encoder, header: *const ItemHeader, ops: *Ops) Error!Status {
         switch (header.item) {
             .settings => |*settings| {
+                // Codex routes a Session's requests by its session id.
+                try ops.header("accept", "text/event-stream");
+                try ops.header("session-id", &std.fmt.bytesToHex(settings.session_affinity, .lower));
+                try ops.header("originator", "rui");
                 try ops.literal("{\"model\":\"");
                 try ops.content(0, .json_string_v1);
                 try ops.literal(if (parallelToolCalls(settings.modelName())) envelope(true) else envelope(false));
@@ -233,7 +237,7 @@ test "the largest item the codec emits fits the ops bound" {
     var headers: [64]ItemHeader = undefined;
     var count: usize = 0;
     for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
-        headers[count] = .{ .item = .{ .settings = .{ .effort = effort, .model_length = 0 } }, .handles = 0b1 };
+        headers[count] = .{ .item = .{ .settings = .{ .effort = effort, .session_affinity = @splat(0xff), .model_length = 0 } }, .handles = 0b1 };
         count += 1;
     }
     for (std.enums.values(codec_abi.Author)) |author| {
@@ -261,7 +265,7 @@ test "the largest item the codec emits fits the ops bound" {
         _ = try encoder.encodeItem(header, &ops);
     }
     // The model is written by a content op, so its length never counts.
-    var longest: ItemHeader = .{ .item = .{ .settings = .{ .effort = .medium, .model_length = codec_abi.max_model_bytes } }, .handles = 0b1 };
+    var longest: ItemHeader = .{ .item = .{ .settings = .{ .effort = .medium, .session_affinity = @splat(0), .model_length = codec_abi.max_model_bytes } }, .handles = 0b1 };
     @memset(&longest.item.settings.model, 'm');
     var shortest = longest;
     shortest.item.settings.model_length = 1;
@@ -271,4 +275,24 @@ test "the largest item the codec emits fits the ops bound" {
     _ = try encoder.encodeItem(&longest, &longest_ops);
     _ = try encoder.encodeItem(&shortest, &shortest_ops);
     try std.testing.expectEqual(shortest_ops.length, longest_ops.length);
+}
+
+test "the settings item asks for the stream, the Session's id and Rui as originator" {
+    var header: ItemHeader = .{ .item = .{ .settings = .{ .effort = null, .session_affinity = .{ 0x00, 0x01, 0x7f, 0x80, 0xab, 0xff } ++ @as([10]u8, @splat(0x10)), .model_length = 1 } }, .handles = 0b1 };
+    header.item.settings.model[0] = 'm';
+    var encoder: Encoder = .{};
+    var ops: Ops = .{};
+    try std.testing.expectEqual(Status.next, try encoder.encodeItem(&header, &ops));
+    var reader = ops.reader(0);
+    const expected = [_]codec_abi.Header{
+        .{ .name = "accept", .value = "text/event-stream" },
+        .{ .name = "session-id", .value = "00017f80abff10101010101010101010" },
+        .{ .name = "originator", .value = "rui" },
+    };
+    for (expected) |want| {
+        const op = (try reader.next()).?;
+        try std.testing.expectEqualStrings(want.name, op.header.name);
+        try std.testing.expectEqualStrings(want.value, op.header.value);
+    }
+    while (try reader.next()) |op| try std.testing.expect(op != .header);
 }
