@@ -837,6 +837,9 @@ const ItemValidation = struct {
     id_digest: [32]u8,
     omit_reasoning_text: bool = false,
     non_whitespace: bool = false,
+    /// A message's text: its text parts back to back.
+    text_length: u64 = 0,
+    text_digest: [32]u8 = @splat(0),
     phase: enum { unphased, commentary, final_answer } = .unphased,
     /// The phase Rui's form holds: only an exact `commentary` or
     /// `final_answer` literal.
@@ -865,7 +868,7 @@ const ItemSource = struct {
     }
 };
 
-fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64, answer_hash: *std.crypto.hash.sha2.Sha256) !ItemValidation {
+fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64) !ItemValidation {
     const item_check = response.item_check;
     item_check.reset(response.operation);
     var bytes: usize = std.math.maxInt(usize);
@@ -877,7 +880,9 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
     };
     const kind = item_check.item_kind.?;
     const id_digest = item_check.idDigest();
-    const neutral = try splitNeutral(response, window, item, ordinal, kind, answer_hash);
+    var text_hash = protocol.contentHasher();
+    const text_start = response.metadata.decoded_length;
+    const neutral = try splitNeutral(response, window, item, ordinal, kind, &text_hash);
     // The grammar accepted the item and located the values that metadata
     // records address, so no second pass reads the whole item.
     switch (kind) {
@@ -900,7 +905,20 @@ fn validateItem(response: *Response, window: *Window, item: Range, ordinal: u64,
             }
             return .{ .kind = .function_call, .id_digest = id_digest };
         },
-        .message => return .{ .kind = .message, .id_digest = id_digest, .non_whitespace = neutral.non_whitespace, .phase = item_check.messagePhase(), .neutral_phase = neutral.phase },
+        .message => {
+            const text_length = response.metadata.decoded_length - text_start;
+            const text_digest = text_hash.finalResult();
+            try response.metadata.append(.{ .tag = .text, .kind = .message, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = text_length, .content_digest = text_digest });
+            return .{
+                .kind = .message,
+                .id_digest = id_digest,
+                .non_whitespace = neutral.non_whitespace,
+                .text_length = text_length,
+                .text_digest = text_digest,
+                .phase = item_check.messagePhase(),
+                .neutral_phase = neutral.phase,
+            };
+        },
     }
 }
 
@@ -1027,9 +1045,9 @@ fn stringIs(window: *Window, value: Range, expected: []const u8) !bool {
 /// becomes neutral only in exactly the expected shape, so the bags keep
 /// everything else the model saw. `created_by` is dropped, as replay drops
 /// it.
-fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind, answer_hash: *std.crypto.hash.sha2.Sha256) !NeutralItem {
+fn splitNeutral(response: *Response, window: *Window, item: Range, ordinal: u64, kind: output_format.OutputItemKind, text_hash: *std.crypto.hash.sha2.Sha256) !NeutralItem {
     var result: NeutralItem = .{};
-    var answer: Answer = .{ .hash = answer_hash };
+    var answer: Answer = .{ .hash = text_hash };
     var bag: Bag = .{ .scope = .item };
     var members = try Members.init(window, item);
     var key: protocol.Bounded(max_evidence_bytes) = .{};
@@ -2313,13 +2331,13 @@ const AnswerSelection = struct {
     phased: bool = false,
     finals: u64 = 0,
 
-    fn accept(self: *AnswerSelection, validation: ItemValidation, ordinal: u64, length: u64, digest: [32]u8) void {
+    fn accept(self: *AnswerSelection, validation: ItemValidation, ordinal: u64) void {
         if (validation.phase != .unphased) self.phased = true;
         if (validation.phase == .final_answer) self.finals += 1;
         if (validation.phase == .final_answer or (!self.phased and validation.phase == .unphased)) {
             self.ordinal = ordinal;
-            self.length = if (validation.non_whitespace) length else 0;
-            self.digest = if (validation.non_whitespace) digest else protocol.contentDigest("");
+            self.length = if (validation.non_whitespace) validation.text_length else 0;
+            self.digest = if (validation.non_whitespace) validation.text_digest else protocol.contentDigest("");
         } else if (self.phased and self.finals == 0) {
             // Mixed phased/unphased text is visible, but only an explicit
             // final can terminate a phased response without Tool Calls.
@@ -2392,8 +2410,7 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
         .item_check = testingItemCheck(),
     };
     const item: Range = .{ .start = start, .length = length };
-    var message_hash = protocol.contentHasher();
-    const validation = try validateItem(&response, &window, item, ordinal, &message_hash);
+    const validation = try validateItem(&response, &window, item, ordinal);
     const record = try itemRecord(&window, item, ordinal, validation);
     try metadata.append(record);
     return record;
@@ -2448,9 +2465,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
         rejection.output_index = index;
         if (index != response.item_count) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
-        var message_hash = protocol.contentHasher();
-        const previous_length = metadata.decoded_length;
-        const validation = try validateItem(response, window, item, index, &message_hash);
+        const validation = try validateItem(response, window, item, index);
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
@@ -2459,7 +2474,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
                 response.compaction_count += 1;
                 if (response.compaction_count > 1) return error.UnsupportedProviderOutput;
             },
-            .message => response.answer.accept(validation, index, metadata.decoded_length - previous_length, message_hash.finalResult()),
+            .message => response.answer.accept(validation, index),
             .function_call => response.call_count += 1,
             .reasoning => {},
         }
@@ -2937,7 +2952,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         var root_buffer: [protocol.max_store_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var used: std.atomic.Value(u64) = .init(raw.len);
-        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 5 * output_format.output_metadata_record_bytes - shortfall };
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 6 * output_format.output_metadata_record_bytes - shortfall };
         var retained: ?named_scratch.Owner = null;
         const descriptors = @import("os/descriptor_limit.zig");
         const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
@@ -2955,7 +2970,7 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
             try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
-            try std.testing.expectEqual(raw.len + done.len + 5 * output_format.output_metadata_record_bytes, used.load(.acquire));
+            try std.testing.expectEqual(raw.len + done.len + 6 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
         try std.testing.expectEqual(raw.len, try source.readPositionalAll(std.testing.io, &buffer, 0));
