@@ -108,3 +108,32 @@ test "an installed key reads back, an absent one is null, and an open file is re
     try std.testing.expectError(error.InsecureCredentialFile, read(file, &key));
     try std.testing.expectError(error.InsecureCredentialFile, present(file));
 }
+
+test "overlapping installs each publish a whole key" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    defer private.close(io);
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var file_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const file = try std.fmt.bufPrint(&file_buffer, "{s}/private/openai.key", .{root});
+    const keys = [_][]const u8{ "sk-" ++ @as([max_key_bytes - 3]u8, @splat('a')), "sk-" ++ @as([max_key_bytes - 3]u8, @splat('b')) };
+    const Installer = struct {
+        fn run(destination: []const u8, key: []const u8, failed: *?anyerror) void {
+            for (0..50) |_| install(destination, key) catch |err| {
+                failed.* = err;
+                return;
+            };
+        }
+    };
+    var failures: [keys.len]?anyerror = @splat(null);
+    var threads: [keys.len]std.Thread = undefined;
+    for (&threads, keys, &failures) |*thread, key, *failed| thread.* = try std.Thread.spawn(.{}, Installer.run, .{ file, key, failed });
+    for (threads) |thread| thread.join();
+    for (failures) |failed| try std.testing.expectEqual(@as(?anyerror, null), failed);
+    var key: Key = .{ .len = 0 };
+    try std.testing.expect(try read(file, &key) != null);
+    try std.testing.expect(std.mem.eql(u8, key.slice(), keys[0]) or std.mem.eql(u8, key.slice(), keys[1]));
+}

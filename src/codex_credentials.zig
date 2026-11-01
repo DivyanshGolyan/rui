@@ -168,9 +168,12 @@ pub fn privatePresent(path: []const u8) !bool {
 }
 
 /// Replaces the owner-only file at `path` with `bytes`, durably and atomically.
+/// The exclusive lock keeps a concurrent publisher off the one temporary file.
 pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {
     var owner = try Owner.open(path);
     defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
     return owner.publishBytes(bytes, null);
 }
 

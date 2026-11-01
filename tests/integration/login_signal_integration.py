@@ -129,6 +129,8 @@ def key_entry(binary, typed):
     home.mkdir(mode=0o700)
     env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
     env["HOME"] = str(home)
+    # A Codex override must not stop a first OpenAI login creating its directory.
+    env["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "elsewhere" / "codex.json")
     master, slave = pty.openpty()
     try:
         before = termios.tcgetattr(slave)

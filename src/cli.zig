@@ -213,15 +213,19 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
     }
     const home = init.environ_map.get("HOME") orelse return homeRequired("the Codex credential is HOME/.config/rui/codex.json unless RUI_CODEX_CREDENTIAL_FILE names it");
     if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
-    if (create) {
-        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/.config/rui", .{home});
-        var opened = try std.Io.Dir.cwd().createDirPathOpen(init.io, directory, .{
-            .permissions = .fromMode(0o700),
-        });
-        opened.close(init.io);
-    }
+    if (create) try createConfigDirectory(init.io, home);
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
+}
+
+/// Creates HOME/.config/rui owner-only when absent, where the default
+/// credential of every provider lives.
+fn createConfigDirectory(io: std.Io, home: []const u8) !void {
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/.config/rui", .{home});
+    var opened = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{
+        .permissions = .fromMode(0o700),
+    });
+    opened.close(io);
 }
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
@@ -745,11 +749,8 @@ const DefaultUpdate = enum { fill, choose };
 fn saveApiKey(init: std.process.Init, update: DefaultUpdate) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try openAiKeyPath(init, &path_buffer);
-    if (init.environ_map.get(api_key.path_variable) == null) {
-        // Creates HOME/.config/rui owner-only when absent, as Codex login does.
-        var unused: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        _ = try credentialPath(init, &unused, true);
-    }
+    // The default path is under HOME, which openAiKeyPath required.
+    if (init.environ_map.get(api_key.path_variable) == null) try createConfigDirectory(init.io, init.environ_map.get("HOME").?);
     const stdin = std.Io.File.stdin();
     var buffer: [api_key.max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
