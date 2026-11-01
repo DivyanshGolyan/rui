@@ -228,7 +228,7 @@ def main():
             saved.close()
             valid = {"version": "3", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
-                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"}, "read_through": None,
+                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"}, "read_through": None, "beyond_unseen": False,
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)

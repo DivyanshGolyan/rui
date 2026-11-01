@@ -13,18 +13,20 @@ pub const Place = enum {
     /// The rule goes before this run's first item after the read-through
     /// position, if one shows.
     here,
-    /// Every item here is unseen and older pages hold more: the rule is earlier.
+    /// Every item here is unseen, and so is the row before them: the rule
+    /// is earlier.
     older,
     /// No position was ever read, or the run is empty.
     none,
 };
 
 /// `oldest` is the run's oldest item position, null when it is empty;
-/// `more` says older items precede it.
-pub fn place(read_through: ?u64, oldest: ?u64, more: bool) Place {
+/// `earlier_unseen` says a row older than the run follows the read-through
+/// position.
+pub fn place(read_through: ?u64, oldest: ?u64, earlier_unseen: bool) Place {
     const read = read_through orelse return .none;
     const first = oldest orelse return .none;
-    return if (more and first > read) .older else .here;
+    return if (earlier_unseen and first > read) .older else .here;
 }
 
 /// Where the opening put the rule in live output.
@@ -74,6 +76,21 @@ pub const Seen = struct {
         self.live_from = live_end;
     }
 
+    /// A transcript frame over a copy of live output drew live offsets
+    /// `start` through `end`. Rows it drew after `live_from` join the rows
+    /// already seen, so a later caught-up frame that shows `end` shows every
+    /// row after `through`. Rows no frame drew never join.
+    pub fn drew(self: *Seen, start: u64, end: u64) void {
+        const from = self.live_from orelse return;
+        if (start <= from and end > from) self.live_from = end;
+    }
+
+    /// An earlier visit saw the conversation through `position`, which the
+    /// Store may not hold yet: leaving records it with what this visit saw.
+    pub fn carry(self: *Seen, position: u64) void {
+        self.advance(position);
+    }
+
     /// A frame showed the end of the transcript of rows after the
     /// read-through position, which runs through `through`.
     pub fn transcript(self: *Seen, through: u64) void {
@@ -97,6 +114,7 @@ pub const Seen = struct {
 };
 
 test "the rule is in a run that reaches a read item or the conversation's start, else earlier" {
+    // `more`: the row before the run is unseen.
     const Case = struct { read_through: ?u64, oldest: ?u64, more: bool, expected: Place };
     for ([_]Case{
         .{ .read_through = null, .oldest = 3, .more = false, .expected = .none },
@@ -107,6 +125,9 @@ test "the rule is in a run that reaches a read item or the conversation's start,
         // The run starts the conversation, so nothing earlier can hold it.
         .{ .read_through = 4, .oldest = 9, .more = false, .expected = .here },
         .{ .read_through = 4, .oldest = 5, .more = true, .expected = .older },
+        // Older pages hold rows, but the one before the run is read: every
+        // unseen row is here.
+        .{ .read_through = 4, .oldest = 5, .more = false, .expected = .here },
     }) |case| try std.testing.expectEqual(case.expected, place(case.read_through, case.oldest, case.more));
 }
 
@@ -159,4 +180,35 @@ test "only rows a frame drew count as seen, and leaving takes each advance once"
     // A transcript reaching the end again never moves the live offset back.
     older.transcript(9);
     try std.testing.expectEqual(@as(?u64, 500), older.live_from);
+}
+
+test "rows a poll brought past the view count once a transcript frame drew them, and only then" {
+    var seen = Seen.open(4, 9, .none, 300);
+    seen.live(true, 9, 300);
+    try std.testing.expectEqual(@as(?u64, 9), seen.take());
+    // One poll brought more than a screen: the latest view starts below
+    // offset 300, so the rows between never drew.
+    seen.live(false, 30, 900);
+    seen.live(false, 31, 950);
+    try std.testing.expectEqual(@as(?u64, null), seen.take());
+    // A transcript frame that starts below them draws none of them.
+    seen.drew(400, 700);
+    seen.live(false, 31, 950);
+    try std.testing.expectEqual(@as(?u64, null), seen.take());
+    // Scrolling up draws them; the latest view then shows where they end.
+    seen.drew(250, 600);
+    seen.drew(550, 800);
+    seen.live(true, 31, 950);
+    try std.testing.expectEqual(@as(?u64, 31), seen.take());
+    // Later polls continue from there.
+    seen.live(true, 33, 990);
+    try std.testing.expectEqual(@as(?u64, 33), seen.take());
+}
+
+test "a position an earlier visit saw is recorded with this visit's" {
+    var seen = Seen.open(4, 9, .none, 300);
+    seen.carry(7);
+    try std.testing.expectEqual(@as(?u64, 7), seen.take());
+    seen.carry(5);
+    try std.testing.expectEqual(@as(?u64, null), seen.take());
 }

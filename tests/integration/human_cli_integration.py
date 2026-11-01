@@ -1724,14 +1724,17 @@ def scroll_return_case():
 def new_since_case():
     """Leaving records how far the conversation showed. Reopening lands on
     the rule above the first row after it; reading down to the latest view
-    and leaving by Esc leaves nothing new for the next opening."""
+    and leaving by Esc leaves nothing new for the next opening, even when
+    the overview quits at once. A pending Action wins over the rule."""
     state = screen_fixture_root("rui-new-since.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_answer(f"since-{i}", f"since-r-{i}", f"since-m-{i}",
-            f"answer {i:02d}\n\nsecond row {i:02d}\n\nthird row {i:02d}")[0] for i in range(11)])
+            f"answer {i:02d}\n\nsecond row {i:02d}\n\nthird row {i:02d}")[0] for i in range(14)] + [
+        fixture.sse_tool_calls("since-action", [("bash", "since-action-call", json.dumps({
+            "cmd": "printf x > since-effect", "description": "Write the since effect", "timeout_ms": None}))])])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = None
@@ -1785,9 +1788,9 @@ def new_since_case():
             os.write(master, b"\x1b[6~")
             shown = settle_screen(master, quiet=0.3)
         assert not shown.startswith("Browsing") and "third row 10" in shown, shown
-        # Esc returns to the overview, whose worker records how far it read.
-        os.write(master, b"\x1b")
-        settle_screen(master, quiet=1.0)
+        # Esc returns to the overview, which records how far it read; quitting
+        # at once sends what its worker has not.
+        overview_frame(master, lambda frame: True, keys=b"\x1b")
         leave_overview(master)
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
@@ -1797,8 +1800,23 @@ def new_since_case():
         shown = enter("third row 10")
         assert not shown.startswith("Browsing") and rule not in shown, ("read rows were new again", shown)
         leave()
+        # Unseen rows past the latest view, and an Action waiting: the
+        # opening's first settled frame shows the choice, not the rule.
+        admit(home, "session", "configure", "--session", session, "--permission-mode", "ask")
+        send(range(11, 14))
+        admit(home, "session", "send", "--to", session, input="since action")
+        fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"], "pending Action")
+        shown = enter(CHOICE)
+        assert not shown.startswith("Browsing") and CHOICE in shown, ("the rule hid the Action", shown)
+        os.write(master, b"\x03")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
+        for fd in (master, slave):
+            os.close(fd)
+        caller = master = slave = None
+        assert not (state / "since-effect").exists(), "opening decided the Action"
         completed = True
-        print("new since you looked: never-read opening records its latest rows; reopening lands on the rule; paging through and Esc leave nothing new", flush=True)
+        print("new since you looked: never-read opening records its latest rows; reopening lands on the rule; paging through and Esc leave nothing new; a pending Action wins", flush=True)
     finally:
         dispose_all(
             lambda: stop_process(caller, timeout=5) if caller is not None else None,
@@ -4867,6 +4885,45 @@ def renderer_cases():
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
 
+        # Ctrl-P on an empty draft brings back the Messages the person sent,
+        # newest first and never a peer's; Ctrl-N walks forward, and past
+        # the newest the draft is empty again. An edit makes it an ordinary
+        # draft. Up still scrolls throughout. Recalling sends nothing.
+        session = configure()
+        with terminal(session) as tty:
+            peer = 'printf %s RECALL-PEER | rui session send --to "$RUI_ADDRESS" > /dev/null'
+            endpoint.responses.append(fixture.sse_tool_calls("recall-peer", [("bash", "recall-peer-call", json.dumps(
+                {"cmd": peer, "description": "Send a Message to itself", "timeout_ms": None}))]))
+            tty.send("RECALL-ONE\r", answer("recall one"))
+            assert "RECALL-PEER" in endpoint.requests[-1].decode(), endpoint.requests[-1]
+            tty.send("RECALL-TWO\r", answer("recall two"))
+            # A script's Message the draft cannot hold as typed text.
+            marker = answer("recall control")
+            admit(home, "session", "send", "--store", store, "--to", session, input="RECALL-\x01-CONTROL")
+            tty.wait(marker)
+            tty.send("//RECALL-SLASH\r", answer("recall slash"))
+            submitted("/RECALL-SLASH")
+            requests = len(endpoint.requests)
+            older, newer = "\x10", "\x0e"
+            passed = "Passed over a sent message the draft cannot hold."
+            for step, (key, draft) in enumerate(((older, "//RECALL-SLASH"), ("\x1b[112;5u", "RECALL-TWO"), ("\x1b[27;5;112~", "RECALL-ONE"),
+                    (newer, "RECALL-TWO"), ("\x1b[110;5u", "//RECALL-SLASH"), (newer, ""), (older, "//RECALL-SLASH"))):
+                tty.send(key, predicate=lambda: tty.capture.draft(draft, 2 + len(draft)))
+                # Only a step over the control Message says it passed one, either way.
+                assert (passed in tty.capture.completed) == (step in (1, 4)), (step, tty.capture.completed)
+            # Up on a recalled draft scrolls, and the draft stays recalled.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[B", predicate=lambda: "Browsing" not in tty.capture.completed and tty.capture.draft("//RECALL-SLASH", 16))
+            # Presses made while a step is read add up; Ctrl-P stops at the oldest.
+            tty.send(older * 4, predicate=lambda: "No earlier message." in tty.capture.completed and tty.capture.draft("RECALL-ONE", 12))
+            tty.send("!", predicate=lambda: tty.capture.draft("RECALL-ONE!", 13))
+            tty.send(older, predicate=lambda: "Ctrl-P recalls sent messages once the draft is empty." in tty.capture.completed)
+            assert tty.capture.draft("RECALL-ONE!", 13), tty.capture.completed
+            assert len(endpoint.requests) == requests, endpoint.requests
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: Ctrl-P and Ctrl-N recall only the person's sent Messages, and an edit ends recall", flush=True)
+
         # An ESC inside a marked paste rejects the paste, and the end marker
         # right after it still ends it: the keys typed next are the draft's,
         # not more paste waiting for a fatal timeout.
@@ -5735,7 +5792,7 @@ def main(selected="all"):
         assert missing_setup["local_credential"] == "missing" and missing_setup["next_session"] == {
             "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
-        assert missing_setup["host"]["capabilities"]["managed_authentication"] is False, missing_setup
+        assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
         linked_home = state / "linked-home"
         (linked_home / ".config").mkdir(parents=True)
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)

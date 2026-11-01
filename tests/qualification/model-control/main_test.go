@@ -189,14 +189,14 @@ func TestOperationPhaseTimestampRequiresOneExactRecord(t *testing.T) {
 }
 
 func TestOrderedRawRequestBodies(t *testing.T) {
-	inspection, err := json.Marshal(inspectRequest{Version: "2", Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
+	inspection, err := json.Marshal(inspectRequest{Version: "3", Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := string(inspection), `{"version":"3","kind":"inspect_session","store":"store","session":"k7m2qx"}`; got != want {
 		t.Fatalf("inspection = %s, want %s", got, want)
 	}
-	result, err := json.Marshal(readResultRequest{Version: "2", Kind: "read_result", Store: "store", Key: "key"})
+	result, err := json.Marshal(readResultRequest{Version: "3", Kind: "read_result", Store: "store", Key: "key"})
 	if err != nil {
 		t.Fatal(err)
 	}

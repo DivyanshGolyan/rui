@@ -72,7 +72,7 @@ def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, s
 
 
 def instance(store):
-    match = re.fullmatch(r"ready ([0-9a-f]{32}) \d+ true (?:true|false) (?:true|false) [1-9]\d* \d+", status(store))
+    match = re.fullmatch(r"ready ([0-9a-f]{32}) \d+ true [a-z_]+ [1-9]\d* \d+", status(store))
     assert match, status(store)
     return match.group(1)
 

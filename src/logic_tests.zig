@@ -19,6 +19,7 @@ const cores = .{
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },
+    .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
