@@ -1,6 +1,6 @@
 //! The codecs this Host serves, by the codec name a Session pins, and the
-//! jobs that run a codec's request encoder and error classifier in storage
-//! their caller owns.
+//! jobs that run a codec's request encoder, error classifier and response
+//! interpreter in storage their caller owns.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
@@ -255,6 +255,95 @@ pub const ClassifyJob = struct {
         if (self.given.contains(given)) return error.CodecBadOp;
         self.given.insert(given);
         return finding;
+    }
+};
+
+/// The response interpreter of a pinned codec.
+pub fn interpreter(codec: protocol.Codec) *const Interpreter {
+    return switch (codec) {
+        .@"openai-responses/1" => &responses_interpreter,
+    };
+}
+
+const responses_interpreter = nativeInterpreter(responses.Interpreter);
+
+pub const max_interpreter_state_bytes = 8 * 1024;
+
+/// A codec's interpreter state, opaque to the Host.
+pub const InterpreterState = struct {
+    bytes: [max_interpreter_state_bytes]u8 align(16),
+};
+
+/// A response interpreter linked into the Host. Each function works on an
+/// `InterpreterState` in an `InterpretJob`, never on a stack.
+pub const Interpreter = struct {
+    /// The state before the stream's first event.
+    init: *const fn (state: *InterpreterState, operation: codec_abi.Operation) void,
+    /// Read one window and write its records into `ops`, which starts empty.
+    step: *const fn (state: *InterpreterState, fed: *const codec_abi.EventFed, ops: *codec_abi.Ops) codec_abi.Status,
+};
+
+/// The `Interpreter` of a codec type with `init(*T, Operation)` and
+/// `interpret(*T, *const EventFed, *Ops) !Status`.
+pub fn nativeInterpreter(comptime Codec: type) Interpreter {
+    comptime std.debug.assert(@sizeOf(Codec) <= max_interpreter_state_bytes and @alignOf(Codec) <= @alignOf(InterpreterState));
+    const adapter = struct {
+        fn init(state: *InterpreterState, operation: codec_abi.Operation) void {
+            of(state).init(operation);
+        }
+
+        // Every error is the codec's own, so it is `.failed`.
+        fn step(state: *InterpreterState, fed: *const codec_abi.EventFed, ops: *codec_abi.Ops) codec_abi.Status {
+            return of(state).interpret(fed, ops) catch .failed;
+        }
+
+        fn of(state: *InterpreterState) *Codec {
+            return @ptrCast(&state.bytes);
+        }
+    };
+    return .{ .init = adapter.init, .step = adapter.step };
+}
+
+/// One response's interpretation, in its caller's storage. The caller
+/// steps each window it feeds and takes every record `next` gives before it
+/// feeds again.
+pub const InterpretJob = struct {
+    interpreter: *const Interpreter,
+    state: InterpreterState,
+    ops: codec_abi.Ops,
+    records: codec_abi.RecordReader,
+    /// Whether the window's answer ended with `need`, which nothing follows.
+    needed: bool,
+
+    pub const Error = error{ CodecFailed, CodecBadOp };
+
+    pub fn begin(self: *InterpretJob, codec: *const Interpreter, operation: codec_abi.Operation) void {
+        self.interpreter = codec;
+        self.records = .{ .bytes = &.{} };
+        codec.init(&self.state, operation);
+    }
+
+    /// Interpret the next window; true once the codec is done, which it may
+    /// be only at the stream's end and must be there unless it failed.
+    pub fn step(self: *InterpretJob, fed: *const codec_abi.EventFed) Error!bool {
+        self.ops.length = 0;
+        self.needed = false;
+        const status = self.interpreter.step(&self.state, fed, &self.ops);
+        self.records = self.ops.records();
+        return switch (status) {
+            .failed => error.CodecFailed,
+            .done => if (fed.end) true else error.CodecBadOp,
+            .next => false,
+        };
+    }
+
+    /// The window's next record, well formed, with nothing after a `need`.
+    /// Null once the window's records end.
+    pub fn next(self: *InterpretJob) Error!?codec_abi.Record {
+        const record = try self.records.next() orelse return null;
+        if (self.needed) return error.CodecBadOp;
+        if (record == .need) self.needed = true;
+        return record;
     }
 };
 

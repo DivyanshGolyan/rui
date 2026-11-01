@@ -283,6 +283,78 @@ pub const Ops = struct {
         }
     }
 
+    pub fn record(self: *Ops, value: Record) error{OpsOverflow}!void {
+        switch (value) {
+            .refusal => |code| return self.finding(.{ .refusal = code }),
+            .report => |range| return self.finding(.{ .report = range }),
+            else => {},
+        }
+        var bytes: [max_record_bytes]u8 = @splat(0);
+        bytes[0] = switch (value) {
+            .refusal, .report => unreachable,
+            inline else => |_, tag| @backingInt(@field(RecordTag, @tagName(tag))),
+        };
+        const size: usize = switch (value) {
+            .raw => |raw| size: {
+                bytes[1] = @backingInt(raw.span);
+                std.mem.writeInt(u64, bytes[2..10], raw.start, .little);
+                std.mem.writeInt(u64, bytes[10..18], raw.length, .little);
+                break :size 18;
+            },
+            .string => |string| size: {
+                bytes[1..3].* = .{ @backingInt(string.field), @intFromBool(string.last) };
+                std.mem.writeInt(u64, bytes[3..11], string.start, .little);
+                std.mem.writeInt(u64, bytes[11..19], string.length, .little);
+                break :size 19;
+            },
+            .item, .added, .terminal => |kind| size: {
+                bytes[1] = @backingInt(kind);
+                break :size 2;
+            },
+            .part => |array| size: {
+                bytes[1] = @backingInt(array);
+                break :size 2;
+            },
+            .part_end => |kind| size: {
+                bytes[1] = @backingInt(kind);
+                break :size 2;
+            },
+            .terminal_failed, .failed => |reason| size: {
+                bytes[1] = @backingInt(reason);
+                break :size 2;
+            },
+            .member_end, .completed, .terminal_end, .finish => 1,
+            .item_end => |item| size: {
+                bytes[1..4].* = .{ @backingInt(item.answer_phase), @backingInt(item.phase), @intFromBool(item.omit_reasoning_text) };
+                break :size 4;
+            },
+            .usage => |usage| size: {
+                if (usage) |counts| {
+                    bytes[1] = 1;
+                    inline for (.{ counts.uncached, counts.cache_read, counts.cache_write, counts.output }, 0..) |count, index|
+                        std.mem.writeInt(u64, bytes[2 + 8 * index ..][0..8], count, .little);
+                }
+                break :size 34;
+            },
+            .at => |at| size: {
+                bytes[1..3].* = .{ @backingInt(at.stage), @intFromBool(at.output_index != null) };
+                std.mem.writeInt(u64, bytes[3..11], at.output_index orelse 0, .little);
+                break :size 11;
+            },
+            .need => |offset| size: {
+                std.mem.writeInt(u64, bytes[1..9], offset, .little);
+                break :size 9;
+            },
+            .refusal, .report => unreachable,
+        };
+        @memcpy(try self.reserve(size), bytes[0..size]);
+    }
+
+    /// Reads these ops as an interpreter's records, from the first.
+    pub fn records(self: *const Ops) RecordReader {
+        return .{ .bytes = self.bytes[0..self.length] };
+    }
+
     fn reserve(self: *Ops, count: usize) error{OpsOverflow}![]u8 {
         if (capacity - self.length < count) return error.OpsOverflow;
         defer self.length += @intCast(count);
@@ -464,6 +536,270 @@ pub const FindingReader = struct {
     fn codeAt(bytes: []const u8, length: u8) error{CodecBadOp}![]const u8 {
         if (length == 0 or length > max_code_bytes or bytes.len < length) return error.CodecBadOp;
         return bytes[0..length];
+    }
+};
+
+// ------------------------------------------------------------- interpret
+//
+// The Host interprets a sealed response stream by framing its server-sent
+// events itself and feeding the codec each event's data from memory as it
+// writes it to the decoded event data, one window at a time. Every range a
+// codec names is an offset into that event data. The codec judges the
+// provider's grammar; it never hashes and never decides a failure's code.
+// It answers each window with records in `Ops`: spans of bytes the Host
+// hashes or decodes as they are fed, the structure those bytes form, and at
+// an event's end its verdict. A codec that needs bytes again (a value whose
+// meaning arrived after it) or has no room left in `Ops` ends its answer
+// with `need`, and the Host feeds on from that offset.
+
+/// One window of one event, or the stream's end.
+pub const EventFed = struct {
+    /// Where `bytes` begin in the decoded event data.
+    offset: u64,
+    bytes: []const u8,
+    /// No bytes of this event follow (`bytes` is empty): the codec judges
+    /// the event.
+    event_end: bool,
+    /// The stream ended between events (`bytes` is empty): the codec
+    /// answers `done`, or `failed` with its verdict.
+    end: bool,
+};
+
+/// What the response answers, which decides which items it may hold.
+pub const Operation = enum(u8) { assistant_response = 0, compaction = 1 };
+
+/// The bytes a `raw` record names, hashed as received.
+pub const Span = enum(u8) {
+    /// The item being read, from its opening brace to its closing one.
+    item = 0,
+    /// One member of the open item's or part's provider bag, `"key":value`.
+    member = 1,
+    /// One item of the completed response's output list.
+    terminal = 2,
+    /// The completed response's usage report.
+    usage = 3,
+};
+
+/// The JSON string contents a `string` record names, decoded and hashed.
+pub const Field = enum(u8) {
+    item_id = 0,
+    /// The id of an item a `response.output_item.added` event announces.
+    added_id = 1,
+    terminal_id = 2,
+    part_text = 3,
+    call_name = 4,
+    call_id = 5,
+    call_arguments = 6,
+    response_id = 7,
+    served_model = 8,
+};
+
+/// Where in the stream a failure stands, for its diagnostic coordinates.
+pub const Stage = enum(u8) { stream = 0, event = 1, item = 2, response = 3 };
+
+/// A codec's verdict, named as the Host names the rejection it becomes. The
+/// Host maps each to its code and kind; a codec cannot choose either.
+pub const Reason = enum(u8) {
+    /// The event's data is not one JSON object.
+    invalid_json = 0,
+    contradictory_provider_output,
+    late_provider_output,
+    provider_connection_closed,
+    missing_provider_field,
+    duplicate_json_field,
+    expected_json_string,
+    provider_value_too_long,
+    invalid_provider_index,
+    trailing_json,
+    overflow,
+    unexpected_json_delimiter,
+    unsupported_event_type,
+    unsupported_item_type,
+    empty_provider_identity,
+    unfinished_provider_output_item,
+    unsupported_response_status,
+    incomplete_provider_output,
+    temporary_provider_failure,
+    context_overflow,
+    /// The provider reported a failure; the refusal finding before it, if
+    /// the Host knows its code, makes it permanent.
+    reported_provider_failure,
+    unsupported_item_status,
+    continuation_unavailable,
+    unsupported_content_block,
+    unsupported_reasoning_block,
+    unsupported_reasoning_text,
+    unsupported_provider_output,
+    unsupported_async_call,
+    invalid_json_literal,
+    unsupported_call_control,
+    unsupported_message_role,
+    unsupported_message_phase,
+    malformed_provider_output,
+    unsupported_annotation,
+    unsupported_caller,
+    unsupported_metadata_authority,
+};
+
+/// The Host's name for a reason: its words, capitalized and joined.
+pub fn reasonName(comptime reason: Reason) []const u8 {
+    comptime var out: []const u8 = "";
+    comptime var upper = true;
+    inline for (@tagName(reason)) |byte| {
+        if (byte == '_') {
+            upper = true;
+            continue;
+        }
+        out = out ++ .{if (upper) std.ascii.toUpper(byte) else byte};
+        upper = false;
+    }
+    return out;
+}
+
+/// The tags continue `FindingTag`'s numbering; an interpreter also gives
+/// the `refusal` and `report` findings.
+pub const RecordTag = enum(u8) {
+    /// u8 Span, u64 start, u64 length: bytes of a span, contiguous with the
+    /// span's earlier bytes. A member's first bytes open it.
+    raw = 9,
+    /// u8 Field, u8 1 when these are the string's last bytes and 0 when not,
+    /// u64 start, u64 length: JSON string contents, contiguous with the
+    /// string's earlier bytes; the first open it.
+    string = 10,
+    /// u8 OutputKind: an item begins; its `raw` item bytes follow.
+    item = 11,
+    /// No payload: the open member's bytes are complete.
+    member_end = 12,
+    /// u8 PartArray: a part of the open item begins.
+    part = 13,
+    /// u8 PartKind: the open part ends; its last `string` part_text, if
+    /// any, is its text.
+    part_end = 14,
+    /// u8 Phase for answer selection, u8 Phase for Rui's form, u8 1 when
+    /// replay leaves the item's reasoning text out: the open item is
+    /// accepted.
+    item_end = 15,
+    /// u8 OutputKind: the event announces the next item, named by its last
+    /// `string` added_id.
+    added = 16,
+    /// No payload: the response completes; the Host checks what it holds.
+    completed = 17,
+    /// u8 OutputKind: one output list item, of its `raw` terminal bytes and
+    /// last `string` terminal_id, ends.
+    terminal = 18,
+    /// u8 Reason: one output list item ends and is not an item.
+    terminal_failed = 19,
+    /// No payload: the output list ends.
+    terminal_end = 20,
+    /// u8 1 when the counts are usable and 0 when not, u64 uncached input,
+    /// u64 cache read, u64 cache write, u64 output tokens: the usage report
+    /// whose `raw` usage bytes were given.
+    usage = 21,
+    /// No payload: the completion is whole.
+    finish = 22,
+    /// u8 Stage, u8 1 when an output index follows and 0 when not, u64
+    /// index: where the event's verdict stands.
+    at = 23,
+    /// u8 Reason: the event's verdict.
+    failed = 24,
+    /// u64 offset: feed on from this offset of the event data. The last
+    /// record of an answer.
+    need = 25,
+};
+
+pub const Usage = struct { uncached: u64, cache_read: u64, cache_write: u64, output: u64 };
+
+pub const Record = union(enum) {
+    raw: struct { span: Span, start: u64, length: u64 },
+    string: struct { field: Field, last: bool, start: u64, length: u64 },
+    item: OutputKind,
+    member_end,
+    part: PartArray,
+    part_end: PartKind,
+    item_end: struct { answer_phase: Phase, phase: Phase, omit_reasoning_text: bool },
+    added: OutputKind,
+    completed,
+    terminal: OutputKind,
+    terminal_failed: Reason,
+    terminal_end,
+    usage: ?Usage,
+    finish,
+    at: struct { stage: Stage, output_index: ?u64 },
+    failed: Reason,
+    need: u64,
+    refusal: []const u8,
+    report: ReportRange,
+};
+
+/// The most bytes one record takes.
+pub const max_record_bytes = 2 + max_code_bytes;
+
+/// Decodes records; anything malformed is `error.CodecBadOp`.
+pub const RecordReader = struct {
+    bytes: []const u8,
+    offset: u16 = 0,
+
+    pub fn next(self: *RecordReader) error{CodecBadOp}!?Record {
+        const rest = self.bytes[self.offset..];
+        if (rest.len == 0) return null;
+        if (std.enums.fromInt(FindingTag, rest[0])) |tag| {
+            var findings: FindingReader = .{ .bytes = rest };
+            const finding = try findings.next() orelse unreachable;
+            self.offset += findings.offset;
+            return switch (tag) {
+                .refusal => .{ .refusal = finding.refusal },
+                .report => .{ .report = finding.report },
+                .context_overflow, .quota => error.CodecBadOp,
+            };
+        }
+        const tag = std.enums.fromInt(RecordTag, rest[0]) orelse return error.CodecBadOp;
+        const size: usize = switch (tag) {
+            .raw => 18,
+            .string => 19,
+            .item, .part, .part_end, .added, .terminal, .terminal_failed, .failed => 2,
+            .member_end, .completed, .terminal_end, .finish => 1,
+            .item_end => 4,
+            .usage => 34,
+            .at => 11,
+            .need => 9,
+        };
+        if (rest.len < size) return error.CodecBadOp;
+        self.offset += @intCast(size);
+        return switch (tag) {
+            .raw => .{ .raw = .{ .span = try value(Span, rest[1]), .start = int(rest[2..10]), .length = int(rest[10..18]) } },
+            .string => .{ .string = .{ .field = try value(Field, rest[1]), .last = try flag(rest[2]), .start = int(rest[3..11]), .length = int(rest[11..19]) } },
+            .item => .{ .item = try value(OutputKind, rest[1]) },
+            .member_end => .member_end,
+            .part => .{ .part = try value(PartArray, rest[1]) },
+            .part_end => .{ .part_end = try value(PartKind, rest[1]) },
+            .item_end => .{ .item_end = .{ .answer_phase = try value(Phase, rest[1]), .phase = try value(Phase, rest[2]), .omit_reasoning_text = try flag(rest[3]) } },
+            .added => .{ .added = try value(OutputKind, rest[1]) },
+            .completed => .completed,
+            .terminal => .{ .terminal = try value(OutputKind, rest[1]) },
+            .terminal_failed => .{ .terminal_failed = try value(Reason, rest[1]) },
+            .terminal_end => .terminal_end,
+            .usage => .{ .usage = if (try flag(rest[1])) .{ .uncached = int(rest[2..10]), .cache_read = int(rest[10..18]), .cache_write = int(rest[18..26]), .output = int(rest[26..34]) } else if (std.mem.allEqual(u8, rest[2..34], 0)) null else return error.CodecBadOp },
+            .finish => .finish,
+            .at => .{ .at = .{ .stage = try value(Stage, rest[1]), .output_index = if (try flag(rest[2])) int(rest[3..11]) else if (std.mem.allEqual(u8, rest[3..11], 0)) null else return error.CodecBadOp } },
+            .failed => .{ .failed = try value(Reason, rest[1]) },
+            .need => .{ .need = int(rest[1..9]) },
+        };
+    }
+
+    fn value(comptime T: type, byte: u8) error{CodecBadOp}!T {
+        return std.enums.fromInt(T, byte) orelse error.CodecBadOp;
+    }
+
+    fn flag(byte: u8) error{CodecBadOp}!bool {
+        return switch (byte) {
+            0 => false,
+            1 => true,
+            else => error.CodecBadOp,
+        };
+    }
+
+    fn int(bytes: *const [8]u8) u64 {
+        return std.mem.readInt(u64, bytes, .little);
     }
 };
 
