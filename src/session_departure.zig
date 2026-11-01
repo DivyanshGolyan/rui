@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, history, details, inspection, permission, message };
+pub const ReadPhase = enum { activity, history, details, inspection, permission, message, recall };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -15,7 +15,7 @@ pub const ReadEnd = union(enum) {
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .history or self.failed.progress.phase == .details or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message) and
+            (self.failed.progress.phase == .history or self.failed.progress.phase == .details or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .recall) and
             !self.failed.progress.rendering;
     }
 
