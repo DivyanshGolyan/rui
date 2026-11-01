@@ -1515,8 +1515,6 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
 }
 
 test "launched Bash leads its own session, so no terminal can reach its prompts" {
-    // /proc carries the session ID; macOS shares the same posix_spawn flag.
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -1527,7 +1525,7 @@ test "launched Bash leads its own session, so no terminal can reach its prompts"
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     var result: Outcome = undefined;
-    try launchForTest(root, budget, &retention, 1, "set -- $(cat /proc/$$/stat); [ \"$6\" = \"$$\" ] && echo own-session; exec 3</dev/tty || echo no-terminal", &result);
+    try launchForTest(root, budget, &retention, 1, "python3 -c 'import os; print(\"own-session\" if os.getsid(0) == os.getppid() else \"shared\")'; exec 3</dev/tty || echo no-terminal", &result);
     const text = result.text();
     if (std.mem.indexOf(u8, text, "own-session\nno-terminal\n") == null) {
         std.debug.print("expected own-session and no-terminal; got:\n{s}\n", .{text});
