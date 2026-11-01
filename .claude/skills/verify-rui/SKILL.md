@@ -40,7 +40,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
 
-   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below).
+   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host and starts a fresh one on the same Store, fixture and `--host-setenv` options.
 
 3. **Open a terminal: one Rui client per name.**
 
@@ -109,6 +109,7 @@ Fixture policy, chosen by the latest user text:
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
 - `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.
 - `start a child`: one Bash call that starts Session `child` with `show environment` through `rui session start`.
+- `relay to ID`: one Bash call that sends `show environment` to Session ID through `rui session send`, so the recipient's Turn starts from a peer Message.
 - `parallel bash`: two Bash commands issued together that sleep 12 s and 20 s, so two calls run side by side.
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.

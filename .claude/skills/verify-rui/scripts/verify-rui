@@ -222,6 +222,7 @@ def fixture_main(args):
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
+      * text containing "relay to ID": one Bash call that sends "show environment" to Session ID as a peer
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
@@ -313,6 +314,10 @@ def fixture_main(args):
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
                     "printf 'CLIENT_MARK=%s\\n' \"${CLIENT_MARK-unset}\"; printf 'HOST_SECRET=%s\\n' \"${HOST_SECRET-unset}\"; command -v brew || echo 'brew: not found'; "
                     "printf 'PATH=%s\\n' \"$PATH\"", "Show the environment")])
+            elif user_text and (relay := re.search(r"relay to ([0-9a-z]{6})", user_text)):
+                kind = "relay"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    f"printf 'show environment' | rui session send --to {relay.group(1)}", "Relay to a peer")])
             elif user_text and "start a child" in user_text:
                 kind = "start-child"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
@@ -589,6 +594,46 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
+def launch_host(run):
+    """Start this run's Host from the options saved at `new`; return its ready status."""
+    options = run.meta["host_options"]
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(options["active_capacity"]),
+                 "--provider-endpoint", run.meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
+    host_env = run.env()
+    for assignment in options["host_setenv"]:
+        key, _, value = assignment.partition("=")
+        host_env[key] = value
+    host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
+                            stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
+                            start_new_session=True)
+    run.own("host", host.pid, argv=host_argv)
+    deadline = time.monotonic() + 30
+    while True:
+        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
+        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
+            return status
+        if host.poll() is not None or time.monotonic() > deadline:
+            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
+        time.sleep(0.1)
+
+
+def cmd_restart_host(args):
+    """Stop the run's Host and start a fresh one on the same Store, fixture and options."""
+    run = Run(args.run)
+    old = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
+           and process_start(r["pid"])[0] == r["lstart"]]
+    stop = run.rui_cmd("host", "stop", "--store", run.store)
+    if stop.returncode != 0:
+        die(f"host stop failed: {stop.stderr}")
+    deadline = time.monotonic() + 15
+    while any(process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"] for r in old):
+        if time.monotonic() > deadline:
+            die("old Host did not exit after host stop")
+        time.sleep(0.1)
+    status = launch_host(run)
+    print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
+
+
 def cmd_new(args):
     build = load_build(args.sha)
     run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
@@ -628,24 +673,10 @@ def cmd_new(args):
     meta["fixture_url"] = f"http://127.0.0.1:{port}/responses"
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
-    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(args.active_capacity),
-                 "--provider-endpoint", meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
-    host_env = run.env()
-    for assignment in args.host_setenv:
-        key, _, value = assignment.partition("=")
-        host_env[key] = value
-    host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
-                            stdout=open(run.evidence / "host.stdout.log", "w"), stderr=open(run.evidence / "host.log", "w"),
-                            start_new_session=True)
-    run.own("host", host.pid, argv=host_argv)
-    deadline = time.monotonic() + 30
-    while True:
-        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
-        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
-            break
-        if host.poll() is not None or time.monotonic() > deadline:
-            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
-        time.sleep(0.1)
+    meta["host_options"] = {"active_capacity": args.active_capacity, "host_setenv": args.host_setenv}
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    run = Run(root)
+    status = launch_host(run)
     meta["host_instance"] = json.loads(status.stdout).get("instance")
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     # Sessions have Host-allocated IDs: start each one labelled with its name
@@ -1680,6 +1711,10 @@ def main():
                    help="add one variable to the Host's own environment (e.g. a Host-only secret)")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_new)
+    p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
+    p.add_argument("run")
+    p.set_defaults(func=cmd_restart_host)
+
     p = sub.add_parser("doctor", help="read-only: right binary/SHA, owned Host ready, owned fixture, private tmux")
     p.add_argument("run"); p.add_argument("--expect-sha")
     p.set_defaults(func=cmd_doctor)
