@@ -211,7 +211,7 @@ def main():
                 row.update(action=str(item["action"]) if item["action"] else None, rejection=item["rejection"])
                 row["fields"] = {name: {"bytes": str(ref["length"]), "sha256": bytes(ref["digest"]).hex()} for name, ref in zip(FIELDS, item["fields"])}
                 wire_items.append(row)
-            valid = dict(version="2", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
+            valid = dict(version="3", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
             for change in ("order", "digest", "missing", "authority", "type"):
                 wire = copy.deepcopy(valid)
                 if change == "order": wire["items"][1]["position"] = wire["items"][0]["position"]

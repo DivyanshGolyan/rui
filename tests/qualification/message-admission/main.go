@@ -77,7 +77,7 @@ func configure(deadline measurement.Deadline, socket, store, workspace, key stri
 	omitted := optionalField{State: "omitted"}
 	provider := "codex"
 	model := "measurement-model"
-	value := configurationCommand{Version: "2", Kind: "configure", Store: store, Key: "configure-" + key, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	value := configurationCommand{Version: "3", Kind: "configure", Store: store, Key: "configure-" + key, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 	var response map[string]any
 	if err := measurement.ExchangeUnix(deadline, socket, "/v1/configure", value, &response); err != nil {
 		return "", err
@@ -89,15 +89,15 @@ func configure(deadline measurement.Deadline, socket, store, workspace, key stri
 }
 
 func messageValue(store, key, session, text string) messageCommand {
-	return messageCommand{Version: "2", Kind: "message", Store: store, Key: key, Session: session, Text: optionalField{State: "value", Value: &text}}
+	return messageCommand{Version: "3", Kind: "message", Store: store, Key: key, Session: session, Text: optionalField{State: "value", Value: &text}}
 }
 
 func observeValue(store, key string) observeCommand {
-	return observeCommand{Version: "2", Kind: "observe_command", Store: store, Key: key}
+	return observeCommand{Version: "3", Kind: "observe_command", Store: store, Key: key}
 }
 
 func inspectValue(store, session string) inspectCommand {
-	return inspectCommand{Version: "2", Kind: "inspect_session", Store: store, Session: session}
+	return inspectCommand{Version: "3", Kind: "inspect_session", Store: store, Session: session}
 }
 
 func startHost(binary, directory string, deadline measurement.Deadline) (*measurement.Host, string, string, error) {

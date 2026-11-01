@@ -289,6 +289,7 @@ def main():
                         "key": f"late-{kind}-{phase}", "session": session, **fields}).encode()
                     header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
                         + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+                        + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
                     upload = socket.socket(socket.AF_UNIX)
                     uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))

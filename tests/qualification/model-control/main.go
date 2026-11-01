@@ -951,7 +951,7 @@ func earlyResponse(connection net.Conn, wait time.Duration) (*http.Response, boo
 }
 
 func openInspections(socketPath, store, session string) ([]net.Conn, error) {
-	body, err := json.Marshal(inspectRequest{Version: "2", Kind: "inspect_session", Store: store, Session: session})
+	body, err := json.Marshal(inspectRequest{Version: "3", Kind: "inspect_session", Store: store, Session: session})
 	if err != nil {
 		return nil, err
 	}
@@ -1185,7 +1185,7 @@ func ordinaryBusy(socketPath string) error {
 }
 
 func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
-	body, err := json.Marshal(readResultRequest{Version: "2", Kind: "read_result", Store: store, Key: key})
+	body, err := json.Marshal(readResultRequest{Version: "3", Kind: "read_result", Store: store, Key: key})
 	if err != nil {
 		return nil, err
 	}
@@ -1293,7 +1293,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		return nil, fmt.Errorf("processing identity incomplete: %v", processing)
 	}
 	interruptBody, err := json.Marshal(modelInterruptionRequest{
-		Version: "2",
+		Version: "3",
 		Kind:    "model_interruption",
 		Store:   store,
 		Key:     "settlement-later-interrupt",
@@ -1312,7 +1312,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	}
 	preparedControls = append(preparedControls, prepared)
 	for index := 1; index < controlHeadroom; index++ {
-		stopBody, err := json.Marshal(sessionStopRequest{Version: "2", Kind: "session_stop", Store: store, Key: fmt.Sprintf("settlement-later-stop-%d", index), Session: session})
+		stopBody, err := json.Marshal(sessionStopRequest{Version: "3", Kind: "session_stop", Store: store, Key: fmt.Sprintf("settlement-later-stop-%d", index), Session: session})
 		if err != nil {
 			return nil, err
 		}

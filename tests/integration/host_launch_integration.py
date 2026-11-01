@@ -189,7 +189,7 @@ def status(store, env):
     assert result.returncode == 0, result.stderr
     # Metadata is exactly one JSON value on stdout.
     value = json.loads(result.stdout)
-    assert value["version"] == "2" and value["type"] == "host_status", result
+    assert value["version"] == "3" and value["type"] == "host_status", result
     return value
 
 

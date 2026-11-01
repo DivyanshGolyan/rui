@@ -160,7 +160,7 @@ def defaults(home, *args, success=True, environment=None):
         return None
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     value = json.loads(result.stdout)
-    assert value["version"] == "2" and value["type"] == "defaults", value
+    assert value["version"] == "3" and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
