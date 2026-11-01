@@ -2,6 +2,7 @@ const std = @import("std");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
+const environment = @import("environment.zig");
 const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -276,7 +277,7 @@ pub const Host = struct {
     /// every slot change and nothing else.
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
-    bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
+    bash_facts: environment.HostFacts = bash.default_facts,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in

@@ -5,6 +5,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const pages = @import("os/pages.zig");
 const system_path = @import("os/system_path.zig");
+const environment = @import("environment.zig");
 const protocol = @import("protocol.zig");
 const BashLifecycle = @import("BashLifecycle.zig");
 const deadline = @import("deadline.zig");
@@ -19,57 +20,52 @@ pub const copy_window_bytes: usize = 16 * 1024;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
-/// Bash receives only this Host-owned environment: the running executable's
-/// directory first on PATH, so ordinary `rui` is this exact build, and the
-/// Host's absolute HOME. Nothing else from the Host environment, including
-/// provider settings or credentials, reaches the child.
-pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !std.process.Environ.Map {
-    var result = std.process.Environ.Map.init(allocator);
-    errdefer result.deinit();
-    // Built once at Host startup, so its path buffers live in pages mapped
-    // for the call.
+/// Reads the Host's facts for every Bash child once, at Host start: the
+/// running executable's directory, so ordinary `rui` is this exact build, the
+/// OS system PATH, and the Host's HOME when absolute. Nothing else from the
+/// Host environment, including provider settings or credentials, reaches the
+/// child. Free with `freeHostFacts`.
+pub fn readHostFacts(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !environment.HostFacts {
+    // Read once, so its buffers live in pages mapped for the call.
     const mapped = try pages.Mapped(struct {
         executable: [std.fs.max_path_bytes]u8,
         system: system_path.Buffer,
-        path: [std.fs.max_path_bytes + 1 + system_path.max_bytes]u8,
+        path: [system_path.max_bytes]u8,
     }).map();
     defer mapped.unmap();
     const buffers = mapped.value;
     const executable = buffers.executable[0..try std.process.executablePath(io, &buffers.executable)];
-    const prefix = searchPrefix(&buffers.path, std.fs.path.dirname(executable));
-    const system = try system_path.read(io, &buffers.system, buffers.path[prefix..][0..system_path.max_bytes]);
-    try result.put("PATH", buffers.path[0 .. prefix + system.len]);
-    if (home) |value| if (std.fs.path.isAbsolute(value)) try result.put("HOME", value);
-    return result;
+    const directory = if (std.fs.path.dirname(executable)) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (directory) |value| allocator.free(value);
+    const system = try allocator.dupe(u8, try system_path.read(io, &buffers.system, &buffers.path));
+    errdefer allocator.free(system);
+    const absolute_home = if (home) |value| if (std.fs.path.isAbsolute(value)) try allocator.dupe(u8, value) else null else null;
+    return .{ .executable_dir = directory, .system_path = system, .home = absolute_home };
 }
 
-/// For owners that never launch Bash (tests); reading it allocates nothing.
-pub const empty_environment: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.heap.page_allocator };
-
-/// One tool process's environment: the shared Host map, unchanged, plus
-/// the bare RUI_ADDRESS, canonical RUI_STORE and Host-issued RUI_SENDER_HANDLE.
-/// The caller deinitializes the owned map.
-pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.Environ.Map, store_selector: []const u8, session: []const u8, sender_handle: []const u8) !std.process.Environ.Map {
-    var result = try shared.clone(allocator);
-    errdefer result.deinit();
-    try result.put("RUI_ADDRESS", session);
-    try result.put("RUI_STORE", store_selector);
-    if (sender_handle.len != 0) try result.put("RUI_SENDER_HANDLE", sender_handle);
-    return result;
+pub fn freeHostFacts(allocator: std.mem.Allocator, facts: environment.HostFacts) void {
+    if (facts.executable_dir) |value| allocator.free(value);
+    allocator.free(facts.system_path);
+    if (facts.home) |value| allocator.free(value);
 }
 
-/// Writes "DIRECTORY:" for the system PATH to follow and returns its length.
-/// A directory containing ':' cannot be one PATH entry; the child then finds
-/// only system commands rather than a split directory.
-fn searchPrefix(buffer: []u8, directory: ?[]const u8) usize {
-    const value = directory orelse return 0;
-    if (std.mem.indexOfScalar(u8, value, ':') != null) return 0;
-    @memcpy(buffer[0..value.len], value);
-    buffer[value.len] = ':';
-    return value.len + 1;
-}
+/// Facts for a Host built without `readHostFacts`, as tests build one: the
+/// fixed system PATH and no directory or HOME.
+pub const default_facts: environment.HostFacts = .{ .executable_dir = null, .system_path = system_path.fixed, .home = null };
 
 const fault_padding_bytes = 4 << 20;
+
+/// `block` plus RUI_FAULT_PADDING, over Linux's 128 KiB per-string limit and
+/// macOS's 1 MiB ARG_MAX, so the OS refuses it with a real E2BIG.
+fn padArguments(arena: std.mem.Allocator, block: environment.Block) !environment.Block {
+    const padding = try arena.allocSentinel(u8, "RUI_FAULT_PADDING=".len + fault_padding_bytes, 0);
+    @memcpy(padding[0.."RUI_FAULT_PADDING=".len], "RUI_FAULT_PADDING=");
+    @memset(padding["RUI_FAULT_PADDING=".len..], 'x');
+    const padded = try arena.allocSentinel(?[*:0]const u8, block.len + 1, null);
+    @memcpy(padded[0..block.len], block);
+    padded[block.len] = padding.ptr;
+    return padded;
+}
 
 pub const ArgumentSizes = struct { command: usize = 0, environment: usize = 0, variables: usize = 0 };
 
@@ -308,19 +304,14 @@ pub const Prepared = struct {
     /// resets the child's signal mask and dispositions and opens its own
     /// /dev/null stdin unless an unlinked read-only input was supplied.
     /// On error.BashArgumentsTooLarge, `refused` holds what the OS refused.
-    pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map, refused: *ArgumentSizes) !Execution {
+    pub fn launch(self: *Prepared, facts: environment.HostFacts, refused: *ArgumentSizes) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        var child_environment = toolEnvironment(arena, shared_environment, self.store_selector, self.session.slice(), self.sender_handle.slice()) catch return error.BashSpawnFailed;
-        if (self.faults.arguments) {
-            // Real E2BIG: over Linux's 128 KiB per-string limit and macOS's 1 MiB ARG_MAX.
-            const padding = arena.alloc(u8, fault_padding_bytes) catch return error.BashSpawnFailed;
-            @memset(padding, 'x');
-            child_environment.put("RUI_FAULT_PADDING", padding) catch return error.BashSpawnFailed;
-        }
-        const environment_block = child_environment.createPosixBlock(arena, .{ .zig_progress_fd = -1 }) catch return error.BashSpawnFailed;
+        const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice() };
+        var environment_block = environment.childBlock(arena, null, facts, identity) catch return error.BashSpawnFailed;
+        if (self.faults.arguments) environment_block = padArguments(arena, environment_block) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
         const cwd = arena.dupeSentinel(u8, self.workspace.slice(), 0) catch return error.BashSpawnFailed;
         const argv = [_:null]?[*:0]const u8{ path, "-c", self.command.?.ptr, "bash" };
@@ -328,10 +319,10 @@ pub const Prepared = struct {
         var stdout_fd: c_int = undefined;
         var stderr_fd: c_int = undefined;
         const started = std.Io.Clock.Timestamp.now(self.scratch.io, .awake);
-        switch (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd, if (self.stdin_capture) |input| input.readonly.?.handle else -1)) {
+        switch (rui_bash_spawn(path, &argv, environment_block.ptr, cwd, &pid, &stdout_fd, &stderr_fd, if (self.stdin_capture) |input| input.readonly.?.handle else -1)) {
             0 => {},
             @backingInt(std.posix.E.@"2BIG") => {
-                refused.* = .{ .command = self.command.?.len, .environment = blockBytes(environment_block.slice), .variables = environment_block.slice.len };
+                refused.* = .{ .command = self.command.?.len, .environment = blockBytes(environment_block), .variables = environment_block.len };
                 return error.BashArgumentsTooLarge;
             },
             else => return error.BashSpawnFailed,
@@ -1479,7 +1470,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
     var refused: ArgumentSizes = .{};
-    var execution = try prepared.launch(&empty_environment, &refused);
+    var execution = try prepared.launch(default_facts, &refused);
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
@@ -1600,12 +1591,12 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(&empty_environment, &refused));
-    // RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
-    const environment_bytes = "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
-    try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 3 }, refused);
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, &refused));
+    // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
+    const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
+    try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);
     var message: [arguments_message_bytes]u8 = undefined;
-    const expected = try std.fmt.allocPrint(std.testing.allocator, "Bash was not started: the system refused its arguments as too large. The command is 4 bytes; the environment is {d} bytes in 3 variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{environment_bytes});
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "Bash was not started: the system refused its arguments as too large. The command is 4 bytes; the environment is {d} bytes in 4 variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{environment_bytes});
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, argumentsTooLargeMessage(&message, refused));
     const widest: ArgumentSizes = .{ .command = std.math.maxInt(usize), .environment = std.math.maxInt(usize), .variables = std.math.maxInt(usize) };
@@ -1922,37 +1913,18 @@ test "Bash descriptor decoding preserves authorized command bytes" {
     }
 }
 
-test "Bash environment carries only this executable's PATH and an absolute HOME" {
+test "Host facts carry this executable's directory, the system PATH and an absolute HOME" {
     var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const executable = executable_buffer[0..try std.process.executablePath(std.testing.io, &executable_buffer)];
-    const directory = std.fs.path.dirname(executable).?;
-    var with_home = try environment(std.testing.io, std.testing.allocator, "/home/peer");
-    defer with_home.deinit();
-    try std.testing.expectEqual(@as(usize, 2), with_home.count());
-    const path = with_home.get("PATH").?;
-    try std.testing.expect(std.mem.startsWith(u8, path, directory));
+    const facts = try readHostFacts(std.testing.io, std.testing.allocator, "/home/peer");
+    defer freeHostFacts(std.testing.allocator, facts);
+    try std.testing.expectEqualStrings(std.fs.path.dirname(executable).?, facts.executable_dir.?);
     const scratch = try std.testing.allocator.create(system_path.Buffer);
     defer std.testing.allocator.destroy(scratch);
     var system: [system_path.max_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings(try system_path.read(std.testing.io, scratch, &system), path[directory.len + 1 ..]);
-    try std.testing.expectEqual(':', path[directory.len]);
-    try std.testing.expectEqualStrings("/home/peer", with_home.get("HOME").?);
-    var relative_home = try environment(std.testing.io, std.testing.allocator, "relative");
-    defer relative_home.deinit();
-    try std.testing.expectEqual(@as(usize, 1), relative_home.count());
-    // Each tool process adds its own Session's address; the shared map stays as it was.
-    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "k7m2qx", "test-action-handle");
-    defer tool.deinit();
-    try std.testing.expectEqual(@as(usize, 5), tool.count());
-    try std.testing.expectEqualStrings("k7m2qx", tool.get("RUI_ADDRESS").?);
-    try std.testing.expectEqualStrings("/store \"q\"", tool.get("RUI_STORE").?);
-    try std.testing.expectEqualStrings("test-action-handle", tool.get("RUI_SENDER_HANDLE").?);
-    try std.testing.expectEqualStrings("/home/peer", tool.get("HOME").?);
-    try std.testing.expectEqual(@as(usize, 2), with_home.count());
-    try std.testing.expect(with_home.get("RUI_ADDRESS") == null);
-    try std.testing.expect(with_home.get("RUI_SENDER_HANDLE") == null);
-    var buffer: [64]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), searchPrefix(&buffer, "/opt/a:b/bin"));
-    try std.testing.expectEqual(@as(usize, 0), searchPrefix(&buffer, null));
-    try std.testing.expectEqualStrings("/opt/rui/bin:", buffer[0..searchPrefix(&buffer, "/opt/rui/bin")]);
+    try std.testing.expectEqualStrings(try system_path.read(std.testing.io, scratch, &system), facts.system_path);
+    try std.testing.expectEqualStrings("/home/peer", facts.home.?);
+    const relative = try readHostFacts(std.testing.io, std.testing.allocator, "relative");
+    defer freeHostFacts(std.testing.allocator, relative);
+    try std.testing.expectEqual(null, relative.home);
 }
