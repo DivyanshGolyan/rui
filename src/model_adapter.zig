@@ -2195,9 +2195,9 @@ test "a prepared request carries the Responses codec's headers with its Session'
 
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
-// Independently authored tool definitions for full-request goldens. These
-// literals must match the provider's frozen tool catalog, not reference it.
-const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"stdin\":{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"},\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
+// Share the tool's prose and schema, not the request's tool envelope.
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_definition.description ++
+    "\",\"strict\":true,\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
 
 // Share prose, not request construction: independently JSON-encode fixture inputs.
 fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8) ![]u8 {

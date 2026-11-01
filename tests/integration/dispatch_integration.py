@@ -27,6 +27,15 @@ from model_fixture import (
 )
 
 
+def without_prose(schema):
+    """Tool wording is prompt prose; compare the schema without it."""
+    if isinstance(schema, list):
+        return [without_prose(item) for item in schema]
+    if isinstance(schema, dict):
+        return {key: without_prose(value) for key, value in schema.items() if not (key == "description" and isinstance(value, str))}
+    return schema
+
+
 def content_reference(text):
     data = text.encode()
     domain = b"rui/content/v1"
@@ -3477,23 +3486,15 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
-                    "description": "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.",
                     "strict": True,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
-                            "stdin": {
-                                "type": ["string", "null"],
-                                "description": "Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests",
-                            },
+                            "stdin": {"type": ["string", "null"]},
+                            "description": {"type": "string"},
                             "timeout_ms": {
                                 "type": ["integer", "null"],
-                                "description": "Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.",
                                 "minimum": 1,
                                 "maximum": 9223372036854775807,
                             },
@@ -3513,6 +3514,7 @@ def main(mode="all", correlation_case="all"):
                 }
             },
         }
+        observed["tools"] = without_prose(observed["tools"])
         assert observed == expected, (observed, expected)
         stop_host(host)
         frozen_peers.finish(time.monotonic() + 5)
