@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -2319,7 +2320,8 @@ def persistent_empty_answer_case():
 def persistent_copy_case():
     """/copy sends the last answer, and /copy code its last code block, to the
     clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
-    the answer where Rui runs, mode 0600 even over an earlier file."""
+    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
+    a link at its name without following it."""
     state = screen_fixture_root("rui-copy.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -2377,6 +2379,17 @@ def persistent_copy_case():
             saved.chmod(0o644)
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            # A link at the export name is replaced, never followed.
+            sentinel = state / "sentinel"
+            sentinel.write_bytes(b"sentinel")
+            sentinel.chmod(0o640)
+            saved.unlink()
+            saved.symlink_to(sentinel)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert sentinel.read_bytes() == b"sentinel" and sentinel.stat().st_mode & 0o777 == 0o640, sentinel
+            assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
+            assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
+            assert list(here.iterdir()) == [saved], list(here.iterdir())
             terminal_step(master, "/exit", "Detached.")
             assert caller.wait(timeout=5) == 0
         completed = True

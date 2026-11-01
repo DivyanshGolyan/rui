@@ -1173,16 +1173,24 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         var name: [copy_name_bytes]u8 = undefined;
         const path = copyName(&name, job.session);
         const directory = std.Io.Dir.cwd();
-        const file = try directory.createFile(task.io, path, .{ .permissions = .fromMode(0o600) });
-        defer file.close(task.io);
-        // The read's failure is the one reported; a part left behind is never
-        // called saved.
-        errdefer directory.deleteFile(task.io, path) catch {};
-        // An earlier file keeps its mode when replaced.
-        try file.setPermissions(task.io, .fromMode(0o600));
-        var sink: Sink = .{ .io = task.io, .file = file, .code = null };
-        if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
-        if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+        var random: [8]u8 = undefined;
+        try std.Io.randomSecure(task.io, &random);
+        var temporary_name: [copy_name_bytes + 22]u8 = undefined;
+        const temporary = std.fmt.bufPrint(&temporary_name, ".{s}.{s}.tmp", .{ path, std.fmt.bytesToHex(random, .lower) }) catch unreachable;
+        // Exclusive creation never follows a link planted at either name, and
+        // the rename replaces whatever sits at the export name, never its
+        // target.
+        const file = try directory.createFile(task.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        var published = false;
+        defer if (!published) directory.deleteFile(task.io, temporary) catch {};
+        {
+            defer file.close(task.io);
+            var sink: Sink = .{ .io = task.io, .file = file, .code = null };
+            if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+            if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+        }
+        try directory.rename(temporary, directory, path, task.io);
+        published = true;
         job.result.copied = .saved;
         return;
     }
