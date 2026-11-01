@@ -233,6 +233,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
+    if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const now = codex_auth.nowSeconds(init.io);
     const readiness: provider_selection.Readiness = blk: {
@@ -244,7 +245,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
             .refresh_required => .refresh_required,
         } else |_| .credential_error;
     };
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null;
     const values = (if (changed) preferences.update(home, edit, readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
             stderr.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
@@ -280,6 +281,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .available_store = if (available_store) |*paths| paths.store.slice() else null,
         .provider = if (values.provider.len != 0) values.provider.slice() else null,
         .model = if (values.model.len != 0) values.model.slice() else null,
+        .notifications = values.notifications,
         .readiness = readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
@@ -290,6 +292,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     const codex = model_capability.supportedCapability(readiness);
     const local_status = switch (readiness) {
@@ -343,6 +346,7 @@ const DefaultsFacts = struct {
     available_store: ?[]const u8,
     provider: ?[]const u8,
     model: ?[]const u8,
+    notifications: bool,
     readiness: provider_selection.Readiness,
 };
 
@@ -357,6 +361,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try std.json.Stringify.value(facts.provider, .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
+    try writer.print(",\"notifications\":{}", .{facts.notifications});
     try writer.print(",\"local_credential\":\"{s}\",\"next_session\":", .{@tagName(facts.readiness)});
     const codex = model_capability.supportedCapability(facts.readiness);
     if (provider_selection.resolve(&.{codex}, null, null, facts.provider, facts.model)) |choice| switch (choice) {
@@ -1690,8 +1695,8 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         return;
     }
     if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
-        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
-        var setup_args: [6][]const u8 = undefined;
+        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
+        var setup_args: [8][]const u8 = undefined;
         const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
             return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
         var nothing = std.heap.FixedBufferAllocator.init(&.{});

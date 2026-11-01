@@ -64,7 +64,7 @@ pub const Command = enum {
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -136,6 +136,7 @@ const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
+const notifications = value("notifications", "on|off");
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
@@ -198,7 +199,7 @@ pub const fresh_session: Definition = .{ .resource = .session, .name = "", .desc
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model") }, .conflicts = &.{.{ "model", "clear-model" }} };
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications }, .conflicts = &.{.{ "model", "clear-model" }} };
 
 pub const Definition = struct {
     resource: Resource,

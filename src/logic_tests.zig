@@ -7,6 +7,7 @@ const core_boundary = @import("core_boundary.zig");
 /// to select test-logic.
 const cores = .{
     .{ "attempt.zig", @import("attempt.zig") },
+    .{ "attention.zig", @import("attention.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },

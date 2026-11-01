@@ -20,6 +20,7 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
+const attention = @import("attention.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -1036,7 +1037,10 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
             const expired = try stream.expire();
-            if (expired != .none) try self.inputEvent(expired);
+            if (expired != .none) {
+                self.notice = null;
+                try self.inputEvent(expired);
+            }
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -1044,17 +1048,21 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         else => return err,
     }) orelse return if (pending == .none) .empty else .decoder_pending;
-    self.notice = null;
     self.dirty = true;
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
+    // Input clears the notice; a reply, such as focus returning, keeps it.
     var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
+            .focus => |focused| self.terminal.focused = focused,
         },
-        else => try self.inputEvent(decoded),
+        else => {
+            self.notice = null;
+            try self.inputEvent(decoded);
+        },
     };
     return .byte;
 }
@@ -1468,10 +1476,13 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.hint = hint.*;
             self.shown.width = null;
         }
+        // The state the conversation opened on is not news.
+        const news = if (self.reading.opening) null else attention.news(self.live.work.state, result.work.work.state);
         self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
+        if (news) |kind| try self.terminal.notify(if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, kind, 0);
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;

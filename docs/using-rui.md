@@ -85,6 +85,10 @@ rui defaults configure --model ID
 
 To remove the saved default instead, run `rui defaults configure --clear-model`. Rui keeps the old default until you change it.
 
+## Notifications
+
+When the terminal running Rui is out of focus, the overview or an open conversation sends a desktop notification when a Session finishes, fails or needs approval. iTerm2, kitty, WezTerm and Ghostty show it as a desktop notification and foot through its notify command. Other terminals, and tmux or screen, get a bell. Rui learns about focus from the terminal's focus reports. In tmux, set `focus-events on` to get notifications. To turn them off, run `rui defaults configure --notifications off`, or enter `/setup --notifications off`.
+
 ## Context compaction
 
 When model context grows too large, Rui compacts it. Compaction never deletes saved conversation history. All eight release-supported Codex model IDs start compaction at an estimated 244,800 tokens. Unknown model names have no automatic threshold unless you set one. A context-overflow error from the provider can still start compaction.

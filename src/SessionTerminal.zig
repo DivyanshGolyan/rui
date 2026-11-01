@@ -6,6 +6,8 @@ const Text = @import("TerminalText.zig");
 const View = @import("session_view.zig");
 const Screen = @import("SessionScreen.zig");
 const protocol = @import("protocol.zig");
+const attention = @import("attention.zig");
+const preferences = @import("preferences.zig");
 const termios = @import("posix");
 const Self = @This();
 
@@ -24,6 +26,11 @@ release_deadline_ms: i64 = 0,
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
 /// Set only after the terminal reported mode 1007 reset and Rui enabled it.
 alternate_scroll: bool = false,
+/// The terminal's latest focus report. One that never reports stays
+/// focused: Rui notifies only when it knows the person looked away.
+focused: bool = true,
+/// How notifications reach this terminal; null sends none.
+notices: ?Notices = null,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(screen: *Screen) !Self {
@@ -50,9 +57,10 @@ pub fn begin(screen: *Screen) !Self {
     if (std.c.fcntl(output, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try Editor.setAttributes(.FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .output = output, .screen = screen };
-    // Query width and alternate-scroll modes without changing them. Opening
-    // never waits for a reply; unsupported queries are ignored.
-    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?2027$p\x1b[?1007$p";
+    // Query width and alternate-scroll modes without changing them, and ask
+    // for focus reports. Opening never waits for a reply; terminals ignore
+    // what they do not support.
+    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?2027$p\x1b[?1007$p";
     if (std.c.write(output, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
         owned = false;
         try self.finish();
@@ -81,6 +89,7 @@ pub fn finish(self: *Self) !void {
     const reset = writeWithin(ops, "\x1b[0m", self.release_deadline_ms);
     // Each owned mode is reset even when an earlier reset fails.
     const paste_disabled = writeWithin(ops, "\x1b[?2004l", self.release_deadline_ms);
+    const focus_disabled = writeWithin(ops, "\x1b[?1004l", self.release_deadline_ms);
     const scroll_reset = !self.alternate_scroll or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
@@ -96,7 +105,7 @@ pub fn finish(self: *Self) !void {
     }
     // The duplicate shares stdout's description: flags already apply to fd 1.
     if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
-    self.result = if (restored) |_| if (flags_ok and reset and paste_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and reset and paste_disabled and focus_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
@@ -374,6 +383,34 @@ pub fn enableAlternateScroll(self: *Self) !void {
     try self.write("\x1b[?1007h");
 }
 
+pub const Notices = struct {
+    signal: attention.Signal,
+    /// Where the preference that turns notifications off lives. It is read
+    /// at each notification, so /setup's change applies at once.
+    home: []const u8,
+
+    /// From the environment the terminal runs in.
+    pub fn of(environ: *const std.process.Environ.Map, home: []const u8) Notices {
+        const multiplexed = environ.get("TMUX") != null or environ.get("STY") != null;
+        return .{ .signal = attention.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", multiplexed), .home = home };
+    }
+};
+
+/// Tells the person, through the terminal, of `name`'s news and `more`
+/// other Sessions' while the terminal is out of focus and notifications are
+/// on. Callers write it between frames, so it never lands inside another
+/// sequence. Unreadable preferences leave notifications on, the default.
+pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) !void {
+    if (self.focused) return;
+    const notices = self.notices orelse return;
+    const saved = preferences.load(notices.home) catch preferences.Values{};
+    if (!saved.notifications) return;
+    var bytes: [attention.max_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    attention.write(&out, notices.signal, name, kind, more) catch unreachable;
+    try self.write(out.buffered());
+}
+
 pub fn permanent(self: *Self, bytes: []const u8) !void {
     return self.screen.append(bytes);
 }
@@ -412,4 +449,42 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Foot
     const delivered = self.screen.render(&output.writer, size, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
     self.size = size;
     return delivered;
+}
+
+test "a notification goes out only while focus is away and the person has not turned them off" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .output = fds[1], .screen = undefined };
+    const Pipe = struct {
+        fn all(fd: c_int, buffer: []u8) []const u8 {
+            const n = std.c.read(fd, buffer.ptr, buffer.len);
+            return if (n > 0) buffer[0..@intCast(n)] else "";
+        }
+    };
+    var buffer: [256]u8 = undefined;
+    // No way to notify, then focused: nothing.
+    terminal.focused = false;
+    try terminal.notify("k7m2qx", .finished, 0);
+    terminal.notices = .{ .signal = .osc9, .home = home };
+    terminal.focused = true;
+    try terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("", Pipe.all(fds[0], &buffer));
+    // Away, with no saved preferences: on by default.
+    terminal.focused = false;
+    try terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx finished\x07", Pipe.all(fds[0], &buffer));
+    // Turned off, then on again, applies to the next notification.
+    _ = try preferences.update(home, .{ .notifications = false }, .missing);
+    try terminal.notify("k7m2qx", .approval, 0);
+    try std.testing.expectEqualStrings("", Pipe.all(fds[0], &buffer));
+    _ = try preferences.update(home, .{ .notifications = true }, .missing);
+    try terminal.notify("k7m2qx", .approval, 1);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx needs approval, and 1 more\x07", Pipe.all(fds[0], &buffer));
 }

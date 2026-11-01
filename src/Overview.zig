@@ -283,6 +283,7 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     Signals.install(true);
     defer Signals.install(false);
     var terminal = SessionTerminal.begin(screen) catch |err| return self.failed(err, options.open);
+    terminal.notices = .of(init.environ_map, options.home);
     self.terminal = &terminal;
     const ended = self.loop();
     return self.finish(ended);
@@ -457,6 +458,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = .{ .buffer = &self.draft },
+        .notify => |alert| try self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
     return next;
@@ -620,6 +622,7 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
                     self.caps.width = method;
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
+                .focus => |focused| self.terminal.focused = focused,
             },
             else => if (try self.compose(decoded)) |next| return next,
         };

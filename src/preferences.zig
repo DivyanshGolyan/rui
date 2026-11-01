@@ -21,6 +21,8 @@ pub const Edit = struct {
     store: Change = .keep,
     provider: Change = .keep,
     model: union(enum) { keep, set: []const u8, clear } = .keep,
+    /// Null keeps the saved choice.
+    notifications: ?bool = null,
 };
 
 /// Safe fields only: resource availability belongs to the selecting caller.
@@ -50,13 +52,20 @@ fn read(dir: std.Io.Dir) !Values {
     const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
     if (count != stat.size) return error.InvalidPreferences;
     var lines = std.mem.splitScalar(u8, bytes[0..count], '\n');
-    if (!std.mem.eql(u8, lines.next() orelse "", "version=1")) return error.UnsupportedPreferencesVersion;
+    // Version 1 predates notifications: they keep their default, on.
+    const version = lines.next() orelse "";
+    const notifications = std.mem.eql(u8, version, "version=2");
+    if (!notifications and !std.mem.eql(u8, version, "version=1")) return error.UnsupportedPreferencesVersion;
     var result: Values = .{};
     const fields = .{ .{ "store=", &result.store }, .{ "provider=", &result.provider }, .{ "model=", &result.model } };
     inline for (fields) |field| {
         const line = lines.next() orelse return error.InvalidPreferences;
         if (!std.mem.startsWith(u8, line, field[0])) return error.InvalidPreferences;
         field[1].set(line[field[0].len..]) catch return error.InvalidPreferences;
+    }
+    if (notifications) {
+        const line = lines.next() orelse return error.InvalidPreferences;
+        result.notifications = if (std.mem.eql(u8, line, "notifications=on")) true else if (std.mem.eql(u8, line, "notifications=off")) false else return error.InvalidPreferences;
     }
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidPreferences, "") or lines.next() != null)
         return error.InvalidPreferences;
@@ -99,6 +108,7 @@ fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Va
         if (!saved.provider.eql(edit.provider.set)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
     }
+    if (edit.notifications) |on| values.notifications = on;
     switch (edit.model) {
         .keep => {},
         .clear => values.model = .{},
@@ -212,7 +222,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Read
     }
     if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
     var bytes: [max_file_bytes]u8 = undefined;
-    const encoded = std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", .{ values.store.slice(), values.provider.slice(), values.model.slice() }) catch return error.InvalidPreferences;
+    const encoded = std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n", .{ values.store.slice(), values.provider.slice(), values.model.slice(), if (values.notifications) "on" else "off" }) catch return error.InvalidPreferences;
     try file.writeStreamingAll(io, encoded);
     try file.sync(io);
     file.close(io);
@@ -297,8 +307,8 @@ test "directory sync failures preserve complete preference publication" {
             return if (self.calls == self.at) -1 else NativeDirectorySync.sync(.{}, fd);
         }
     };
-    const old = "version=1\nstore=\nprovider=codex\nmodel=deliberate-pin\n";
-    const new = "version=1\nstore=\nprovider=codex\nmodel=new-pin\n";
+    const old = "version=2\nstore=\nprovider=codex\nmodel=deliberate-pin\nnotifications=on\n";
+    const new = "version=2\nstore=\nprovider=codex\nmodel=new-pin\nnotifications=on\n";
     for (0..4) |cut| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -380,6 +390,39 @@ test "preference edits distinguish model keep set and clear without publishing r
             try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = invalid } }, .configured));
             try std.testing.expectEqualStrings(valid, (try load(home)).model.slice());
         }
+    }
+}
+
+test "notifications stay on until turned off, and a version 1 file reads as on" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..len];
+    try std.testing.expect((try load(home)).notifications);
+    _ = try update(home, .{ .provider = .{ .set = "codex" } }, .missing);
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+    try file.writeStreamingAll(io, "version=1\nstore=\nprovider=codex\nmodel=pin\n");
+    file.close(io);
+    try std.testing.expect((try load(home)).notifications);
+    // Turning them off keeps every other choice, and a later edit keeps it off.
+    const off = try update(home, .{ .notifications = false }, .configured);
+    try std.testing.expect(!off.notifications and off.provider.eql("codex") and off.model.eql("pin"));
+    const kept = try update(home, .{ .model = .clear }, .configured);
+    try std.testing.expect(!kept.notifications and !(try load(home)).notifications);
+    try std.testing.expect((try update(home, .{ .notifications = true }, .configured)).notifications);
+    const saved = try config.openFile(io, "preferences", .{});
+    defer saved.close(io);
+    var bytes: [256]u8 = undefined;
+    const count = try saved.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings("version=2\nstore=\nprovider=codex\nmodel=\nnotifications=on\n", bytes[0..count]);
+    for ([_][]const u8{ "version=2\nstore=\nprovider=codex\nmodel=\n", "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
+        const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try bad.writeStreamingAll(io, invalid);
+        bad.close(io);
+        try std.testing.expectError(error.InvalidPreferences, load(home));
     }
 }
 

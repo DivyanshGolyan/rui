@@ -28,6 +28,8 @@ pub const Report = union(enum) {
     width: vaxis.gwidth.Method,
     /// The terminal reports alternate scroll (mode 1007) present but reset.
     alternate_scroll_reset,
+    /// Focus reporting (mode 1004): whether the terminal now has focus.
+    focus: bool,
 };
 
 /// One decoded unit. Terminal replies are reports, never editor input.
@@ -220,6 +222,7 @@ fn decode(self: *Self, line_end: bool) Decoded {
         // next feed or next, after the caller consumed it.
         if (result.n == self.used) self.used = 0 else self.consumed = result.n;
         switch (event) {
+            .focus_in, .focus_out => return .{ .report = .{ .focus = event == .focus_in } },
             .paste_start => self.paste = true,
             .paste_end => self.paste = false,
             else => {},
@@ -298,6 +301,17 @@ test "alternate scroll is reported only when present and reset" {
         try std.testing.expectEqual(status != 2, decoded == .none);
         try std.testing.expectEqual(Pending.none, input.pending());
     }
+}
+
+test "focus changes are reports, never keys, and keep the key after them" {
+    var input: Self = .{};
+    try std.testing.expect(input.feed(0x1b, 0) == .none);
+    try std.testing.expect(input.feed('[', 0) == .none);
+    try std.testing.expectEqual(Report{ .focus = false }, input.feed('O', 0).report);
+    for ("\x1b[I") |byte| if (byte != 'I') try std.testing.expect(input.feed(byte, 0) == .none);
+    try std.testing.expectEqual(Report{ .focus = true }, input.feed('I', 0).report);
+    try std.testing.expectEqualStrings("x", testEvent(input.feed('x', 0)).?.key_press.text.?);
+    try std.testing.expectEqual(Pending.none, input.pending());
 }
 
 test "fragmented X10 mouse reports are consumed whole, never as typed text" {
