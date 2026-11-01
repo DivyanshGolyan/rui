@@ -2448,21 +2448,41 @@ pub const Store = struct {
         return .{ .rejected = .{ .replayed = false, .code = code } };
     }
 
+    /// A fresh Message admission, as `MessageCommitted` receives it.
+    pub const MessageAdmission = struct {
+        /// The admitted Session, borrowed for the call.
+        session: []const u8,
+        /// Store-wide, increasing with each admission.
+        admission_id: u64,
+        /// The sender was another Session's Action, not a person.
+        from_peer: bool,
+    };
+
+    /// Called once a fresh Message admission commits, before the Store lock
+    /// is released, so whatever reads the Store next also sees its effect.
+    /// A replayed or rejected Message calls nothing. It cannot fail.
+    pub const MessageCommitted = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, admission: MessageAdmission) void,
+    };
+
     /// A Message's `require_model` condition checks that the Host serves its
     /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
         command: *const protocol.MessageCommand,
+        committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
         const access = self.enter(.none) catch return .infrastructure_failure;
         defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, self.submitMessageLocked(command, faults)) catch .infrastructure_failure;
+        return access.finishTransaction(Ordinary.none, faults, self.submitMessageLocked(command, committed, faults)) catch .infrastructure_failure;
     }
 
     fn submitMessageLocked(
         self: *Store,
         request: *const protocol.MessageCommand,
+        committed: ?MessageCommitted,
         faults: Faults,
     ) !MessageReply {
         const command = request;
@@ -2559,6 +2579,11 @@ pub const Store = struct {
         );
         if (faults.before_commit) return error.InjectedCommitFailure;
         try self.execute("COMMIT");
+        if (committed) |callback| callback.call(callback.context, .{
+            .session = session.slice(),
+            .admission_id = admission_id,
+            .from_peer = command.sender != null,
+        });
         return .{ .accepted = .{
             .replayed = false,
             .admission_id = admission_id,
@@ -9378,10 +9403,10 @@ test "Store distinguishes noncanonical Session references from canonical unknown
         var message: protocol.MessageCommand = .{ .text = content };
         try message.key.set(try std.fmt.bufPrint(&key, "reference-message-{d}", .{index}));
         try message.session.set(reference);
-        const message_reply = storage.submitMessageWithModel(&message, .{});
+        const message_reply = storage.submitMessageWithModel(&message, null, .{});
         try std.testing.expect(message_reply == .rejected);
         try std.testing.expectEqual(if (canonical_unknown) protocol.MessageRejection.unknown_session else .invalid_session_reference, message_reply.rejected.code);
-        const message_replay = storage.submitMessageWithModel(&message, .{});
+        const message_replay = storage.submitMessageWithModel(&message, null, .{});
         try std.testing.expect(message_replay == .rejected and message_replay.rejected.replayed);
         try std.testing.expectEqual(message_reply.rejected.code, message_replay.rejected.code);
 
@@ -9650,7 +9675,7 @@ fn submitTestMessage(
     try file.sync(std.testing.io);
     var command = try completeMessage(key, session_ref, file, text);
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&command, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
 }
 
 const TestingCall = struct {
@@ -9915,7 +9940,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
     var expected_empty: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"4\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -10283,7 +10308,7 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
                 defer command.removeTemporaryContent(std.testing.io) catch unreachable;
                 fault.arm(storage.database);
                 defer fault.disarm(storage.database);
-                try std.testing.expectEqual(std.meta.Tag(MessageReply).infrastructure_failure, std.meta.activeTag(storage.submitMessageWithModel(&command, .{})));
+                try std.testing.expectEqual(std.meta.Tag(MessageReply).infrastructure_failure, std.meta.activeTag(storage.submitMessageWithModel(&command, null, .{})));
             },
         }
         try std.testing.expect(fault.failed > 0);
@@ -14841,7 +14866,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try file.sync(std.testing.io);
     var message = try completeMessage("provider-reopen-message", created_session_0.slice(), file, "message");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", created_session_0.slice());
     var view: HistoricalView = undefined;
@@ -15644,6 +15669,23 @@ test "real SQLite full during import publishes no canonical prefix" {
     ));
 }
 
+/// Records each `MessageCommitted` call, as the Host's environment install sees it.
+const TestingCommits = struct {
+    calls: [4]struct { session: protocol.Bounded(protocol.max_session_bytes), admission_id: u64, from_peer: bool } = undefined,
+    count: usize = 0,
+
+    fn callback(self: *TestingCommits) Store.MessageCommitted {
+        return .{ .context = self, .call = record };
+    }
+
+    fn record(context: *anyopaque, admission: Store.MessageAdmission) void {
+        const self: *TestingCommits = @ptrCast(@alignCast(context));
+        self.calls[self.count] = .{ .session = .{}, .admission_id = admission.admission_id, .from_peer = admission.from_peer };
+        self.calls[self.count].session.set(admission.session) catch unreachable;
+        self.count += 1;
+    }
+};
+
 test "message admissions remain queued in order and retain bounded canonical content" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -15664,7 +15706,12 @@ test "message admissions remain queued in order and retain bounded canonical con
     var first = try completeMessage("message-1", created_session_0.slice(), first_file, first_text);
     defer first.removeTemporaryContent(std.testing.io) catch unreachable;
     const before = try pragmaInt(storage.database, "SELECT unixepoch()");
-    const first_reply = storage.submitMessageWithModel(&first, .{});
+    var commits: TestingCommits = .{};
+    const first_reply = storage.submitMessageWithModel(&first, commits.callback(), .{});
+    try std.testing.expectEqual(@as(usize, 1), commits.count);
+    try std.testing.expect(commits.calls[0].session.eql(created_session_0.slice()));
+    try std.testing.expectEqual(@as(u64, 1), commits.calls[0].admission_id);
+    try std.testing.expect(!commits.calls[0].from_peer);
     try std.testing.expect(first_reply == .accepted);
     try std.testing.expect(!first_reply.accepted.replayed);
     try std.testing.expectEqual(@as(u64, 1), first_reply.accepted.admission_id);
@@ -15675,7 +15722,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try second_file.sync(std.testing.io);
     var second = try completeMessage("message-2", created_session_0.slice(), second_file, second_text);
     defer second.removeTemporaryContent(std.testing.io) catch unreachable;
-    const second_reply = storage.submitMessageWithModel(&second, .{});
+    const second_reply = storage.submitMessageWithModel(&second, null, .{});
     try std.testing.expect(second_reply == .accepted);
     try std.testing.expect(first_reply.accepted.admission_id < second_reply.accepted.admission_id);
     // The Host stamps each admission with its wall clock, to the second.
@@ -15685,7 +15732,9 @@ test "message admissions remain queued in order and retain bounded canonical con
     // A replayed or restarted admission keeps the time it was admitted at.
     try exec(storage.database, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1");
 
-    const replay = storage.submitMessageWithModel(&first, .{});
+    const replay = storage.submitMessageWithModel(&first, commits.callback(), .{});
+    // A replayed admission installs nothing.
+    try std.testing.expectEqual(@as(usize, 1), commits.count);
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
     try std.testing.expectEqual(first_reply.accepted.admission_id, replay.accepted.admission_id);
@@ -15822,7 +15871,7 @@ test "model admission skips Sessions of a provider the Host does not serve" {
         var storage: Store = undefined;
         try storage.openWithOptions(std.testing.io, database, root, .{ .served = protocol.routesAll(.unserved) });
         defer storage.close() catch unreachable;
-        try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
         try std.testing.expect(try storage.admitNextModelAttempt(.{}) == null);
     }
     var storage: Store = undefined;
@@ -15846,20 +15895,20 @@ test "a creating Message with require_model creates nothing without a model" {
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
 
     storage.served = protocol.routesAll(.unserved);
-    const refused = storage.submitMessageWithModel(&message, .{});
+    const refused = storage.submitMessageWithModel(&message, null, .{});
     try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, refused.rejected.code);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM session"));
     // The saved refusal replays even once a model is available, and the
     // same key without the condition is a different request.
     storage.served = protocol.routesAll(.endpoint);
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}).rejected.replayed);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}).rejected.replayed);
     var unconditional = message;
     unconditional.require_model = false;
-    try std.testing.expect(storage.submitMessageWithModel(&unconditional, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&unconditional, null, .{}) == .conflict);
 
     var accepted = message;
     try accepted.key.set("composer-ready");
-    const reply = storage.submitMessageWithModel(&accepted, .{});
+    const reply = storage.submitMessageWithModel(&accepted, null, .{});
     try std.testing.expect(reply == .accepted);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
 }
@@ -15879,7 +15928,7 @@ test "initial Message atomically allocates its Session and replays its original 
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const reply = storage.submitMessageWithModel(&message, .{});
+        const reply = storage.submitMessageWithModel(&message, null, .{});
         try std.testing.expect(reply == .accepted);
         first = reply.accepted;
         try std.testing.expect(protocol.validSessionId(first.session.slice()));
@@ -15891,28 +15940,28 @@ test "initial Message atomically allocates its Session and replays its original 
         var changed = message;
         changed.configuration.?.model.value = .{};
         try changed.configuration.?.model.value.set("model-b");
-        try std.testing.expect(storage.submitMessageWithModel(&changed, .{}) == .conflict);
+        try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
         var refused = message;
         try refused.key.set("invalid-initial-settings");
         refused.configuration.?.workspace.value = .{};
-        const rejected = storage.submitMessageWithModel(&refused, .{});
+        const rejected = storage.submitMessageWithModel(&refused, null, .{});
         try std.testing.expect(rejected == .rejected);
         try std.testing.expectEqual(protocol.MessageRejection.invalid_workspace, rejected.rejected.code);
-        try std.testing.expect(storage.submitMessageWithModel(&refused, .{}).rejected.replayed);
+        try std.testing.expect(storage.submitMessageWithModel(&refused, null, .{}).rejected.replayed);
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
     }
     {
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
-        const replay = storage.submitMessageWithModel(&message, .{}).accepted;
+        const replay = storage.submitMessageWithModel(&message, null, .{}).accepted;
         try std.testing.expect(replay.replayed);
         try std.testing.expectEqual(first.admission_id, replay.admission_id);
         try std.testing.expectEqualDeep(first.session, replay.session);
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM message_admission"));
         var failed = message;
         try failed.key.set("failed-start-commit");
-        try std.testing.expect(storage.submitMessageWithModel(&failed, .{ .before_commit = true }) == .infrastructure_failure);
+        try std.testing.expect(storage.submitMessageWithModel(&failed, null, .{ .before_commit = true }) == .infrastructure_failure);
         try storage.close();
     }
     {
@@ -15949,7 +15998,7 @@ test "message rejections replay before current Session checks without retained i
     try file.sync(std.testing.io);
     var message = try completeMessage("rejected-message", "000000", file, text);
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    const rejected = storage.submitMessageWithModel(&message, .{});
+    const rejected = storage.submitMessageWithModel(&message, null, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(protocol.MessageRejection.unknown_session, rejected.rejected.code);
 
@@ -15959,7 +16008,7 @@ test "message rejections replay before current Session checks without retained i
     const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     try std.testing.expectEqualStrings(message.session.slice(), configured.accepted.session.slice());
-    const replay = storage.submitMessageWithModel(&message, .{});
+    const replay = storage.submitMessageWithModel(&message, null, .{});
     try std.testing.expect(replay == .rejected);
     try std.testing.expect(replay.rejected.replayed);
     try std.testing.expectEqual(protocol.MessageRejection.unknown_session, replay.rejected.code);
@@ -16018,24 +16067,30 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     var sent = try Send.make(tmp.dir, "peer-send", allocated_session_1.slice(), sender, "look at this\nsecond line");
     sent.sender_handle = handle;
     defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
-    const accepted = storage.submitMessageWithModel(&sent, .{});
+    var commits: TestingCommits = .{};
+    const accepted = storage.submitMessageWithModel(&sent, commits.callback(), .{});
     try std.testing.expect(accepted == .accepted);
-    try std.testing.expect(storage.submitMessageWithModel(&sent, .{}).accepted.replayed);
+    try std.testing.expect(storage.submitMessageWithModel(&sent, commits.callback(), .{}).accepted.replayed);
+    try std.testing.expectEqual(@as(usize, 1), commits.count);
+    try std.testing.expect(commits.calls[0].from_peer);
+    try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
     // The sender is part of the request: the same key without it conflicts.
     var anonymous = try Send.make(tmp.dir, "peer-send-anonymous", allocated_session_1.slice(), null, "look at this\nsecond line");
     defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
     try anonymous.key.set("peer-send");
-    try std.testing.expect(storage.submitMessageWithModel(&anonymous, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&anonymous, null, .{}) == .conflict);
 
     var refused = try Send.make(tmp.dir, "peer-refused", "absent", sender, "lost");
     refused.sender_handle = handle;
     defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&refused, commits.callback(), .{}).rejected.code);
+    // A rejected Message installs nothing.
+    try std.testing.expectEqual(@as(usize, 1), commits.count);
 
     var forged = try Send.make(tmp.dir, "peer-forged", allocated_session_1.slice(), "f0rged", "forged");
     defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, .{}).rejected.code);
-    const forged_replay = storage.submitMessageWithModel(&forged, .{});
+    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&forged, null, .{}).rejected.code);
+    const forged_replay = storage.submitMessageWithModel(&forged, null, .{});
     try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .invalid_sender_handle);
     // Every invalid binding must leave both receiver admission and the
     // falsely claimed sender's Activity untouched.
@@ -16051,11 +16106,11 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             4 => invalid.sender = null,
             else => unreachable,
         }
-        try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&invalid, .{}).rejected.code);
+        try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&invalid, null, .{}).rejected.code);
     }
     var changed_handle = sent;
     changed_handle.sender_handle = null;
-    try std.testing.expect(storage.submitMessageWithModel(&changed_handle, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&changed_handle, null, .{}) == .conflict);
     // An invalid target is refused first, whichever sender: an unknown one
     // claims no sequence position, and the Store stays open.
     for ([_]struct { key: []const u8, from: []const u8 }{
@@ -16065,7 +16120,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
         var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
         if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
         defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, .{}).rejected.code);
+        try std.testing.expectEqual(protocol.MessageRejection.invalid_session_reference, storage.submitMessageWithModel(&empty, null, .{}).rejected.code);
     }
     // An unknown sender has no sequence: only the known sender's refusals are kept.
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM sent_rejection"));
@@ -16104,10 +16159,10 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
     try std.testing.expect(own.items[0].position < own.items[1].position);
     try storage.revokeActionSender(action);
-    try std.testing.expect(storage.submitMessageWithModel(&sent, .{}).accepted.replayed);
+    try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
     var stale = sent;
     try stale.key.set("stale-handle");
-    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, .{}).rejected.code);
+    try std.testing.expectEqual(protocol.MessageRejection.invalid_sender_handle, storage.submitMessageWithModel(&stale, null, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
     var reader: ContentReader = undefined;
     reader.open(try storage.openActivityContent(&.{ .session = session, .position = own.items[0].position }));
@@ -16163,7 +16218,7 @@ test "message observation validates accepted admission references independently"
             "primary input",
         );
         defer primary_message.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(storage.submitMessageWithModel(&primary_message, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&primary_message, null, .{}) == .accepted);
 
         const other_file = try tmp.dir.createFile(std.testing.io, "reference-other-message", .{ .read = true });
         try other_file.writeStreamingAll(std.testing.io, "other input");
@@ -16175,7 +16230,7 @@ test "message observation validates accepted admission references independently"
             "other input",
         );
         defer other_message.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(storage.submitMessageWithModel(&other_message, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&other_message, null, .{}) == .accepted);
 
         switch (corruption) {
             .session => try execSessionSql(
@@ -16227,7 +16282,7 @@ test "message observation rejects an answer attached to processing durable facts
         "input",
     );
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try exec(
         storage.database,
@@ -16261,23 +16316,26 @@ test "message conflicts and failed commits cannot create another admission" {
     try file.sync(std.testing.io);
     var message = try completeMessage("message", created_session_0.slice(), file, text);
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{ .before_commit = true }) == .infrastructure_failure);
+    var commits: TestingCommits = .{};
+    try std.testing.expect(storage.submitMessageWithModel(&message, commits.callback(), .{ .before_commit = true }) == .infrastructure_failure);
+    // A Message that did not commit installs nothing.
+    try std.testing.expectEqual(@as(usize, 0), commits.count);
     try storage.close();
 
     try testingStore(&storage, &tmp, std.testing.io);
     try std.testing.expect((try storage.observeCommand("message")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
-    const accepted = storage.submitMessageWithModel(&message, .{});
+    const accepted = storage.submitMessageWithModel(&message, null, .{});
     try std.testing.expect(accepted == .accepted);
 
     var retargeted = message;
     retargeted.text.file = null;
     try retargeted.session.set("0ther0");
-    try std.testing.expect(storage.submitMessageWithModel(&retargeted, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&retargeted, null, .{}) == .conflict);
     var changed = message;
     changed.text.file = null;
     changed.text.length += 1;
-    try std.testing.expect(storage.submitMessageWithModel(&changed, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
     var changed_kind = try completeConfiguration("message", created_session_0.slice(), workspace, "model-a");
     try std.testing.expect(storage.configure(&changed_kind, .{}) == .conflict);
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
@@ -16302,14 +16360,14 @@ test "failed message import rolls back content command and admission" {
     try file.sync(std.testing.io);
     var message = try completeMessage("message-import", created_session_0.slice(), file, text);
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{ .content_import = true }) == .infrastructure_failure);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{ .content_import = true }) == .infrastructure_failure);
     try storage.close();
 
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     try std.testing.expect((try storage.observeCommand("message-import")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
 }
 
 test "rollback failure fences mutation until fresh reopen restores committed facts" {
@@ -16341,7 +16399,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         const configured = storage.configure(&configuration, .{});
         try std.testing.expect(configured == .accepted);
         message.session = configured.accepted.session;
-        try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
         try std.testing.expectError(
             error.CanonicalRollbackFailed,
             storage.admitNextModelAttempt(.{
@@ -16999,7 +17057,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try testingBytesContent(&tmp, name, "é中")
         else
             try testingContent(&tmp, name, 'x', if (index == 0) 1024 * 1024 else 3);
-        try std.testing.expect(storage.submitMessageWithModel(&command, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
         try command.removeTemporaryContent(std.testing.io);
     }
     try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPageForTesting(request)).count);
@@ -17810,7 +17868,7 @@ test "definite rejections retain decisions without retaining payloads" {
     try unknown_message.session.set("absent");
     unknown_message.text = try testingContent(&tmp, "unknown-message", 'm', 64 * 1024);
     defer unknown_message.removeTemporaryContent(std.testing.io) catch unreachable;
-    const unknown_reply = storage.submitMessageWithModel(&unknown_message, .{});
+    const unknown_reply = storage.submitMessageWithModel(&unknown_message, null, .{});
     try std.testing.expect(unknown_reply == .rejected);
     try std.testing.expectEqual(protocol.MessageRejection.unknown_session, unknown_reply.rejected.code);
 
@@ -17839,13 +17897,13 @@ test "definite rejections retain decisions without retaining payloads" {
 
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
-    try std.testing.expect(storage.submitMessageWithModel(&unknown_message, .{}).rejected.replayed);
+    try std.testing.expect(storage.submitMessageWithModel(&unknown_message, null, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&incomplete, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&exhausted, .{}).rejected.replayed);
 
     var changed = unknown_message;
     changed.text.digest[0] ^= 1;
-    try std.testing.expect(storage.submitMessageWithModel(&changed, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
     var retargeted = incomplete;
     try retargeted.session.set("0ther0");
     try std.testing.expect(storage.configure(&retargeted, .{}) == .conflict);
@@ -17853,7 +17911,7 @@ test "definite rejections retain decisions without retaining payloads" {
     try changed_kind.key.set("incomplete");
     try changed_kind.session.set("absent");
     changed_kind.text = unknown_message.text;
-    try std.testing.expect(storage.submitMessageWithModel(&changed_kind, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
 }
 
@@ -17876,14 +17934,14 @@ test "one committed selection freezes its settings and input prefix" {
     try first_file.sync(std.testing.io);
     var first = try completeMessage("dispatch-1", created_session_0.slice(), first_file, "first");
     defer first.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&first, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .accepted);
 
     const second_file = try tmp.dir.createFile(std.testing.io, "dispatch-second", .{ .read = true });
     try second_file.writeStreamingAll(std.testing.io, "second");
     try second_file.sync(std.testing.io);
     var second = try completeMessage("dispatch-2", created_session_0.slice(), second_file, "second");
     defer second.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&second, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
 
     var instructions_update: protocol.ConfigureCommand = .{};
     try instructions_update.key.set("instructions-before-selection");
@@ -17932,7 +17990,7 @@ test "one committed selection freezes its settings and input prefix" {
     try third_file.sync(std.testing.io);
     var third = try completeMessage("dispatch-3", created_session_0.slice(), third_file, "later");
     defer third.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&third, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&third, null, .{}) == .accepted);
     var update: protocol.ConfigureCommand = .{};
     try update.key.set("configure-later");
     try update.session.set(created_session_0.slice());
@@ -18051,7 +18109,7 @@ test "continued accepted output keeps model immutable and public text readable" 
         "first",
     );
     defer first.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&first, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
     const second_file = try tmp.dir.createFile(std.testing.io, "continued-second", .{ .read = true });
@@ -18064,7 +18122,7 @@ test "continued accepted output keeps model immutable and public text readable" 
         "second",
     );
     defer second.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&second, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
 
     const source_bytes = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}";
     const source = try tmp.dir.createFile(std.testing.io, "continued-output", .{ .read = true });
@@ -18312,7 +18370,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         try message_file.sync(std.testing.io);
         var message = try completeMessage("failure-message", created_session_0.slice(), message_file, "fail");
         defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectError(
             error.InjectedCommitFailure,
@@ -18575,7 +18633,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try message_file.sync(std.testing.io);
     var message = try completeMessage("retry-message", created_session_0.slice(), message_file, "retry me");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
 
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const policy = retry_policy.Input{
@@ -18699,7 +18757,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try file.sync(std.testing.io);
     var message = try completeMessage("historical-message", created_session_0.slice(), file, "message");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted_attempt = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted_attempt.permit.consume();
 

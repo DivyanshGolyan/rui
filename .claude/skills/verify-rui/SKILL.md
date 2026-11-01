@@ -36,9 +36,11 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    - starts Session `demo` (bypass) and Session `approve` (ask), each labelled with its name, and records their IDs in `run.json` under `sessions`;
    - seeds N answered messages into `demo`. Use `--seed 3` or more when you need PgUp history.
 
+   `--host-setenv NAME=VALUE` (repeatable) adds a variable to the Host's own environment, for example a Host-only secret Bash must not see.
+
    `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
 
-   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below).
+   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host (when it is running) and starts a fresh one on the same Store, fixture and `--host-setenv` options.
 
 3. **Open a terminal: one Rui client per name.**
 
@@ -50,6 +52,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    - `pty`: headless PTY. Input arrives through `send` into a FIFO.
    - `tmux-detached`: Rui in a window of the run's private tmux server, with no client attached.
    - `tmux-attached`: the same, plus an owned tmux client attached through its own recorded PTY, recorded as terminal `NAME.client`.
+   - `--setenv NAME=VALUE` (repeatable) sets a variable in that terminal's environment. In a PATH value, `{PATH}` stands for the run's PATH.
    - `--no-tap` (tmux only): runs Rui directly in the pane, as a control for harness effects. It records no input bytes.
 
    Each Rui runs under the tap: an inner PTY proxy that records every byte Rui receives and emits.
@@ -104,6 +107,9 @@ Fixture policy, chosen by the latest user text:
 - `tool demonstration`: three Bash calls (`ls`, `exit 127`, stderr plus `exit 1`), then a summary.
 - `consent check`: one 32-line Bash command, which needs consent in `approve`.
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
+- `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.
+- `start a child`: one Bash call that starts Session `child` with `show environment` through `rui session start`.
+- `relay to ID`: one Bash call that sends `show environment` to Session ID through `rui session send`, so the recipient's Turn starts from a peer Message.
 - `parallel bash`: two Bash commands issued together that sleep 12 s and 20 s, so two calls run side by side.
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.

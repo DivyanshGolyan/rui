@@ -291,6 +291,11 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Cleanup facts unavailable: fence only while facts stay unconfirmed | `bash_lifecycle_integration.py`, `'service acts'` | macOS `EPERM` |
 | Cross-scenario matrix: splits, cutoff and status | `'resumable Bash parser'`, `'wide process exit'` | Native Linux and macOS. Cross-compilation does not qualify `WNOWAIT` |
 | Capture cannot be completed | `'stops a running Attempt'` | None |
+| [Bash environment](ARCHITECTURE.md#bash-environment): the Turn's first Bash sees the sending terminal's environment led by this `rui`, without the Host's own variables or the terminal's `RUI_` names; a later terminal's Message switches it | `bash_environment_integration.py`, `'received keeps well-formed entries'` | Linux; the macOS system `PATH` and live terminals are lane evidence |
+| A peer's Message never displaces a person's environment and fills a Session that holds none; every order of offers keeps the highest rank | `bash_environment_integration.py`, `'Rank.outranks is a strict total order'`, `"every order of offers keeps each Session's highest rank"` | Fallback after a Host restart: unit evidence only |
+| Only a fresh admission installs, after commit and before the Store lock is released; a replay or rejection installs nothing | `'message admissions remain queued in order'`, `'a peer sender is resolved from its Action handle'`, `'message conflicts and failed commits cannot create another admission'` | None |
+| An environment over 64 KiB is refused before connecting, naming its largest variables, and its capture recovers from a smaller environment; no environment value reaches a caller record | `bash_environment_integration.py`, `'a Message uploads its environment ahead of the unchanged record'` | None |
+| Host refuses a missing header, an oversized or malformed environment, a repeated name and the header on another route before admission | `bash_environment_integration.py`, `"a Message's environment header and entries are checked before admission"` | None |
 | Evidence layers | `test-logic`, `bash-owner-integration`, `bash-lifecycle-integration` | No reruns to pass |
 | [Frozen catalog and permission mode](ARCHITECTURE.md#authorizing-exact-actions) | `'frozen catalog'`, `'allow once survives'` | Workflow bypass across restart: none located |
 | Bash-only catalog and configuration: exact `bash`/`none` CLI, `["bash"]`/`[]` wire; removed Edit and duplicate/alternate spellings reject | `human_cli_integration.py`, `proposal_integration.py`, `dispatch_integration.py`, `'Current facts'` | Public arrays and private SQLite masks remain distinct representations |
@@ -434,6 +439,7 @@ Targets (Host-only; CLI/helpers separate):
 - ≤2 cores observed model-fixture CPU and ≤120 CPU s complete work, two same-Host rounds: `measure-model-output`
 - p95 durable control acknowledgement ≤1 s with 100 live streams and 100 occupied custody records: `measure-model-control`
 - 0/100/1,000/10,000 Dormant Sessions at fixed capacity: `measure-admission`
+- Session environment register: at most 4,096 Sessions and 128 values of at most 1 MiB in total, least recently used replaced, each value freed when no entry names it: `'the table holds at most its Sessions and value bytes'`, `'the table holds at most its values'`, `'a value is freed exactly when no entry names it'`
 - Behavior failure vs invalid measurement vs target miss: `measurement-check`
 
 ### Descriptor startup capacity
