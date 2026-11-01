@@ -220,6 +220,8 @@ def fixture_main(args):
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
+      * text containing "show environment": one Bash call that prints CLIENT_MARK, `command -v brew` and PATH
+      * text containing "start a child": one Bash call that starts Session "child" with "show environment"
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
@@ -289,8 +291,12 @@ def fixture_main(args):
                 return
             if tool_results:
                 kind = "tool-summary"
-                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
-                    f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}.")[0]
+                summary = f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}."
+                if user_text and ("show environment" in user_text or "start a child" in user_text):
+                    # Say what Bash printed, so the conversation shows it.
+                    printed = [r.get("output", "").partition("stdout tail:\n")[2].rstrip("\n") for r in tool_results]
+                    summary += "\n\nBash printed:\n" + "\n".join(printed)
+                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}", summary)[0]
             elif user_text and "tool demonstration" in user_text:
                 kind = "tool-calls"
                 payload = fixture.sse_tool_calls(f"r{n}", [
@@ -302,6 +308,15 @@ def fixture_main(args):
                 payload = fixture.sse_tool_calls(f"r{n}", [
                     bash(f"c{n}a", "sleep 12; echo built", "Build the docs"),
                     bash(f"c{n}b", "sleep 20; echo tested", "Run the slow tests")])
+            elif user_text and "show environment" in user_text:
+                kind = "show-environment"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    "printf 'CLIENT_MARK=%s\\n' \"${CLIENT_MARK-unset}\"; command -v brew || echo 'brew: not found'; "
+                    "printf 'PATH=%s\\n' \"$PATH\"", "Show the environment")])
+            elif user_text and "start a child" in user_text:
+                kind = "start-child"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    "printf 'show environment' | rui session start --label child --permission-mode bypass", "Start a child Session")])
             elif user_text and "long bash" in user_text:
                 kind = "long-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", "sleep 8; echo slept", "Sleep eight seconds")])
@@ -615,7 +630,11 @@ def cmd_new(args):
     run = Run(root)
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(args.active_capacity),
                  "--provider-endpoint", meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
-    host = subprocess.Popen(host_argv, env=run.env(), cwd=run.project, stdin=subprocess.DEVNULL,
+    host_env = run.env()
+    for assignment in args.host_setenv:
+        key, _, value = assignment.partition("=")
+        host_env[key] = value
+    host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
                             stdout=open(run.evidence / "host.stdout.log", "w"), stderr=open(run.evidence / "host.log", "w"),
                             start_new_session=True)
     run.own("host", host.pid, argv=host_argv)
@@ -766,10 +785,13 @@ def cmd_term(args):
     columns, rows = (int(v) for v in args.size.split("x"))
     python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
     child_env = run.env(COLORTERM="truecolor")
+    for assignment in args.setenv:
+        key, _, value = assignment.partition("=")
+        child_env[key] = value.replace("{PATH}", child_env["PATH"]) if key == "PATH" else value
     tap = [python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
            "--env", json.dumps(child_env), "--size", args.size]
     record = {"name": name, "surface": args.surface, "session": args.session, "argv": argv, "size": args.size,
-              "tapped": not args.no_tap, "t_ns": now_ns(), "wall": wall()}
+              "tapped": not args.no_tap, "setenv": args.setenv, "t_ns": now_ns(), "wall": wall()}
     if args.surface == "pty":
         if args.no_tap:
             die("--no-tap applies to tmux surfaces")
@@ -1654,6 +1676,8 @@ def main():
     p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")
     p.add_argument("--no-sessions", action="store_true", help="an empty Store: start neither demo nor approve")
     p.add_argument("--active-capacity", type=int, default=2, help="the Host's Active Capacity")
+    p.add_argument("--host-setenv", action="append", default=[], metavar="NAME=VALUE",
+                   help="add one variable to the Host's own environment (e.g. a Host-only secret)")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_new)
     p = sub.add_parser("doctor", help="read-only: right binary/SHA, owned Host ready, owned fixture, private tmux")
@@ -1665,6 +1689,8 @@ def main():
     p.add_argument("--session", default="demo", help="demo | approve | overview (bare rui) | a Session ID")
     p.add_argument("--size", default="80x24")
     p.add_argument("--no-tap", action="store_true", help="tmux only: run Rui directly in the pane (control; no byte log)")
+    p.add_argument("--setenv", action="append", default=[], metavar="NAME=VALUE",
+                   help="add or replace one variable in this terminal's environment; PATH's value may hold {PATH} for the run's PATH")
     p.add_argument("argv", nargs="*", help="override argv (must still pass --store)")
     p.set_defaults(func=cmd_term)
     p = sub.add_parser("send", help="inject input: --text, --hex or --keys; logged with monotonic time")
