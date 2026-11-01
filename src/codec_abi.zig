@@ -235,170 +235,62 @@ pub const Headers = struct {
 
 // -------------------------------------------------------------- classify
 //
-// The Host classifies an HTTP error response by feeding the codec the sealed
-// body in order, one window at a time, from its first byte to its last. It
-// never feeds a byte twice, and the codec cannot ask it to: a codec keeps
-// what it needs of earlier windows in its own state, and names text by range.
-// The codec answers each window with findings in `Ops`. A finding can only
-// narrow the failure the Host's status rules give, and every narrowing
-// settles the Attempt as a failure no retry can fix, so a codec can never
-// make a failure retryable. The Host keeps every status rule, decides which
-// narrowing applies, and maps each code through its own closed sets, so a
-// code it does not know narrows nothing.
+// The Host gives the codec an HTTP error body whole, as one read-only slice,
+// and the codec answers with an `ErrorBody`, naming the report's text by
+// range of that slice. What it names can only narrow the failure the Host's
+// status rules give, and every narrowing settles the Attempt as a failure no
+// retry can fix, so a codec can never make a failure retryable. The Host
+// keeps every status rule, decides which narrowing applies, and maps each
+// code through its own closed sets, so a code it does not know narrows
+// nothing.
 
-pub const Status = enum(u8) {
-    /// The window is read; its findings are ready.
-    next = 0,
-    /// The body is classified.
-    done = 1,
-    /// The codec cannot classify this body.
-    failed = 2,
-};
-
-/// The findings a codec writes for one window.
-pub const Ops = struct {
-    pub const capacity = 256;
-
-    length: u16 = 0,
-    bytes: [capacity]u8 = undefined,
-
-    pub fn finding(self: *Ops, value: Finding) error{OpsOverflow}!void {
-        switch (value) {
-            .context_overflow => (try self.reserve(1))[0] = @backingInt(FindingTag.context_overflow),
-            .quota => |quota| {
-                std.debug.assert(quota.code.len != 0 and quota.code.len <= max_code_bytes);
-                const head = try self.reserve(11 + quota.code.len);
-                head[0..3].* = .{ @backingInt(FindingTag.quota), @intCast(quota.code.len), @intFromBool(quota.resets_at != null) };
-                std.mem.writeInt(u64, head[3..11], quota.resets_at orelse 0, .little);
-                @memcpy(head[11..], quota.code);
-            },
-            .refusal => |code| {
-                std.debug.assert(code.len != 0 and code.len <= max_code_bytes);
-                const head = try self.reserve(2 + code.len);
-                head[0..2].* = .{ @backingInt(FindingTag.refusal), @intCast(code.len) };
-                @memcpy(head[2..], code);
-            },
-            .report => |range| {
-                const head = try self.reserve(19);
-                head[0..3].* = .{ @backingInt(FindingTag.report), @backingInt(range.field), @backingInt(range.escape) };
-                std.mem.writeInt(u64, head[3..11], range.start, .little);
-                std.mem.writeInt(u64, head[11..19], range.length, .little);
-            },
-        }
-    }
-
-    fn reserve(self: *Ops, count: usize) error{OpsOverflow}![]u8 {
-        if (capacity - self.length < count) return error.OpsOverflow;
-        defer self.length += @intCast(count);
-        return self.bytes[self.length..][0..count];
-    }
-
-    /// Reads these ops as findings, from the first op.
-    pub fn findings(self: *const Ops) FindingReader {
-        return .{ .bytes = self.bytes[0..self.length] };
-    }
-};
-
-/// One window of the body. Windows are contiguous: the first starts at
-/// offset 0 and each starts where the one before ended.
-pub const Fed = struct {
-    bytes: []const u8,
-    /// No bytes follow these: the codec answers `done` or `failed`.
-    end: bool,
-};
-
-/// The longest provider code a finding carries. Every code the Host knows is
-/// shorter, so a codec leaves a longer one out.
+/// The longest provider code an `ErrorBody` carries. Every code the Host
+/// knows is shorter, so a codec leaves a longer one out.
 pub const max_code_bytes = 64;
 
-/// The two parts of a report, `code: message`.
-pub const ReportField = enum(u8) { code = 0, message = 1 };
+/// A provider code, at least one byte.
+pub const Code = struct {
+    len: u8,
+    bytes: [max_code_bytes]u8 = undefined,
 
-pub const FindingTag = enum(u8) {
-    /// No payload: the request exceeds the model's context.
-    context_overflow = 5,
-    /// u8 code length (1 to max_code_bytes), u8 1 when a reset time is
-    /// given and 0 when not, u64 little-endian reset time (0 when not
-    /// given), the code: a quota refusal, if the Host knows the code as one.
-    quota = 6,
-    /// u8 code length (1 to max_code_bytes), the code: a refusal, if the
-    /// Host knows the code as one.
-    refusal = 7,
-    /// u8 field, u8 escape, u64 little-endian start, u64 little-endian
-    /// length: one part of the report, as a range of the body.
-    report = 8,
-};
+    pub fn of(text: []const u8) Code {
+        std.debug.assert(text.len != 0 and text.len <= max_code_bytes);
+        var code: Code = .{ .len = @intCast(text.len) };
+        @memcpy(code.bytes[0..text.len], text);
+        return code;
+    }
 
-pub const Finding = union(FindingTag) {
-    context_overflow,
-    quota: Quota,
-    refusal: []const u8,
-    report: ReportRange,
+    pub fn slice(self: *const Code) []const u8 {
+        return self.bytes[0..self.len];
+    }
 };
 
 pub const Quota = struct {
-    code: []const u8,
+    code: Code,
     /// The Unix second the quota resets, when the provider gives one.
     resets_at: ?u64,
 };
 
-/// Where one part of the report is. With `json_string_v1` the range holds
-/// the contents of a JSON string, without its quotes, which the Host
-/// decodes; with `verbatim` it holds the text itself.
+/// Where one part of the report is, as a range of the body. With
+/// `json_string_v1` the range holds the contents of a JSON string, without
+/// its quotes, which the Host decodes; with `verbatim` it holds the text
+/// itself.
 pub const ReportRange = struct {
-    field: ReportField,
     escape: Escape,
     start: u64,
     length: u64,
 };
 
-/// Decodes findings; anything malformed is `error.CodecBadOp`.
-pub const FindingReader = struct {
-    bytes: []const u8,
-    offset: u16 = 0,
-
-    pub fn next(self: *FindingReader) error{CodecBadOp}!?Finding {
-        const rest = self.bytes[self.offset..];
-        if (rest.len == 0) return null;
-        const tag = std.enums.fromInt(FindingTag, rest[0]) orelse return error.CodecBadOp;
-        switch (tag) {
-            .context_overflow => {
-                self.offset += 1;
-                return .context_overflow;
-            },
-            .quota => {
-                if (rest.len < 11 or rest[2] > 1) return error.CodecBadOp;
-                const code = try codeAt(rest[11..], rest[1]);
-                const resets_at = std.mem.readInt(u64, rest[3..11], .little);
-                if (rest[2] == 0 and resets_at != 0) return error.CodecBadOp;
-                self.offset += @intCast(11 + code.len);
-                return .{ .quota = .{ .code = code, .resets_at = if (rest[2] == 1) resets_at else null } };
-            },
-            .refusal => {
-                if (rest.len < 2) return error.CodecBadOp;
-                const code = try codeAt(rest[2..], rest[1]);
-                self.offset += @intCast(2 + code.len);
-                return .{ .refusal = code };
-            },
-            .report => {
-                if (rest.len < 19) return error.CodecBadOp;
-                const field = std.enums.fromInt(ReportField, rest[1]) orelse return error.CodecBadOp;
-                const escape = std.enums.fromInt(Escape, rest[2]) orelse return error.CodecBadOp;
-                self.offset += 19;
-                return .{ .report = .{
-                    .field = field,
-                    .escape = escape,
-                    .start = std.mem.readInt(u64, rest[3..11], .little),
-                    .length = std.mem.readInt(u64, rest[11..19], .little),
-                } };
-            },
-        }
-    }
-
-    fn codeAt(bytes: []const u8, length: u8) error{CodecBadOp}![]const u8 {
-        if (length == 0 or length > max_code_bytes or bytes.len < length) return error.CodecBadOp;
-        return bytes[0..length];
-    }
+/// What a codec read in an error body. A body it cannot read names nothing.
+pub const ErrorBody = struct {
+    /// The request exceeds the model's context.
+    context_overflow: bool,
+    /// A quota refusal, if the Host knows the code as one.
+    quota: ?Quota,
+    /// A refusal, if the Host knows the code as one.
+    refusal: ?Code,
+    /// The two parts of the report, `code: message`.
+    report: struct { code: ?ReportRange, message: ?ReportRange },
 };
 
 /// A tool as the model is told about it; each codec writes its own envelope.

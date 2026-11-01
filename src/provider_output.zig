@@ -559,10 +559,7 @@ fn readPart(part: *output_decode.ReportPart, window: *Window, value: ?Range) voi
     // A field's value is valid JSON, so a string is its contents in quotes.
     const first = window.bytesAt(range.start, range.start + 1) catch return;
     if (first[0] != '"') return;
-    output_decode.readPart(window, range.start + 1, range.length - 2, .json_string_v1, part) catch {
-        part.text.len = 0;
-        part.shortened = false;
-    };
+    output_decode.readWindowPart(window, range.start + 1, range.length - 2, .json_string_v1, part);
 }
 
 fn streamError(window: *Window, event: Range, failed_response: bool, provider_failure: *ProviderFailure) !void {

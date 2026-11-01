@@ -1,30 +1,27 @@
 //! The shell around a codec's reading of a sealed response. `classify`
-//! feeds an HTTP error body through the codec's classifier and turns its
-//! findings into the error response the execution owner decides on. The
-//! codec reads the body only through the windows the shell feeds it; the
-//! shell keeps every status rule, maps provider codes through
+//! gives an HTTP error body, mapped read-only, to the codec's classifier and
+//! turns what it names into the error response the execution owner decides
+//! on. The shell keeps every status rule, maps provider codes through
 //! `transport_policy`'s closed sets, and bounds the report itself.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const output_format = @import("output_format.zig");
+const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 const transport_policy = @import("transport_policy.zig");
 
 /// One response's decoding, in the execution Workspace; the Host decodes
 /// one response at a time.
 pub const Decode = struct {
-    job: codecs.ClassifyJob,
-    window: Window,
+    classify: codecs.ClassifyScratch,
 };
 
 /// One read window over a file, shared by every reader of that file. A
 /// field, a nested object and the digest of an event all read the same
 /// bytes, so whichever reader needs them first loads them and the rest find
-/// them in memory. `classify` feeds a body through it, then reads the
-/// report's ranges through it, so a range in the last window fed costs no
-/// read.
+/// them in memory.
 pub const Window = struct {
     io: std.Io,
     file: std.Io.File,
@@ -123,95 +120,69 @@ pub fn writeReport(report: *Report, code: *const ReportPart, message: *const Rep
 }
 
 comptime {
-    // A finding's code holds every code the Host knows.
+    // A codec's code holds every code the Host knows.
     for (std.enums.values(transport_policy.Refusal)) |refusal| std.debug.assert(@tagName(refusal).len <= codec_abi.max_code_bytes);
 }
 
-/// What a codec found in one body, through the Host's closed sets.
-const Found = struct {
-    context_overflow: bool = false,
-    quota: ?transport_policy.Quota = null,
-    refusal: ?transport_policy.Refusal = null,
-    report: std.EnumArray(codec_abi.ReportField, ?codec_abi.ReportRange) = .initFill(null),
-};
-
-/// Classify the sealed HTTP error body of `length` bytes in `body` with
-/// `classifier`, and fill `failure` with its refusal and report, for every
-/// answer. Only a 4xx or 5xx body is read. A codec can narrow the status
-/// rule only by a code the Host knows: quota at HTTP 429, then context
-/// overflow, then a refusal at any status. A codec failure or a bad finding
-/// narrows nothing and leaves no report; a failed read is `.unreadable`.
-/// Never inlined: the report's two parts stay in this rare frame.
-pub noinline fn classify(decode: *Decode, classifier: *const codecs.Classifier, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
+/// Classify the sealed HTTP error body, the first `length` bytes of `body`,
+/// with `codec`'s classifier, and fill `failure` with its refusal and
+/// report, for every answer. Only a 4xx or 5xx body is read. A codec can
+/// narrow the status rule only by a code the Host knows: quota at HTTP 429,
+/// then context overflow, then a refusal at any status. A failed read is
+/// `.unreadable`. Never inlined: the report's two parts stay in this rare
+/// frame.
+pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
     failure.clear();
     if (status < 400 or status >= 600) return .ordinary;
-    const window = &decode.window;
-    window.io = io;
-    window.file = body;
-    window.start = 0;
-    window.length = 0;
-    var found: Found = .{};
-    feed(decode, classifier, length, &found) catch |err| switch (err) {
-        error.CodecFailed, error.CodecBadOp => return .ordinary,
-        else => return .{ .unreadable = err },
-    };
-    readReport(window, &found, &failure.report) catch |err| {
-        failure.report.len = 0;
-        return .{ .unreadable = err };
-    };
-    failure.refusal = found.refusal;
-    if (status == 429) if (found.quota) |quota| return .{ .quota = quota };
-    if (found.context_overflow) return .context_overflow;
-    return if (found.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
-}
-
-/// Feed the window's body of `length` bytes to the codec window by window
-/// until it is done, and collect what it finds. Nothing found counts unless
-/// the job ends well.
-fn feed(decode: *Decode, classifier: *const codecs.Classifier, length: u64, found: *Found) !void {
-    const job = &decode.job;
-    job.begin(classifier, length);
-    var offset: u64 = 0;
-    while (true) {
-        const bytes: []const u8 = if (offset == length) &.{} else try decode.window.bytesAt(offset, length);
-        offset += bytes.len;
-        const done = try job.step(&.{ .bytes = bytes, .end = offset == length });
-        while (try job.next()) |finding| switch (finding) {
-            .context_overflow => found.context_overflow = true,
-            .quota => |quota| if (transport_policy.Quota.ofProviderCode(quota.code)) |code| {
-                found.quota = .{ .code = code, .resets_at = quota.resets_at };
-            },
-            .refusal => |code| found.refusal = transport_policy.Refusal.ofProviderCode(code),
-            .report => |range| found.report.set(range.field, range),
-        };
-        if (done) return;
-    }
-}
-
-fn readReport(window: *Window, found: *const Found, report: *Report) !void {
+    const bytes = pages.mapReadOnly(io, body, length) catch |err| return .{ .unreadable = err };
+    defer pages.unmapReadOnly(bytes);
+    const found = codecs.classify(codec, &decode.classify, bytes);
     var code: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
     var message: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
-    if (found.report.get(.code)) |range| try readPart(window, range.start, range.length, range.escape, &code);
-    if (found.report.get(.message)) |range| try readPart(window, range.start, range.length, range.escape, &message);
-    writeReport(report, &code, &message);
+    if (found.report.code) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, &code);
+    if (found.report.message) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, &message);
+    writeReport(&failure.report, &code, &message);
+    failure.refusal = if (found.refusal) |refusal| .ofProviderCode(refusal.slice()) else null;
+    if (status == 429) if (found.quota) |quota| if (transport_policy.Quota.ofProviderCode(quota.code.slice())) |known| {
+        return .{ .quota = .{ .code = known, .resets_at = quota.resets_at } };
+    };
+    if (found.context_overflow) return .context_overflow;
+    return if (failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
 }
 
-/// Decode the first `max_part_bytes` of the `length` bytes at `start` into
-/// the empty `part`. A range that does not decode, which a codec that judged
-/// the body would not name, leaves the part empty; only a failed read is an
-/// error.
-pub fn readPart(window: *Window, start: u64, length: u64, escape: codec_abi.Escape, part: *ReportPart) !void {
+/// Decode the first `max_part_bytes` of `bytes` into the empty `part`. A
+/// range that does not decode, which a codec that judged the body would not
+/// name, leaves the part empty.
+fn readPart(bytes: []const u8, escape: codec_abi.Escape, part: *ReportPart) void {
+    var source: SliceSource = .{ .bytes = bytes };
+    decodePart(&source, escape, part);
+}
+
+/// `readPart` over the `length` bytes at `start` of a window's file. A
+/// failed read leaves the part empty too.
+pub fn readWindowPart(window: *Window, start: u64, length: u64, escape: codec_abi.Escape, part: *ReportPart) void {
     const end = start + length;
-    var source: RangeSource = .{ .window = window, .position = start, .end = end, .limit = @min(end, start + max_part_source_bytes), .escape = escape };
+    var source: RangeSource = .{ .window = window, .position = start, .end = end, .limit = @min(end, start + max_part_source_bytes) };
+    decodePart(&source, escape, part);
+}
+
+fn decodePart(source: anytype, escape: codec_abi.Escape, part: *ReportPart) void {
+    decodeInto(source, escape, part) catch {
+        part.text.len = 0;
+        part.shortened = false;
+    };
+}
+
+fn decodeInto(source: anytype, escape: codec_abi.Escape, part: *ReportPart) !void {
     const text = &part.text;
-    while (source.position != source.end) {
+    while (!source.done()) {
         var scalar: [4]u8 = undefined;
-        const count = source.scalar(&scalar) catch |err| switch (err) {
-            error.InvalidEncodedString, error.InvalidJsonEscape, error.InvalidJsonSurrogate => {
-                text.len = 0;
-                return;
+        const count = switch (escape) {
+            .verbatim => verbatim: {
+                scalar[0] = try source.next();
+                break :verbatim 1;
             },
-            else => return err,
+            .json_string_v1 => try output_format.decodeScalar(source, &scalar),
         };
         const kept = @min(count, text.bytes.len - text.len);
         @memcpy(text.bytes[text.len..][0..kept], scalar[0..kept]);
@@ -224,6 +195,28 @@ pub fn readPart(window: *Window, start: u64, length: u64, escape: codec_abi.Esca
     if (!std.unicode.utf8ValidateSlice(text.slice())) text.len = 0;
 }
 
+/// A report range in memory.
+const SliceSource = struct {
+    bytes: []const u8,
+    position: usize = 0,
+
+    fn done(self: *const SliceSource) bool {
+        return self.position == self.bytes.len;
+    }
+
+    /// One byte of JSON string contents, which holds no raw control.
+    pub fn take(self: *SliceSource) !u8 {
+        const byte = try self.next();
+        return if (byte < 0x20) error.InvalidEncodedString else byte;
+    }
+
+    fn next(self: *SliceSource) !u8 {
+        if (self.done()) return error.InvalidEncodedString;
+        defer self.position += 1;
+        return self.bytes[self.position];
+    }
+};
+
 /// A report range read through the window.
 const RangeSource = struct {
     window: *Window,
@@ -231,17 +224,9 @@ const RangeSource = struct {
     end: u64,
     /// Where reads stop: a part is full before its decoding gets there.
     limit: u64,
-    escape: codec_abi.Escape,
 
-    /// The next decoded scalar's bytes, or with `verbatim` the next byte.
-    fn scalar(self: *RangeSource, out: *[4]u8) !usize {
-        switch (self.escape) {
-            .verbatim => {
-                out[0] = try self.next();
-                return 1;
-            },
-            .json_string_v1 => return output_format.decodeScalar(self, out),
-        }
+    fn done(self: *const RangeSource) bool {
+        return self.position == self.end;
     }
 
     /// One byte of JSON string contents, which holds no raw control.
@@ -251,25 +236,25 @@ const RangeSource = struct {
     }
 
     fn next(self: *RangeSource) !u8 {
-        if (self.position == self.end) return error.InvalidEncodedString;
+        if (self.done()) return error.InvalidEncodedString;
         const byte = (try self.window.bytesAt(self.position, self.limit))[0];
         self.position += 1;
         return byte;
     }
 };
 
-const pinned = codecs.classifier(.@"openai-responses/1");
+const pinned: protocol.Codec = .@"openai-responses/1";
 
 var testing_decode: Decode = undefined;
 
 const Classified = struct { response: execution.ErrorResponse, failure: ProviderFailure };
 
 /// Classify `body` at `status`, written to a fresh file in `tmp`.
-fn classifyForTesting(tmp: *std.testing.TmpDir, classifier: *const codecs.Classifier, body: []const u8, length: u64, status: u16, out: *Classified) !void {
+fn classifyForTesting(tmp: *std.testing.TmpDir, codec: protocol.Codec, body: []const u8, length: u64, status: u16, out: *Classified) !void {
     const file = try tmp.dir.createFile(std.testing.io, "error-body", .{ .read = true, .truncate = true });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, body);
-    out.response = classify(&testing_decode, classifier, std.testing.io, file, length, status, &out.failure);
+    out.response = classify(&testing_decode, codec, std.testing.io, file, length, status, &out.failure);
 }
 
 fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
@@ -358,108 +343,14 @@ test "a malformed number makes a body not JSON, which narrows nothing" {
     }
 }
 
-/// The pinned classifier, with its answer to the last window replaced:
-/// it fails, or it adds `ops` to its findings.
-fn FaultyClassifier(comptime fault: union(enum) { failure, ops: []const u8 }) type {
-    return struct {
-        const classifier: codecs.Classifier = .{ .init = pinned.init, .step = step };
-
-        fn step(state: *codecs.ClassifierState, fed: *const codec_abi.Fed, ops: *codec_abi.Ops) codec_abi.Status {
-            const status = pinned.step(state, fed, ops);
-            if (!fed.end) return status;
-            switch (fault) {
-                .failure => return .failed,
-                .ops => |bytes| {
-                    @memcpy(ops.bytes[ops.length..][0..bytes.len], bytes);
-                    ops.length += @intCast(bytes.len);
-                    return status;
-                },
-            }
-        }
-    };
-}
-
-test "a classifier failure narrows nothing and keeps the status rule" {
+test "a large error body classifies as its small twin does" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const quota = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1800000123,\"message\":\"Out.\"}}";
-    const overflow = "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Too long.\"}}";
-    const refusal = "{\"error\":{\"code\":\"cyber_policy\",\"message\":\"No.\"}}";
-    var classified: Classified = undefined;
-    // The pinned classifier narrows each body.
-    try classifyForTesting(&tmp, pinned, quota, quota.len, 429, &classified);
-    try std.testing.expectEqual(execution.ErrorResponse{ .quota = .{ .code = .usage_limit_reached, .resets_at = 1_800_000_123 } }, classified.response);
-    try std.testing.expectEqualStrings("usage_limit_reached: Out.", classified.failure.report.slice());
-    // Failing after it found them, it narrows nothing and leaves no report,
-    // so each status keeps its own rule: a 429 stays a retryable rate limit.
-    const failing = &FaultyClassifier(.failure).classifier;
-    for ([_][]const u8{ quota, overflow, refusal }) |body| for ([_]u16{ 429, 400, 403, 503 }) |status| {
-        try classifyForTesting(&tmp, failing, body, body.len, status, &classified);
-        try std.testing.expectEqual(execution.ErrorResponse.ordinary, classified.response);
-        try std.testing.expectEqual(@as(?transport_policy.Refusal, null), classified.failure.refusal);
-        try std.testing.expectEqual(@as(usize, 0), classified.failure.report.len);
-        const disposition: transport_policy.Disposition = if (status == 429 or status == 503) .temporary_http else .permanent_http;
-        const failure = execution.transferDecision(.{ .transport_finished = .{ .disposition = disposition, .http_status = status, .retry_after_ms = 9_000 } }, classified.response).fail;
-        try std.testing.expectEqual(if (disposition == .temporary_http) execution.FailureKind.temporary else .permanent, failure.kind);
-        try std.testing.expect(failure.quota == null);
-        const Code = @TypeOf(failure.code);
-        const code: Code = if (disposition == .temporary_http) .{ .temporary_http = status } else .{ .http = status };
-        try std.testing.expectEqual(code, failure.code);
-    };
-}
-
-test "a bad classifier finding narrows nothing and leaves no report" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const quota = "{\"error\":{\"code\":\"usage_limit_reached\",\"message\":\"Out.\"}}";
-    const past_end = comptime [_]u8{ 8, 1, 1 } ++ std.mem.toBytes(@as(u64, quota.len)) ++ std.mem.toBytes(@as(u64, 1));
-    var classified: Classified = undefined;
-    inline for (comptime [_][]const u8{
-        // A second quota, a report past the body, an unknown tag, an encode
-        // op, a cut finding.
-        &([_]u8{ 6, 1, 0 } ++ std.mem.toBytes(@as(u64, 0)) ++ [_]u8{'x'}),
-        &past_end,
-        &.{0xff},
-        &.{ 1, 1, 0, '{' },
-        &.{ 7, 5, 'a' },
-    }) |ops| {
-        try classifyForTesting(&tmp, &FaultyClassifier(.{ .ops = ops }).classifier, quota, quota.len, 429, &classified);
-        try std.testing.expectEqual(execution.ErrorResponse.ordinary, classified.response);
-        try std.testing.expectEqual(@as(?transport_policy.Refusal, null), classified.failure.refusal);
-        try std.testing.expectEqual(@as(usize, 0), classified.failure.report.len);
-    }
-    // A codec that wants more after the last window is a bad codec too.
-    const Unfinished = struct {
-        const classifier: codecs.Classifier = .{ .init = pinned.init, .step = step };
-        fn step(state: *codecs.ClassifierState, fed: *const codec_abi.Fed, ops: *codec_abi.Ops) codec_abi.Status {
-            _ = pinned.step(state, fed, ops);
-            return .next;
-        }
-    };
-    try classifyForTesting(&tmp, &Unfinished.classifier, quota, quota.len, 429, &classified);
-    try std.testing.expectEqual(execution.ErrorResponse.ordinary, classified.response);
-    try std.testing.expectEqual(@as(usize, 0), classified.failure.report.len);
-}
-
-test "a large error body is classified in bounded windows as a small one is" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // The pinned classifier, counting the windows it is fed.
-    const Counting = struct {
-        var windows: usize = 0;
-        var longest: usize = 0;
-        const classifier: codecs.Classifier = .{ .init = pinned.init, .step = step };
-        fn step(state: *codecs.ClassifierState, fed: *const codec_abi.Fed, ops: *codec_abi.Ops) codec_abi.Status {
-            windows += 1;
-            longest = @max(longest, fed.bytes.len);
-            return pinned.step(state, fed, ops);
-        }
-    };
     const small = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1800000123,\"message\":\"Out.\"}}";
     var expected: Classified = undefined;
     try classifyForTesting(&tmp, pinned, small, small.len, 429, &expected);
     // The same envelope after some 850 KB of other members, with its message
-    // in the first window and its code in the last.
+    // at the start and its code at the end.
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(std.testing.allocator);
     try body.appendSlice(std.testing.allocator, "{\"error\":{\"message\":\"Out.\",\"padding\":[");
@@ -467,10 +358,8 @@ test "a large error body is classified in bounded windows as a small one is" {
     try body.appendSlice(std.testing.allocator, "],\"resets_at\":1800000123,\"code\":\"usage_limit_reached\"},\"more\":{\"code\":\"cyber_policy\"}}");
     try std.testing.expect(body.items.len > 64 * protocol.content_window_bytes);
     var large: Classified = undefined;
-    try classifyForTesting(&tmp, &Counting.classifier, body.items, body.items.len, 429, &large);
+    try classifyForTesting(&tmp, pinned, body.items, body.items.len, 429, &large);
     try std.testing.expectEqual(expected.response, large.response);
     try std.testing.expectEqual(expected.failure.refusal, large.failure.refusal);
     try std.testing.expectEqualStrings(expected.failure.report.slice(), large.failure.report.slice());
-    try std.testing.expectEqual(std.math.divCeil(usize, body.items.len, protocol.content_window_bytes) catch unreachable, Counting.windows);
-    try std.testing.expectEqual(protocol.content_window_bytes, Counting.longest);
 }
