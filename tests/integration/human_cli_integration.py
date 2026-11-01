@@ -160,7 +160,7 @@ def defaults(home, *args, success=True, environment=None):
         return None
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     value = json.loads(result.stdout)
-    assert value["version"] == "2" and value["type"] == "defaults", value
+    assert value["version"] == "3" and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
@@ -410,7 +410,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
     # exact bindings outside that list without inferring a context window.
-    body = {"version": "2", "kind": "configure", "store": str(store),
+    body = {"version": "3", "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
@@ -1721,6 +1721,95 @@ def scroll_return_case():
             shutil.rmtree(state)
 
 
+def new_since_case():
+    """Leaving records how far the conversation showed. Reopening lands on
+    the rule above the first row after it; reading down to the latest view
+    and leaving by Esc leaves nothing new for the next opening."""
+    state = screen_fixture_root("rui-new-since.")
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_answer(f"since-{i}", f"since-r-{i}", f"since-m-{i}",
+            f"answer {i:02d}\n\nsecond row {i:02d}\n\nthird row {i:02d}")[0] for i in range(11)])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        defaults(home, "--store", store)
+        session = create_session(home, "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+
+        def send(indexes):
+            for i in indexes:
+                message = admit(home, "session", "send", "--to", session, input=f"since input {i:02d}")
+                fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved answer")
+
+        def enter(marker):
+            nonlocal caller, master, slave
+            master, slave = open_pty(80, 16)
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            read_terminal(master, marker)
+            return settle_screen(master, quiet=0.5)
+
+        def leave():
+            nonlocal caller, master, slave
+            os.write(master, b"\x15/exit\n")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
+            for fd in (master, slave):
+                os.close(fd)
+            caller = master = slave = None
+
+        rule = "── new since you looked ──"
+        send(range(3))
+        # Never read: the opening shows the latest rows, and leaving records them.
+        shown = enter("third row 02")
+        assert not shown.startswith("Browsing") and rule not in shown, shown
+        leave()
+        send(range(3, 11))
+        # The latest view cannot reach the rule, so the opening starts there.
+        shown = enter(rule)
+        rows = [row.strip() for row in shown.split("\n")]
+        assert rows[0].startswith("Browsing") and rows[1] == rule, shown
+        assert "since input 03" in "\n".join(rows[2:4]) and "third row 02" not in shown and "third row 10" not in shown, shown
+        # Paging down reads each newer page as the view reaches it, then
+        # returns to the latest view.
+        for _ in range(40):
+            if not shown.startswith("Browsing"):
+                break
+            os.write(master, b"\x1b[6~")
+            shown = settle_screen(master, quiet=0.3)
+        assert not shown.startswith("Browsing") and "third row 10" in shown, shown
+        # Esc returns to the overview, whose worker records how far it read.
+        os.write(master, b"\x1b")
+        settle_screen(master, quiet=1.0)
+        leave_overview(master)
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
+        for fd in (master, slave):
+            os.close(fd)
+        caller = master = slave = None
+        shown = enter("third row 10")
+        assert not shown.startswith("Browsing") and rule not in shown, ("read rows were new again", shown)
+        leave()
+        completed = True
+        print("new since you looked: never-read opening records its latest rows; reopening lands on the rule; paging through and Esc leave nothing new", flush=True)
+    finally:
+        dispose_all(
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None),
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
+        if completed:
+            shutil.rmtree(state)
+
+
 def persistent_opening_case():
     """Frozen replay uses real content once and assistant-only formatting."""
     import canonical_failure_integration as canonical
@@ -1824,7 +1913,7 @@ def persistent_opening_case():
                 # incomplete span remain buffered after a visible bold prefix.
                 body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
                 return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                    b"X-Rui-Wire-Version: 2\r\nContent-Length: " + str(len(body) + 1).encode()
+                    b"X-Rui-Wire-Version: 3\r\nContent-Length: " + str(len(body) + 1).encode()
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
@@ -1893,7 +1982,12 @@ def persistent_opening_case():
         # Session's first Message; the checks below are about the rows above.
         def above_line(frames):
             return "\n".join(row for row in frames.split("\n") if not row.startswith("literal **user** é · "))
-        output = read_terminal(master, "› ")
+        # Rows were saved since the earlier visits saw the conversation, so
+        # it opens on the rule; Esc returns to the latest view.
+        output = read_terminal(master, "new since you looked")
+        assert current_screen(master).startswith("Browsing · Esc returns"), output
+        os.write(master, b"\x1b")
+        output = settle_screen(master, quiet=0.5)
         assert "\nliteral **user** é · " in output, output
         output = above_line(output)
         assert "saved user 09" in output and "literal **user** é" not in output, output
@@ -3268,7 +3362,7 @@ int fsync(int fd) {
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
     # Every mutation kind, including Session stop, is a recoverable capture.
-    stop = {"version": "2", "kind": "session_stop", "store": str(store.resolve()),
+    stop = {"version": "3", "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
@@ -3372,7 +3466,7 @@ def opaque_session_commands_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for key, session in (("prefix", "human/nul"), ("opaque", "human/nul\x00' é\n--last")):
-            body = {"version": "2", "kind": "configure", "store": str(store), "key": key,
+            body = {"version": "3", "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
                            (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},
@@ -5470,10 +5564,13 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "new-since"), selected
     if selected in ("all", "callers", "caller-core", "empty-answers"):
         persistent_empty_answer_case()
     if selected == "empty-answers":
+        return
+    if selected == "new-since":
+        new_since_case()
         return
     if selected == "session-ids":
         help_case()
@@ -5505,6 +5602,7 @@ def main(selected="all"):
         overview_cases()
         persistent_opening_case()
         scroll_return_case()
+        new_since_case()
         persistent_pending_case()
         persistent_input_cases()
     if selected in ("all", "persistent-permission"):

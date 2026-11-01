@@ -172,6 +172,8 @@ const Job = union(enum) {
     /// read on the worker's thread.
     start: view.OwnedStart,
     stop: view.Reference,
+    /// How far the person just saw a Session they returned from.
+    mark_read: struct { session: view.Reference, position: u64 },
 
     /// A job owns its inputs until it is replaced or the overview ends,
     /// whether or not it ran.
@@ -180,9 +182,9 @@ const Job = union(enum) {
     }
 };
 
-/// One host read and list page, at most one first-line batch, and the
-/// requests the core's ledger allows can wait at once.
-const max_jobs = 3 + view.max_requests;
+/// One host read and list page, at most one first-line batch, one mark
+/// read, and the requests the core's ledger allows can wait at once.
+const max_jobs = 4 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -512,6 +514,9 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         },
         .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        // No saved work depends on it: a Host that does not take it keeps
+        // the earlier position, and the next opening lands there.
+        .mark_read => |*mark| requests.markRead(self.options.store, &mark.session, mark.position) catch {},
     }
 }
 
@@ -547,6 +552,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .mark_read => {},
     }
     return null;
 }
@@ -771,6 +777,9 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
     if (returned) ended = frontend.back() orelse {
+        // The overview draws while its worker records how far the person
+        // read.
+        if (frontend.takeSeen()) |position| self.queue(.{ .mark_read = .{ .session = session, .position = position } });
         self.init.gpa.destroy(frontend);
         for (opened) |file| file.close(io);
         return null;
@@ -821,6 +830,8 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
             break :run {};
         };
         const departure = frontend.leave(left.ended, restored);
+        // The terminal is restored, so waiting for the Host holds no screen.
+        if (frontend.takeSeen()) |position| (client.Requests{ .io = io }).markRead(store, session, position) catch {};
         const end = departure.end catch |err| {
             if (departure.failure_notice) self.terminal.detached(store, session, departure.action) catch |notice_error|
                 stderr.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});

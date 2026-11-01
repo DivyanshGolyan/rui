@@ -25,6 +25,7 @@ const Self = @This();
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const unseen = @import("unseen.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -127,12 +128,18 @@ transcript: struct {
     plan: reads.Plan = .{ .start = 0 },
     // Older pages reach the conversation's start, so the transcript says so.
     beginning: bool = false,
-    // A failed older load waits for the next scroll rather than retrying at once.
-    older_failed: bool = false,
+    // A failed page load waits for the next scroll rather than retrying at once.
+    load_failed: bool = false,
     history_requested: ?History = null,
     // The Messages of collapsed blocks in the transcript.
     blocks: View.Blocks = .{},
+    // A transcript of the rows after the read-through position, rather than
+    // a copy of live output: where its next page starts, null once it holds
+    // the opening's end, and the position its rows show every row through.
+    newer: ?struct { next: ?protocol_reply.ActivityCursor, through: u64 } = null,
 } = .{},
+// What this visit has seen of the conversation, for "new since you looked".
+seen: unseen.Seen = .{},
 // One collapsed Message shown in full.
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
@@ -651,9 +658,11 @@ fn driveActive(self: *Self) !void {
                     try self.launch(self.freeze(.details), reads.history);
                 } else {
                     // /history scrolls the transcript to its top; older pages
-                    // then load there as for any scroll.
+                    // then load there as for any scroll. The transcript of
+                    // rows after the read-through position loads nothing
+                    // older, so /history leaves it for one that does.
                     const screen = self.terminal.screen;
-                    if (screen.view != .transcript) {
+                    if (screen.view != .transcript or self.transcript.newer != null) {
                         try screen.latest();
                         if (screen.view == .live) try self.beginTranscript();
                     }
@@ -671,6 +680,11 @@ fn driveActive(self: *Self) !void {
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
                 self.notice = "Loading earlier messages…";
                 try self.launch(self.freeze(.history), reads.history);
+            } else if (self.newerWanted()) |cursor| {
+                self.notice = "Loading newer messages…";
+                const job = self.freeze(.history);
+                job.newer = cursor;
+                try self.launch(job, reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
             } else if (self.terminal.screen.consent == null and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
@@ -758,6 +772,10 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
     _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    // What this frame showed of the conversation.
+    if (screen.view == .live and !self.reading.opening and self.live.cursor.end == null)
+        self.seen.live(if (self.seen.live_from) |at| screen.liveShows(at) else false, self.live.cursor.position, try screen.liveEnd());
+    if (self.transcript.newer) |newer| if (screen.transcriptAtBottom()) self.seen.transcript(newer.through);
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -913,8 +931,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 if (down) return; // Live output already shows the latest rows.
                 try self.beginTranscript();
             }
-            self.transcript.older_failed = false; // A new scroll may retry a failed load.
-            if (screen.browse(down, action == .page_up or action == .page_down)) try screen.latest();
+            self.transcript.load_failed = false; // A new scroll may retry a failed load.
+            const more = if (self.transcript.newer) |newer| newer.next != null else false;
+            // Past the end of the rows after the read-through position, the
+            // next page loads before live output follows.
+            if (screen.browse(down, action == .page_up or action == .page_down) and !more) try screen.latest();
         },
         .latest, .back, .close => {
             // Leaving also abandons a Message page not yet shown, and returns
@@ -1000,6 +1021,7 @@ fn expand(self: *Self) !void {
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
     self.transcript.id += 1;
+    self.transcript.newer = null;
     const front = try screen.liveStart();
     self.transcript.plan = reads.plan(&self.live.marks, &self.live.echoes, front, self.live.lowest);
     try screen.beginTranscript(self.transcript.plan.start);
@@ -1027,7 +1049,54 @@ fn showOlderLabels(self: *Self) !void {
 }
 
 fn olderWanted(self: *const Self) bool {
-    return (self.transcript.plan.next() != null or self.transcript.older != null) and !self.transcript.older_failed and self.terminal.screen.transcriptAtTop() and !self.reading.opening;
+    return (self.transcript.plan.next() != null or self.transcript.older != null) and !self.transcript.load_failed and self.terminal.screen.transcriptAtTop() and !self.reading.opening;
+}
+
+/// Where the next page of rows after the read-through position starts, once
+/// the transcript of them shows its end.
+fn newerWanted(self: *const Self) ?protocol_reply.ActivityCursor {
+    const newer = self.transcript.newer orelse return null;
+    if (self.transcript.load_failed or self.reading.opening or !self.terminal.screen.transcriptAtBottom()) return null;
+    return newer.next;
+}
+
+/// Opens the conversation at the "new since you looked" rule, on a
+/// transcript of the rows after the read-through position, when the latest
+/// view does not show them all. `rule` is the rule's live offset.
+fn land(self: *Self, rule: ?u64) !void {
+    const result = &self.job.result;
+    const screen = self.terminal.screen;
+    const placed: unseen.Rule = if (result.rule == .at) .{ .at = rule.? } else result.rule;
+    self.seen = .open(result.read_through, result.cursor.position, placed, try screen.liveEnd());
+    const shown = if (self.seen.live_from) |at| screen.liveShows(at) else false;
+    if (screen.view != .live or !self.seen.opensTranscript(shown)) return;
+    const after = result.read_through.?;
+    screen.beginNewer();
+    self.transcript = .{
+        .id = self.transcript.id + 1,
+        .history_requested = self.transcript.history_requested,
+        .newer = .{ .next = .{ .end = result.cursor.position, .position = after }, .through = after },
+    };
+    self.dirty = true;
+}
+
+/// Joins a newer page to the end of the transcript. When the page pushed
+/// out text no frame showed, the transcript ends there.
+fn showNewer(self: *Self) !void {
+    const result = &self.job.result;
+    const newer = &self.transcript.newer.?;
+    if (!try self.terminal.screen.appendFile(self.init.io, self.files.inspection)) {
+        newer.next = null;
+        return;
+    }
+    for (result.collapsed.slice()) |block| self.transcript.blocks.append(block);
+    newer.* = .{ .next = result.newer, .through = result.through };
+}
+
+/// The position for leaving to record, once: how far this visit's frames
+/// showed the conversation past what the Store holds.
+pub fn takeSeen(self: *Self) ?u64 {
+    return self.seen.take();
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
@@ -1196,7 +1265,7 @@ fn settleReader(self: *Self) !void {
     if (end == .complete and self.reading.phase == .history) {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
-        if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
+        if (screen.view == .transcript and self.job.transcript == self.transcript.id) if (self.job.newer != null) try self.showNewer() else {
             const prepended = try screen.prependFile(self.init.io, self.files.inspection);
             // The page's newest blocks are those its kept rows show.
             const collapsed = self.job.result.collapsed.slice();
@@ -1213,7 +1282,7 @@ fn settleReader(self: *Self) !void {
                 self.transcript.beginning = self.transcript.older == null;
             }
             try self.showOlderLabels();
-        }
+        };
     } else if (end == .complete and self.reading.phase == .message) {
         const screen = self.terminal.screen;
         const request = self.expansion.reading.?;
@@ -1224,7 +1293,11 @@ fn settleReader(self: *Self) !void {
             (request.view == .live or request.transcript == self.transcript.id))
             try screen.showMessage(self.init.io, self.files.inspection);
     } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
-        try self.showStaged();
+        const opening = self.reading.opening;
+        const rule = try self.showStaged();
+        try self.applyReader(end);
+        if (opening) try self.land(rule);
+        return;
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
         if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
@@ -1237,16 +1310,22 @@ fn settleReader(self: *Self) !void {
 /// them: live output keeps text, not the styling the scratch file also
 /// counts, and escapes clusters it cannot show, so each is the settled end
 /// once writing reaches it. A page's own start precedes its separator.
-fn showStaged(self: *Self) !void {
+/// Returns the live offset of the "new since you looked" rule it wrote.
+fn showStaged(self: *Self) !?u64 {
     const result = &self.job.result;
     self.live.messages = result.messages;
     if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
     var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd() };
     // Every cut in output order; at one offset an echo ends before a
     // boundary prunes it, and a boundary prunes before an echo begins.
-    const Cut = struct { output: u64, kind: enum { echo_end, boundary, echo_start }, index: usize };
-    var cuts: [@typeInfo(@FieldType(reads.Boundaries, "items")).array.len + 2 * @typeInfo(@FieldType(reads.Echoes, "items")).array.len]Cut = undefined;
+    const Cut = struct { output: u64, kind: enum { echo_end, boundary, echo_start, rule }, index: usize };
+    var cuts: [@typeInfo(@FieldType(reads.Boundaries, "items")).array.len + 2 * @typeInfo(@FieldType(reads.Echoes, "items")).array.len + 1]Cut = undefined;
     var count: usize = 0;
+    var rule: ?u64 = null;
+    if (result.rule == .at) {
+        cuts[count] = .{ .output = result.rule.at, .kind = .rule, .index = 0 };
+        count += 1;
+    }
     for (result.boundaries.slice(), 0..) |mark, index| {
         cuts[count] = .{ .output = mark.output, .kind = .boundary, .index = index };
         count += 1;
@@ -1277,11 +1356,13 @@ fn showStaged(self: *Self) !void {
                 if (echo.message.state != .applied) self.live.lowest = if (self.live.lowest) |known| @min(known, echo.position) else echo.position;
                 self.live.echoes.add(echo, self.reading.opening);
             },
+            .rule => rule = offset,
         }
     }
     _ = try staged.to(staged.length);
     for (result.collapsed.slice()) |block| self.live.blocks.append(block);
     if (staged.length != 0) self.reading.output_started = true;
+    return rule;
 }
 
 /// Writes staged output to live output up to an output offset.
@@ -1434,13 +1515,13 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
 
 fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
-        if (self.reading.phase == .history) self.transcript.older_failed = true;
+        if (self.reading.phase == .history) self.transcript.load_failed = true;
         if (self.reading.pending_diagnostic == null)
             self.notice = switch (self.reading.phase) {
                 .details => "! Details unavailable; draft retained.",
                 .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
                 .inspection => "! Inspection unavailable; draft retained.",
-                else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
+                else => if (self.job.newer != null) "! Newer messages unavailable; scroll down to retry. Draft retained." else "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
         self.dirty = true;
         return;

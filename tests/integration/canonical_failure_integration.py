@@ -25,7 +25,7 @@ import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
 
-ERROR = {"version": "2", "type": "invocation_error", "code": "canonical_store_failure"}
+ERROR = {"version": "3", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
 
 
@@ -228,7 +228,7 @@ class Exchange(socketserver.BaseRequestHandler):
                 response = self.server.rewrite(response)
             else:
                 response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                    b"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: "
+                    b"X-Rui-Wire-Version: 3\r\nConnection: close\r\nContent-Length: "
                     + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
         if response is not None:  # An explicitly held cancellation peer sends nothing.
             self.request.sendall(response)
@@ -253,7 +253,7 @@ def wrong_target(response, null_code=False):
             "000000" if answer.get("session") != "000000" else "111111")
     encoded = json.dumps(value, separators=(",", ":")).encode()
     return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
-        b"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: "
+        b"X-Rui-Wire-Version: 3\r\nConnection: close\r\nContent-Length: "
         + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
 
 
@@ -651,11 +651,11 @@ def permission_read_cases(state):
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         for status, body, expected in (
                 (500, ERROR_BYTES, "CanonicalStoreFailure"),
-                (503, b'{"version":"2","type":"busy","code":"host_busy"}', "ActionReadFailed"),
+                (503, b'{"version":"3","type":"busy","code":"host_busy"}', "ActionReadFailed"),
                 (500, ERROR_BYTES[:-1], "InvalidResponse"),
                 (409, ERROR_BYTES, "InvalidResponse")):
             response = (f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
-                f"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+                f"X-Rui-Wire-Version: 3\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
             proxy = ReplyProxy(host, "/v1/read-action-arguments", lambda reply: response)
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
@@ -712,9 +712,9 @@ def permission_read_cases(state):
         assert configured.returncode == 0, configured
         details_session = json.loads(configured.stdout)["answer"]["session"]
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
-        body = b'{"version":"2","type":"busy","code":"host_busy"}'
+        body = b'{"version":"3","type":"busy","code":"host_busy"}'
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
-            b"X-Rui-Wire-Version: 2\r\nConnection: close\r\nContent-Length: "
+            b"X-Rui-Wire-Version: 3\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
         master, slave = open_pty()
@@ -841,7 +841,7 @@ def keyed_observation_cases(state, only="keyed"):
             else:
                 observation["wire_only"] = "must-not-be-presented"
             encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
-            return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nContent-Length: "
+            return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: "
                 + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
         for omitted in (False, True):
             if only == "keyed-bindings" and not omitted or only == "keyed-output" and omitted:

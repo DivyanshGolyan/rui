@@ -62,7 +62,7 @@ def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b"
     kind = b"application/json" if mode == "page" else b"application/octet-stream"
     response = (b"HTTP/1.1 200 OK\r\nContent-Type: " + kind +
         f"\r\nContent-Length: {len(body) if advertised is None else advertised}\r\n".encode() +
-        extra_headers + b"X-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n" + body)
+        extra_headers + b"X-Rui-Wire-Version: 3\r\nConnection: close\r\n\r\n" + body)
     with one_reply(socket_path, response) as deadline:
         return caller(store, mode, "null" if mode == "page" else 1, 0 if mode == "page" else "arguments",
                       ok=False, timeout=max(0, deadline - time.monotonic()))
@@ -211,7 +211,7 @@ def main():
                 row.update(action=str(item["action"]) if item["action"] else None, rejection=item["rejection"])
                 row["fields"] = {name: {"bytes": str(ref["length"]), "sha256": bytes(ref["digest"]).hex()} for name, ref in zip(FIELDS, item["fields"])}
                 wire_items.append(row)
-            valid = dict(version="2", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
+            valid = dict(version="3", type="proposal_page", end=str(first["end"]), items=wire_items, more=True)
             for change in ("order", "digest", "missing", "authority", "type"):
                 wire = copy.deepcopy(valid)
                 if change == "order": wire["items"][1]["position"] = wire["items"][0]["position"]
@@ -222,7 +222,7 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
-            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "2"', b'"version":"2","version":"2"'))
+            mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "3"', b'"version":"3","version":"3"'))
             assert mock_reply(fields["socket"], store, "field", b"abc", 9,
                 b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b""
             # A complete earlier window may be visible on failure; the final

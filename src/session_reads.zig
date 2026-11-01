@@ -16,6 +16,7 @@ const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
+const unseen = @import("unseen.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -166,6 +167,9 @@ pub const Job = struct {
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
     message_target: ?View.Collapsed = null,
+    // A history read renders the conversation after this cursor, for the
+    // end of the transcript that starts at the "new since you looked" rule.
+    newer: ?protocol_reply.ActivityCursor = null,
     // The latest live work held queued input: a listed echo, whose read
     // was earlier, is labelled by it.
     held: bool = false,
@@ -210,6 +214,15 @@ pub const Job = struct {
         collapsed: Collected = .{},
         // The opening's lowest unapplied position (see View.Pending).
         lowest: ?u64 = null,
+        // The Session's read-through position, as the opening's page read it.
+        read_through: ?u64 = null,
+        // Where the opening put the "new since you looked" rule, as an
+        // output offset.
+        rule: unseen.Rule = .none,
+        // A newer page: where the conversation continues, null at the
+        // opening's end, and the position its rows show every row through.
+        newer: ?protocol_reply.ActivityCursor = null,
+        through: u64 = 0,
         // The job's Messages after this read.
         messages: Messages = .{},
         live: View.Live = .{},
@@ -321,7 +334,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end, .colour = job.colour };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(page.facts.work.work.state.holdsQueue(), &output);
@@ -330,8 +343,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // listing, at the opening's seam. No later boundary may precede its
         // row, which shows nothing live.
         output.messages.shown = @max(output.messages.shown, pending.newest);
+        job.result.read_through = page.facts.read_through;
+        const oldest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else null;
+        switch (unseen.place(page.facts.read_through, oldest, page.facts.more)) {
+            .here => output.unseen_after = page.facts.read_through,
+            .older => job.result.rule = .older,
+            .none => {},
+        }
     }
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
+    if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
@@ -373,6 +394,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const latest = job.phase == .details;
     if (!latest) if (job.listing) |step| return list(job, task, step);
+    if (!latest) if (job.newer) |cursor| return newer(job, task, cursor);
     const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
@@ -382,6 +404,29 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
     job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
+}
+
+/// Renders one Activity page after `cursor`, oldest first and as live
+/// output shows it, for the end of the transcript that starts at the "new
+/// since you looked" rule. The first page, which follows the read-through
+/// position itself, starts with the rule.
+fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
+    const requests = task.requests();
+    const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.rendering = true;
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .end = page.facts.end, .colour = job.colour };
+    if (cursor.ordinal == null) try output.rule();
+    var compact = false;
+    try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact);
+    _ = output.finish();
+    job.result.collapsed = output.blocks;
+    job.result.newer = page.continuation();
+    // Later rows of a page's last position may be on the next page.
+    job.result.through = if (job.result.newer) |next| @max(next.position - 1, cursor.position) else page.facts.end;
 }
 
 /// Renders one listed Message, bound to its item's length and digest, and
@@ -453,11 +498,30 @@ const DisplayCapture = struct {
     current: ?protocol.ActivityItem = null,
     current_start: u64 = 0,
     current_shown: bool = false,
+    /// The rule goes before the first shown item after this position.
+    unseen_after: ?u64 = null,
+    /// Where the rule went.
+    rule_at: ?u64 = null,
+    colour: bool = false,
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         _ = self.finish();
         self.current = value;
         self.current_start = self.offset;
+    }
+
+    /// Writes the "new since you looked" rule here.
+    fn rule(self: *@This()) !void {
+        self.unseen_after = null;
+        self.rule_at = self.offset;
+        try self.write(View.Style.quiet.code(self.colour));
+        try self.write(unseen.rule);
+        try self.write(View.Style.normal.code(self.colour));
+    }
+
+    fn write(self: *@This(), bytes: []const u8) !void {
+        try self.file.writePositionalAll(self.task.io, bytes, self.offset);
+        self.offset += bytes.len;
     }
 
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
@@ -468,8 +532,13 @@ const DisplayCapture = struct {
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
-        try self.file.writePositionalAll(self.task.io, bytes, self.offset);
-        self.offset += bytes.len;
+        // An item's first bytes follow the rule when it is the first unseen
+        // one shown, and its echo and boundary start after the rule.
+        if (bytes.len != 0 and !self.current_shown) if (self.current) |current| if (self.unseen_after) |after| if (current.position > after) {
+            try self.rule();
+            self.current_start = self.offset;
+        };
+        try self.write(bytes);
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
@@ -491,6 +560,35 @@ const DisplayCapture = struct {
         return self.messages;
     }
 };
+
+test "the rule precedes the first shown item after the read-through position, once, outside its echo" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "output", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    const message: protocol.ActivityItem.Message = .{ .admission = 4, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 };
+    var output: DisplayCapture = .{ .task = &task, .file = file, .unseen_after = 3 };
+    // Read items, and an unseen one that shows nothing, take no rule.
+    output.item(.{ .position = 3, .at = 1, .value = .{ .assistant = content } });
+    try output.feed("seen\n");
+    output.item(.{ .position = 4, .at = 1, .value = .{ .call = undefined } });
+    try output.feed("");
+    output.item(.{ .position = 5, .at = 1, .value = .{ .admission = message } });
+    try output.feed("\n› new\n");
+    output.item(.{ .position = 6, .at = 1, .value = .{ .assistant = content } });
+    try output.feed("later\n");
+    _ = output.finish();
+    var bytes: [128]u8 = undefined;
+    const written = bytes[0..try file.readPositionalAll(io, &bytes, 0)];
+    try std.testing.expectEqualStrings("seen\n" ++ unseen.rule ++ "\n› new\nlater\n", written);
+    try std.testing.expectEqual(@as(?u64, 5), output.rule_at);
+    // The Message's echo is its own rows, after the rule.
+    try std.testing.expectEqual(@as(usize, 1), output.echoes.count);
+    try std.testing.expectEqualStrings("\n› new\n", written[@intCast(output.echoes.items[0].output)..@intCast(output.echoes.items[0].end)]);
+}
 
 /// Messages shown in live output, by admission id. A Message shows first as
 /// its Admission, or is listed at the opening's seam, and gains its

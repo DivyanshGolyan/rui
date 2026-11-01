@@ -3,7 +3,7 @@ const model_capability = @import("model_capability.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "2";
+pub const wire_version = "3";
 pub const max_key_bytes = 128;
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
@@ -156,6 +156,7 @@ pub const Kind = enum {
     proposal_field,
     activity_page,
     activity_content,
+    mark_read,
 };
 
 pub const ConfigureCommand = struct {
@@ -666,6 +667,8 @@ pub const ActivityItem = struct {
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
+/// A person has seen the Session's conversation through `position`.
+pub const MarkRead = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0 };
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -884,11 +887,14 @@ pub const ActivityFacts = struct {
     more: bool = false,
     call_activity: CallActivity = .{},
     work: PageWork = .{},
+    /// The position a person has read the Session's conversation through,
+    /// as of this page's read; null until someone has.
+    read_through: ?u64 = null,
 
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    /// Holes: more, call activity, work, read-through position.
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, ",\"read_through\":", Hole.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
@@ -897,7 +903,7 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.work, self.read_through });
     }
 };
 
@@ -921,12 +927,13 @@ pub const Request = union(Kind) {
     proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
+    mark_read: MarkRead,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .mark_read => {},
         }
     }
 
@@ -1261,6 +1268,8 @@ const Parser = struct {
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
+        else if (kind_text.eql("mark_read"))
+            .mark_read
         else
             return error.UnknownCommand;
 
@@ -1344,6 +1353,10 @@ const Parser = struct {
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content);
+            },
+            .mark_read => {
+                out.* = .{ .mark_read = .{ .store = store } };
+                try self.parseMarkRead(&out.mark_read);
             },
         }
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
@@ -1696,6 +1709,16 @@ const Parser = struct {
         try self.readSmallString(&direction);
         out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
         try out.validate();
+    }
+
+    fn parseMarkRead(self: *Parser, out: *MarkRead) !void {
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&out.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        out.position = try self.readCanonicalU64();
+        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
     }
 
     fn parseActivityContent(self: *Parser, out: *ReadActivityContent) !void {
@@ -2279,6 +2302,8 @@ pub const proposal_field_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, position.
+pub const mark_read_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
 /// metadata has a shape. The variable parts are written between these.
 pub const configure_request = struct {
@@ -2319,6 +2344,7 @@ pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
 pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+pub const max_mark_read_request_bytes = shapeBytes(mark_read_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
@@ -2326,7 +2352,7 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
     proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,
+    activity_content_request,    mark_read_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2497,10 +2523,11 @@ pub const max_control_response_bytes = @max(
 /// authentication capabilities.
 pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
+pub const mark_read_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"mark_read_reply\",\"status\":\"recorded\"}";
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, mark_read_ack.len));
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
@@ -2888,7 +2915,7 @@ test "ingress unknown write failure keeps submitted charge until close" {
 }
 
 test "observation needs no scratch at a full budget" {
-    const json = "{\"version\":\"2\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
+    const json = "{\"version\":\"3\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
     var source: MetadataSource = .{ .input = json };
     var used = std.atomic.Value(u64).init(3);
     var retained: ?named_scratch.Owner = null;
@@ -2916,7 +2943,7 @@ test "Conversation content stream wire requires start zero and literal true" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -2944,7 +2971,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -2953,6 +2980,30 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expect(request == .conversation_page);
+        }
+    }
+}
+
+test "a read-through position is a canonical positive Session position" {
+    const cases = [_]struct { position: []const u8, expected: ?u64 = null, failure: ?anyerror = null }{
+        .{ .position = "1", .expected = 1 },
+        .{ .position = "9223372036854775807", .expected = std.math.maxInt(i64) },
+        .{ .position = "0", .failure = error.InvalidCursor },
+        .{ .position = "9223372036854775808", .failure = error.InvalidCursor },
+        .{ .position = "07", .failure = error.InvalidIdentity },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":\"s\",\"session\":\"x\",\"position\":\"{s}\"}}", .{case.position});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expectEqual(case.expected.?, request.mark_read.position);
+            try std.testing.expectEqualStrings("x", request.mark_read.session.slice());
         }
     }
 }
@@ -2996,7 +3047,7 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
         var buffer: [2048]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
@@ -3047,7 +3098,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(
             &buffer,
-            "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+            "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
                 "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
                 "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
@@ -3093,7 +3144,7 @@ test "configuration tools accept only an empty catalog or Bash" {
     };
     for (cases) |case| {
         var buffer: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
             "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
@@ -3119,24 +3170,24 @@ test "configuration tools accept only an empty catalog or Bash" {
 test "Session inspection selects a closed report profile or exact failed response stream" {
     const cases = [_]struct { json: []const u8, expected: ?ReportProfile, failed_response: ?FailedResponseExport = null }{
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
             .expected = .current,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
             .expected = .full,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
             .expected = null,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
             .expected = .current,
             .failed_response = .{ .operation = 106, .attempt = 1, .part = .body },
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
             .expected = .current,
             .failed_response = .{ .operation = 42, .attempt = 3, .part = .metadata },
         },
@@ -3162,14 +3213,14 @@ test "Session inspection selects a closed report profile or exact failed respons
 }
 
 test "Session listing wire distinguishes all, exact workspace, continuation, since and invalid cursor" {
-    const head = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
+    const head = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
     const since = ",\"since\":\"abababababababababababababababab.42\"";
     const Case = struct { json: []const u8, workspace: ?[]const u8 = null, after: u64 = 0, ceiling: u64 = 0, since: ?u64 = null, through: ?u64 = null, failure: ?anyerror = null };
     const cases = [_]Case{
         .{ .json = head ++ "}" },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
         // A token's first page, and a changed continuation through the
         // first page's generation after the last reference it gave.
         .{ .json = head ++ since ++ "}", .since = 42 },
@@ -3177,7 +3228,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
         // A full continuation carries no token; a changed one never ends
         // before its token, and names a Session.
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2q\"}", .failure = error.InvalidCursor },
@@ -3210,7 +3261,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
 }
 
 test "peer wire rejects old sender strings, malformed addresses and missing handles" {
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
     const cases = [_]struct { json: []const u8, failure: anyerror }{
         .{ .json = prefix ++ "\"peer\",\"sender_handle\":null", .failure = error.InvalidJsonShape },
         .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null", .failure = error.InvalidJsonShape },
@@ -3232,7 +3283,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";
@@ -3276,7 +3327,7 @@ test "initial Message ingress retains text custody and rejects extra content bef
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
     const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
@@ -3333,10 +3384,10 @@ test "only a creating Message carries require_model, and it binds the digest" {
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const creating = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const creating = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
         "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const addressed = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
         .{ .bytes = creating ++ ",\"require_model\":false}" },
@@ -3385,7 +3436,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const configure = "{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
+    const configure = "{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
         "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"omitted\"}," ++
         "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"}}";

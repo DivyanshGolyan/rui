@@ -22,7 +22,7 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 44;
+pub const schema_version: u32 = 45;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -1370,6 +1370,7 @@ const SessionFacts = struct {
     output_reservation: ?u64 = null,
     reasoning_effort: ?protocol.ReasoningEffort = null,
     created_at: u64,
+    read_through: ?u64 = null,
 };
 
 const MessageProjection = struct {
@@ -3552,6 +3553,29 @@ pub const Store = struct {
         const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
         page.work.work = .fromCore(work);
         page.work.revision = session.revision;
+        page.read_through = session.read_through;
+    }
+
+    /// Records that a person has seen the Session's conversation through
+    /// `request.position`. It only advances, so a client that saw less, or a
+    /// repeated write, changes nothing. Like every Session write, a change
+    /// touches the Session in the change ring.
+    pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.page, self.markReadLocked(request));
+    }
+
+    fn markReadLocked(self: *Store, request: *const protocol.MarkRead) !void {
+        const session = request.session.slice();
+        const statement = try self.cached("UPDATE session SET read_through=?2 WHERE session_ref=?1 AND ?2<next_position AND (read_through IS NULL OR read_through<?2)");
+        defer resetCached(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, request.position);
+        try expectDone(statement);
+        if (c.sqlite3_changes(self.database) == 1) return self.touch(session);
+        const facts = (try self.readSessionFacts(session, null)) orelse return error.SessionNotFound;
+        if (request.position >= facts.next_position) return error.InvalidCursor;
     }
 
     // This projection shares the page's canonical capture, not Current's active
@@ -7963,7 +7987,7 @@ pub const Store = struct {
     /// The Session facts turn work binds to, without the workspace or label
     /// a whole configuration carries, and optionally its workspace.
     fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*protocol.Bounded(protocol.max_workspace_bytes)) !?SessionFacts {
-        const statement = try self.cached("SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace FROM session WHERE session_ref=?1");
+        const statement = try self.cached("SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,read_through FROM session WHERE session_ref=?1");
         defer resetCached(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
@@ -7978,6 +8002,7 @@ pub const Store = struct {
             .reasoning_effort = try readNullableEffort(statement, 6),
             .created_at = @intCast(try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore),
             .provider = try readProvider(statement, 8),
+            .read_through = if (try readNullablePositiveI64(statement, 10)) |position| @intCast(position) else null,
         };
         try readText(statement, 0, &facts.model);
         if (workspace) |destination| try readText(statement, 9, destination);
@@ -8389,7 +8414,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     ++ reasoning_effort_column_sql ++
         \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
         \\ created_at INTEGER NOT NULL CHECK(created_at>0),
-        \\ next_position INTEGER NOT NULL CHECK(next_position>0)
+        \\ next_position INTEGER NOT NULL CHECK(next_position>0),
+        \\ -- The position a person has seen the conversation through; NULL until one has.
+        \\ read_through INTEGER CHECK(read_through IS NULL OR (read_through>0 AND read_through<next_position))
         \\) STRICT;
         \\CREATE INDEX session_workspace_list ON session(workspace);
         \\CREATE TABLE core_command(
@@ -9797,7 +9824,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
     var expected_empty: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -19249,6 +19276,43 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPageForTesting(request)).count);
+}
+
+test "read-through only advances, within the Session's committed positions, and pages carry it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "read-through-config");
+    try submitTestMessage(&storage, &tmp, "read-through-a", "a", session.slice(), "first");
+    try submitTestMessage(&storage, &tmp, "read-through-b", "b", session.slice(), "second");
+    var page: protocol.ActivityPage = .{};
+    try page.session.set(session.slice());
+    const unread = try storage.activityPageForTesting(page);
+    try std.testing.expectEqual(@as(?u64, null), unread.read_through);
+    const first = unread.items[0].position;
+    var read: protocol.MarkRead = .{ .position = first };
+    try read.session.set(session.slice());
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, first), (try storage.activityPageForTesting(page)).read_through);
+    // A client that saw more moves it on; one that saw less, or the same
+    // write again, leaves it.
+    read.position = unread.end;
+    try storage.markRead(&read);
+    try storage.markRead(&read);
+    read.position = first;
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, unread.end), (try storage.activityPageForTesting(page)).read_through);
+    // A position the Session has not reached, or an unknown Session, fails
+    // without fencing the Store.
+    read.position = unread.end + 1;
+    try std.testing.expectError(error.InvalidCursor, storage.markRead(&read));
+    try read.session.set("zzzzzz");
+    read.position = 1;
+    try std.testing.expectError(error.SessionNotFound, storage.markRead(&read));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(?u64, unread.end), (try storage.activityPageForTesting(page)).read_through);
 }
 
 test "every activity row is dated by the fact that owns it" {

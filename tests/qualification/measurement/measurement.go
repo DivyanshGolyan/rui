@@ -394,7 +394,7 @@ func ExchangeUnix(deadline Deadline, socketPath string, route string, value any,
 		return err
 	}
 	header := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n",
+		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\nConnection: close\r\n\r\n",
 		route,
 		len(body),
 	)
