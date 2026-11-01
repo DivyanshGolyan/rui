@@ -13,6 +13,7 @@ import sys
 
 TAG = re.compile(r"v0\.([0-9]+)\.([0-9]+)")
 SCHEMA = re.compile(r"^pub const schema_version: u32 = ([0-9]+);$", re.M)
+PUBLISH = re.compile(r"^@PUBLISH@\n", re.M)
 PLATFORMS = ("darwin-arm64", "linux-x86_64")
 
 
@@ -52,9 +53,15 @@ def plan(sha):
     return f"0.{schema}.{patch}"
 
 
-def installer(template, version, digests):
-    """Fill the release installer template with its version and archive digests."""
-    text = template.replace("@VERSION@", version)
+def installer(template, version, digests, publish):
+    """Fill the release installer template: its version, archive digests and
+    the shared publication fragment (release/publish.sh) at @PUBLISH@."""
+    if re.search(r"@[A-Z0-9_]+@", publish):
+        raise SystemExit("release/publish.sh must not contain placeholders")
+    text, count = PUBLISH.subn(lambda _: publish, template)
+    if count != 1:
+        raise SystemExit("installer template must contain @PUBLISH@ exactly once")
+    text = text.replace("@VERSION@", version)
     for platform in PLATFORMS:
         digest = digests[platform]
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -86,8 +93,10 @@ def main():
                 digests[platform] = digest
     if set(digests) != set(PLATFORMS):
         raise SystemExit(f"SHA256SUMS must list every platform archive for {args.version}")
-    template = (Path(__file__).resolve().parents[2] / "release/install.sh").read_text()
-    args.output.write_text(installer(template, args.version, digests))
+    root = Path(__file__).resolve().parents[2]
+    template = (root / "release/install.sh").read_text()
+    publish = (root / "release/publish.sh").read_text()
+    args.output.write_text(installer(template, args.version, digests, publish))
     args.output.chmod(0o755)
 
 

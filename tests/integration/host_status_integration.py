@@ -20,6 +20,15 @@ import os_semantics
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
+PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
+
+
+def installer_view(home):
+    """What the installer's report reads from this build: the selected Store and its Host status."""
+    result = subprocess.run(["sh", "-c", '. "$1"; _rui_selected "$2"', "sh", PUBLISH, RUI],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stderr == "", result
+    return result.stdout.splitlines()
 
 
 def status(store):
@@ -374,6 +383,7 @@ def main():
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
         home.mkdir(mode=0o700)
+        assert installer_view(home) == [f"{home}/.local/share/rui/store", "store_unavailable"]
         assert status(store) == "unavailable"
         assert cli_status(home, "--store", store)["status"] == "unavailable"
         assert not store.exists(), "observation created a Store"
@@ -589,6 +599,9 @@ def main():
             setup = exchange("host_info", lambda: subprocess.run([RUI, "defaults", "configure", "--store", str(alias)],
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
+            # Configure saves the canonical path, which the installer then shows.
+            view = exchange("host_info", lambda: installer_view(home))
+            assert view == [str(store.resolve()), "ready"], view
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected == {
                 "version": "2", "type": "host_status", "status": "ready", "store": str(store.resolve()),
