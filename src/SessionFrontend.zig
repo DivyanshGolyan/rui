@@ -29,6 +29,10 @@ const work_line = @import("work_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
+/// What the caller does between the conversation's frames, without the
+/// screen or input: the overview keeps listing, so another Session's news
+/// still notifies.
+pub const Aside = struct { context: *anyopaque, step: *const fn (*anyopaque) void };
 const Job = reads.Job;
 pub const Files = reads.Files;
 const Inspection = reads.Inspection;
@@ -50,6 +54,7 @@ interrupted: *client.Cancellation = undefined,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
+aside: ?Aside = null,
 input: Input = undefined,
 submission: Submission = undefined,
 reader: Task = .{},
@@ -202,8 +207,8 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// caller restores the terminal before `leave` joins them, so a borrower that
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
-pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation) !Outcome {
-    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, aside: ?Aside) !Outcome {
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false, .aside = aside };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
     terminal.pump = .{ .context = self, .step = pump };
@@ -321,7 +326,7 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page };
-    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted);
+    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, null);
     try std.testing.expectEqual(Outcome.detached, outcome);
     try std.testing.expect(terminal.active and terminal.pump == null);
     var written: [65536]u8 = undefined;
@@ -695,6 +700,9 @@ fn driveActive(self: *Self) !void {
             self.reading.phase = .activity;
         }
         self.withdrawDecided();
+        if (self.aside) |aside| aside.step(aside.context);
+        // Another Session's notification goes out with the next frame.
+        if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
         if (self.expansion.pending) try self.expand();
         _ = try self.step(16);
@@ -1454,6 +1462,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
+    var news: ?attention.Kind = null;
     if (self.reading.output_started)
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
@@ -1477,12 +1486,11 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.shown.width = null;
         }
         // The state the conversation opened on is not news.
-        const news = if (self.reading.opening) null else attention.news(self.live.work.state, result.work.work.state);
+        if (!self.reading.opening) news = attention.news(.{ .state = self.live.work.state, .first_action = self.live.work.first_action }, .{ .state = result.work.work.state, .first_action = result.work.work.first_action });
         self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
-        if (news) |kind| try self.terminal.notify(if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, kind, 0);
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -1491,6 +1499,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     }
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    // The next frame writes it first, once the read is applied.
+    if (news) |kind| self.terminal.notify(if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, kind, 0);
     self.dirty = true;
 }
 

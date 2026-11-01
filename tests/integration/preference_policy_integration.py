@@ -47,7 +47,7 @@ def main():
         run("login")
         private = home / ".config/rui"
         saved = private / "preferences"
-        assert saved.read_bytes() == b"version=2\nstore=\nprovider=codex\nmodel=\nnotifications=on\n"
+        assert saved.read_bytes() == b"version=1\nstore=\nprovider=codex\nmodel=\n"
         run("set", "deliberate-pin")
         old = saved.read_bytes()
         temporary = private / "preferences.tmp"

@@ -222,7 +222,13 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Read
     }
     if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
     var bytes: [max_file_bytes]u8 = undefined;
-    const encoded = std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n", .{ values.store.slice(), values.provider.slice(), values.model.slice(), if (values.notifications) "on" else "off" }) catch return error.InvalidPreferences;
+    // Version 1 says notifications are on, so an older Rui still reads the
+    // file of anyone who has not turned them off.
+    const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
+    const encoded = (if (values.notifications)
+        std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", fields)
+    else
+        std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications=off\n", fields)) catch return error.InvalidPreferences;
     try file.writeStreamingAll(io, encoded);
     try file.sync(io);
     file.close(io);
@@ -307,8 +313,8 @@ test "directory sync failures preserve complete preference publication" {
             return if (self.calls == self.at) -1 else NativeDirectorySync.sync(.{}, fd);
         }
     };
-    const old = "version=2\nstore=\nprovider=codex\nmodel=deliberate-pin\nnotifications=on\n";
-    const new = "version=2\nstore=\nprovider=codex\nmodel=new-pin\nnotifications=on\n";
+    const old = "version=1\nstore=\nprovider=codex\nmodel=deliberate-pin\n";
+    const new = "version=1\nstore=\nprovider=codex\nmodel=new-pin\n";
     for (0..4) |cut| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -412,18 +418,23 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     try std.testing.expect(!off.notifications and off.provider.eql("codex") and off.model.eql("pin"));
     const kept = try update(home, .{ .model = .clear }, .configured);
     try std.testing.expect(!kept.notifications and !(try load(home)).notifications);
-    try std.testing.expect((try update(home, .{ .notifications = true }, .configured)).notifications);
-    const saved = try config.openFile(io, "preferences", .{});
-    defer saved.close(io);
     var bytes: [256]u8 = undefined;
-    const count = try saved.readPositionalAll(io, &bytes, 0);
-    try std.testing.expectEqualStrings("version=2\nstore=\nprovider=codex\nmodel=\nnotifications=on\n", bytes[0..count]);
+    try std.testing.expectEqualStrings("version=2\nstore=\nprovider=codex\nmodel=\nnotifications=off\n", try savedFile(config, &bytes));
+    // Turned back on, the file is version 1 again, which an older Rui reads.
+    try std.testing.expect((try update(home, .{ .notifications = true }, .configured)).notifications);
+    try std.testing.expectEqualStrings("version=1\nstore=\nprovider=codex\nmodel=\n", try savedFile(config, &bytes));
     for ([_][]const u8{ "version=2\nstore=\nprovider=codex\nmodel=\n", "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
         const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try bad.writeStreamingAll(io, invalid);
         bad.close(io);
         try std.testing.expectError(error.InvalidPreferences, load(home));
     }
+}
+
+fn savedFile(config: std.Io.Dir, buffer: []u8) ![]const u8 {
+    const file = try config.openFile(io, "preferences", .{});
+    defer file.close(io);
+    return buffer[0..try file.readPositionalAll(io, buffer, 0)];
 }
 
 test "preference edits persist explicit choices rather than recommendations" {

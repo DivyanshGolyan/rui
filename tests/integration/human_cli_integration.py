@@ -436,8 +436,8 @@ def preference_edits(home, store):
     """Exact saved intent, independent of prospective recommendation output."""
     defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
     saved = home / ".config/rui/preferences"
-    pinned = f"version=2\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\n"
-    cleared = f"version=2\nstore={store.resolve()}\nprovider=codex\nmodel=\nnotifications=on\n"
+    pinned = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+    cleared = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=\n"
     assert saved.read_text() == pinned
     defaults(home, "--store", store)
     assert saved.read_text() == pinned, "omitted model lost its selection"
@@ -457,10 +457,11 @@ def preference_edits(home, store):
     assert saved.read_text() == cleared
     defaults(home, "--model", "gpt-6-luna")
     assert saved.read_text() == pinned
-    # Notifications are on by default; off keeps every other choice.
+    # Notifications are on by default; off keeps every other choice and is
+    # the only choice an older Rui cannot read.
     assert defaults(home)["notifications"] is True
     assert defaults(home, "--notifications", "off")["notifications"] is False
-    assert saved.read_text() == pinned.replace("notifications=on", "notifications=off")
+    assert saved.read_text() == pinned.replace("version=1", "version=2") + "notifications=off\n"
     defaults(home, "--notifications", "maybe", success=False)
     assert defaults(home, "--notifications", "on")["notifications"] is True
     assert saved.read_text() == pinned
@@ -1346,10 +1347,25 @@ def raw_output(master, until, timeout=15):
     return raw
 
 
+def quiet_output(master, seconds):
+    """Whatever the terminal writes within `seconds`."""
+    raw = b""
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if not select.select([master], [], [], remaining)[0]:
+            break
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
 def notification_cases():
     """Out of focus, the overview and the conversation each notify once of a
-    Session that finished or needs approval; in focus, or with notifications
-    off, they write none. Focus reporting is asked for and given back."""
+    Session that finished or needs approval, and an open conversation of
+    another Session's finish; in focus, or with notifications off, they write
+    none. Focus reporting is asked for and given back."""
     state = screen_fixture_root("rui-notify.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -1361,6 +1377,7 @@ def notification_cases():
         "First finish": fixture.sse_answer("notify-1", "notify-reason-1", "notify-message-1", "First done.")[0],
         "Focused finish": fixture.sse_answer("notify-2", "notify-reason-2", "notify-message-2", "Second done.")[0],
         "Muted finish": fixture.sse_answer("notify-3", "notify-reason-3", "notify-message-3", "Third done.")[0],
+        "Other lane finish": fixture.sse_answer("notify-4", "notify-reason-4", "notify-message-4", "Fourth done.")[0],
         "Propose a notified Action": fixture.sse_tool_calls("notify-action", [
             ("bash", "notify-action-call", json.dumps({"cmd": "true", "description": "Do nothing", "timeout_ms": None}))]),
     })
@@ -1419,12 +1436,18 @@ def notification_cases():
         raw_output(master, b"\x1b]9;Rui: notify lane needs approval\x07", timeout=20)
         shown_choice = read_terminal(master, CHOICE)
         assert "? Do nothing" in shown_choice, shown_choice
+        # Another Session's finish, while the conversation is open and away,
+        # notifies exactly once; the open Session's news stays its own.
+        admit(home, "session", "send", "--to", lanes["focused lane"], input="Other lane finish", cwd=workspace)
+        raw = raw_output(master, b"\x1b]9;Rui: focused lane finished\x07", timeout=20)
+        raw += quiet_output(master, 3)
+        assert raw.count(b"\x1b]9;") == 1, raw
         os.write(master, b"\x03")
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         assert b"\x1b[?1004l" in output, output[-256:]
         completed = True
-        print("Notifications: overview finish once while away, none in focus or when off, conversation approval, focus reporting restored", flush=True)
+        print("Notifications: overview finish once while away, none in focus or when off, conversation approval, another Session's finish under a conversation once, focus reporting restored", flush=True)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
@@ -5740,11 +5763,11 @@ def main(selected="all"):
         defaults(preferences_home, "--store", alias,
             "--provider", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
-        assert saved.read_text() == f"version=2\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\n"
+        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
         preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=gpt-5.6-sol"))
-        assert saved.read_text().endswith("provider=codex\nmodel=gpt-5.6-sol\nnotifications=on\n")
+        assert saved.read_text().endswith("provider=codex\nmodel=gpt-5.6-sol\n")
         assert defaults(preferences_home)["model"] == "gpt-5.6-sol"
         saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
@@ -5760,7 +5783,7 @@ def main(selected="all"):
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
         defaults(linked_home, "--store", store,
             "--provider", "codex", "--model", "gpt-6-luna", success=False)
-        assert saved.read_text() == f"version=2\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\n"
+        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
         backup = saved.parent / "saved-preferences"
         saved.rename(backup)
         os.mkfifo(saved, mode=0o600)
@@ -5847,7 +5870,7 @@ def main(selected="all"):
         defaults(preferences_home, "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--provider", "codex")
-        assert saved.read_text().endswith("provider=codex\nmodel=\nnotifications=on\n")
+        assert saved.read_text().endswith("provider=codex\nmodel=\n")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")

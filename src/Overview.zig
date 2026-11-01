@@ -252,6 +252,9 @@ frame: std.ArrayList(u8) = .empty,
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
+/// What ended the listing kept under a conversation; the overview ends with
+/// it once the conversation returns.
+aside_failure: ?anyerror = null,
 /// The Session the last accepted start made, for guidance if its
 /// conversation fails.
 started: ?view.Reference = null,
@@ -395,6 +398,7 @@ fn loop(self: *Self) !Ending {
 /// One pass: a due tick, the next job and a frame, then one wait for input,
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
+    if (self.aside_failure) |err| return err;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
     try self.dispatch();
@@ -458,7 +462,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = .{ .buffer = &self.draft },
-        .notify => |alert| try self.terminal.notify(alert.name, alert.kind, alert.more),
+        .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
     return next;
@@ -690,6 +694,8 @@ fn draw(self: *Self, frame: u64) !?Next {
     self.draft_anchor = screen.draft_anchor;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
+    // A waiting notification goes first, through the frame's pumped write.
+    bytes.writer.writeAll(self.terminal.takeNotification()) catch return error.OutOfMemory;
     screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
     self.frame = bytes.toArrayList();
     // The terminal already shows it; keep the new screen, whose pulse is
@@ -728,6 +734,40 @@ fn budget(self: *const Self, now_ms: u64, awake_ms: u64, pulses: bool) i32 {
     return if (tick < 0) frame else @min(tick, frame);
 }
 
+/// While a conversation is open, the listing goes on without the screen or
+/// input, so another Session's news still notifies. Only listing jobs run:
+/// a start or stop result waits for the overview, which acts on it.
+fn aside(raw: *anyopaque) void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.aside_failure != null) return;
+    self.listAside() catch |err| {
+        self.aside_failure = err;
+    };
+}
+
+fn listAside(self: *Self) !void {
+    const now_ms = self.realMs();
+    if (self.state.wakeAt()) |at| if (now_ms >= at) {
+        _ = try self.event(.{ .tick = now_ms });
+    };
+    if (self.worker.thread == null) {
+        if (self.job_count != 0 and listing(self.jobs[0])) try self.dispatch();
+        return;
+    }
+    if (!listing(self.job)) return;
+    var fds = [_]std.posix.pollfd{.{ .fd = self.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try std.posix.poll(&fds, 0) == 0) return;
+    drain(self.done[0]);
+    _ = try self.complete();
+}
+
+fn listing(job: Job) bool {
+    return switch (job) {
+        .host, .list, .lines => true,
+        .start, .stop => false,
+    };
+}
+
 /// While the terminal takes no output, reads input as the loop does, as the
 /// conversation's pump does. A key that leaves or opens a Session cuts the
 /// stale frame short, and a signal ends the wait.
@@ -742,6 +782,11 @@ fn pump(raw: *anyopaque) !void {
 /// leaves it.
 fn converse(self: *Self, session: view.Reference) ?Left {
     var left: Left = .{ .session = session, .frontend = null, .files = null, .ended = error.OutOfMemory };
+    // The conversation notifies of its own Session; the listing, of others.
+    _ = self.event(.{ .conversing = session }) catch |err| {
+        left.ended = err;
+        return left;
+    };
     const io = self.init.io;
     const screen = self.terminal.screen;
     if (!self.screen_fresh) {
@@ -769,7 +814,10 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         left.ended = err;
         return left;
     };
-    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted);
+    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, .{ .context = self, .step = aside });
+    if (self.event(.{ .conversing = null })) |_| {} else |err| {
+        if (self.aside_failure == null) self.aside_failure = err;
+    }
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;

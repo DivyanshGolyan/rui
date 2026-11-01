@@ -31,14 +31,24 @@ pub const Attention = struct {
     }
 };
 
-/// What to notify when a Session's state moved from `before`, null when the
+/// What a screen read of a Session's work: its state and the earliest
+/// Action awaiting a decision, which names the wait for approval.
+pub const Seen = struct {
+    state: session_work.WorkState,
+    first_action: ?u64 = null,
+};
+
+/// What to notify when a Session's work moved from `before`, null when the
 /// screen had not seen it, to `after`: each state that wants the person is
-/// news once, however many reads show it. A wait for approval is one wait
-/// while it lasts, as its Bash ends and the approval state begins.
-pub fn news(before: ?session_work.WorkState, after: session_work.WorkState) ?Kind {
-    const now = Attention.of(after) orelse return null;
-    if (before) |state| if (Attention.of(state)) |seen| {
-        if (std.meta.eql(seen, now) or seen.kind == .approval and now.kind == .approval) return null;
+/// news once, however many reads show it. A wait for the same Action is one
+/// wait while it lasts, as its Bash ends and the approval state begins; the
+/// next Action to wait is news again.
+pub fn news(before: ?Seen, after: Seen) ?Kind {
+    const now = Attention.of(after.state) orelse return null;
+    if (before) |read| if (Attention.of(read.state)) |seen| {
+        if (seen.kind == .approval and now.kind == .approval) {
+            if (read.first_action == after.first_action) return null;
+        } else if (std.meta.eql(seen, now)) return null;
     };
     return now.kind;
 }
@@ -73,7 +83,7 @@ pub fn write(out: *std.Io.Writer, how: Signal, name: []const u8, kind: Kind, mor
         .osc9 => try out.writeAll("\x1b]9;Rui: "),
         .osc777 => try out.writeAll("\x1b]777;notify;Rui;"),
     }
-    var text: TerminalText = .{ .mode = .multiline };
+    var text: TerminalText = .{ .mode = .line };
     try text.feed(out, session_line.cut(max_name_bytes, name).slice());
     try text.finish(out);
     try out.writeAll(switch (kind) {
@@ -86,22 +96,26 @@ pub fn write(out: *std.Io.Writer, how: Signal, name: []const u8, kind: Kind, mor
 }
 
 test "each finish, failure and approval is news once, and stopping or working is none" {
-    const finished: session_work.WorkState = .{ .finished = .{ .since = 10 } };
-    try std.testing.expectEqual(Kind.finished, news(.{ .working = .{ .since = 5 } }, finished).?);
+    const finished: Seen = .{ .state = .{ .finished = .{ .since = 10 } } };
+    try std.testing.expectEqual(Kind.finished, news(.{ .state = .{ .working = .{ .since = 5 } } }, finished).?);
     try std.testing.expectEqual(Kind.finished, news(null, finished).?);
     try std.testing.expectEqual(@as(?Kind, null), news(finished, finished));
     // A later Turn's finish is news again; so is a new approval after Bash ran.
-    try std.testing.expectEqual(Kind.finished, news(finished, .{ .finished = .{ .since = 11 } }).?);
-    try std.testing.expectEqual(Kind.approval, news(.{ .bash = .{ .since = 3, .call = 0, .description = null, .running = 1, .approvals = 0 } }, .{ .approval = .{ .since = 4 } }).?);
-    try std.testing.expectEqual(Kind.failed, news(finished, .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } }).?);
-    try std.testing.expectEqual(@as(?Kind, null), news(finished, .{ .stopped = .{ .since = 12, .cause = .stop } }));
-    try std.testing.expectEqual(@as(?Kind, null), news(.{ .approval = .{ .since = 3 } }, .{ .working = .{ .since = 4 } }));
+    try std.testing.expectEqual(Kind.finished, news(finished, .{ .state = .{ .finished = .{ .since = 11 } } }).?);
+    try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .bash = .{ .since = 3, .call = 0, .description = null, .running = 1, .approvals = 0 } } }, .{ .state = .{ .approval = .{ .since = 4 } }, .first_action = 7 }).?);
+    try std.testing.expectEqual(Kind.failed, news(finished, .{ .state = .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } } }).?);
+    try std.testing.expectEqual(@as(?Kind, null), news(finished, .{ .state = .{ .stopped = .{ .since = 12, .cause = .stop } } }));
+    try std.testing.expectEqual(@as(?Kind, null), news(.{ .state = .{ .approval = .{ .since = 3 } }, .first_action = 7 }, .{ .state = .{ .working = .{ .since = 4 } } }));
     // An Action beside running Bash waits for approval; when the Bash ends
     // and the approval state begins, that is the same wait.
-    const beside: session_work.WorkState = .{ .bash = .{ .since = 5, .call = 0, .description = null, .running = 1, .approvals = 1 } };
-    try std.testing.expectEqual(Kind.approval, news(.{ .bash = .{ .since = 5, .call = 0, .description = null, .running = 1, .approvals = 0 } }, beside).?);
-    try std.testing.expectEqual(@as(?Kind, null), news(beside, .{ .approval = .{ .since = 6 } }));
-    try std.testing.expectEqual(@as(?Kind, null), news(.{ .approval = .{ .since = 6 } }, beside));
+    const beside: Seen = .{ .state = .{ .bash = .{ .since = 5, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .first_action = 7 };
+    try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .bash = .{ .since = 5, .call = 0, .description = null, .running = 1, .approvals = 0 } } }, beside).?);
+    try std.testing.expectEqual(@as(?Kind, null), news(beside, .{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }));
+    try std.testing.expectEqual(@as(?Kind, null), news(.{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }, beside));
+    // Once that Action is decided, the next one waiting is a new wait, even
+    // when no read saw the Session between them.
+    try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }, .{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 8 }).?);
+    try std.testing.expectEqual(Kind.approval, news(beside, .{ .state = .{ .approval = .{ .since = 9 } }, .first_action = 8 }).?);
 }
 
 test "of every work state, only a finish, a failure and an Action awaiting approval want the person" {
@@ -124,10 +138,11 @@ test "of every work state, only a finish, a failure and an Action awaiting appro
             .finished => .finished,
             else => null,
         };
-        try std.testing.expectEqual(expected, news(null, state));
-        try std.testing.expectEqual(@as(?Kind, null), news(state, state));
+        const seen: Seen = .{ .state = state, .first_action = if (expected == .approval) 1 else null };
+        try std.testing.expectEqual(expected, news(null, seen));
+        try std.testing.expectEqual(@as(?Kind, null), news(seen, seen));
     }
-    try std.testing.expectEqual(@as(?Kind, null), news(null, .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } }));
+    try std.testing.expectEqual(@as(?Kind, null), news(null, .{ .state = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } } }));
 }
 
 test "the signal follows what the terminal supports, and a multiplexer gets a bell" {
@@ -148,7 +163,8 @@ test "a notification is one sequence a hostile name cannot end or extend" {
     const cases = .{
         .{ Signal.osc9, "Fix the build", Kind.finished, 0, "\x1b]9;Rui: Fix the build finished\x07" },
         .{ Signal.osc777, "k7m2qx", Kind.approval, 2, "\x1b]777;notify;Rui;k7m2qx needs approval, and 2 more\x07" },
-        .{ Signal.osc9, "a\x07b\x1b\\c\u{9c}d", Kind.failed, 0, "\x1b]9;Rui: a\\x07b\\x1b\\c\\u009cd failed\x07" },
+        .{ Signal.osc9, "a\x07b\x1b\\c\u{9c}d", Kind.failed, 0, "\x1b]9;Rui: a\\x07b\\x1b\\\\c\\u009cd failed\x07" },
+        .{ Signal.osc9, "two\nlines\t\"x\"", Kind.finished, 0, "\x1b]9;Rui: two\\nlines\\t\\\"x\\\" finished\x07" },
         .{ Signal.bell, "anything", Kind.finished, 3, "\x07" },
     };
     inline for (cases) |case| {

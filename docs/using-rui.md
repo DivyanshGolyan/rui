@@ -87,7 +87,7 @@ To remove the saved default instead, run `rui defaults configure --clear-model`.
 
 ## Notifications
 
-When the terminal running Rui is out of focus, the overview or an open conversation sends a desktop notification when a Session finishes, fails or needs approval. iTerm2, kitty, WezTerm and Ghostty show it as a desktop notification and foot through its notify command. Other terminals, and tmux or screen, get a bell. Rui learns about focus from the terminal's focus reports. In tmux, set `focus-events on` to get notifications. To turn them off, run `rui defaults configure --notifications off`, or enter `/setup --notifications off`.
+When the terminal running Rui is out of focus, the overview or an open conversation sends a desktop notification when a Session finishes, fails or needs approval. iTerm2, kitty, WezTerm and Ghostty show it as a desktop notification and foot through its notify command. Other terminals, and tmux, get a bell. Rui learns about focus only from the terminal's focus reports, so a terminal or multiplexer that sends none gets no notifications. In tmux, set `focus-events on` to get them. To turn them off, run `rui defaults configure --notifications off`, or enter `/setup --notifications off`.
 
 ## Context compaction
 

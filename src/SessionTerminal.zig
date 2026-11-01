@@ -31,6 +31,9 @@ alternate_scroll: bool = false,
 focused: bool = true,
 /// How notifications reach this terminal; null sends none.
 notices: ?Notices = null,
+/// The notification the next frame writes first. At most one waits; a newer
+/// one replaces it.
+notification: struct { bytes: [attention.max_bytes]u8 = undefined, len: usize = 0 } = .{},
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(screen: *Screen) !Self {
@@ -388,27 +391,41 @@ pub const Notices = struct {
     /// Where the preference that turns notifications off lives. It is read
     /// at each notification, so /setup's change applies at once.
     home: []const u8,
+    /// Inside tmux, which also changes the conversation's composing hint.
+    tmux: bool,
 
     /// From the environment the terminal runs in.
     pub fn of(environ: *const std.process.Environ.Map, home: []const u8) Notices {
-        const multiplexed = environ.get("TMUX") != null or environ.get("STY") != null;
-        return .{ .signal = attention.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", multiplexed), .home = home };
+        const tmux = environ.get("TMUX") != null;
+        const multiplexed = tmux or environ.get("STY") != null;
+        return .{ .signal = attention.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", multiplexed), .home = home, .tmux = tmux };
     }
 };
 
-/// Tells the person, through the terminal, of `name`'s news and `more`
+/// Holds, for the next frame, a notification of `name`'s news and `more`
 /// other Sessions' while the terminal is out of focus and notifications are
-/// on. Callers write it between frames, so it never lands inside another
-/// sequence. Unreadable preferences leave notifications on, the default.
-pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) !void {
+/// on. Unreadable preferences leave notifications on, the default.
+pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) void {
     if (self.focused) return;
     const notices = self.notices orelse return;
     const saved = preferences.load(notices.home) catch preferences.Values{};
     if (!saved.notifications) return;
-    var bytes: [attention.max_bytes]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
+    var out = std.Io.Writer.fixed(&self.notification.bytes);
     attention.write(&out, notices.signal, name, kind, more) catch unreachable;
-    try self.write(out.buffered());
+    self.notification.len = out.buffered().len;
+}
+
+/// The waiting notification, which the caller writes as the first bytes of
+/// its next frame, through that frame's write: so it never lands inside
+/// another sequence, and a full terminal pumps rather than fails. The bytes
+/// hold until the next `notify`; a frame that fails drops them.
+pub fn takeNotification(self: *Self) []const u8 {
+    defer self.notification.len = 0;
+    return self.notification.bytes[0..self.notification.len];
+}
+
+pub fn notificationWaiting(self: *const Self) bool {
+    return self.notification.len != 0;
 }
 
 pub fn permanent(self: *Self, bytes: []const u8) !void {
@@ -444,47 +461,41 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Foot
         }
     };
     var buffer: [4096]u8 = undefined;
+    comptime std.debug.assert(attention.max_bytes <= buffer.len);
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
+    // The empty buffer holds it whole; the frame's flush writes it first.
+    output.writer.writeAll(self.takeNotification()) catch unreachable;
     const size = self.geometry();
     const delivered = self.screen.render(&output.writer, size, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
     self.size = size;
     return delivered;
 }
 
-test "a notification goes out only while focus is away and the person has not turned them off" {
-    var fds: [2]std.posix.fd_t = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    defer _ = std.c.close(fds[1]);
-    _ = std.c.fcntl(fds[0], std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
+test "a notification waits for the next frame, only while focus is away and the person has not turned them off" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    var terminal: Self = .{ .original = undefined, .flags = undefined, .output = fds[1], .screen = undefined };
-    const Pipe = struct {
-        fn all(fd: c_int, buffer: []u8) []const u8 {
-            const n = std.c.read(fd, buffer.ptr, buffer.len);
-            return if (n > 0) buffer[0..@intCast(n)] else "";
-        }
-    };
-    var buffer: [256]u8 = undefined;
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .output = -1, .screen = undefined };
     // No way to notify, then focused: nothing.
     terminal.focused = false;
-    try terminal.notify("k7m2qx", .finished, 0);
-    terminal.notices = .{ .signal = .osc9, .home = home };
+    terminal.notify("k7m2qx", .finished, 0);
+    terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
     terminal.focused = true;
-    try terminal.notify("k7m2qx", .finished, 0);
-    try std.testing.expectEqualStrings("", Pipe.all(fds[0], &buffer));
-    // Away, with no saved preferences: on by default.
+    terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    // Away, with no saved preferences: on by default, and taken once.
     terminal.focused = false;
-    try terminal.notify("k7m2qx", .finished, 0);
-    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx finished\x07", Pipe.all(fds[0], &buffer));
-    // Turned off, then on again, applies to the next notification.
+    terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx finished\x07", terminal.takeNotification());
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    // Turned off, then on again, applies to the next notification; a newer
+    // one replaces one still waiting.
     _ = try preferences.update(home, .{ .notifications = false }, .missing);
-    try terminal.notify("k7m2qx", .approval, 0);
-    try std.testing.expectEqualStrings("", Pipe.all(fds[0], &buffer));
+    terminal.notify("k7m2qx", .approval, 0);
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
     _ = try preferences.update(home, .{ .notifications = true }, .missing);
-    try terminal.notify("k7m2qx", .approval, 1);
-    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx needs approval, and 1 more\x07", Pipe.all(fds[0], &buffer));
+    terminal.notify("k7m2qx", .finished, 0);
+    terminal.notify("k7m2qx", .approval, 1);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx needs approval, and 1 more\x07", terminal.takeNotification());
 }
