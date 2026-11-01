@@ -547,6 +547,22 @@ def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
 
 
+# Darwin's per-user temporary directory once resolved:
+# /private/var/folders/XX/<30 characters>/T.
+DARWIN_TEMPORARY_ROOT_BYTES = len("/private/var/folders/XX/" + "X" * 30 + "/T")
+
+
+def screen_fixture_root(prefix):
+    """A new private root, resolved, at least as long as Darwin's would be.
+
+    Pages such as /status show the Store and Workspace, which wrap. Linux's
+    short /tmp would leave those pages rows that a Mac never has.
+    """
+    parent = pathlib.Path(tempfile.gettempdir()).resolve(strict=True)
+    padding = "t" * max(0, DARWIN_TEMPORARY_ROOT_BYTES - len(str(parent)))
+    return canonical_fixture_root(tempfile.mkdtemp(prefix=prefix + padding, dir=parent))
+
+
 def is_peer_disconnect(error):
     """Classify socket closure; callers decide whether closure is expected."""
     return isinstance(error, (BrokenPipeError, ConnectionResetError)) or (
