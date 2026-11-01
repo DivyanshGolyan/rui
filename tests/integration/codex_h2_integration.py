@@ -17,7 +17,7 @@ import codex_integration as codex
 import model_fixture as fixture
 import transport_h2_integration as h2_fixture
 import host_process
-from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+from host_process import HostDiagnostics, dispose_all, retain_failure_state, start_ready_process
 import os_semantics
 
 
@@ -245,20 +245,28 @@ def openai_base_url_run():
         print("openai base URL passed: the key goes over TLS to /custom/v1/responses under RUI_OPENAI_BASE_URL")
         complete = True
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
-        if complete:
-            shutil.rmtree(root)
-        else:
-            retain_failure_state("OpenAI base URL failure state", root)
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "OpenAI base URL endpoint thread did not retire"
+        cleaned = False
+        try:
+            # Every disposal runs; a body failure stays primary.
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("OpenAI base URL failure state", root)
 
 
 if __name__ == "__main__":
     host_process.enter()
-    openai_base_url_run()
+    if os_semantics.SSL_CERT_FILE_TRUST:
+        openai_base_url_run()
+    else:
+        print("openai base URL TLS case not run: Darwin system trust ignores SSL_CERT_FILE; unit tests cover the URL rules")
     run()
     run(observed=True)
     run(intake=10)
