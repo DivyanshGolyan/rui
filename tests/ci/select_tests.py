@@ -130,6 +130,8 @@ RULES = (
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      "Credential mutation and synthetic managed transport"),
+    (("src/path_list.zig",), ("test-logic", "check"), ("test-logic", "test"),
+     "Search path values; the system PATH reader and Bash's environment build on them"),
     (("src/os/*",),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
