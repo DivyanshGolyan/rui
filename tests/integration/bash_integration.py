@@ -1126,6 +1126,7 @@ def main():
     add_exchange(responses, "cleanup", "printf cleaned")
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
+    add_exchange(responses, "arguments", "printf never")
     add_exchange(responses, "capture-read", "printf captured")
     add_exchange(responses, "capture", "printf captured")
     add_exchange(responses, "seal", "printf sealed")
@@ -2230,7 +2231,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 29 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 30 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
