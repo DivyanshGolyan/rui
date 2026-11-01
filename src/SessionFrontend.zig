@@ -31,8 +31,9 @@ pub const Requests = reads.Requests;
 pub const Status = reads.Status;
 /// What the caller does between the conversation's frames, without the
 /// screen or input: the overview keeps listing, so another Session's news
-/// still notifies.
-pub const Aside = struct { context: *anyopaque, step: *const fn (*anyopaque) void };
+/// still notifies. Its failure ends the conversation as the conversation's
+/// own would.
+pub const Aside = struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void };
 const Job = reads.Job;
 pub const Files = reads.Files;
 const Inspection = reads.Inspection;
@@ -708,7 +709,7 @@ fn driveActive(self: *Self) !void {
             self.reading.phase = .activity;
         }
         self.withdrawDecided();
-        if (self.aside) |aside| aside.step(aside.context);
+        if (self.aside) |aside| try aside.step(aside.context);
         // Another Session's notification goes out with the next frame.
         if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
