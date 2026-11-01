@@ -52,34 +52,49 @@ pub fn childBlock(arena: std.mem.Allocator, base: ?Value, facts: HostFacts, iden
             start = end + 1;
         }
     } else if (facts.home) |home| {
-        block[length] = try variable(arena, "HOME", home);
+        block[length] = (try variable(arena, "HOME", home)).ptr;
         length += 1;
     }
-    block[0] = try variable(arena, "PATH", try leadPath(arena, facts.executable_dir, path));
-    block[length] = try variable(arena, "RUI_ADDRESS", identity.address);
-    block[length + 1] = try variable(arena, "RUI_STORE", identity.store);
+    block[0] = (try leadPath(arena, facts.executable_dir, path)).ptr;
+    block[length] = (try variable(arena, "RUI_ADDRESS", identity.address)).ptr;
+    block[length + 1] = (try variable(arena, "RUI_STORE", identity.store)).ptr;
     length += 2;
     if (identity.sender_handle.len != 0) {
-        block[length] = try variable(arena, "RUI_SENDER_HANDLE", identity.sender_handle);
+        block[length] = (try variable(arena, "RUI_SENDER_HANDLE", identity.sender_handle)).ptr;
         length += 1;
     }
     block[length] = null;
     return block[0..length :null];
 }
 
-/// `path` with `directory` as its first entry, so a bare `rui` is this
-/// build. Unchanged when the directory is unknown, contains ':' (it cannot be
-/// one entry), or already leads.
-pub fn leadPath(arena: std.mem.Allocator, directory: ?[]const u8, path: []const u8) error{OutOfMemory}![]const u8 {
-    const lead = directory orelse return path;
-    if (std.mem.indexOfScalar(u8, lead, ':') != null) return path;
-    if (std.mem.startsWith(u8, path, lead) and (path.len == lead.len or path[lead.len] == ':')) return path;
-    if (path.len == 0) return lead;
-    return std.fmt.allocPrint(arena, "{s}:{s}", .{ lead, path });
+/// `PATH=` and `path` with `directory` as its first entry and no other
+/// copy of it, so a bare `rui` is this build. `path` is unchanged when the
+/// directory is unknown or contains ':' (it cannot be one entry). An empty
+/// `path` becomes the directory alone, since a trailing ':' would search the
+/// working directory.
+pub fn leadPath(arena: std.mem.Allocator, directory: ?[]const u8, path: []const u8) error{OutOfMemory}![:0]const u8 {
+    const prefix = "PATH=";
+    const lead = directory orelse return variable(arena, "PATH", path);
+    if (std.mem.indexOfScalar(u8, lead, ':') != null) return variable(arena, "PATH", path);
+    const buffer = try arena.allocSentinel(u8, prefix.len + lead.len + 1 + path.len, 0);
+    @memcpy(buffer[0..prefix.len], prefix);
+    @memcpy(buffer[prefix.len..][0..lead.len], lead);
+    var length = prefix.len + lead.len;
+    if (path.len != 0) {
+        var entries = std.mem.splitScalar(u8, path, ':');
+        while (entries.next()) |entry| {
+            if (std.mem.eql(u8, entry, lead)) continue;
+            buffer[length] = ':';
+            @memcpy(buffer[length + 1 ..][0..entry.len], entry);
+            length += 1 + entry.len;
+        }
+    }
+    buffer[length] = 0;
+    return buffer[0..length :0];
 }
 
-fn variable(arena: std.mem.Allocator, name: []const u8, value: []const u8) error{OutOfMemory}![*:0]const u8 {
-    return (try std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ name, value }, 0)).ptr;
+fn variable(arena: std.mem.Allocator, name: []const u8, value: []const u8) error{OutOfMemory}![:0]const u8 {
+    return std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ name, value }, 0);
 }
 
 test "childBlock over every base, directory, HOME and sender handle" {
@@ -88,8 +103,9 @@ test "childBlock over every base, directory, HOME and sender handle" {
         null,
         "LANG=C\x00",
         "LANG=C\x00PATH=\x00",
-        "LANG=C\x00PATH=/client/bin:/bin\x00TERM=x\x00",
+        "LANG=C\x00PATH=/client/bin:/bin\x00HOME=/home/client\x00",
         "PATH=/opt/rui:/client/bin\x00LANG=C\x00",
+        "PATH=/bin:/opt/rui::/opt/rui/\x00",
     };
     const directories = [_]?[]const u8{ null, "/opt/a:b", "/opt/rui" };
     // PATH for each base (rows) and directory (columns), written out by hand.
@@ -99,14 +115,16 @@ test "childBlock over every base, directory, HOME and sender handle" {
         .{ "", "", "/opt/rui" },
         .{ "/client/bin:/bin", "/client/bin:/bin", "/opt/rui:/client/bin:/bin" },
         .{ "/opt/rui:/client/bin", "/opt/rui:/client/bin", "/opt/rui:/client/bin" },
+        .{ "/bin:/opt/rui::/opt/rui/", "/bin:/opt/rui::/opt/rui/", "/opt/rui:/bin::/opt/rui/" },
     };
     // The base's entries other than PATH, in order.
     const others = [bases.len][]const []const u8{
         &.{},
         &.{"LANG=C"},
         &.{"LANG=C"},
-        &.{ "LANG=C", "TERM=x" },
+        &.{ "LANG=C", "HOME=/home/client" },
         &.{"LANG=C"},
+        &.{},
     };
     for (bases, paths, others) |base, row, kept| for (directories, row) |directory, path| {
         for ([_]?[]const u8{ null, "/home/peer" }) |home| for ([_][]const u8{ "", "handle-1" }) |handle| {
@@ -162,16 +180,19 @@ test "childBlock with no base matches the Host map it replaces" {
     for (expected, block) |want, got| try std.testing.expectEqualStrings(want, std.mem.span(got.?));
 }
 
-test "leadPath is idempotent" {
+test "leadPath puts the directory first once and is idempotent" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     for ([_]?[]const u8{ null, "/opt/a:b", "/opt/rui", "/opt" }) |directory| {
-        for ([_][]const u8{ "", "/bin", "/opt/rui", "/opt/rui:/bin", "/opt/ruin:/bin", "/bin:/opt/rui", ":" }) |path| {
-            const once = try leadPath(arena, directory, path);
-            try std.testing.expectEqualStrings(once, try leadPath(arena, directory, once));
+        for ([_][]const u8{ "", "/bin", "/opt/rui", "/opt/rui:/bin", "/opt/ruin:/bin", "/bin:/opt/rui", ":", "/bin::/opt/rui:/opt/rui" }) |path| {
+            const once = (try leadPath(arena, directory, path))["PATH=".len..];
+            try std.testing.expectEqualStrings(once, (try leadPath(arena, directory, once))["PATH=".len..]);
         }
     }
-    // A longer name that starts with the directory is not the directory.
-    try std.testing.expectEqualStrings("/opt/rui:/opt/ruin:/bin", try leadPath(arena, "/opt/rui", "/opt/ruin:/bin"));
+    // A system PATH that already holds the directory keeps one copy, first.
+    try std.testing.expectEqualStrings("PATH=/usr/local/bin:/usr/bin:/bin", try leadPath(arena, "/usr/local/bin", "/usr/bin:/usr/local/bin:/bin"));
+    // A longer name that starts with the directory is another entry.
+    try std.testing.expectEqualStrings("PATH=/opt/rui:/opt/ruin:/bin", try leadPath(arena, "/opt/rui", "/opt/ruin:/bin"));
+    try std.testing.expectEqualStrings("PATH=/opt/rui", try leadPath(arena, "/opt/rui", ""));
 }

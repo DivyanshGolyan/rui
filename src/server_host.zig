@@ -277,7 +277,7 @@ pub const Host = struct {
     /// every slot change and nothing else.
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
-    bash_facts: environment.HostFacts = bash.test_facts,
+    bash_facts: environment.HostFacts = bash.default_facts,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in

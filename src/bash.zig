@@ -49,8 +49,9 @@ pub fn freeHostFacts(allocator: std.mem.Allocator, facts: environment.HostFacts)
     if (facts.home) |value| allocator.free(value);
 }
 
-/// For owners whose Bash needs no Host facts (tests): the fixed system PATH.
-pub const test_facts: environment.HostFacts = .{ .executable_dir = null, .system_path = system_path.fixed, .home = null };
+/// Facts for a Host built without `readHostFacts`, as tests build one: the
+/// fixed system PATH and no directory or HOME.
+pub const default_facts: environment.HostFacts = .{ .executable_dir = null, .system_path = system_path.fixed, .home = null };
 
 const fault_padding_bytes = 4 << 20;
 
@@ -1469,7 +1470,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
     var refused: ArgumentSizes = .{};
-    var execution = try prepared.launch(test_facts, &refused);
+    var execution = try prepared.launch(default_facts, &refused);
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
@@ -1590,8 +1591,8 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(test_facts, &refused));
-    // RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, &refused));
+    // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
     const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
     try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);
     var message: [arguments_message_bytes]u8 = undefined;
