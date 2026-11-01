@@ -14,6 +14,7 @@ const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
+const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
@@ -84,7 +85,7 @@ pub noinline fn interpretOutput(
     item_check: *Output.OutputItemCheck,
     faults: Output.Faults,
     /// What a provider error event said; the caller saves its report.
-    provider_failure: *Output.ProviderFailure,
+    provider_failure: *output_decode.ProviderFailure,
     out: *OutputInterpretation,
 ) void {
     var rejection: Output.Rejection = .{};
@@ -120,15 +121,14 @@ pub noinline fn interpretOutput(
     }
 }
 
-/// Also fills `provider_failure` with what the body said, for every answer.
-pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16, provider_failure: *Output.ProviderFailure) execution.ErrorResponse {
-    return switch (Output.httpError(io, source, length, status, provider_failure) catch |err| return .{ .unreadable = err }) {
-        .ordinary => .ordinary,
-        .context_overflow => .context_overflow,
-        .quota => |quota| .{ .quota = quota },
-        .refusal => |refusal| .{ .refusal = refusal },
-    };
+/// Classifies an HTTP error body in `decode` through `codec`, the one the
+/// request was encoded with. Also fills `provider_failure` with what the
+/// body said, for every answer.
+pub fn interpretErrorResponse(decode: *output_decode.Decode, codec: protocol.Codec, io: std.Io, source: std.Io.File, length: u64, status: u16, provider_failure: *output_decode.ProviderFailure) execution.ErrorResponse {
+    return output_decode.classify(decode, codecs.classifier(codec), io, source, length, status, provider_failure);
 }
+
+var testing_decode: output_decode.Decode = undefined;
 
 test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
     var tmp = std.testing.tmpDir(.{});
@@ -139,7 +139,7 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
-        const response = interpretErrorResponse(std.testing.io, file, bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, Output.testingProviderFailure());
         const decision = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
@@ -179,14 +179,14 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         const file = try tmp.dir.createFile(std.testing.io, "quota-authority", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, case.bytes);
-        const response = interpretErrorResponse(std.testing.io, file, case.bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 429, Output.testingProviderFailure());
         const failure = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
         } }, response).fail;
         try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
         if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
-        try std.testing.expect(interpretErrorResponse(std.testing.io, file, case.bytes.len, 200, Output.testingProviderFailure()) == .ordinary);
+        try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, Output.testingProviderFailure()) == .ordinary);
     }
 }
 
@@ -273,9 +273,9 @@ test "provider interpretation closes failure variants without granting settlemen
     const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, overflow);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 400, Output.testingProviderFailure()) == .context_overflow);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 200, Output.testingProviderFailure()) == .ordinary);
-    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len + 1, 503, Output.testingProviderFailure()) == .unreadable);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 400, Output.testingProviderFailure()) == .context_overflow);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 200, Output.testingProviderFailure()) == .ordinary);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len + 1, 503, Output.testingProviderFailure()) == .unreadable);
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
@@ -963,7 +963,7 @@ pub const Preparation = struct {
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
     /// The Session's codec, begun at the settings stage.
-    job: codecs.Job = undefined,
+    job: codecs.EncodeJob = undefined,
     /// Built in place: the codec's headers as the settings item's ops run
     /// (emptied when the job begins, judged as they are kept), the rest when
     /// the request seals.
@@ -1710,6 +1710,7 @@ pub const Preparation = struct {
         self.request.length = self.writer.offset;
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
+        self.request.codec = self.settings.provider.codec();
         return .{ .prepared = &self.request };
     }
 
