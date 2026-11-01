@@ -38,6 +38,32 @@ pub const Provider = enum {
         };
     }
 };
+/// How a Host serves a provider: not at all, at a development endpoint
+/// that takes no credential, or at its own endpoint with its credential.
+pub const Route = enum { unserved, endpoint, chatgpt_device, key_file };
+
+/// Each provider's Route, as `host_info` reports it.
+pub const Routes = std.enums.EnumFieldStruct(Provider, Route, null);
+
+/// Every provider on `route`.
+pub fn routesAll(route: Route) Routes {
+    var routes: Routes = undefined;
+    inline for (@typeInfo(Provider).@"enum".field_names) |name| @field(routes, name) = route;
+    return routes;
+}
+
+pub fn routeOf(routes: Routes, provider: Provider) Route {
+    return switch (provider) {
+        inline else => |tag| @field(routes, @tagName(tag)),
+    };
+}
+
+/// Whether a Host with these Routes makes model requests for any provider.
+pub fn servesModel(routes: Routes) bool {
+    inline for (@typeInfo(Provider).@"enum".field_names) |name| if (@field(routes, name) != .unserved) return true;
+    return false;
+}
+
 /// A provider grammar and its version, as a Session pins it. A version's
 /// requests never change shape, so a pinned Session's prompt cache holds.
 pub const Codec = enum { @"openai-responses/1" };
@@ -436,8 +462,7 @@ pub const HostInfo = struct {
     custody_occupied: []const u8,
     capabilities: struct {
         bash: bool,
-        model: bool,
-        managed_authentication: bool,
+        providers: Routes,
     },
 };
 
@@ -2493,9 +2518,13 @@ pub const max_control_response_bytes = @max(
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), start time, slots in use, model and managed
-/// authentication capabilities.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"model\":", Hole.boolean, ",\"managed_authentication\":", Hole.boolean, "}}" };
+/// (decimal or `unlimited`), start time, slots in use, and each provider's
+/// Route.
+pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\"}}}" };
+comptime {
+    if (!std.mem.eql(u8, @typeInfo(Provider).@"enum".field_names[0], "codex") or @typeInfo(Provider).@"enum".field_names.len != 1)
+        @compileError("host_info_reply names one Route hole per provider, in Provider order");
+}
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports

@@ -17,6 +17,7 @@ const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -723,9 +724,7 @@ pub fn serve(
     active_capacity: usize,
     limits: Limits,
     hooks: Hooks,
-    provider_endpoint: ?[]const u8,
-    provider_ca_file: ?[]const u8,
-    authentication: ?model_adapter.Authentication,
+    served: *const providers.Providers,
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
@@ -744,8 +743,8 @@ pub fn serve(
         active_capacity,
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
-        provider_endpoint != null,
-        authentication != null,
+        served.any(),
+        served.chatgpt() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -782,8 +781,8 @@ pub fn serve(
         active_capacity,
         intake_capacity,
         3,
-        provider_endpoint != null,
-        authentication != null,
+        served.any(),
+        served.chatgpt() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -823,7 +822,7 @@ pub fn serve(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
+        .{ .served = served.routes(), .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
             try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
@@ -849,8 +848,8 @@ pub fn serve(
     const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
-    var bash_environment = try bash.environment(io, allocator, home);
-    defer bash_environment.deinit();
+    const bash_facts = try bash.readHostFacts(io, allocator, home);
+    defer bash.freeHostFacts(allocator, bash_facts);
     // Zero bytes are an empty custody record and retention entry, so fresh
     // pages need no initializing pass and an unused one never becomes resident.
     const custody_records = try pages.mapZeroed(execution.CustodyRecord, active_capacity);
@@ -870,11 +869,9 @@ pub fn serve(
         .store = &storage,
         .hooks = hooks,
         .limits = limits,
-        .provider_endpoint = provider_endpoint,
-        .provider_ca_file = provider_ca_file,
-        .authentication = authentication,
+        .providers = served,
         .bash_path = bash_path,
-        .bash_environment = &bash_environment,
+        .bash_facts = bash_facts,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
@@ -897,9 +894,14 @@ pub fn serve(
     host.retention = &retention;
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
-    if (provider_endpoint) |endpoint| {
-        try provider.validateEndpoint(endpoint);
-        if (authentication) |selected| try model_adapter.validateAuthenticationEndpoint(endpoint, provider_ca_file, selected);
+    if (served.any()) {
+        for (served.table.values) |entry| if (entry) |value| {
+            try provider.validateEndpoint(value.endpoint);
+            switch (value.credential) {
+                .none => {},
+                .chatgpt_device => |selected| try model_adapter.validateAuthenticationEndpoint(value.endpoint, served.ca_file, selected),
+            }
+        };
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
@@ -925,7 +927,7 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, provider_endpoint != null);
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
     readiness_owned = false;
     if (diagnostic_open_error) |err|
@@ -1180,14 +1182,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.providers.routes() });
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = host.store.configure(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
+            const result = host.store.configure(command, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -1200,7 +1202,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = host.store.submitMessageWithModel(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
+            const result = host.store.submitMessageWithModel(command, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1919,12 +1921,11 @@ fn renderHostInfo(
     descriptor_soft_limit: ?u64,
     started_at: u64,
     custody_occupied: u64,
-    model: bool,
-    managed_authentication: bool,
+    routes: protocol.Routes,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, model, managed_authentication });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex });
 }
 
 /// Nothing changed since the token: it comes back, with no rows.
@@ -2904,7 +2905,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, false });
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, protocol.routesAll(.chatgpt_device) });
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -3536,7 +3537,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
-        const configured = storage.configure(&configure, true, .{});
+        const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);

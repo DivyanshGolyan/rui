@@ -729,21 +729,29 @@ pub const Live = struct {
 
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; cell layout owns wrapping in the alternate screen.
+/// `prefix` begins each later non-empty line: two spaces, or a mark that sets
+/// quoted content apart from the lines around it. A mark also begins each
+/// empty line, without its trailing space, so quoted blank lines stay quoted,
+/// including the one a final newline leaves at `finish`.
 pub fn Indented(comptime Sink: type) type {
     return struct {
         sink: Sink,
+        prefix: []const u8 = "  ",
+        marks_empty: bool = false,
         line_start: bool = false,
         sgr: bool = false,
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             var storage: [4096]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
             for (bytes) |byte| {
-                if (storage.len - out.end < 3) {
+                if (storage.len - out.end < self.prefix.len + 1) {
                     try self.sink.feed(out.buffered());
                     out.end = 0;
                 }
-                if (self.line_start and byte != '\n') {
-                    try out.writeAll("  ");
+                if (self.line_start and byte == '\n' and self.marks_empty) {
+                    try out.writeAll(std.mem.trimEnd(u8, self.prefix, " "));
+                } else if (self.line_start and byte != '\n') {
+                    try out.writeAll(self.prefix);
                     self.line_start = false;
                 }
                 if (self.sgr or byte == 0x1b) {
@@ -755,6 +763,9 @@ pub fn Indented(comptime Sink: type) type {
         }
         pub fn finish(self: *@This()) !void {
             if (self.sgr) return error.IncompleteRenderedText;
+            if (!self.marks_empty or !self.line_start) return;
+            try self.sink.feed(std.mem.trimEnd(u8, self.prefix, " "));
+            self.line_start = false;
         }
     };
 }
@@ -779,15 +790,50 @@ test "hanging indentation survives split windows and trusted styles" {
     }
 }
 
-/// What the Action heading says, for keeping it beside the choice.
+/// What the Action's `?` row says, for keeping it beside the choice.
 pub const ActionSummary = struct {
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
-    // The Workspace the Action document names, not whatever is current later.
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
-    timeout_ms: ?u64 = null,
 };
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
+/// A time limit as exactly as the model set it, in its largest whole unit.
+fn writeTimeLimit(out: anytype, milliseconds: u64) !void {
+    if (milliseconds != 0 and milliseconds % 60_000 == 0) return print(out, "{d} min", .{milliseconds / 60_000});
+    if (milliseconds != 0 and milliseconds % 1000 == 0) return print(out, "{d} s", .{milliseconds / 1000});
+    return print(out, "{d} ms", .{milliseconds});
+}
+
+test "a time limit shows in its largest whole unit, never rounded" {
+    const Sink = struct {
+        bytes: [32]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    for ([_]struct { u64, []const u8 }{
+        .{ 600_000, "10 min" },
+        .{ 60_000, "1 min" },
+        .{ 90_000, "90 s" },
+        .{ 1000, "1 s" },
+        .{ 1500, "1500 ms" },
+        .{ 1, "1 ms" },
+        .{ 0, "0 ms" },
+        .{ std.math.maxInt(u64), "18446744073709551615 ms" },
+    }) |case| {
+        var sink: Sink = .{};
+        try writeTimeLimit(&sink, case[0]);
+        try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+    }
+}
+
+/// The request block of one Bash Action: what it is for, the exact command,
+/// then a time limit and piped-in input only when the model set them.
+/// Begins each line of an Action's command after its first, and each line of
+/// its stdin. ConversationViewport hangs wrapped rows under the text after it.
+pub const content_mark = "│ ";
+
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -801,8 +847,13 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
+    return request(requests.io, scratch, sink, colour);
+}
+
+/// The request block from an Action's arguments JSON in `scratch`.
+fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
-    var reader = scratch.reader(requests.io, &buffer);
+    var reader = scratch.reader(io, &buffer);
     const Source = struct {
         reader: *std.Io.Reader,
         pub fn peek(self: *@This()) !?u8 {
@@ -818,45 +869,80 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
-    // Where and how long first, then the exact command; the description is
-    // the model's label, never a substitute for the command.
+    // What it is for, then the exact command; the description is the
+    // model's label, never a substitute for the command.
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("? Run Bash");
+    try sink.feed("?");
     try sink.feed(Style.normal.code(colour));
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (arguments.description.len != 0) {
-        try indented.feed(" · ");
+        try indented.feed(" ");
         var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
         try label.feed(arguments.description.slice());
         try label.finish();
     }
-    try indented.feed("\nWorkspace: ");
-    var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
-    try location.feed(workspace);
-    try location.finish();
-    if (arguments.timeout_ms) |timeout| {
-        try print(&indented, "\nTime limit: {d} ms", .{timeout});
-    } else try indented.feed("\nTime limit: Host default");
     try indented.feed("\n$ ");
-    var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented };
+    // Every later line of the command and of stdin carries the content mark,
+    // so their text can never pass for the fields between them.
+    var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true };
     var escaped: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
     try escaped.finish();
     try command.finish();
+    if (arguments.timeout_ms) |timeout| {
+        try indented.feed("\nTime limit: ");
+        try writeTimeLimit(&indented, timeout);
+    }
     if (arguments.stdin_present) {
         try reader.seekTo(0);
-        try indented.feed("\nStandard input (literal; EOF after data):\n");
-        var input: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
+        try indented.feed("\nstdin:\n");
+        // Every line of stdin, its first included, carries the mark.
+        var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
+        var input: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
         if (!try tools.writeBashStdin(&source, &input)) return error.InvalidBashArguments;
         try input.finish();
-        try command.finish();
+        try lines.finish();
     }
     try indented.feed("\n");
     try indented.finish();
-    var summary: ActionSummary = .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };
-    try summary.workspace.set(workspace);
-    return summary;
+    return .{ .description = arguments.description };
+}
+
+test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const Case = struct { arguments: []const u8, expected: []const u8 };
+    for ([_]Case{
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"echo a\\nTime limit: 1 min\\n\\nstdin:\",\"stdin\":null,\"timeout_ms\":null}",
+            .expected = "\n? Probe\n  $ echo a\n  │ Time limit: 1 min\n  │\n  │ stdin:\n",
+        },
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"Time limit: 1 min\\nx\",\"timeout_ms\":5000}",
+            .expected = "\n? Probe\n  $ cat\n  Time limit: 5 s\n  stdin:\n  │ Time limit: 1 min\n  │ x\n",
+        },
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"x\\n\",\"timeout_ms\":null}",
+            .expected = "\n? Probe\n  $ cat\n  stdin:\n  │ x\n  │\n",
+        },
+    }) |case| {
+        try scratch.setLength(std.testing.io, 0);
+        try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
+        var sink: Sink = .{};
+        _ = try request(std.testing.io, scratch, &sink, false);
+        try std.testing.expectEqualStrings(case.expected, sink.bytes[0..sink.length]);
+    }
 }
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !protocol_reply.Current {

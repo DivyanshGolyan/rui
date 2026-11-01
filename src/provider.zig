@@ -31,6 +31,8 @@ pub const PreparedRequest = struct {
     length: u64,
     charged: u64,
     structured_output: bool,
+    /// The Session's provider, whose endpoint the request goes to.
+    provider: protocol.Provider,
     /// The codec the Session pinned, which also classifies the answer's
     /// error body.
     codec: protocol.Codec,
@@ -84,7 +86,8 @@ pub const HeaderObservation = struct {
 };
 
 pub const Options = struct {
-    endpoint: []const u8,
+    /// Each served provider's endpoint.
+    endpoints: std.EnumArray(protocol.Provider, ?[]const u8),
     ca_file: ?[]const u8 = null,
     /// The most Transfers alive at once.
     capacity: usize,
@@ -210,7 +213,7 @@ pub const Credentials = struct {
 
 pub const Reactor = struct {
     client: h2.Client,
-    endpoint: h2.Endpoint,
+    endpoints: std.EnumArray(protocol.Provider, ?h2.Endpoint),
     io: std.Io,
     observation: HeaderObservation,
     scratch_path: []const u8,
@@ -227,7 +230,7 @@ pub const Reactor = struct {
             return error.InvalidProviderCaFile;
         self.* = .{
             .client = undefined,
-            .endpoint = undefined,
+            .endpoints = .initFill(null),
             .io = io,
             .observation = options.observation,
             .scratch_path = options.scratch_path,
@@ -242,7 +245,9 @@ pub const Reactor = struct {
             .proxy = h2.proxyFromEnvironment(),
         });
         errdefer self.client.deinit();
-        self.endpoint = try self.client.addEndpoint(options.endpoint);
+        for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
+            if (url) |value| endpoint.* = try self.client.addEndpoint(value);
+        }
     }
 
     pub fn deinit(self: *Reactor) void {
@@ -603,7 +608,7 @@ pub const Transfer = struct {
             self.* = undefined;
         }
         try reactor.client.prepare(&self.stream, .{
-            .endpoint = reactor.endpoint,
+            .endpoint = reactor.endpoints.get(request.provider).?,
             .fields = fields[0..count],
             .body = .{ .file = .{
                 .handle = request.file.handle,
@@ -739,7 +744,7 @@ test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, std.testing.io, .{
-        .endpoint = "http://127.0.0.1:1/responses",
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses" }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -801,6 +806,7 @@ test "a Transfer that fails to start releases its credential use" {
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
     var request: PreparedRequest = undefined;
+    request.provider = .codex;
     request.codec = .@"openai-responses/1";
     const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 };
     codecs.requestHeaders(request.codec, &settings, &request.headers);
