@@ -154,7 +154,7 @@ test "provider interpretation preserves independently reported model evidence" {
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
         var interpreted: output_decode.Interpretation = undefined;
-        output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, output_decode.testingProviderFailure(), &interpreted);
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, output_decode.testingProviderFailure(), &interpreted);
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -221,7 +221,7 @@ test "provider interpretation closes failure variants without granting settlemen
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
         var interpreted: output_decode.Interpretation = undefined;
-        output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -244,7 +244,7 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
     var result: output_decode.Interpretation = undefined;
-    output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &result);
+    output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &result);
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -3611,7 +3611,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try event_data.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
     var interpreted: output_decode.Interpretation = undefined;
-    output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, output_decode.testingProviderFailure(), &interpreted);
+    output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, output_decode.testingProviderFailure(), &interpreted);
     const accepted = switch (interpreted) {
         .accepted => |*value| value,
         .rejected => return error.UnexpectedOutputRejection,

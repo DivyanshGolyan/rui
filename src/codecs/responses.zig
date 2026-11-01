@@ -236,13 +236,13 @@ pub const ClassifyScratch = struct {
         count: u2 = 0,
         /// Whether its last value is a string, which `range` holds.
         is_string: bool = false,
-        range: json.Range = .{ .start = 0, .length = 0 },
+        range: Range = .{ .start = 0, .length = 0 },
 
-        fn string(self: Member) ?json.Range {
+        fn string(self: Member) ?Range {
             return if (self.is_string) self.range else null;
         }
 
-        fn set(self: *Member, range: json.Range) void {
+        fn set(self: *Member, range: Range) void {
             self.is_string = true;
             self.range = range;
         }
@@ -286,14 +286,14 @@ pub const ClassifyScratch = struct {
     }
 
     /// `message`, else `detail`; a message that is not a string is left out.
-    fn message(members: anytype) ?json.Range {
+    fn message(members: anytype) ?Range {
         const text = members.get(.message);
         if (text.count == 1) return text.string();
         const detail = members.get(.detail);
         return if (detail.count == 1) detail.string() else null;
     }
 
-    fn report(range: ?json.Range) ?codec_abi.ReportRange {
+    fn report(range: ?Range) ?codec_abi.ReportRange {
         const value = range orelse return null;
         return .{ .escape = .json_string_v1, .start = value.start, .length = value.length };
     }
@@ -487,6 +487,8 @@ const max_word_bytes = 256;
 const Judge = struct {
     operation: codec_abi.Operation,
     frames: [max_frames]Frame,
+    /// Each frame's fields, as `capacities` sizes them.
+    values: [values_count]Value,
     /// Open judged containers.
     depth: u8,
     /// Open containers below the judged ones.
@@ -496,8 +498,39 @@ const Judge = struct {
 
     const max_frames = 5;
 
-    const Name = enum { type, id, status, role, phase, internal_chat_message_metadata_passthrough, content, text, encrypted_content, summary, name, call_id, arguments, caller, async, namespace, encrypted_function_args, refusal, annotations, cell_id, executed_tool_calls, tool_calls_complete };
+    // Ordered so that a block, an annotation, a caller and metadata read
+    // only leading names, and their frames hold only those.
+    const Name = enum { type, text, refusal, annotations, cell_id, executed_tool_calls, tool_calls_complete, id, status, role, phase, internal_chat_message_metadata_passthrough, content, encrypted_content, summary, name, call_id, arguments, caller, async, namespace, encrypted_function_args };
     const name_count = @typeInfo(Name).@"enum".field_names.len;
+    const Names = std.bit_set.IntegerBitSet(name_count);
+
+    /// How many names, from the first, the frame at each depth reads: the
+    /// item at 0, a caller, metadata or block array at 1, a block at 2, an
+    /// annotation array at 3 and an annotation at 4.
+    const capacities = [max_frames]usize{
+        name_count,
+        reach(&.{ type_fields, metadata_fields }),
+        reach(&.{ type_fields, refusal_fields, output_text_fields, text_fields }),
+        0,
+        reach(&.{type_fields}),
+    };
+    /// Where each depth's fields start in `values`, and how many there are.
+    const starts = blk: {
+        var start: [max_frames + 1]usize = undefined;
+        start[0] = 0;
+        for (capacities, 0..) |capacity, depth| start[depth + 1] = start[depth] + capacity;
+        break :blk start;
+    };
+    const values_count = starts[max_frames];
+
+    fn reach(comptime tables: []const Consumed) usize {
+        var count: usize = 0;
+        for (tables) |table| {
+            for (table.plain) |name| count = @max(count, @as(usize, @backingInt(name)) + 1);
+            for (table.nested) |field| count = @max(count, @as(usize, @backingInt(field[0])) + 1);
+        }
+        return count;
+    }
 
     const Reading = enum { output, reasoning, summary };
     const readings = .{ Reading.output, .reasoning, .summary };
@@ -568,12 +601,17 @@ const Judge = struct {
         kind: Kind,
         object: bool,
         key: ?Name,
-        wants_key: bool,
-        fields: [name_count]Value,
+        /// The names this object holds, whose values `fields` keeps.
+        present: Names,
+        fields: []Value,
         aggregate: Value,
 
+        fn lookup(self: *const Frame, name: Name) Value {
+            return if (self.present.isSet(@backingInt(name))) self.fields[@backingInt(name)] else .{};
+        }
+
         fn get(self: *const Frame, comptime name: Name) Incompatibility!Value {
-            const value = self.fields[@backingInt(name)];
+            const value = self.lookup(name);
             if (value.duplicate) return error.DuplicateJsonField;
             return value;
         }
@@ -623,7 +661,7 @@ const Judge = struct {
 
         fn consumesDuplicate(self: *const Frame, comptime field_names: []const Name, comptime reading: ?Reading) bool {
             inline for (field_names) |name| {
-                const value = self.fields[@backingInt(name)];
+                const value = self.lookup(name);
                 if (value.duplicate) return true;
                 if (if (reading) |consumed| value.ambiguousAs(consumed) else value.ambiguous.all) return true;
             }
@@ -723,8 +761,11 @@ const Judge = struct {
     fn key(self: *Judge, reader: *const json.Reader) void {
         if (self.ignored != 0) return;
         const frame = &self.frames[self.depth - 1];
-        frame.key = std.meta.stringToEnum(Name, reader.text() orelse "");
-        frame.wants_key = false;
+        const name = std.meta.stringToEnum(Name, reader.text() orelse "") orelse {
+            frame.key = null;
+            return;
+        };
+        frame.key = if (@backingInt(name) < frame.fields.len) name else null;
     }
 
     fn begin(self: *Judge, kind: json.Kind) void {
@@ -739,13 +780,14 @@ const Judge = struct {
             self.ignored = 1;
             return;
         }
-        const frame = &self.frames[self.depth];
-        frame.kind = child;
-        frame.object = object;
-        frame.key = null;
-        frame.wants_key = true;
-        frame.fields = @splat(.{});
-        frame.aggregate = .{ .shape = .array };
+        self.frames[self.depth] = .{
+            .kind = child,
+            .object = object,
+            .key = null,
+            .present = .empty,
+            .fields = self.values[starts[self.depth]..starts[self.depth + 1]],
+            .aggregate = .{ .shape = .array },
+        };
         self.depth += 1;
     }
 
@@ -805,12 +847,12 @@ const Judge = struct {
         const frame = &self.frames[self.depth - 1];
         if (frame.object) {
             if (frame.key) |name| {
-                const field = &frame.fields[@backingInt(name)];
-                const duplicate = field.shape != .absent;
-                field.* = value;
-                field.duplicate = duplicate;
+                const index = @backingInt(name);
+                const duplicate = frame.present.isSet(index);
+                frame.present.set(index);
+                frame.fields[index] = value;
+                frame.fields[index].duplicate = duplicate;
             }
-            frame.wants_key = true;
             frame.key = null;
         } else {
             // Elements are judged in order: the first failure stands.
@@ -854,7 +896,7 @@ const Judge = struct {
 
     // A consumed duplicate, wherever it stands among the rules.
     fn ambiguity(frame: *const Frame) Readings {
-        const declared = frame.fields[@backingInt(Name.type)];
+        const declared = frame.lookup(.type);
         return switch (frame.kind) {
             .item => .{ .all = item_fields.duplicateIn(frame) or if (declared.itemKind()) |kind| switch (kind) {
                 inline else => |known| (comptime kindFields(known)).duplicateIn(frame),
@@ -1020,7 +1062,7 @@ const Named = struct {
     word: ?Word = null,
     decoded: u64 = 0,
     /// A string's contents, or the value whole, as event offsets.
-    range: json.Range = .{ .start = 0, .length = 0 },
+    range: Range = .{ .start = 0, .length = 0 },
     digits: json.Digits = .plain,
     integer: ?u64 = null,
 
@@ -1075,10 +1117,36 @@ const Named = struct {
         return if (member.integer.? > std.math.maxInt(i64)) null else member.integer.?;
     }
 
-    fn contents(self: *const Named) Range {
-        return .{ .start = self.range.start, .length = self.range.length };
+    /// One more appearance of the walked member whose value starts at
+    /// `start`; the walk needs a string's word and decoded length alone.
+    fn walked(self: *Named, data: []const u8, start: usize, value: json.Value) void {
+        self.count +|= 1;
+        self.shape = switch (data[start]) {
+            '"' => .string,
+            '{' => .object,
+            '[' => .array,
+            't' => .true_value,
+            'f' => .false_value,
+            'n' => .null_value,
+            else => .number,
+        };
+        const contents = value.string orelse return;
+        var text: json.Text = .{ .length = 0 };
+        json.decode(slice(data, contents), &text);
+        self.range = contents;
+        self.decoded = text.length;
+        self.word = std.meta.stringToEnum(Word, text.slice() orelse "");
     }
 };
+
+/// An item's identity, by its type and its nonempty id string.
+fn identity(item_type: *const Named, id: *const Named) Failure!struct { kind: codec_abi.OutputKind, id: Range } {
+    const kind = Word.kind(try (try item_type.required()).compared()) orelse return error.UnsupportedItemType;
+    const named = try id.required();
+    if (named.shape != .string) return error.ExpectedJsonString;
+    if (named.decoded == 0) return error.EmptyProviderIdentity;
+    return .{ .kind = kind, .id = named.range };
+}
 
 /// A Responses stream's state between events.
 pub const Stream = struct {
@@ -1118,18 +1186,17 @@ pub const InterpretScratch = struct {
     /// What a provider's error names, kept as `streamError` reaches it.
     failed: codec_abi.Failed,
 
+    /// Only counts are reset: a named value's other fields are written as
+    /// it is read.
     fn init(self: *InterpretScratch, operation: codec_abi.Operation) void {
         self.type = null;
         self.path = @splat(.other);
         self.in_item = false;
-        self.outer = .initFill(.{});
-        self.nested = .initFill(.{});
-        self.response = .initFill(.{});
-        self.response_error = .initFill(.{});
-        self.details_reason = .{};
-        self.item = .initFill(.{});
-        self.usage = .initFill(.{});
-        self.cached = .{};
+        inline for (.{ &self.outer.values, &self.nested.values, &self.response.values, &self.response_error.values, &self.item.values, &self.usage.values }) |values| {
+            for (values) |*member| member.count = 0;
+        }
+        self.details_reason.count = 0;
+        self.cached.count = 0;
         self.judge.reset(operation);
         self.failed = .{ .reason = .reported_provider_failure, .refusal = null, .report = .{ .code = null, .message = null } };
     }
@@ -1309,12 +1376,9 @@ fn addedItem(stream: *Stream, scratch: *const InterpretScratch, at: *codec_abi.A
     if (output_index != stream.item_count) return error.ContradictoryProviderOutput;
     const item = try scratch.outer.getPtrConst(.item).required();
     if (item.shape != .object) return error.UnexpectedJsonDelimiter;
-    const kind = Word.kind(try (try scratch.item.getPtrConst(.type).required()).compared()) orelse return error.UnsupportedItemType;
-    const id = try scratch.item.getPtrConst(.id).required();
-    if (id.shape != .string) return error.ExpectedJsonString;
-    if (id.decoded == 0) return error.EmptyProviderIdentity;
+    const announced = try identity(scratch.item.getPtrConst(.type), scratch.item.getPtrConst(.id));
     stream.added_active = true;
-    return .{ .added = .{ .kind = kind, .id = id.contents() } };
+    return .{ .added = .{ .kind = announced.kind, .id = announced.id } };
 }
 
 fn doneItem(stream: *Stream, scratch: *const InterpretScratch, at: *codec_abi.At) Failure!Verdict {
@@ -1328,22 +1392,23 @@ fn doneItem(stream: *Stream, scratch: *const InterpretScratch, at: *codec_abi.At
     const members = &scratch.item;
     var call: [3]Range = @splat(.{ .start = 0, .length = 0 });
     if (kind == .function_call) for (&call, [_]ItemKey{ .name, .call_id, .arguments }) |*range, name| {
-        range.* = members.getPtrConst(name).contents();
+        range.* = members.getPtrConst(name).range;
     };
-    const phase = members.getPtrConst(.phase);
+    const phase_member = members.getPtrConst(.phase);
+    // Rui's form holds only an exact `commentary` or `final_answer`.
+    const phase: codec_abi.Phase = if (kind != .message or phase_member.count == 0 or phase_member.shape != .string) .unphased else if (phase_member.word == .commentary) .commentary else if (phase_member.word == .final_answer) .final_answer else .unphased;
     stream.item_count += 1;
     stream.added_active = false;
     return .{
         .item = .{
             .kind = kind,
-            // Rui's form holds only an exact `commentary` or `final_answer`.
-            .phase = if (kind != .message or phase.count == 0 or phase.shape != .string) .unphased else if (phase.word == .commentary) .commentary else if (phase.word == .final_answer) .final_answer else .unphased,
+            .phase = phase,
             .answer_phase = judge.answerPhase(),
             .omit_reasoning_text = omit_reasoning_text,
-            .whole = item.contents(),
-            .id = members.getPtrConst(.id).contents(),
+            .whole = item.range,
+            .id = members.getPtrConst(.id).range,
             .call = call,
-            .members = .{ .offset = item.range.start, .scope = .item, .kind = kind, .array = .none, .part = .opaque_block },
+            .members = .{ .offset = item.range.start, .scope = .item, .kind = kind, .phase = phase, .array = .none, .text = .{ .start = 0, .length = 0 } },
         },
     };
 }
@@ -1356,7 +1421,7 @@ fn completedResponse(stream: *Stream, scratch: *const InterpretScratch, at: *cod
         .check = null,
         .response_id = .{ .start = 0, .length = 0 },
         .served_model = null,
-        .output = .{ .offset = 0, .scope = .output, .kind = .message, .array = .none, .part = .opaque_block },
+        .output = .{ .offset = 0, .scope = .output, .kind = .message, .phase = .unphased, .array = .none, .text = .{ .start = 0, .length = 0 } },
         .usage = .absent,
     };
     responseCheck(scratch, &completed) catch |err| {
@@ -1377,11 +1442,11 @@ fn responseCheck(scratch: *const InterpretScratch, completed: *codec_abi.Complet
     const id = try members.getPtrConst(.id).required();
     _ = try id.compared();
     if (id.decoded == 0) return error.EmptyProviderIdentity;
-    completed.response_id = id.contents();
+    completed.response_id = id.range;
     if (try members.getPtrConst(.model).get()) |model| if (model.shape != .null_value) {
         _ = try model.compared();
         if (model.decoded == 0) return error.EmptyProviderIdentity;
-        completed.served_model = model.contents();
+        completed.served_model = model.range;
     };
     const output = try members.getPtrConst(.output).required();
     if (output.shape != .array) return error.UnexpectedJsonDelimiter;
@@ -1395,7 +1460,7 @@ fn usage(scratch: *const InterpretScratch) Failure!@FieldType(codec_abi.Complete
     const report = try scratch.response.getPtrConst(.usage).get() orelse return .absent;
     if (report.shape == .null_value) return .absent;
     if (report.shape != .object) return error.UnexpectedJsonDelimiter;
-    return .{ .report = .{ .whole = report.contents(), .counts = usageCounts(scratch) } };
+    return .{ .report = .{ .whole = report.range, .counts = usageCounts(scratch) } };
 }
 
 fn usageCounts(scratch: *const InterpretScratch) ?codec_abi.Usage {
@@ -1450,8 +1515,8 @@ fn streamError(scratch: *InterpretScratch, data: []const u8, reported: ?*const N
     const value = code orelse return error.ReportedProviderFailure;
     if (value.word == .context_length_exceeded) return error.ContextOverflow;
     if (value.decoded <= codec_abi.max_code_bytes) {
-        var text: json.Text = undefined;
-        json.decode(data[@intCast(value.range.start)..][0..@intCast(value.range.length)], &text);
+        var text: json.Text = .{ .length = 0 };
+        json.decode(slice(data, value.range), &text);
         failed.refusal = .of(text.slice().?);
     }
     return error.ReportedProviderFailure;
@@ -1493,30 +1558,31 @@ fn incompleteOverflow(scratch: *const InterpretScratch) bool {
 // exactly the expected shape; `created_by` is dropped, as replay drops it.
 
 /// The next step of the walk from `cursor`, which it moves on; null when
-/// the walk's item or output list ends.
+/// the walk's item or output list ends. Each byte is scanned once, except a
+/// part's other members, read once to find its type and text and again as
+/// its bag.
 pub fn nextMember(data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
     while (true) switch (cursor.scope) {
         .item => {
             const member = nextKey(data, &cursor.offset) orelse return null;
-            switch (itemMember(data, cursor.kind, &member)) {
-                .neutral => {},
-                .bag => return .{ .bag = member.whole },
+            switch (itemMember(data, cursor, &member)) {
                 .parts => |array| {
                     cursor.scope = .array;
                     cursor.array = array;
-                    cursor.offset = member.value;
                 },
+                .neutral => cursor.offset = json.valueEnd(data, @intCast(member.value)),
+                .bag => return .{ .bag = bagMember(data, &member, cursor) },
             }
         },
         .array => {
-            const block = nextElement(data, &cursor.offset) orelse {
+            const start = nextElement(data, &cursor.offset) orelse {
                 cursor.scope = .item;
                 continue;
             };
-            const part = partOf(data, block, cursor.kind, cursor.array);
+            const part = partOf(data, start, cursor.kind, cursor.array);
             cursor.scope = .part;
-            cursor.part = part.kind;
-            cursor.offset = block.start;
+            cursor.offset = start;
+            cursor.text = part.member;
             return .{ .part = .{ .array = cursor.array, .kind = part.kind, .text = part.text } };
         },
         .part => {
@@ -1524,23 +1590,27 @@ pub fn nextMember(data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member
                 cursor.scope = .array;
                 return .part_end;
             };
-            const name = member.name.slice() orelse "";
-            if (std.mem.eql(u8, name, "type") or std.mem.eql(u8, name, textKey(cursor.part))) continue;
-            return .{ .bag = member.whole };
+            if (member.start == cursor.text.start) {
+                cursor.offset = cursor.text.start + cursor.text.length;
+                continue;
+            }
+            const bag = bagMember(data, &member, cursor);
+            if (json.decodedTag(enum { type }, slice(data, member.key)) == null) return .{ .bag = bag };
         },
         .output => {
-            const element = nextElement(data, &cursor.offset) orelse return null;
-            return terminalOf(data, element) catch |err| .{ .terminal_failed = reasonOf(err) };
+            const start = nextElement(data, &cursor.offset) orelse return null;
+            return terminalOf(data, start, &cursor.offset) catch |err| .{ .terminal_failed = reasonOf(err) };
         },
     };
 }
 
-/// One object member: its decoded key, its whole `"key":value` bytes and
-/// where its value starts.
-const ObjectMember = struct { name: json.Text, whole: Range, value: u64 };
+/// One object member: its key's contents, where it starts and where its
+/// value starts.
+const ObjectMember = struct { key: Range, start: u64, value: u64 };
 
 /// The member after `offset` (an object's `{` or the end of a member), or
-/// null at the object's end; `offset` moves past what is read.
+/// null at the object's end, past which `offset` then moves; otherwise
+/// `offset` moves to the member's value.
 fn nextKey(data: []const u8, offset: *u64) ?ObjectMember {
     var at = json.skipSpace(data, @intCast(offset.*));
     if (data[at] != '}') at = json.skipSpace(data, at + 1);
@@ -1549,50 +1619,43 @@ fn nextKey(data: []const u8, offset: *u64) ?ObjectMember {
         return null;
     }
     const name = json.stringAt(data, at);
-    var member: ObjectMember = .{ .name = undefined, .whole = .{ .start = at, .length = 0 }, .value = 0 };
-    json.decode(slice(data, name.contents), &member.name);
     const value = json.skipSpace(data, json.skipSpace(data, name.end) + 1);
-    const end = json.valueEnd(data, value);
-    member.whole.length = end - at;
-    member.value = value;
-    offset.* = end;
-    return member;
+    offset.* = value;
+    return .{ .key = name.contents, .start = at, .value = value };
 }
 
-/// The element after `offset` (an array's `[` or the end of an element), or
-/// null at the array's end; `offset` moves past what is read.
-fn nextElement(data: []const u8, offset: *u64) ?Range {
+/// The whole `"key":value` of `member`, whose value the cursor moves past.
+fn bagMember(data: []const u8, member: *const ObjectMember, cursor: *codec_abi.Cursor) Range {
+    cursor.offset = json.valueEnd(data, @intCast(member.value));
+    return .{ .start = member.start, .length = cursor.offset - member.start };
+}
+
+/// Where the element after `offset` (an array's `[` or the end of an
+/// element) starts, or null at the array's end, past which `offset` then
+/// moves.
+fn nextElement(data: []const u8, offset: *u64) ?u64 {
     var at = json.skipSpace(data, @intCast(offset.*));
     if (data[at] != ']') at = json.skipSpace(data, at + 1);
     if (data[at] == ']') {
         offset.* = at + 1;
         return null;
     }
-    const end = json.valueEnd(data, at);
-    offset.* = end;
-    return .{ .start = at, .length = end - at };
+    return at;
 }
 
-fn slice(data: []const u8, range: json.Range) []const u8 {
+fn slice(data: []const u8, range: Range) []const u8 {
     return data[@intCast(range.start)..][0..@intCast(range.length)];
 }
 
-/// The value at `start` is a string whose decoded contents are `word`.
-fn stringIs(data: []const u8, start: u64, word: Word) bool {
-    if (data[@intCast(start)] != '"') return false;
-    var text: json.Text = undefined;
-    json.decode(slice(data, json.stringAt(data, @intCast(start)).contents), &text);
-    return std.mem.eql(u8, text.slice() orelse return false, @tagName(word));
-}
-
-fn itemMember(data: []const u8, kind: codec_abi.OutputKind, member: *const ObjectMember) union(enum) { neutral, bag, parts: codec_abi.PartArray } {
+fn itemMember(data: []const u8, cursor: *const codec_abi.Cursor, member: *const ObjectMember) union(enum) { neutral, bag, parts: codec_abi.PartArray } {
     const Name = enum { type, created_by, role, phase, content, summary, name, call_id, arguments };
-    const name = std.meta.stringToEnum(Name, member.name.slice() orelse "") orelse return .bag;
+    const name = json.decodedTag(Name, slice(data, member.key)) orelse return .bag;
     if (name == .type or name == .created_by) return .neutral;
-    const array: codec_abi.PartArray = switch (kind) {
+    const array: codec_abi.PartArray = switch (cursor.kind) {
         .message => switch (name) {
-            .role => return if (stringIs(data, member.value, .assistant)) .neutral else .bag,
-            .phase => return if (stringIs(data, member.value, .commentary) or stringIs(data, member.value, .final_answer)) .neutral else .bag,
+            // The grammar accepts only an assistant's message.
+            .role => return .neutral,
+            .phase => return if (cursor.phase == .unphased) .bag else .neutral,
             .content => .content,
             else => return .bag,
         },
@@ -1613,24 +1676,28 @@ fn itemMember(data: []const u8, kind: codec_abi.OutputKind, member: *const Objec
     return .{ .parts = array };
 }
 
-/// A block of an accepted item: its part kind, by its type, and its text.
-fn partOf(data: []const u8, block: Range, kind: codec_abi.OutputKind, array: codec_abi.PartArray) struct { kind: codec_abi.PartKind, text: Range } {
-    var type_start: ?u64 = null;
-    var text: ?u64 = null;
-    var refusal: ?u64 = null;
-    var offset = block.start;
+/// A block of an accepted item, whose `{` is at `start`, its members read
+/// once: its part kind, by its type, its text's contents and its whole text
+/// member.
+fn partOf(data: []const u8, start: u64, kind: codec_abi.OutputKind, array: codec_abi.PartArray) struct { kind: codec_abi.PartKind, text: Range, member: Range } {
+    const Text = struct { contents: ?Range = null, member: Range = .{ .start = 0, .length = 0 } };
+    var word: ?Word = null;
+    var text: Text = .{};
+    var refusal: Text = .{};
+    var offset = start;
     while (nextKey(data, &offset)) |member| {
-        const name = member.name.slice() orelse continue;
-        if (std.mem.eql(u8, name, "type")) type_start = member.value;
-        if (std.mem.eql(u8, name, "text")) text = member.value;
-        if (std.mem.eql(u8, name, "refusal")) refusal = member.value;
+        const value = json.valueAt(data, @intCast(member.value));
+        offset = value.end;
+        const found: Text = .{ .contents = value.string, .member = .{ .start = member.start, .length = value.end - member.start } };
+        switch (json.decodedTag(enum { type, text, refusal }, slice(data, member.key)) orelse continue) {
+            .type => word = json.decodedTag(Word, slice(data, value.string.?)),
+            .text => text = found,
+            .refusal => refusal = found,
+        }
     }
-    var word: json.Text = undefined;
-    json.decode(slice(data, json.stringAt(data, @intCast(type_start.?)).contents), &word);
-    const part = partKind(kind, array, std.meta.stringToEnum(Word, word.slice().?)).?;
-    const start = (if (part == .refusal) refusal else text).?;
-    const contents = json.stringAt(data, @intCast(start)).contents;
-    return .{ .kind = part, .text = .{ .start = contents.start, .length = contents.length } };
+    const part = partKind(kind, array, word).?;
+    const chosen = if (part == .refusal) refusal else text;
+    return .{ .kind = part, .text = chosen.contents.?, .member = chosen.member };
 }
 
 /// The part a block of `array` in an item of `kind` is, by its type.
@@ -1647,43 +1714,23 @@ fn partKind(kind: codec_abi.OutputKind, array: codec_abi.PartArray, word: ?Word)
     };
 }
 
-fn textKey(kind: codec_abi.PartKind) []const u8 {
-    return if (kind == .refusal) "refusal" else "text";
-}
-
-/// An output list element's identity: its type and nonempty id.
-fn terminalOf(data: []const u8, element: Range) Failure!codec_abi.Member {
-    if (data[@intCast(element.start)] != '{') return error.UnexpectedJsonDelimiter;
-    const Name = enum { type, id };
-    const Found = struct { count: u2 = 0, value: u64 = 0 };
-    var found: std.enums.EnumArray(Name, Found) = .initFill(.{});
-    var offset = element.start;
-    while (nextKey(data, &offset)) |member| {
-        const name = std.meta.stringToEnum(Name, member.name.slice() orelse "") orelse continue;
-        const field = found.getPtr(name);
-        field.count +|= 1;
-        field.value = member.value;
+/// The output list element at `start`, an item named by its identity, whose
+/// end `offset` moves to.
+fn terminalOf(data: []const u8, start: u64, offset: *u64) Failure!codec_abi.Member {
+    if (data[@intCast(start)] != '{') {
+        offset.* = json.valueEnd(data, @intCast(start));
+        return error.UnexpectedJsonDelimiter;
     }
-    var text: json.Text = undefined;
-    _ = try identityString(data, found.get(.type).count, found.get(.type).value, &text);
-    if (text.length > max_word_bytes) return error.ProviderValueTooLong;
-    const kind = Word.kind(std.meta.stringToEnum(Word, text.slice() orelse "")) orelse return error.UnsupportedItemType;
-    const id = try identityString(data, found.get(.id).count, found.get(.id).value, &text);
-    if (text.length == 0) return error.EmptyProviderIdentity;
-    return .{ .terminal = .{ .kind = kind, .whole = element, .id = id } };
-}
-
-/// A member that appears once and is a string, decoded into `text`.
-fn identityString(data: []const u8, count: u2, start: u64, text: *json.Text) Failure!Range {
-    switch (count) {
-        0 => return error.MissingProviderField,
-        1 => {},
-        else => return error.DuplicateJsonField,
+    var found: std.enums.EnumArray(enum { type, id }, Named) = .initFill(.{});
+    offset.* = start;
+    while (nextKey(data, offset)) |member| {
+        const value = json.valueAt(data, @intCast(member.value));
+        offset.* = value.end;
+        const name = json.decodedTag(@TypeOf(found).Key, slice(data, member.key)) orelse continue;
+        found.getPtr(name).walked(data, @intCast(member.value), value);
     }
-    if (data[@intCast(start)] != '"') return error.ExpectedJsonString;
-    const contents = json.stringAt(data, @intCast(start)).contents;
-    json.decode(slice(data, contents), text);
-    return .{ .start = contents.start, .length = contents.length };
+    const named = try identity(found.getPtrConst(.type), found.getPtrConst(.id));
+    return .{ .terminal = .{ .kind = named.kind, .whole = .{ .start = start, .length = offset.* - start }, .id = named.id } };
 }
 
 test "only the pinned table's models send parallel tool calls" {

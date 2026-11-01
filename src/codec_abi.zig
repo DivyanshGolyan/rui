@@ -388,11 +388,12 @@ pub const Cursor = struct {
     /// The offset in the event data of the next byte the walk reads.
     offset: u64,
     scope: enum(u8) { item, array, part, output },
-    /// The item's kind, the array it is in and the part it is in, as far as
-    /// the scope is inside them.
+    /// The item's kind and the phase Rui's form holds of it, and the array
+    /// and the text member of the part the scope is in, as far as it is.
     kind: OutputKind,
+    phase: Phase,
     array: PartArray,
-    part: PartKind,
+    text: Range,
 };
 
 /// An output item the codec accepted. (`Item` is a request's.)

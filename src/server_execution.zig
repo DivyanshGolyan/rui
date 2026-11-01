@@ -1865,7 +1865,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         return .cleanup;
     };
     metadata.fail_writes = host.hooks.fails(.response_metadata);
-    output_decode.interpretResponse(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
+    output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
     }, &workspace.provider_failure, &workspace.interpretation);
@@ -3258,7 +3258,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     );
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        metadata.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
@@ -3266,7 +3266,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     stdout.close(std.testing.io);
     stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
-    try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
+    try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     metadata.deinit();
@@ -3283,7 +3283,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer limited.deinit();
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        limited.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        limited.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

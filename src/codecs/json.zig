@@ -1,11 +1,14 @@
 //! A JSON reader a codec runs over a whole document. It checks the document
-//! against RFC 8259 byte by byte, taking a run of plain string contents at
-//! once and holding only its open containers and the token it is in, so a
-//! body of any size reads in the same few hundred bytes. A handler hears
-//! where each key and value begins and ends; a string's decoded start stays
-//! in the reader for comparing with names and codes, and its range names the
-//! rest. A document is one object; whitespace is space, tab, CR and LF.
+//! against RFC 8259 byte by byte, taking each string's contents at once and
+//! holding only its open containers and the token it is in, so a body of
+//! any size reads in the same few hundred bytes. A handler hears where each
+//! key and value begins and ends; a string's decoded start stays in the
+//! reader for comparing with names and codes, and its range names the rest.
+//! A document is one object; whitespace is space, tab, CR and LF.
 const std = @import("std");
+const codec_abi = @import("../codec_abi.zig");
+
+const Range = codec_abi.Range;
 
 /// The deepest value a document may hold: the top object's members are at
 /// depth 1.
@@ -15,8 +18,6 @@ pub const max_depth = 64;
 pub const max_text_bytes = 64;
 
 pub const Kind = enum { object, array, string, number, literal };
-
-pub const Range = struct { start: u64, length: u64 };
 
 /// Why bytes are not one JSON object, named as the Host's validation of
 /// provider output has always named it, so a rejection's saved detail does
@@ -30,10 +31,11 @@ pub const Error = error{
     InvalidJsonValue,
     InvalidJsonNumber,
     InvalidJsonLiteral,
-} || StringError;
-
-/// Why a string's contents do not decode.
-pub const StringError = error{ InvalidJsonString, InvalidJsonEscape, InvalidJsonSurrogate, InvalidJsonUtf8 };
+    InvalidJsonString,
+    InvalidJsonEscape,
+    InvalidJsonSurrogate,
+    InvalidJsonUtf8,
+};
 
 /// How a number differs from a plain nonnegative integer that fits a u64,
 /// as a reader of its digits meets it: a sign first, then too many digits,
@@ -42,148 +44,99 @@ pub const Digits = enum { plain, negative, overflow, fractional };
 
 pub const Literal = enum { true_value, false_value, null_value };
 
-/// Decodes a JSON string's contents one byte at a time, checking every
-/// escape and UTF-8 sequence. The reader runs one over each string it reads
-/// and the shell over each range a codec names, so both decode alike.
-pub const StringDecoder = struct {
-    state: enum { plain, escape, unicode, surrogate_backslash, surrogate_u },
-    /// A UTF-8 sequence in progress.
-    sequence: [4]u8 = undefined,
-    sequence_length: u3,
-    sequence_expected: u3 = undefined,
-    /// A `\u` escape in progress, and the high surrogate before it, if any.
-    hex: u21 = undefined,
-    hex_digits: u3 = undefined,
-    high: u21,
-
-    /// Ready for a string's first byte of contents.
-    pub fn reset(self: *StringDecoder) void {
-        self.state = .plain;
-        self.sequence_length = 0;
-        self.high = 0;
+/// Decodes JSON string contents from `bytes[start..]` up to the first
+/// unescaped quote or the end of `bytes`, checking every escape and UTF-8
+/// sequence, and gives each scalar to `sink.append(bytes, scalar)` and each
+/// run of plain ASCII whole with a null scalar. Returns where it stopped:
+/// the quote's index, or `bytes.len`. The reader runs it over each string
+/// it reads and the shell over each range a codec names, so both decode
+/// alike.
+pub fn decodeString(bytes: []const u8, start: usize, sink: anytype) Error!usize {
+    var at = start;
+    while (at < bytes.len) {
+        const plain = plainLength(bytes[at..]);
+        if (plain != 0) {
+            sink.append(bytes[at..][0..plain], null);
+            at += plain;
+            continue;
+        }
+        at = switch (bytes[at]) {
+            '"' => return at,
+            0...0x1f => return error.InvalidJsonString,
+            '\\' => try escape(bytes, at + 1, sink),
+            else => try sequence(bytes, at, sink),
+        };
     }
+    return at;
+}
 
-    /// Whether a scalar is in progress, so the contents cannot end here.
-    pub fn pending(self: *const StringDecoder) bool {
-        return self.state != .plain or self.sequence_length != 0;
-    }
+/// The escape whose backslash is just before `at`; returns where it ends.
+fn escape(bytes: []const u8, at: usize, sink: anytype) Error!usize {
+    if (at == bytes.len) return error.UnexpectedJsonEnd;
+    const value: u8 = switch (bytes[at]) {
+        '"', '\\', '/' => bytes[at],
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        'u' => return unicodeEscape(bytes, at + 1, sink),
+        else => return error.InvalidJsonEscape,
+    };
+    sink.append(&.{value}, value);
+    return at + 1;
+}
 
-    /// Decode a run of contents, giving each scalar to
-    /// `sink.append(bytes, scalar)`, and a run of plain ASCII whole with a
-    /// null scalar.
-    pub fn pushSlice(self: *StringDecoder, bytes: []const u8, sink: anytype) StringError!void {
-        var index: usize = 0;
-        while (index < bytes.len) {
-            if (!self.pending()) {
-                const plain = plainLength(bytes[index..]);
-                if (plain != 0) {
-                    sink.append(bytes[index..][0..plain], null);
-                    index += plain;
-                    continue;
-                }
+/// A `\u` escape whose hex digits start at `at`, with its low surrogate
+/// when it is a high one.
+fn unicodeEscape(bytes: []const u8, at: usize, sink: anytype) Error!usize {
+    const value = try hex(bytes, at);
+    var end = at + 4;
+    const scalar = switch (value) {
+        0xdc00...0xdfff => return error.InvalidJsonSurrogate,
+        0xd800...0xdbff => pair: {
+            for ("\\u", 0..) |expected, index| {
+                if (end + index == bytes.len) return error.UnexpectedJsonEnd;
+                if (bytes[end + index] != expected) return error.InvalidJsonSurrogate;
             }
-            try self.push(bytes[index], sink);
-            index += 1;
-        }
-    }
+            const low = try hex(bytes, end + 2);
+            if (low < 0xdc00 or low > 0xdfff) return error.InvalidJsonSurrogate;
+            end += 6;
+            break :pair 0x10000 + ((value - 0xd800) << 10) + (low - 0xdc00);
+        },
+        else => value,
+    };
+    var encoded: [4]u8 = undefined;
+    const count = std.unicode.utf8Encode(scalar, &encoded) catch unreachable;
+    sink.append(encoded[0..count], scalar);
+    return end;
+}
 
-    /// Decode one byte of contents; a closing quote is not contents.
-    pub fn push(self: *StringDecoder, byte: u8, sink: anytype) StringError!void {
-        switch (self.state) {
-            .plain => {},
-            .escape => {
-                self.state = .plain;
-                const value: u8 = switch (byte) {
-                    '"', '\\', '/' => byte,
-                    'b' => 0x08,
-                    'f' => 0x0c,
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    'u' => {
-                        self.hex = 0;
-                        self.hex_digits = 0;
-                        self.state = .unicode;
-                        return;
-                    },
-                    else => return error.InvalidJsonEscape,
-                };
-                return sink.append(&.{value}, value);
-            },
-            .unicode => {
-                const digit = std.fmt.charToDigit(byte, 16) catch return error.InvalidJsonEscape;
-                self.hex = self.hex * 16 + digit;
-                self.hex_digits += 1;
-                if (self.hex_digits == 4) try self.escaped(sink);
-                return;
-            },
-            .surrogate_backslash => {
-                self.state = if (byte == '\\') .surrogate_u else return error.InvalidJsonSurrogate;
-                return;
-            },
-            .surrogate_u => {
-                if (byte != 'u') return error.InvalidJsonSurrogate;
-                self.hex = 0;
-                self.hex_digits = 0;
-                self.state = .unicode;
-                return;
-            },
-        }
-        if (self.sequence_length != 0) {
-            // Inside a UTF-8 sequence; std's decoder judges it once whole.
-            if (byte < 0x20) return error.InvalidJsonString;
-            if (byte == '"' or byte == '\\') return error.InvalidJsonUtf8;
-            self.sequence[self.sequence_length] = byte;
-            self.sequence_length += 1;
-            if (self.sequence_length == self.sequence_expected) {
-                const sequence = self.sequence[0..self.sequence_expected];
-                const scalar = std.unicode.utf8Decode(sequence) catch return error.InvalidJsonUtf8;
-                self.sequence_length = 0;
-                sink.append(sequence, scalar);
-            }
-            return;
-        }
-        switch (byte) {
-            '"', 0...0x1f => return error.InvalidJsonString,
-            '\\' => self.state = .escape,
-            0x80...0xff => {
-                self.sequence_expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidJsonUtf8;
-                self.sequence[0] = byte;
-                self.sequence_length = 1;
-            },
-            else => sink.append(&.{byte}, byte),
-        }
+fn hex(bytes: []const u8, at: usize) Error!u21 {
+    var value: u21 = 0;
+    for (at..at + 4) |index| {
+        if (index == bytes.len) return error.UnexpectedJsonEnd;
+        value = value * 16 + (std.fmt.charToDigit(bytes[index], 16) catch return error.InvalidJsonEscape);
     }
+    return value;
+}
 
-    /// Four hex digits of a `\u` escape are read.
-    fn escaped(self: *StringDecoder, sink: anytype) StringError!void {
-        const value = self.hex;
-        if (self.high != 0) {
-            if (value < 0xdc00 or value > 0xdfff) return error.InvalidJsonSurrogate;
-            const scalar = 0x10000 + ((self.high - 0xd800) << 10) + (value - 0xdc00);
-            self.high = 0;
-            self.state = .plain;
-            return decodedScalar(scalar, sink);
-        }
-        switch (value) {
-            0xd800...0xdbff => {
-                self.high = value;
-                self.state = .surrogate_backslash;
-            },
-            0xdc00...0xdfff => return error.InvalidJsonSurrogate,
-            else => {
-                self.state = .plain;
-                decodedScalar(value, sink);
-            },
+/// The UTF-8 sequence that starts at `at`; std's decoder judges it once
+/// whole.
+fn sequence(bytes: []const u8, at: usize, sink: anytype) Error!usize {
+    const length = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return error.InvalidJsonUtf8;
+    for (at + 1..at + length) |index| {
+        if (index == bytes.len) return error.UnexpectedJsonEnd;
+        switch (bytes[index]) {
+            0...0x1f => return error.InvalidJsonString,
+            '"', '\\' => return error.InvalidJsonUtf8,
+            else => {},
         }
     }
-
-    fn decodedScalar(scalar: u21, sink: anytype) void {
-        var encoded: [4]u8 = undefined;
-        const count = std.unicode.utf8Encode(scalar, &encoded) catch unreachable;
-        sink.append(encoded[0..count], scalar);
-    }
-};
+    const encoded = bytes[at..][0..length];
+    sink.append(encoded, std.unicode.utf8Decode(encoded) catch return error.InvalidJsonUtf8);
+    return at + length;
+}
 
 /// How many leading bytes are string contents that need no check: no quote,
 /// backslash, control or UTF-8.
@@ -213,8 +166,6 @@ pub const Reader = struct {
     decoded: u64,
     /// The first `max_text_bytes` decoded bytes of the current string.
     text_bytes: [max_text_bytes]u8 = undefined,
-    /// Reset as each string begins.
-    contents: StringDecoder = undefined,
     /// Where the rest of the literal being read starts in `literal_tails`.
     literal: u4,
     /// The number being read, while it is a plain nonnegative integer that
@@ -252,20 +203,17 @@ pub const Reader = struct {
     /// its bytes give.
     pub fn read(self: *Reader, bytes: []const u8, handler: anytype) Error!void {
         self.init();
-        var index: usize = 0;
-        while (index < bytes.len) {
-            if (self.state == .string and !self.contents.pending()) {
-                const plain = plainLength(bytes[index..]);
-                if (plain != 0) {
-                    self.append(bytes[index..][0..plain], null);
-                    index += plain;
-                    self.offset += plain;
-                    continue;
-                }
+        while (self.offset < bytes.len) : (self.offset += 1) {
+            if (self.state != .string) {
+                try self.step(bytes[@intCast(self.offset)], handler);
+                continue;
             }
-            try self.step(bytes[index], handler);
-            index += 1;
-            self.offset += 1;
+            self.offset = try decodeString(bytes, @intCast(self.offset), self);
+            if (self.offset == bytes.len) break;
+            if (self.in_key) {
+                handler.key(self, self.depth);
+                self.state = .colon;
+            } else self.endValue(.string, handler);
         }
         if (self.state == .done) return;
         // A value deeper than any document may hold was due, or more bytes
@@ -338,12 +286,7 @@ pub const Reader = struct {
                 try self.beginValue(byte, handler);
             },
             .after_value => try self.afterValue(byte, handler),
-            .string => if (byte == '"' and !self.contents.pending()) {
-                if (self.in_key) {
-                    handler.key(self, self.depth);
-                    self.state = .colon;
-                } else self.endValue(.string, handler);
-            } else try self.contents.push(byte, self),
+            .string => unreachable,
             .minus => self.state = switch (byte) {
                 '0' => .zero,
                 '1'...'9' => .integer_digits,
@@ -483,12 +426,11 @@ pub const Reader = struct {
         self.in_key = key;
         self.string_start = self.offset + 1;
         self.decoded = 0;
-        self.contents.reset();
         self.state = .string;
     }
 
     /// The string decoder's sink: keep the decoded start and count the rest.
-    pub fn append(self: *Reader, bytes: []const u8, scalar: ?u21) void {
+    fn append(self: *Reader, bytes: []const u8, scalar: ?u21) void {
         _ = scalar;
         if (self.decoded < max_text_bytes) {
             const kept = @min(bytes.len, max_text_bytes - @as(usize, @intCast(self.decoded)));
@@ -500,7 +442,7 @@ pub const Reader = struct {
 
 /// A string's decoded start and decoded length, as the reader keeps them.
 pub const Text = struct {
-    bytes: [max_text_bytes]u8,
+    bytes: [max_text_bytes]u8 = undefined,
     length: u64,
 
     /// The decoded string, when no longer than `max_text_bytes`.
@@ -508,7 +450,7 @@ pub const Text = struct {
         return if (self.length <= max_text_bytes) self.bytes[0..@intCast(self.length)] else null;
     }
 
-    pub fn append(self: *Text, bytes: []const u8, scalar: ?u21) void {
+    fn append(self: *Text, bytes: []const u8, scalar: ?u21) void {
         _ = scalar;
         if (self.length < max_text_bytes) {
             const kept = @min(bytes.len, max_text_bytes - @as(usize, @intCast(self.length)));
@@ -531,6 +473,16 @@ pub fn stringAt(document: []const u8, start: usize) struct { contents: Range, en
         if (document[at] == '"') return .{ .contents = .{ .start = start + 1, .length = at - start - 1 }, .end = at + 1 };
         at += 2;
     }
+}
+
+/// A value the reader accepted: one past its last byte, and a string's
+/// contents.
+pub const Value = struct { end: usize, string: ?Range };
+
+pub fn valueAt(document: []const u8, start: usize) Value {
+    if (document[start] != '"') return .{ .end = valueEnd(document, start), .string = null };
+    const found = stringAt(document, start);
+    return .{ .end = found.end, .string = found.contents };
 }
 
 /// Where the value that starts at `start` ends, one past its last byte.
@@ -570,12 +522,25 @@ pub fn skipSpace(document: []const u8, at: usize) usize {
     return index;
 }
 
+/// Decodes `contents`, which the reader accepted as a string's, giving
+/// each scalar to `sink` as `decodeString` does.
+pub fn decodeContents(contents: []const u8, sink: anytype) void {
+    std.debug.assert((decodeString(contents, 0, sink) catch unreachable) == contents.len);
+}
+
 /// Decodes `contents`, which the reader accepted as a string's, into `out`.
 pub fn decode(contents: []const u8, out: *Text) void {
     out.length = 0;
-    var decoder: StringDecoder = undefined;
-    decoder.reset();
-    decoder.pushSlice(contents, out) catch unreachable;
+    decodeContents(contents, out);
+}
+
+/// The tag of `E` that `contents`, a string's the reader accepted, decode
+/// to: compared as they stand unless they hold an escape.
+pub fn decodedTag(comptime E: type, contents: []const u8) ?E {
+    if (std.mem.indexOfScalar(u8, contents, '\\') == null) return std.meta.stringToEnum(E, contents);
+    var text: Text = .{ .length = 0 };
+    decode(contents, &text);
+    return std.meta.stringToEnum(E, text.slice() orelse return null);
 }
 
 fn space(byte: u8) bool {
