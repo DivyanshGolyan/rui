@@ -29,12 +29,6 @@ test {
 // and managed-route authentication. The Host owns only effect scheduling and
 // the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
-pub const observation_names: provider.ObservationNames = .{
-    .request_id = "x-request-id",
-    .model = "openai-model",
-    .alternate_model = "x-openai-model",
-    .turn_state = "x-codex-turn-state",
-};
 
 /// Interpretation borrows sealed bytes and the caller's metadata/data workspaces.
 /// It grants no settlement authority and neither closes nor transfers either

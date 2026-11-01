@@ -1,5 +1,6 @@
 const std = @import("std");
 const bash = @import("bash.zig");
+const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
@@ -440,7 +441,8 @@ pub fn executionMain(host: *Host) void {
             .capacity = slots.len,
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
             .observation = .{
-                .names = model_adapter.observation_names,
+                // The one served endpoint is the Codex route.
+                .names = codecs.manifest(protocol.Provider.codex.codec()).observe,
                 .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
             },
             .scratch_path = host.lease.paths.scratch.slice(),
