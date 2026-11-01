@@ -87,8 +87,15 @@ pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Valu
 /// Under the same preference lock as setup, keep an existing provider choice.
 /// Null means no change was published; credentials are owned separately.
 pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !bool {
+    return saveProviderAfterLogin(home, provider, true);
+}
+
+/// Saves `provider` as the default after its sign-in: only when none is
+/// saved with `only_if_unset`, else as the person's explicit choice. True
+/// when the default is now `provider` because of this call.
+pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider, only_if_unset: bool) !bool {
     const readiness: Readinesses = .initFill(.configured);
-    return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, true)) != null;
+    return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, only_if_unset)) != null;
 }
 
 /// Apply explicit choices to the locked snapshot, never resolved recommendations.

@@ -625,7 +625,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
-    if (args.len == 1 and std.mem.eql(u8, args[0], "openai")) return saveApiKey(init);
+    if (args.len == 1 and std.mem.eql(u8, args[0], "openai")) return saveApiKey(init, if (interactive) .choose else .fill);
     if (args.len != 1 or !std.mem.eql(u8, args[0], "codex")) return usage();
     // Guided login already owns SIGINT from the choice through publication.
     var interrupt = if (interactive) null else LoginInterrupt.init();
@@ -672,7 +672,9 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     const home = init.environ_map.get("HOME") orelse "";
     // The preference attempt must run even if the terminal receipt cannot be
     // written. Installation and future defaults have independent outcomes.
-    const default_outcome = preferences.fillProviderAfterLogin(home, .codex);
+    // A guided login is the person's choice of Codex; the explicit command
+    // only fills an unset default.
+    const default_outcome = preferences.saveProviderAfterLogin(home, .codex, !interactive);
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Signed in to Codex.\n");
     const added = default_outcome catch |err| {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex may not be saved as the default for new Sessions (");
@@ -736,7 +738,11 @@ fn openAiKeyPath(init: std.process.Init, buffer: []u8) ![]const u8 {
     };
 }
 
-fn saveApiKey(init: std.process.Init) !void {
+/// How saving a key treats the provider default: `fill` sets it only when
+/// unset, and `choose` sets it because the person just picked OpenAI.
+const DefaultUpdate = enum { fill, choose };
+
+fn saveApiKey(init: std.process.Init, update: DefaultUpdate) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try openAiKeyPath(init, &path_buffer);
     if (init.environ_map.get(api_key.path_variable) == null) {
@@ -745,35 +751,42 @@ fn saveApiKey(init: std.process.Init) !void {
         _ = try credentialPath(init, &unused, true);
     }
     const stdin = std.Io.File.stdin();
-    // A terminal does not echo the key, so it never lands in scrollback.
-    const terminal: ?TerminalEditor.Attributes = if (stdin.isTty(init.io) catch false) TerminalEditor.getAttributes() catch null else null;
-    if (terminal) |original| {
-        try TerminalEditor.setAttributes(.FLUSH, TerminalEditor.hidingInput(original));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Paste your OpenAI API key, then press Enter (it is not shown): ");
-    }
-    defer if (terminal) |original| {
-        TerminalEditor.setAttributes(.FLUSH, original) catch {};
-        std.Io.File.stdout().writeStreamingAll(init.io, "\n") catch {};
-    };
     var buffer: [api_key.max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
-    var length: usize = 0;
-    while (length < buffer.len) {
-        const count = stdin.readStreaming(init.io, &.{buffer[length..]}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
+    // A terminal does not echo the key, so it never lands in scrollback.
+    const line: []const u8 = if (stdin.isTty(init.io) catch false) blk: {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Paste your OpenAI API key, then press Enter (it is not shown): ");
+        const entered = TerminalEditor.readSecretLine(init.io, &buffer) catch |err| {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+            if (err == error.SecretEntryInterrupted) {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Key entry cancelled. Nothing was saved.\n");
+                return error.LoginInterrupted;
+            }
+            if (err == error.StreamTooLong) break :blk &buffer;
+            return err;
         };
-        length += count;
-        if (std.mem.indexOfScalar(u8, buffer[0..length], '\n') != null) break;
-    }
-    const line_end = if (std.mem.indexOfScalar(u8, buffer[0..length], '\n')) |at| at + 1 else length;
-    api_key.install(path, api_key.trimNewline(buffer[0..line_end])) catch |err| {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        break :blk entered orelse "";
+    } else blk: {
+        var length: usize = 0;
+        while (length < buffer.len) {
+            const count = stdin.readStreaming(init.io, &.{buffer[length..]}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            length += count;
+            if (std.mem.indexOfScalar(u8, buffer[0..length], '\n') != null) break;
+        }
+        const line_end = if (std.mem.indexOfScalar(u8, buffer[0..length], '\n')) |at| at + 1 else length;
+        break :blk api_key.trimNewline(buffer[0..line_end]);
+    };
+    api_key.install(path, line) catch |err| {
         if (err == error.InvalidApiKey) stderr.diagnostic("rui: that is not an API key: expected one line of visible characters, at most {d} bytes. Nothing was saved.\n", .{api_key.max_key_bytes});
         return err;
     };
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: OpenAI API key saved. A Host started from now on serves openai; stop and restart a running Host to add it.\n");
     const home = init.environ_map.get("HOME") orelse return;
-    const added = preferences.fillProviderAfterLogin(home, .openai) catch |err| {
+    const added = preferences.saveProviderAfterLogin(home, .openai, update == .fill) catch |err| {
         stderr.diagnostic("rui: OpenAI may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{@errorName(err)});
         return;
     };
@@ -1074,8 +1087,8 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
         return;
     }
     if (provider == .openai) {
-        saveApiKey(init) catch |err| {
-            if (err != error.InvalidApiKey) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@errorName(err)});
+        saveApiKey(init, .choose) catch |err| {
+            if (err != error.InvalidApiKey and err != error.LoginInterrupted) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@errorName(err)});
         };
         return;
     }

@@ -47,11 +47,39 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
     };
 }
 
-/// `attributes` with typed input left unshown, for a secret read as a line.
-pub fn hidingInput(attributes: Attributes) Attributes {
-    var quiet = attributes;
-    quiet.c_lflag &= ~@as(termios.tcflag_t, termios.ECHO);
-    return quiet;
+/// One line from the terminal with nothing shown, for a secret. Enter ends
+/// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
+/// null. Ctrl+C arrives as a byte, not a signal, so the terminal's own
+/// settings are always restored before this returns.
+pub fn readSecretLine(io: std.Io, buffer: []u8) !?[]const u8 {
+    const original = try getAttributes();
+    var mode = original;
+    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
+    mode.c_cc[termios.VMIN] = 1;
+    mode.c_cc[termios.VTIME] = 0;
+    try setAttributes(.FLUSH, mode);
+    defer setAttributes(.FLUSH, original) catch {};
+    var chunk: [64]u8 = undefined;
+    defer std.crypto.secureZero(u8, &chunk);
+    var length: usize = 0;
+    errdefer std.crypto.secureZero(u8, buffer[0..length]);
+    while (true) {
+        const count = std.Io.File.stdin().readStreaming(io, &.{&chunk}) catch |err| switch (err) {
+            error.EndOfStream => return if (length == 0) null else buffer[0..length],
+            else => return err,
+        };
+        for (chunk[0..count]) |byte| switch (byte) {
+            '\r', '\n' => return buffer[0..length],
+            0x03 => return error.SecretEntryInterrupted,
+            0x04 => if (length == 0) return null,
+            0x08, 0x7f => length -|= 1,
+            else => {
+                if (length == buffer.len) return error.StreamTooLong;
+                buffer[length] = byte;
+                length += 1;
+            },
+        };
+    }
 }
 
 pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.TermiosSetError!void {
