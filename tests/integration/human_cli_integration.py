@@ -37,13 +37,21 @@ def untimed(row):
 # the conversation's last line, "• Waiting · 12s",
 # "! Rate limited · retry 2 in 18s", "Stopping…".
 LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
-# A waiting Action's input row while its choice is offered, and the keys
-# that decide it: Enter confirms the highlighted option, Allow once at first.
+# A waiting Action's input row while its choice is offered, and the key
+# that decides it: Enter confirms the highlighted option, Allow once at first.
 CHOICE = "› Allow once"
 ALLOW = b"\r"
 # The choice's input row at any width, picked or not.
 CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
-DENY = b"\x1b[C\r"
+
+
+def pick_deny(master, ready):
+    """Move a ready choice to Deny; return once a delivered frame shows it ready.
+
+    An arrow spends readiness, so an Enter sent with it would decide nothing.
+    """
+    os.write(master, b"\x1b[C")
+    return read_terminal(master, "› Deny") + action_ready(ready, master)
 
 
 def time_limit(milliseconds):
@@ -968,8 +976,8 @@ def terminal_wait_oracles():
 def shown_bash_command(master):
     """The current Action's "$ " command, rejoined across wrapped rows.
 
-    A later line of the command starts with the content mark; a wrapped row
-    is indented four columns. As in raw_export, a row filled to the edge broke
+    A later line of the command starts with the content mark `│`; a wrapped
+    row starts with `┆`. As in raw_export, a row filled to the edge broke
     inside a word; any other soft break consumed a space.
     """
     capture = terminal_capture(master)
@@ -981,7 +989,7 @@ def shown_bash_command(master):
     for line in rows[start + 1:]:
         if line.startswith("  │ "):
             command += "\n" + line[4:]
-        elif line.startswith("    "):
+        elif line.startswith("  ┆ "):
             command += ("" if len(previous) >= width else " ") + line[4:]
         else:
             break
@@ -2457,8 +2465,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             proxy.exchanges.clear()
         if decision == "deny-action" and not stale_target:
             # Move to Deny first, so what follows Enter shows only the outcome.
-            os.write(master, DENY[:-1])
-            read_terminal(master, "› Deny")
+            pick_deny(master, ready_read)
         os.write(master, b"\r")
         settled = ""
         if lost_reply:
@@ -4095,8 +4102,11 @@ def renderer_cases():
                 # whose meaning was lost: it fails closed the same way rather
                 # than being skipped so that the Enter after it decides.
                 for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u", "\x1b[+27;1;13~"):
-                    tty.send(recover + "\n", "! Not ready; nothing authorized.")
+                    # Each refusal leaves the same screen, so no new frame
+                    # need appear; readiness after the keys proves they ran.
+                    os.write(tty.master, (recover + "\n").encode())
                     tty.ready(ready_read)
+                    assert "! Not ready; nothing authorized." in tty.capture.completed, tty.capture.completed
                     assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
                     assert not (workspace / "renderer-effect").exists(), "Ctrl-R at the choice authorized an Action"
                 # Enter confirms the highlighted Allow once.
@@ -4172,8 +4182,8 @@ def renderer_cases():
 
         # Typing beside one Action never decides the next: `/` at the first
         # of two, decided elsewhere, then `a` + Enter is the command `/a`.
-        # The command ends that line, and the second Action is decided only
-        # at its own choice once input is fresh again.
+        # The line outlives the command until Esc, and the second Action is
+        # decided only at its own choice once input is fresh again.
         session = configure("ask")
         endpoint.responses.append(fixture.sse_tool_calls("renderer-successor", [
             ("bash", f"successor-{index}", json.dumps({"cmd": f"printf decided > renderer-successor-{index}", "description": f"Successor {index}", "timeout_ms": None}))
@@ -4191,15 +4201,17 @@ def renderer_cases():
                 tty.wait("Successor 1 — Denied", after=generation)
                 # The other client saved its own record in this HOME.
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                # The typed line outlives the first Action, so the second waits
-                # beside it with no prompt; the command ends the line and the
-                # second choice returns.
+                # The typed line outlives the first Action and its command, so
+                # the second waits beside it with no prompt until Esc.
                 tty.send("a\r", "! Unknown command /a · /help")
-                tty.wait(CHOICE)
+                assert CHOICE not in tty.capture.completed, tty.capture.completed
+                tty.send("\x07", CHOICE)
                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
                 tty.ready(ready_read)
-                tty.send(DENY.decode(), marker)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", marker)
                 decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
                 assert [(item["action"], item["decision"]) for item in decisions] == [(second, "deny")], decisions
                 assert not any((workspace / f"renderer-successor-{index}").exists() for index in (1, 2))
@@ -4262,7 +4274,8 @@ def renderer_cases():
 
         # A slash command begun while reading a tall Action stays a command:
         # `/`, the final page, then `a` + Enter runs `/a` and authorizes
-        # nothing. The choice returns and decides once input is fresh.
+        # nothing. Esc returns to the choice, which decides once input is
+        # fresh.
         session = configure("ask")
         command = "\n".join(f"# reading line {index}" for index in range(100)) + "\nprintf allowed > renderer-reading-effect"
         endpoint.responses.append(fixture.sse_tool_calls("renderer-reading", [
@@ -4283,10 +4296,13 @@ def renderer_cases():
                 assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 tty.send("a\r", "! Unknown command /a · /help")
-                assert CHOICE in tty.capture.completed, tty.capture.completed
+                assert CHOICE not in tty.capture.completed, tty.capture.completed
+                tty.send("\x07", CHOICE)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
                 tty.ready(ready_read)
-                tty.send(DENY.decode(), marker)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", marker)
                 assert not (workspace / "renderer-reading-effect").exists()
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
@@ -4473,8 +4489,10 @@ def renderer_cases():
             tty.wait(predicate=updated, timeout=10)
             for frame in frames:
                 assert "Session: " not in frame and "! Unknown command /foo · /help" in frame, frame
-            # Running a command returns to the Action, whose choice waits for
-            # it: a command typed there meanwhile is ignored, never queued.
+            # Running a command returns to the Action. The /status line was
+            # typed beside it, so the draft keeps the input row until Esc
+            # returns to the choice, which the command holds: a command typed
+            # there meanwhile is ignored, never queued.
             reading, release_read = threading.Event(), threading.Event()
             missing = b"00000000-0000-4000-8000-000000000000"
             def hold_read(body):
@@ -4488,7 +4506,7 @@ def renderer_cases():
             frames = tty.every_frame()
             os.write(tty.master, b"/result " + missing + b"\n")
             assert reading.wait(10), tty.capture.completed
-            tty.wait("Command running…")
+            tty.send("\x07", "Command running…")
             tty.send("/requests\n", "! Command still running.")
             partial = [frame for frame in frames if any("/result" in row for row in frame.rstrip("\n").split("\n")[-2:])]
             assert len(partial) <= 1, (len(partial), partial[:2])

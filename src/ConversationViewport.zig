@@ -80,15 +80,19 @@ pub const DraftPieces = struct {
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
 /// A user line never hangs left of its body column: position alone must
-/// distinguish user text where the terminal shows no attributes.
-fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16 } {
+/// distinguish user text where the terminal shows no attributes. `quoted`:
+/// the marker begins an Action's command (`$`) or a later line of it or its
+/// stdin (`│`).
+fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
     var cells: usize = bytes;
+    var quoted = false;
     for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$", "│" }) |glyph| {
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
+            quoted = std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -96,7 +100,7 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (user and width >= 4 and std.mem.startsWith(u8, line, "  ")) return .{ .bytes = 2, .cells = 2 };
         return .{ .bytes = 0, .cells = 0 };
     }
-    return .{ .bytes = bytes, .cells = @intCast(cells) };
+    return .{ .bytes = bytes, .cells = @intCast(cells), .quoted = quoted };
 }
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
@@ -149,6 +153,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         dirty: bool = true,
         /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
         sidenotes: bool = false,
+        /// An Action: each wrapped row of its command or stdin starts with
+        /// `┆`, so no row of that text can pass for a field, nor a wrapped
+        /// row for a new `│` line.
+        quotes: bool = false,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
@@ -346,7 +354,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             const split = hanging(self.bytes[offset..end], body.width, user);
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
-            return rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
+            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
+            if (commit and self.quotes and split.quoted) for (1..rows) |index| {
+                const mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
+                _ = mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(offset + split.bytes - 2, colour, plain) }, .{ .wrap = .none });
+            };
+            return rows;
         }
 
         /// Prints bytes as style runs, a bounded batch of segments at a time:
@@ -576,6 +589,36 @@ const TestScreen = struct {
         return std.mem.trimEnd(u8, storage[0..length], " ");
     }
 };
+
+test "an Action's wrapped command and stdin rows carry a wrap mark, so none passes for a field or a new line" {
+    const pad: [30]u8 = @splat(' ');
+    const text = "? Probe\n  $ echo a" ++ pad ++ "Time limit: 1 min\n  │ x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
+    const command = std.mem.indexOf(u8, text, "  $").?;
+    for ([_]bool{ false, true }) |quotes| {
+        errdefer std.debug.print("quotes={}\n", .{quotes});
+        var view: Sized(256, false) = .{ .quotes = quotes };
+        try view.append(text);
+        try view.prepare();
+        var test_screen: TestScreen = undefined;
+        // From the command's second row too, so its first row is above the window.
+        for ([_]Position{ .{}, .{ .offset = command, .row = 1 } }) |from| {
+            const drawn = view.draw(test_screen.window(24, 20), from, true, false, .{});
+            var storage: [128]u8 = undefined;
+            var spoofs: usize = 0;
+            for (0..drawn.rows) |index| {
+                const row = test_screen.row(@intCast(index), &storage);
+                if (std.mem.indexOf(u8, row, "Time limit: 1 min") == null and std.mem.indexOf(u8, row, "stdin:") == null) continue;
+                spoofs += 1;
+                try std.testing.expect(std.mem.startsWith(u8, row, if (quotes) "  ┆ " else "    "));
+            }
+            try std.testing.expectEqual(@as(usize, 2), spoofs);
+            // The field itself carries no mark.
+            var field = false;
+            for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");
+            try std.testing.expect(field);
+        }
+    }
+}
 
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};

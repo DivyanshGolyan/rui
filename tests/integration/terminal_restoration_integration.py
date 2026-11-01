@@ -1484,7 +1484,9 @@ def consent_boundary_cases(state, library):
                 presentation += human.action_ready(read_ready, master)
                 assert set(records.glob("*.json")) == before, "expiry captured stale permission"
                 assert not (root / "effect").exists(), "stale input ran Bash"
-                os.write(master, human.ALLOW if case == "escape-allow" else human.DENY)
+                if case != "escape-allow":
+                    human.pick_deny(master, read_ready)
+                os.write(master, human.ALLOW)
                 human.read_terminal(master, "Allowed." if case == "escape-allow" else "• Write consent effect marker — Denied")
                 assert len(set(records.glob("*.json")) - before) == 1, "first fresh choice was not captured"
                 os.write(master, b"\x03")
@@ -1496,7 +1498,8 @@ def consent_boundary_cases(state, library):
                 # The paste went to the draft; Esc returns to the choice.
                 os.write(master, b"\x1b[201~\x07")
                 presentation += human.action_ready(read_ready, master)
-                os.write(master, human.DENY)
+                human.pick_deny(master, read_ready)
+                os.write(master, human.ALLOW)
                 human.read_terminal(master, "• Write consent effect marker — Denied")
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)
@@ -1646,7 +1649,9 @@ def command_interruption_cases(state, library, only=None):
                     # The command is held on the reader worker. The pending
                     # Action owns the input field and nothing is fresh until
                     # the command completes: neither a Message nor Enter is
-                    # captured, sent or authorizes the Action.
+                    # captured, sent or authorizes the Action. Esc first
+                    # returns from the typed command line to the choice.
+                    os.write(master, b"\x07")
                     for typed in (b"hello\r", b"a\r"):
                         os.write(master, typed)
                         fixture.wait_for(lambda: unread_input(slave) == 0, f"{case} read {typed!r} while held")
@@ -1935,7 +1940,9 @@ def decision_reporting_cases(state):
                 os.write(master, b"propose exact decision\n")
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(read_ready, master)
-                os.write(master, human.ALLOW if decision == "allow_once" else human.DENY)
+                if decision != "allow_once":
+                    human.pick_deny(master, read_ready)
+                os.write(master, human.ALLOW)
                 if lost:
                     assert received.wait(10)
                     caller.send_signal(signal.SIGINT)
@@ -2103,7 +2110,9 @@ def detach_reporting_cases(state, library):
                 if kind != "message":
                     proposal = human.read_terminal(master, human.CHOICE)
                     proposal += human.action_ready(read_ready, master)
-                    os.write(master, human.ALLOW if kind == "allow_once" else human.DENY)
+                    if kind != "allow_once":
+                        human.pick_deny(master, read_ready)
+                    os.write(master, human.ALLOW)
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
                 status = human.terminal_step(master, "/status", "Session: ", composer=True)
                 assert "Original reserved request:" not in status, status
@@ -2210,7 +2219,9 @@ def startup_reporting_cases(state, library):
                 proposal = human.read_terminal(master, human.CHOICE)
                 proposal += human.action_ready(ready_read, master)
                 proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-                event = human.ALLOW if kind == "allow_once" else human.DENY
+                if kind == "deny":
+                    human.pick_deny(master, ready_read)
+                event = human.ALLOW
             else:
                 if kind == "retry":
                     proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"")

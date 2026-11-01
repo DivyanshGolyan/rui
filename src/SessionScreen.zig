@@ -29,6 +29,9 @@ pub const Ticket = struct {
     first: Position,
     next: Position,
     delivered: bool = false,
+    /// Input arrived after this frame was issued, so its prompt can no
+    /// longer make the choice ready; only a later frame can.
+    answered: bool = false,
 };
 
 /// Proof that every byte of one frame was written and flushed. Only `render`
@@ -69,18 +72,19 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // The exact adopted Action and its fresh typing scope. Only this owner
 // changes it, from delivered frames and the frontend's completed observations.
 consent: ConsentPolicy.Consent = .{},
-// A line typed beside an Action holds the input row as the draft until it
-// ends: until the latest view is shown again (Esc, or a sent Message) or a
-// slash command runs. It outlives that Action, so an Enter meant for the line
-// never reaches a choice that appears meanwhile. Only beginTyping, endTyping
-// and latest write it.
+// A line typed beside an Action holds the input row as the draft until the
+// user returns to the choice (Esc, End or Ctrl-End) or sends a Message. A
+// slash command or any other view change keeps it. It outlives that Action,
+// so an Enter meant for the line never reaches a choice that appears
+// meanwhile. Only beginTyping and endTyping write it.
 typing: bool = false,
 // Advances whenever view, layout, consent authority or the shown choice is
 // invalidated. A frame receipt from an older scope credits nothing, and a
 // frame from an older scope is stale: the next one must be drawn.
 scope: u64 = 0,
 // The projection the latest frame encodes. Input routes by it until the next
-// frame is selected, even while that frame's output pumps input.
+// frame is selected, even while that frame's output pumps input; typing
+// moves it to the draft at once.
 selected: ConsentPolicy.Projection = .{},
 // The latest frame's ticket: one issued frame at a time, delivered at most once.
 ticket: ?Ticket = null,
@@ -200,34 +204,27 @@ pub fn adopt(self: *Self, io: std.Io, file: std.Io.File, action: u64) !void {
     self.invalidateScope();
 }
 
-/// Revokes freshness; the Action, its read rows and its shown option remain.
-/// Only revoked freshness revokes the frame: revoking again must not force a
-/// frame per byte typed or pasted while approval is paused.
+/// Spends freshness: Enter counts again only after a later prompt frame is
+/// delivered and input then drains empty. The Action, its read rows and its
+/// shown option remain. Freshness never changes what a frame shows, so this
+/// revokes no frame and a paste costs no frame per byte.
 pub fn invalidateConsent(self: *Self) void {
-    const fresh = self.consent.acceptsInput();
     self.consent.invalidate();
-    if (fresh) self.invalidateScope();
+    if (self.ticket) |*ticket| ticket.answered = true;
 }
 
-/// Revokes freshness and the latest frame's ticket after a key at the choice
-/// that could not act: a later key counts only after a new prompt frame and
-/// empty input. Keys refused before that frame revoke nothing more.
-pub fn refuseChoice(self: *Self) void {
-    self.consent.invalidate();
-    if (!self.stale()) self.invalidateScope();
-}
-
-/// A key typed beside the Action: the input row shows the draft, which takes
-/// that key, until the line ends. Nothing typed decides.
+/// A key typed beside the Action: the input row shows the draft at once,
+/// and the draft takes that key and those after it. Nothing typed decides.
 pub fn beginTyping(self: *Self) void {
     self.typing = true;
-    self.consent.invalidate();
+    self.invalidateConsent();
+    self.selected.row = .draft;
     self.invalidateScope();
 }
 
-/// A slash command ended the typed line: the input row returns to the
-/// choice, which needs fresh input again. While typing, no decision prompt
-/// was drawn, so freshness is already spent.
+/// The user returned to the choice: the input row shows it again, and it
+/// needs fresh input. While typing, no decision prompt was drawn, so
+/// freshness is already spent.
 pub fn endTyping(self: *Self) void {
     if (!self.typing) return;
     self.typing = false;
@@ -257,11 +254,11 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
     return .{ .read_completed = true };
 }
 
-/// The latest delivered frame asked for this Action's decision, and nothing
-/// revoked its scope since.
+/// The latest delivered frame asked for this Action's decision, nothing
+/// revoked its scope since, and no input answered it.
 pub fn decisionPromptDelivered(self: *const Self) bool {
     const ticket = self.ticket orelse return false;
-    return ticket.delivered and ticket.decision_prompt and ticket.scope == self.scope and ticket.action != null and ticket.action == self.consent.action;
+    return ticket.delivered and ticket.decision_prompt and !ticket.answered and ticket.scope == self.scope and ticket.action != null and ticket.action == self.consent.action;
 }
 
 /// Opens the fresh typing scope from post-write input observations, only for
@@ -281,12 +278,11 @@ pub const ChoiceOutcome = union(enum) { picked, decision: ConsentPolicy.Decision
 
 /// An arrow or Enter at the choice. A live probe before it acts: current
 /// geometry, command and selection, never the readiness of the frame that
-/// drew the prompt. A key that cannot act revokes freshness and the frame's
-/// ticket, so freshness must be earned again from a new prompt frame.
+/// drew the prompt. The caller spends freshness after every input at the
+/// choice, so the next key counts only after a new prompt frame.
 pub fn choose(self: *Self, key: ChoiceKey, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         self.invalidateLayout();
-        self.consent.invalidate();
         return .{ .blocked = .layout };
     }
     const live = ConsentPolicy.project(self.consent, self.shownAction(), command_blocked);
@@ -309,7 +305,6 @@ pub fn choose(self: *Self, key: ChoiceKey, size: std.posix.winsize, command_bloc
             return .{ .decision = decision };
         },
     };
-    self.refuseChoice();
     return .{ .blocked = block };
 }
 
@@ -454,9 +449,6 @@ fn viewed(self: *Self) *Document {
 }
 
 pub fn latest(self: *Self) !void {
-    // The latest view ends a typed line; the choice it shows needs fresh
-    // input, already spent while typing.
-    self.typing = false;
     if (self.action_view) |action| {
         const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
@@ -472,6 +464,7 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
     const end = if (prefix) @min(Viewport.capacity, length) else length;
     document.clear();
     document.sidenotes = false;
+    document.quotes = false;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < end) {
@@ -488,6 +481,7 @@ pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void 
     const length = (try file.stat(io)).size;
     self.view = if (action) .action else .inspection;
     try self.load(&self.browsing, io, file, true);
+    self.browsing.quotes = action;
     self.browsing.top = .{};
     self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
     if (action) {
@@ -1779,8 +1773,10 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     const resized: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
     try expectBlocked(.layout, screen.choose(.enter, resized, false));
     try std.testing.expect(!screen.actionRead());
-    try std.testing.expect(!screen.consent.acceptsInput());
+    try std.testing.expect(screen.stale());
     try std.testing.expectEqual(@as(?u64, 0xa), screen.consent.action);
+    // The caller spends freshness after every input at the choice.
+    screen.invalidateConsent();
     // Read again, prompt again, then a queued command blocks the decision.
     _ = screen.select(false);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
@@ -1790,6 +1786,7 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     _ = screen.select(false);
     try expectBlocked(.command, screen.choose(.enter, size, true));
     try std.testing.expectEqual(@as(?u64, 0xa), screen.consent.action);
+    screen.invalidateConsent();
     // While the command holds the choice, its frames ask for no decision.
     try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.select(true).approval);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
@@ -1800,9 +1797,14 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     _ = screen.select(false);
-    // An arrow moves the highlight once fresh; Enter decides what it shows.
+    // An arrow moves the highlight once fresh and spends that freshness:
+    // Enter decides only once a delivered frame shows the move.
     try std.testing.expect(screen.choose(.{ .pick = .deny }, size, false) == .picked);
     try std.testing.expect(screen.stale());
+    try expectBlocked(.not_ready, screen.choose(.enter, size, false));
+    _ = screen.select(false);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
     const decided = screen.choose(.enter, size, false);
     try std.testing.expect(decided == .decision);
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .deny }, decided.decision);

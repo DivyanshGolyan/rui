@@ -228,10 +228,10 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var visible = alive;
         var fresh = false;
         // A key typed beside the Action moved the input row to the draft
-        // until the latest view is shown again.
+        // until Esc, End or Ctrl-End returns to the choice.
         var typing = false;
         // The highlighted option: Allow once until an arrow moves it while
-        // input is fresh.
+        // input is fresh. Every input spends freshness.
         var picked: Consent.Choice = .allow_once;
         // Input goes to the row the latest frame drew. The first frame of an
         // Action precedes its read receipt, so it draws the unread row; any
@@ -328,9 +328,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             }
             // Typing beside the Action moves the input row to the draft.
             if (choosing and !held and (event == .unicode or event == .paste)) typing = true;
-            // Input to the draft beside a pending Action invalidates the
-            // choice and never submits the draft.
-            if (alive and (!choosing or typing) and event != .pause and event != .latest and event != .receipt) fresh = false;
+            // Every input spends freshness, at the choice or in the draft;
+            // the draft never submits beside a pending Action.
+            if (event != .pause and event != .latest and event != .receipt) fresh = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));

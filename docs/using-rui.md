@@ -25,7 +25,7 @@ By default, Bash runs without asking (`bypass`). To review each command first, e
 /configure --permission-mode ask
 ```
 
-Rui then shows each proposed command above an Allow once / Deny choice, with Allow once highlighted. ← and → move the highlight and Enter confirms it. A key pressed before the choice is ready decides nothing: Rui says `! Not ready; nothing authorized.` and the choice counts keys again once it is redrawn. Typing or pasting never decides: it goes to your draft, where slash commands still run, and Esc returns to the choice.
+Rui then shows each proposed command above an Allow once / Deny choice, with Allow once highlighted. ← and → move the highlight and Enter confirms it. Enter confirms only the option on screen. A key pressed before the choice is ready decides nothing: Rui says `! Not ready; nothing authorized.` and the choice counts keys again once it is redrawn. Every key spends that readiness, an arrow included, so after ← or → Enter counts once the moved highlight is drawn. Typing or pasting never decides: it goes to your draft, where slash commands still run, and Esc returns to the choice.
 
 ## Input
 

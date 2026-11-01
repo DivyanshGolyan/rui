@@ -848,7 +848,8 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     try self.submission.begin(.{ .message = ticket });
     // A sent Message continues the conversation: show it and its reply
     // rather than the frozen transcript or page the reader was browsing,
-    // or a page asked for before it.
+    // or a page asked for before it, and ends a line typed beside an Action.
+    self.terminal.screen.endTyping();
     self.admission.sent += 1;
     self.inspection.status_requested = false;
     self.transcript.history_requested = null;
@@ -917,8 +918,10 @@ fn perform(self: *Self, action: ConversationAction) !void {
             if (screen.browse(down, action == .page_up or action == .page_down)) try screen.latest();
         },
         .latest, .back, .close => {
-            // Leaving also abandons a Message page not yet shown.
+            // Leaving also abandons a Message page not yet shown, and ends a
+            // line typed beside an Action.
             self.dropMessageRequest();
+            screen.endTyping();
             if (action == .close and self.settledView()) {
                 if (self.submission.view()) |submission| {
                     self.notice = switch (submission.state) {
@@ -1060,27 +1063,28 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     // The input row the latest frame shows takes the input; a transition
-    // changes it only at the next frame. Typing beside the Action moves to
-    // the draft at once. In the draft, nothing decides, and returning to the
-    // Action needs fresh input.
+    // changes it only at the next frame, except that typing beside the
+    // Action moves it to the draft at once. Every input spends the choice's
+    // freshness; only an arrow or Enter at the choice uses it first.
     const screen = self.terminal.screen;
-    if (screen.selected.row == .selector and !screen.typing) try self.choiceEvent(decoded) else {
-        if (screen.consent.active()) screen.invalidateConsent();
+    if (screen.selected.row == .selector) try self.choiceEvent(decoded) else {
+        screen.invalidateConsent();
         try self.draftEvent(decoded);
     }
     if (self.leaving != null) screen.interruptConsent();
 }
 
 /// One input at an Action's Allow once / Deny choice. Only arrows and Enter
-/// act on it, and only once input is fresh; any other key that reaches it
-/// spends that freshness.
+/// act on it, and only once input is fresh. Every input there spends that
+/// freshness, whatever it does: the next arrow or Enter counts only after a
+/// later prompt frame is delivered and input drains empty.
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const screen = self.terminal.screen;
+    defer screen.invalidateConsent();
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
         // While an Action waits there is no original to retry.
         .action => |action| if (action == .recover) {
-            screen.refuseChoice();
             self.notice = "! Action needs a decision; nothing to retry.";
         } else try self.perform(action),
         .left => try self.choose(.{ .pick = .allow_once }),
@@ -1089,16 +1093,12 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         // The draft takes this key and those after it, beside the Action;
         // while a command runs, neither a Message nor a command could go.
         .text => if (screen.selected.approval == .held) {
-            screen.refuseChoice();
             self.notice = "! Command still running. Input ignored.";
         } else {
             screen.beginTyping();
             try self.draftEvent(decoded);
         },
-        .refused => {
-            screen.refuseChoice();
-            self.notice = "! Key combination not recognized; nothing authorized.";
-        },
+        .refused => self.notice = "! Key combination not recognized; nothing authorized.",
     }
 }
 
@@ -1148,7 +1148,6 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .command => {
             self.slashCommand(self.input.composition().bytes);
             self.input.clear();
-            self.terminal.screen.endTyping();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
@@ -1594,6 +1593,8 @@ test "typing beside a ready Action moves to the draft, which decides nothing and
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        // A line typed in an earlier case, never returned from, ends here.
+        screen.endTyping();
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
         self.live.work.first_action = 7;
@@ -1829,10 +1830,18 @@ test "arrows move the choice only once input is fresh, and Enter decides the opt
         defer file.close(std.testing.io);
         try held.settle();
         try std.testing.expect(held.screen.consent.acceptsInput());
-        // Allow once is the default; Right then Left returns to it.
-        try sendKeys(&held.self, "\x1b[C\x1b[D");
+        // Allow once is the default; Right then Left returns to it. Each
+        // move is shown before the next key counts.
+        try sendKeys(&held.self, "\x1b[C");
+        try held.settle();
+        try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.selected);
+        try sendKeys(&held.self, "\x1b[D");
+        try held.settle();
         try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.selected);
-        if (choice == .deny) try sendKeys(&held.self, "\x1b[C");
+        if (choice == .deny) {
+            try sendKeys(&held.self, "\x1b[C");
+            try held.settle();
+        }
         try std.testing.expect(held.screen.consent.acceptsInput());
         try sendKeys(&held.self, "\r");
         try std.testing.expect(!held.screen.consent.active());
@@ -1843,7 +1852,7 @@ test "arrows move the choice only once input is fresh, and Enter decides the opt
     }
 }
 
-test "an Enter before input is fresh decides nothing, says so and revokes the prompt, so freshness is earned again from a new frame" {
+test "an Enter before input is fresh decides nothing, says so and spends the prompt, so freshness is earned again from a new frame" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const file = try held.adopt(3);
@@ -1858,7 +1867,6 @@ test "an Enter before input is fresh decides nothing, says so and revokes the pr
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
     try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
-    try std.testing.expect(held.screen.stale());
     try std.testing.expect(!held.screen.decisionPromptDelivered());
     // Only a new prompt frame and empty input make the choice fresh again.
     try std.testing.expect(!held.screen.promptCompleted(.empty, false, false));
@@ -1867,7 +1875,7 @@ test "an Enter before input is fresh decides nothing, says so and revokes the pr
     try std.testing.expect(held.screen.consent.acceptsInput());
 }
 
-test "an arrow before input is fresh moves nothing, says so and revokes the prompt" {
+test "an arrow before input is fresh moves nothing, says so and spends the prompt" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const file = try held.adopt(3);
@@ -1877,7 +1885,6 @@ test "an arrow before input is fresh moves nothing, says so and revokes the prom
     try sendKeys(&held.self, "\x1b[C");
     try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.selected);
     try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
-    try std.testing.expect(held.screen.stale());
     try std.testing.expect(!held.screen.decisionPromptDelivered());
     held.self.dirty = true;
     try held.settle();
@@ -1965,7 +1972,7 @@ test "an Esc that expires does what an Esc reported whole does, at the Action, f
             },
             .choice, .paused => {
                 try std.testing.expect(held.self.leaving == null);
-                try std.testing.expectEqual(place == .choice, held.screen.consent.acceptsInput());
+                try std.testing.expect(!held.screen.consent.acceptsInput());
                 try held.settle();
                 try std.testing.expect(held.screen.actionVisible());
                 try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
@@ -2199,5 +2206,100 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
             }
         }
         try std.testing.expectEqual(case.recovery, recovers);
+    }
+}
+
+test "choice readiness: an arrow pumped by a held redraw is shown before an Enter after it decides" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    try sendKeys(self, "\x1b[C");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.selected);
+    try std.testing.expect(held.screen.consent.acceptsInput());
+    // Left and Enter arrive while a redraw is held: the screen still shows Deny.
+    try held.hold("\x1b[D\r");
+    _ = try self.draw();
+    try std.testing.expect(held.pumps != 0);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+    try std.testing.expectEqualStrings("! Not ready; nothing authorized.", self.notice.?);
+    // A delivered frame shows Allow once; then Enter decides it.
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.selected);
+    try std.testing.expect(held.screen.consent.acceptsInput());
+    try sendKeys(self, "\r");
+    try std.testing.expectEqual(protocol.PermissionDecision.allow_once, self.submission.intent.?.decision.decision);
+}
+
+test "choice readiness: a slash command typed beside the Action keeps the draft, so a second Enter decides nothing" {
+    for ([_][]const u8{ "/wait", "/login", "/nonsense", "/status" }) |command| {
+        errdefer std.debug.print("command={s}\n", .{command});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        try std.testing.expect(held.screen.consent.acceptsInput());
+        try sendKeys(self, command);
+        try sendKeys(self, "\r");
+        // As the loop runs a queued command: the latest view while it runs.
+        if (self.input.takeCommand() != null) try held.screen.latest();
+        self.dirty = true;
+        try held.settle();
+        try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .paused }, held.screen.selected);
+        try sendKeys(self, "\r");
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+        // Esc returns to the choice, which a later frame makes ready.
+        try sendKeys(self, "\x07");
+        try held.settle();
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
+        try std.testing.expect(held.screen.consent.acceptsInput());
+    }
+}
+
+test "choice readiness: typing while a command holds the choice revokes no frame per byte" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    self.inspection.command_running = true;
+    self.dirty = true;
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Approval.held, held.screen.selected.approval);
+    try sendKeys(self, "pasted text");
+    try std.testing.expect(!held.screen.stale());
+    try std.testing.expectEqualStrings("! Command still running. Input ignored.", self.notice.?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expect(!held.screen.consent.acceptsInput());
+}
+
+test "choice readiness: a key with no use at the choice spends it, so the Enter after it decides nothing" {
+    // Tab, Backspace, Delete, Home, Ctrl-X and Up.
+    for ([_][]const u8{ "\t", "\x7f", "\x1b[3~", "\x1b[H", "\x18", "\x1b[A" }) |key| {
+        errdefer std.debug.print("key={s}\n", .{key});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        try std.testing.expect(held.screen.consent.acceptsInput());
+        try sendKeys(self, key);
+        try std.testing.expect(!held.screen.consent.acceptsInput());
+        try sendKeys(self, "\r");
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expectEqualStrings("! Not ready; nothing authorized.", self.notice.?);
+        // A new frame and empty input make the choice ready again.
+        self.dirty = true;
+        try held.settle();
+        try std.testing.expect(held.screen.consent.acceptsInput());
     }
 }

@@ -416,7 +416,7 @@ def interactive_cases(state, binding=False, null_code=False):
         session = json.loads(configured.stdout)["answer"]["session"]
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
-                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "\x1b[C"),
+                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", ""),
                 ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
@@ -453,6 +453,8 @@ def interactive_cases(state, binding=False, null_code=False):
                         proposal = human.read_terminal(master, human.CHOICE)
                         assert "\n? Check successful shell exit\n" in proposal and "\n  $ true\n" in proposal, proposal
                         proposal += human.action_ready(ready_read, master)
+                        # Deny is picked and shown before Enter counts.
+                        proposal += human.pick_deny(master, ready_read)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":

@@ -46,11 +46,13 @@ pub const Consent = struct {
         self.* = .{};
     }
 
-    /// An arrow moves the highlight only while input is fresh: a key pressed
-    /// before the prompt was drawn never counts. Returns whether it counted.
+    /// An arrow moves the highlight only while input is fresh, and spends
+    /// that freshness: Enter confirms only an option a delivered frame showed.
+    /// Returns whether it counted.
     pub fn move(self: *Consent, to: Choice) bool {
         if (!self.acceptsInput()) return false;
         self.selected = to;
+        self.invalidate();
         return true;
     }
 
@@ -131,7 +133,7 @@ test "consent requires real emptiness after completed prompt" {
 test "consent bounded lifecycle sequences preserve exact authority and the shown option" {
     // Every explored prefix is followed by Enter. The oracle tracks
     // contractual freshness and the highlighted option independently of the
-    // policy state: an arrow counts only while fresh.
+    // policy state: an arrow counts only while fresh, and spends it.
     const Event = enum { empty, budget, pending, expiry, redraw, invalid, interrupt, left, right };
     const events = std.enums.values(Event);
     const count = events.len * events.len * events.len;
@@ -178,6 +180,7 @@ test "consent bounded lifecycle sequences preserve exact authority and the shown
                     const to: Choice = if (event == .left) .allow_once else .deny;
                     try std.testing.expectEqual(alive and fresh, consent.move(to));
                     if (alive and fresh) shown = to;
+                    fresh = false;
                 },
             }
             try std.testing.expectEqual(shown, consent.selected);
@@ -202,6 +205,9 @@ test "consent reentry and successor proposals require separate fresh scopes and 
     try std.testing.expect(consent.confirm() == null);
     try std.testing.expect(consent.promptCompleted(.empty, false, false));
     try std.testing.expect(consent.move(.deny));
+    // The move spent freshness: Enter waits for a frame that shows Deny.
+    try std.testing.expect(consent.confirm() == null);
+    try std.testing.expect(consent.promptCompleted(.empty, false, false));
     // Reentry invalidates freshness but keeps the shown option.
     consent.invalidate();
     try std.testing.expect(consent.confirm() == null);

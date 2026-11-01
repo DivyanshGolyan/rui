@@ -731,7 +731,8 @@ pub const Live = struct {
 /// escaped or rendered; cell layout owns wrapping in the alternate screen.
 /// `prefix` begins each later non-empty line: two spaces, or a mark that sets
 /// quoted content apart from the lines around it. A mark also begins each
-/// empty line, without its trailing space, so quoted blank lines stay quoted.
+/// empty line, without its trailing space, so quoted blank lines stay quoted,
+/// including the one a final newline leaves at `finish`.
 pub fn Indented(comptime Sink: type) type {
     return struct {
         sink: Sink,
@@ -762,6 +763,9 @@ pub fn Indented(comptime Sink: type) type {
         }
         pub fn finish(self: *@This()) !void {
             if (self.sgr) return error.IncompleteRenderedText;
+            if (!self.marks_empty or !self.line_start) return;
+            try self.sink.feed(std.mem.trimEnd(u8, self.prefix, " "));
+            self.line_start = false;
         }
     };
 }
@@ -846,14 +850,6 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     return request(requests.io, scratch, sink, colour);
 }
 
-/// Content that ends with a newline ends on a marked empty line, never a
-/// blank row before the next field or the rule.
-fn endContent(quoted: anytype) !void {
-    if (!quoted.line_start) return;
-    try quoted.sink.feed(std.mem.trimEnd(u8, content_mark, " "));
-    quoted.line_start = false;
-}
-
 /// The request block from an Action's arguments JSON in `scratch`.
 fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
@@ -894,7 +890,6 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
     try escaped.finish();
     try command.finish();
-    try endContent(&command);
     if (arguments.timeout_ms) |timeout| {
         try indented.feed("\nTime limit: ");
         try writeTimeLimit(&indented, timeout);
@@ -902,12 +897,12 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     if (arguments.stdin_present) {
         try reader.seekTo(0);
         try indented.feed("\nstdin:\n");
-        command.line_start = true;
-        var input: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
+        // Every line of stdin, its first included, carries the mark.
+        var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
+        var input: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
         if (!try tools.writeBashStdin(&source, &input)) return error.InvalidBashArguments;
         try input.finish();
-        try command.finish();
-        try endContent(&command);
+        try lines.finish();
     }
     try indented.feed("\n");
     try indented.finish();
