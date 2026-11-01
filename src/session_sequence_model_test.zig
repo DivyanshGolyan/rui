@@ -234,9 +234,10 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         const unread = seed == 5;
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
-        // The offer: the latest frame showed the choice, was delivered, and
-        // input then drained empty, with nothing since. Every input spends
-        // it and every other change retires it.
+        // The offer: the latest frame showed the choice, or the draft beside
+        // the Action as its reason, was delivered, and input then drained
+        // empty, with nothing since. Every input spends it and every other
+        // change retires it.
         var fresh = false;
         // The input row is the draft: a line was being written when the
         // Action arrived, or a key was typed beside it, until Esc, Ctrl-G,
@@ -251,6 +252,11 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var drawn_read = false;
         var submitted: usize = 0;
         var decision = false;
+        // The Action a sent reason denies once its Message is accepted.
+        var denial: ?u64 = null;
+        // A letter's refusal took the line under the draft, so it does not
+        // say Enter denies: a frame drawn with it offers nothing.
+        var letter_refused = false;
         var sealed: Text = .{};
         if (blocked) {
             front.input.queueCommand("x");
@@ -299,7 +305,13 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     } else if (fresh) picked = if (event == .left) .allow_once else .deny;
                 },
                 .enter => {
-                    const send = !blocked and !alive and !decision and draft.len != 0 and submitted == 0;
+                    // Beside a visible Action, only an offered draft is
+                    // sent, as its reason; one letter is never a reason.
+                    const trimmed = std.mem.trim(u8, draft.slice(), &std.ascii.whitespace);
+                    const letter = trimmed.len == 1 and std.mem.indexOfScalar(u8, "adynADYN", trimmed[0]) != null;
+                    const reason = alive and visible and typing and fresh and !letter;
+                    const send = !blocked and (!alive or reason) and !decision and draft.len != 0 and submitted == 0;
+                    letter_refused = alive and visible and typing and letter;
                     try fixture.byte(13);
                     if (choosing) {
                         if (fresh and !blocked and !unread) {
@@ -314,9 +326,14 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     } else if (send) {
                         submitted += 1;
                         sealed = draft;
-                        try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.message));
+                        try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.ticket().?));
                         draft = .{};
                         visible = false;
+                        if (reason) {
+                            alive = false;
+                            typing = false;
+                            denial = 913;
+                        }
                     }
                 },
                 .pause => {
@@ -333,8 +350,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     drawn_read = true;
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
-                    // An Action taller than the view stays unread: no prompt.
-                    if (alive and visible and seed != 2 and !blocked and !unread and !typing) fresh = true;
+                    // An Action taller than the view stays unread: no choice,
+                    // but the draft beside it is still a reason.
+                    if (alive and visible and seed != 2 and !blocked and (typing or !unread) and !(typing and letter_refused)) fresh = true;
                 },
             }
             // Typing beside the Action moves the input row to the draft.
@@ -342,11 +360,17 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             // Every input spends the offer, at the choice or in the draft,
             // and a page or a return to the latest view retires it: only a
             // delivered frame after the last change, then empty input,
-            // offers again. The draft never submits beside a pending Action.
+            // offers again. Beside a pending Action the draft submits only
+            // as an offered reason.
             if (event != .receipt) fresh = false;
+            if (event != .receipt and event != .enter) letter_refused = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
+            try std.testing.expectEqual(denial, if (front.submission.intent) |intent| switch (intent) {
+                .message_then_deny => |sent| sent.action,
+                else => null,
+            } else null);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
-            if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
+            if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.ticket().?));
             try std.testing.expectEqual(fresh, fixture.screen.offered() != null);
             if (fixture.screen.consent) |pending| try std.testing.expectEqual(picked, pending.highlight);
             const now_choosing = alive and visible and seed != 2 and !typing;
