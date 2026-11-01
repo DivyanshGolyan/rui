@@ -28,29 +28,33 @@ pub const Error = error{InvalidJson};
 /// `end` of a number, `integer`.
 pub const Reader = struct {
     /// The offset in the document of the byte being read.
-    offset: u64 = 0,
-    state: State = .document,
-    /// Open containers; bit `i` is set when container `i` is an array.
-    depth: u8 = 0,
-    arrays: std.bit_set.IntegerBitSet(max_depth + 1) = .empty,
-    in_key: bool = false,
-    string_start: u64 = 0,
-    decoded: u64 = 0,
+    offset: u64,
+    state: State,
+    /// How many containers are open.
+    depth: u8,
+    /// Bit `i` is set when open container `i` is an array.
+    arrays: std.bit_set.IntegerBitSet(max_depth + 1),
+    in_key: bool,
+    string_start: u64,
+    decoded: u64,
     /// The first `max_text_bytes` decoded bytes of the current string.
     text_bytes: [max_text_bytes]u8 = undefined,
     /// A UTF-8 sequence in progress.
     sequence: [4]u8 = undefined,
-    sequence_length: u3 = 0,
-    sequence_expected: u3 = 0,
+    sequence_length: u3,
+    sequence_expected: u3,
     /// A `\u` escape in progress, and the high surrogate before it, if any.
-    hex: u21 = 0,
-    hex_digits: u3 = 0,
-    high: u21 = 0,
-    /// The rest of the literal being read.
-    literal_rest: []const u8 = "",
+    hex: u21,
+    hex_digits: u3,
+    high: u21,
+    /// Where the rest of the literal being read starts in `literal_tails`.
+    literal: u4,
     /// The number being read, while it is a plain nonnegative integer that
     /// fits.
-    integer: ?u64 = null,
+    integer: ?u64,
+
+    /// Each literal after its first byte, ended by a 0.
+    const literal_tails = "rue\x00alse\x00ull\x00";
 
     const State = enum {
         document,
@@ -76,6 +80,27 @@ pub const Reader = struct {
         literal,
         done,
     };
+
+    /// The state before a document's first byte. The decoded text and the
+    /// UTF-8 sequence are written before they are read, so they are left.
+    pub fn init(self: *Reader) void {
+        self.* = .{
+            .offset = 0,
+            .state = .document,
+            .depth = 0,
+            .arrays = .empty,
+            .in_key = false,
+            .string_start = 0,
+            .decoded = 0,
+            .sequence_length = 0,
+            .sequence_expected = 0,
+            .hex = 0,
+            .hex_digits = 0,
+            .high = 0,
+            .literal = 0,
+            .integer = null,
+        };
+    }
 
     pub fn feed(self: *Reader, bytes: []const u8, handler: anytype) Error!void {
         for (bytes) |byte| {
@@ -176,7 +201,11 @@ pub const Reader = struct {
                 else => try self.numberTail(byte, handler),
             },
             .fraction_start => self.state = if (std.ascii.isDigit(byte)) .fraction else return error.InvalidJson,
-            .fraction => if (!std.ascii.isDigit(byte)) try self.numberTail(byte, handler),
+            .fraction => switch (byte) {
+                '0'...'9' => {},
+                'e', 'E' => self.state = .exponent_start,
+                else => try self.endNumber(byte, handler),
+            },
             .exponent_start => self.state = switch (byte) {
                 '+', '-' => .exponent_sign,
                 '0'...'9' => .exponent,
@@ -185,9 +214,9 @@ pub const Reader = struct {
             .exponent_sign => self.state = if (std.ascii.isDigit(byte)) .exponent else return error.InvalidJson,
             .exponent => if (!std.ascii.isDigit(byte)) try self.endNumber(byte, handler),
             .literal => {
-                if (byte != self.literal_rest[0]) return error.InvalidJson;
-                self.literal_rest = self.literal_rest[1..];
-                if (self.literal_rest.len == 0) self.endValue(.literal, handler);
+                if (byte != literal_tails[self.literal]) return error.InvalidJson;
+                self.literal += 1;
+                if (literal_tails[self.literal] == 0) self.endValue(.literal, handler);
             },
             .done => if (!space(byte)) return error.InvalidJson,
         }
@@ -273,8 +302,8 @@ pub const Reader = struct {
         try self.afterValue(byte, handler);
     }
 
-    fn startLiteral(self: *Reader, rest: []const u8) void {
-        self.literal_rest = rest;
+    fn startLiteral(self: *Reader, comptime tail: []const u8) void {
+        self.literal = comptime std.mem.indexOf(u8, literal_tails, tail ++ "\x00").?;
         self.state = .literal;
     }
 
@@ -390,7 +419,8 @@ const Recorder = struct {
 };
 
 fn readForTesting(document: []const u8, window: usize, recorder: *Recorder) bool {
-    var reader: Reader = .{};
+    var reader: Reader = undefined;
+    reader.init();
     var offset: usize = 0;
     while (offset < document.len) {
         const end = @min(document.len, offset + window);
@@ -424,20 +454,46 @@ test "the reader accepts exactly the objects std.json accepts, however the docum
         "{\"a\":\"\xff\"}",                        "{\"a\":\"\xe6\x97\"}",            "{\"a\":1}x",
         "{\"a\":1}{}",                             "{\"a\":[1}",                      "{\"a\":{]}",
         "{1:2}",                                   "{\"a\" 1}",                       "{\"a\":1 \"b\":2}",
-        "{\"a\":\"b\"",                            "{\"a\":[1,2",
+        "{\"a\":\"b\"",                            "{\"a\":[1,2",                     "{\"a\":1.2.3}",
+        "{\"a\":0.1.2.3}",                         "{\"a\":1.2.3e4}",                 "{\"a\":1e2.3}",
+        "{\"a\":1e2e3}",                           "{\"a\":1.5E+2.5}",                "{\"a\":[1.5,2e3,1E+2,-0e-0,0.25]}",
     };
-    for (documents) |document| {
-        const expected = document.len != 0 and std.mem.trimStart(u8, document, " \t\r\n")[0] == '{' and
-            try std.json.validate(std.testing.allocator, document);
-        var whole: Recorder = .{};
-        defer whole.events.deinit(std.testing.allocator);
-        try std.testing.expectEqual(expected, readForTesting(document, document.len + 1, &whole));
-        for ([_]usize{ 1, 2, 3, 7 }) |window| {
-            var cut: Recorder = .{};
-            defer cut.events.deinit(std.testing.allocator);
-            try std.testing.expectEqual(expected, readForTesting(document, window, &cut));
-            try std.testing.expectEqualStrings(whole.events.items, cut.events.items);
+    for (documents) |document| try expectReadAsStd(document);
+}
+
+test "the reader accepts exactly the numbers std.json accepts" {
+    // Every spelling of up to five number bytes, as a member and in an
+    // array.
+    const alphabet = "01-+.eE";
+    var spelling: [5]u8 = undefined;
+    var buffer: [16]u8 = undefined;
+    for (1..spelling.len + 1) |length| {
+        for (0..std.math.pow(usize, alphabet.len, length)) |index| {
+            var rest = index;
+            for (spelling[0..length]) |*byte| {
+                byte.* = alphabet[rest % alphabet.len];
+                rest /= alphabet.len;
+            }
+            for ([_][2][]const u8{ .{ "{\"a\":", "}" }, .{ "{\"a\":[", ",1]}" } }) |wrapper| {
+                try expectReadAsStd(try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ wrapper[0], spelling[0..length], wrapper[1] }));
+            }
         }
+    }
+}
+
+/// The reader accepts `document` exactly when std.json does, and reports the
+/// same events however the document is cut.
+fn expectReadAsStd(document: []const u8) !void {
+    const expected = document.len != 0 and std.mem.trimStart(u8, document, " \t\r\n")[0] == '{' and
+        try std.json.validate(std.testing.allocator, document);
+    var whole: Recorder = .{};
+    defer whole.events.deinit(std.testing.allocator);
+    try std.testing.expectEqual(expected, readForTesting(document, document.len + 1, &whole));
+    for ([_]usize{ 1, 2, 3, 7 }) |window| {
+        var cut: Recorder = .{};
+        defer cut.events.deinit(std.testing.allocator);
+        try std.testing.expectEqual(expected, readForTesting(document, window, &cut));
+        try std.testing.expectEqualStrings(whole.events.items, cut.events.items);
     }
 }
 

@@ -1707,7 +1707,7 @@ fn completeTransfer(
                 // borrows it; this owner still disposes it before settlement.
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
-                error_response = model_adapter.interpretErrorResponse(&workspace.decode, host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
+                error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
                 if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             }
         },
@@ -2204,6 +2204,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .length = 4,
             .charged = 4,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         };
         var slot = ExecutionSlot{ .model_authenticating = .{
@@ -2325,6 +2326,7 @@ test "HTTP error capture retires before execution custody" {
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
@@ -2339,7 +2341,7 @@ test "HTTP error capture retires before execution custody" {
             // A short sealed read is a real classifier error, not malformed
             // JSON's negative-overflow result.
             response.length += 1;
-            const unreadable = model_adapter.interpretErrorResponse(&workspace.value.decode, io, response.file, response.length, 400, &workspace.value.provider_failure);
+            const unreadable = model_adapter.interpretErrorResponse(&workspace.value.decode, slot.provider.transfer.codec(), io, response.file, response.length, 400, &workspace.value.provider_failure);
             try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, unreadable);
         }
         completeTransfer(&host, workspace.value, &slot, .{
@@ -3465,6 +3467,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };

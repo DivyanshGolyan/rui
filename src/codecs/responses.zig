@@ -208,23 +208,24 @@ pub const Encoder = struct {
 /// that appear once count. The reader holds the state for any body size,
 /// and the report is named by range, so nothing of the body is buffered.
 pub const Classifier = struct {
-    reader: json.Reader,
-    /// The named member being read: of the body, and of its error object.
-    outer: Outer,
-    inner: Inner,
+    reader: json.Reader = undefined,
+    /// The named member being read, of the body and of its error object;
+    /// null for any other.
+    outer: ?Outer,
+    inner: ?Inner,
     /// Whether the body's `error` member is an object.
     error_object: bool,
     envelope: std.EnumArray(Outer, Member),
     failure: std.EnumArray(Inner, Member),
     /// The error object's code, when it is a string of at most
     /// max_code_bytes; empty otherwise.
-    code: [codec_abi.max_code_bytes]u8,
+    code: [codec_abi.max_code_bytes]u8 = undefined,
     code_length: u8,
     /// The error object's `resets_at`, when it is a plain integer.
     resets_at: ?u64,
 
-    const Outer = enum { other, @"error", message, detail };
-    const Inner = enum { other, code, type, message, detail, resets_at };
+    const Outer = enum { @"error", message, detail };
+    const Inner = enum { code, type, message, detail, resets_at };
 
     const Member = struct {
         /// How often it appears, counting no further than a duplicate.
@@ -247,16 +248,15 @@ pub const Classifier = struct {
 
     pub fn init(self: *Classifier) void {
         self.* = .{
-            .reader = .{},
-            .outer = .other,
-            .inner = .other,
+            .outer = null,
+            .inner = null,
             .error_object = false,
             .envelope = .initFill(.{}),
             .failure = .initFill(.{}),
-            .code = undefined,
             .code_length = 0,
             .resets_at = null,
         };
+        self.reader.init();
     }
 
     pub fn classify(self: *Classifier, fed: *const codec_abi.Fed, ops: *Ops) Error!Status {
@@ -306,9 +306,9 @@ pub const Classifier = struct {
     pub fn key(self: *Classifier, reader: *const json.Reader, depth: u8) void {
         const name = reader.text() orelse "";
         switch (depth) {
-            1 => self.outer = std.meta.stringToEnum(Outer, name) orelse .other,
+            1 => self.outer = std.meta.stringToEnum(Outer, name),
             2 => if (self.inError()) {
-                self.inner = std.meta.stringToEnum(Inner, name) orelse .other;
+                self.inner = std.meta.stringToEnum(Inner, name);
             },
             else => {},
         }
@@ -317,15 +317,14 @@ pub const Classifier = struct {
     pub fn begin(self: *Classifier, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
         _ = reader;
         switch (depth) {
-            1 => {
-                if (self.outer == .other) return;
-                start(self.envelope.getPtr(self.outer));
-                if (self.outer == .@"error") self.error_object = kind == .object;
+            1 => if (self.outer) |outer| {
+                start(self.envelope.getPtr(outer));
+                if (outer == .@"error") self.error_object = kind == .object;
             },
-            2 => if (self.inError() and self.inner != .other) {
-                start(self.failure.getPtr(self.inner));
-                if (self.inner == .code) self.code_length = 0;
-                if (self.inner == .resets_at) self.resets_at = null;
+            2 => if (self.inError()) if (self.inner) |inner| {
+                start(self.failure.getPtr(inner));
+                if (inner == .code) self.code_length = 0;
+                if (inner == .resets_at) self.resets_at = null;
             },
             else => {},
         }
@@ -333,18 +332,18 @@ pub const Classifier = struct {
 
     pub fn end(self: *Classifier, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
         switch (depth) {
-            1 => if (kind == .string and self.outer != .other) {
-                self.envelope.getPtr(self.outer).set(reader.string());
+            1 => if (kind == .string) if (self.outer) |outer| {
+                self.envelope.getPtr(outer).set(reader.string());
             },
-            2 => if (self.inError() and self.inner != .other) switch (kind) {
+            2 => if (self.inError()) if (self.inner) |inner| switch (kind) {
                 .string => {
-                    self.failure.getPtr(self.inner).set(reader.string());
-                    if (self.inner == .code) if (reader.text()) |text| {
+                    self.failure.getPtr(inner).set(reader.string());
+                    if (inner == .code) if (reader.text()) |text| {
                         @memcpy(self.code[0..text.len], text);
                         self.code_length = @intCast(text.len);
                     };
                 },
-                .number => if (self.inner == .resets_at) {
+                .number => if (inner == .resets_at) {
                     self.resets_at = reader.integer;
                 },
                 else => {},

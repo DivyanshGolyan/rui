@@ -106,45 +106,7 @@ pub const EventData = struct {
     }
 };
 
-/// One read window over an append-only file, shared by every reader of that
-/// file. A field, a nested object and the digest of an event all read the
-/// same bytes, so whichever reader needs them first loads them and the rest
-/// find them in memory.
-const Window = struct {
-    io: std.Io,
-    file: std.Io.File,
-    start: u64 = 0,
-    length: usize = 0,
-    bytes: [protocol.content_window_bytes]u8 = undefined,
-
-    /// Borrowed bytes from `position` up to at most `end`, never empty; valid
-    /// until the next call on this window.
-    fn bytesAt(self: *Window, position: u64, end: u64) ![]const u8 {
-        std.debug.assert(position < end);
-        if (position < self.start or position >= self.start + self.length) {
-            self.length = 0;
-            const wanted: usize = @intCast(@min(end - position, self.bytes.len));
-            const count = try self.file.readPositionalAll(self.io, self.bytes[0..wanted], position);
-            if (count != wanted) return error.ShortSealedRead;
-            self.start = position;
-            self.length = count;
-        }
-        const offset: usize = @intCast(position - self.start);
-        return self.bytes[offset..][0..@intCast(@min(self.length - offset, end - position))];
-    }
-
-    /// Keep bytes just written at `position`. Contiguous writes extend the
-    /// window; any other write starts it again, at the write.
-    fn remember(self: *Window, position: u64, bytes: []const u8) void {
-        if (self.start + self.length != position or bytes.len > self.bytes.len - self.length) {
-            self.start = position;
-            self.length = 0;
-        }
-        if (bytes.len > self.bytes.len) return;
-        @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-        self.length += bytes.len;
-    }
-};
+const Window = output_decode.Window;
 
 const FileSource = struct {
     window: *Window,
@@ -567,7 +529,6 @@ fn malformedEnvelope(err: anyerror) !bool {
 }
 
 const ProviderFailure = output_decode.ProviderFailure;
-const Prefix = output_decode.ReportPart;
 
 /// The fields a report reads, from an error object or the envelope around
 /// it, which may hold the `error` object itself.
@@ -580,31 +541,28 @@ const Typed = enum { typed, untyped };
 /// Writes `code` (else, when typed, the object's `type`) and its `message`
 /// (else a bare `detail`) into `report`. Best effort: a field that is
 /// absent, null or malformed is left out, and nothing here fails.
-fn writeReport(window: *Window, fields: Fields(report_fields), code: *const Prefix, typed: Typed, report: *output_decode.Report) void {
-    var name: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
-    if (code.text.len == 0 and typed == .typed) readPrefix(&name, window, fields.get("type") catch null) else name = code.*;
-    var message: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
-    readPrefix(&message, window, (fields.get("message") catch null) orelse (fields.get("detail") catch null));
-    output_decode.writeReport(report, &name, &message);
+fn writeReport(window: *Window, fields: Fields(report_fields), code: *const output_decode.ReportPart, typed: Typed, report: *output_decode.Report) void {
+    var kind: output_decode.ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
+    const name = if (code.text.len == 0 and typed == .typed) name: {
+        readPart(&kind, window, fields.get("type") catch null);
+        break :name &kind;
+    } else code;
+    var message: output_decode.ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
+    readPart(&message, window, (fields.get("message") catch null) orelse (fields.get("detail") catch null));
+    output_decode.writeReport(report, name, &message);
 }
 
-/// A string's first `max_part_bytes`, cut back to whole UTF-8 scalars. An
-/// absent or malformed value leaves it empty.
-fn readPrefix(prefix: *Prefix, window: *Window, value: ?Range) void {
-    prefix.text.len = 0;
-    prefix.shortened = false;
+/// A string value's report part, into the empty `part`. Any other value, or
+/// a failed read, leaves it empty.
+fn readPart(part: *output_decode.ReportPart, window: *Window, value: ?Range) void {
     const range = value orelse return;
-    var decoded = Decoded{ .bounded = &prefix.text };
-    var source = FileSource.init(window, range) catch return;
-    _ = parseString(&source, &decoded) catch {
-        prefix.text.len = 0;
-        return;
+    // A field's value is valid JSON, so a string is its contents in quotes.
+    const first = window.bytesAt(range.start, range.start + 1) catch return;
+    if (first[0] != '"') return;
+    output_decode.readPart(window, range.start + 1, range.length - 2, .json_string_v1, part) catch {
+        part.text.len = 0;
+        part.shortened = false;
     };
-    source.expectEnd() catch {
-        prefix.text.len = 0;
-        return;
-    };
-    if (decoded.overflow) prefix.shorten();
 }
 
 fn streamError(window: *Window, event: Range, failed_response: bool, provider_failure: *ProviderFailure) !void {
@@ -626,7 +584,7 @@ fn streamError(window: *Window, event: Range, failed_response: bool, provider_fa
     }
     if (try rangeEquals(window, failure, "null")) return error.TemporaryProviderFailure;
     const fields = try readFields(window, failure, report_fields);
-    var code: Prefix = .{ .text = .{ .len = 0 }, .shortened = false };
+    var code: output_decode.ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
     if (try fields.get("code")) |value| {
         if (!try rangeEquals(window, value, "null")) _ = try readString(window, value, &code.text);
     }

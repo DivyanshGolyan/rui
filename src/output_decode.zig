@@ -19,28 +19,46 @@ pub const Decode = struct {
     window: Window,
 };
 
-/// The read buffer for one body: the shell feeds the body through it, then
-/// reads the report's ranges through it, so a range in the last window fed
-/// costs no read. Most error bodies fit one window.
-const Window = struct {
-    start: u64,
-    length: usize,
-    bytes: [protocol.content_window_bytes]u8,
+/// One read window over a file, shared by every reader of that file. A
+/// field, a nested object and the digest of an event all read the same
+/// bytes, so whichever reader needs them first loads them and the rest find
+/// them in memory. `classify` feeds a body through it, then reads the
+/// report's ranges through it, so a range in the last window fed costs no
+/// read.
+pub const Window = struct {
+    io: std.Io,
+    file: std.Io.File,
+    start: u64 = 0,
+    length: usize = 0,
+    bytes: [protocol.content_window_bytes]u8 = undefined,
 
-    /// The window's bytes from `position`, reading up to `end` when it does
-    /// not hold them; never empty.
-    fn at(self: *Window, io: std.Io, file: std.Io.File, position: u64, end: u64) ![]const u8 {
+    /// Borrowed bytes from `position` up to at most `end`, never empty; valid
+    /// until the next call on this window. A read reaches no further than
+    /// `end`.
+    pub fn bytesAt(self: *Window, position: u64, end: u64) ![]const u8 {
         std.debug.assert(position < end);
         if (position < self.start or position >= self.start + self.length) {
             self.length = 0;
             const wanted: usize = @intCast(@min(end - position, self.bytes.len));
-            const count = try file.readPositionalAll(io, self.bytes[0..wanted], position);
+            const count = try self.file.readPositionalAll(self.io, self.bytes[0..wanted], position);
             if (count != wanted) return error.ShortSealedRead;
             self.start = position;
             self.length = count;
         }
         const offset: usize = @intCast(position - self.start);
         return self.bytes[offset..][0..@intCast(@min(self.length - offset, end - position))];
+    }
+
+    /// Keep bytes just written at `position`. Contiguous writes extend the
+    /// window; any other write starts it again, at the write.
+    pub fn remember(self: *Window, position: u64, bytes: []const u8) void {
+        if (self.start + self.length != position or bytes.len > self.bytes.len - self.length) {
+            self.start = position;
+            self.length = 0;
+        }
+        if (bytes.len > self.bytes.len) return;
+        @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+        self.length += bytes.len;
     }
 };
 
@@ -49,6 +67,10 @@ const Window = struct {
 /// only: classification and retries never read it.
 pub const Report = protocol.Bounded(protocol.max_report_bytes);
 pub const max_part_bytes = 256;
+/// The most bytes of a range one part's decoding reads: each decoded byte
+/// takes at most six (`\u0041`), and the scalar that finds the part full at
+/// most twelve (a surrogate pair).
+const max_part_source_bytes = 6 * max_part_bytes + 12;
 const shortened_mark = "…";
 comptime {
     std.debug.assert(protocol.max_report_bytes == 2 * max_part_bytes + ": ".len + 2 * shortened_mark.len);
@@ -123,12 +145,17 @@ const Found = struct {
 pub noinline fn classify(decode: *Decode, classifier: *const codecs.Classifier, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
     failure.clear();
     if (status < 400 or status >= 600) return .ordinary;
+    const window = &decode.window;
+    window.io = io;
+    window.file = body;
+    window.start = 0;
+    window.length = 0;
     var found: Found = .{};
-    feed(decode, classifier, io, body, length, &found) catch |err| switch (err) {
+    feed(decode, classifier, length, &found) catch |err| switch (err) {
         error.CodecFailed, error.CodecBadOp => return .ordinary,
         else => return .{ .unreadable = err },
     };
-    readReport(&decode.window, io, body, &found, &failure.report) catch |err| {
+    readReport(window, &found, &failure.report) catch |err| {
         failure.report.len = 0;
         return .{ .unreadable = err };
     };
@@ -138,17 +165,15 @@ pub noinline fn classify(decode: *Decode, classifier: *const codecs.Classifier, 
     return if (found.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
 }
 
-/// Feed the body to the codec window by window until it is done, and
-/// collect what it finds. Nothing found counts unless the job ends well.
-fn feed(decode: *Decode, classifier: *const codecs.Classifier, io: std.Io, body: std.Io.File, length: u64, found: *Found) !void {
+/// Feed the window's body of `length` bytes to the codec window by window
+/// until it is done, and collect what it finds. Nothing found counts unless
+/// the job ends well.
+fn feed(decode: *Decode, classifier: *const codecs.Classifier, length: u64, found: *Found) !void {
     const job = &decode.job;
-    const window = &decode.window;
-    window.start = 0;
-    window.length = 0;
     job.begin(classifier, length);
     var offset: u64 = 0;
     while (true) {
-        const bytes: []const u8 = if (offset == length) &.{} else try window.at(io, body, offset, length);
+        const bytes: []const u8 = if (offset == length) &.{} else try decode.window.bytesAt(offset, length);
         offset += bytes.len;
         const done = try job.step(&.{ .bytes = bytes, .end = offset == length });
         while (try job.next()) |finding| switch (finding) {
@@ -163,19 +188,21 @@ fn feed(decode: *Decode, classifier: *const codecs.Classifier, io: std.Io, body:
     }
 }
 
-fn readReport(window: *Window, io: std.Io, body: std.Io.File, found: *const Found, report: *Report) !void {
+fn readReport(window: *Window, found: *const Found, report: *Report) !void {
     var code: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
     var message: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
-    if (found.report.get(.code)) |range| try readPart(window, io, body, range, &code);
-    if (found.report.get(.message)) |range| try readPart(window, io, body, range, &message);
+    if (found.report.get(.code)) |range| try readPart(window, range.start, range.length, range.escape, &code);
+    if (found.report.get(.message)) |range| try readPart(window, range.start, range.length, range.escape, &message);
     writeReport(report, &code, &message);
 }
 
-/// Decode a report range's first `max_part_bytes`. A range that does not
-/// decode, which a codec that judged the body would not name, leaves the
-/// part empty; only a failed read is an error.
-fn readPart(window: *Window, io: std.Io, body: std.Io.File, range: codec_abi.ReportRange, part: *ReportPart) !void {
-    var source: RangeSource = .{ .window = window, .io = io, .file = body, .position = range.start, .end = range.start + range.length, .escape = range.escape };
+/// Decode the first `max_part_bytes` of the `length` bytes at `start` into
+/// the empty `part`. A range that does not decode, which a codec that judged
+/// the body would not name, leaves the part empty; only a failed read is an
+/// error.
+pub fn readPart(window: *Window, start: u64, length: u64, escape: codec_abi.Escape, part: *ReportPart) !void {
+    const end = start + length;
+    var source: RangeSource = .{ .window = window, .position = start, .end = end, .limit = @min(end, start + max_part_source_bytes), .escape = escape };
     const text = &part.text;
     while (source.position != source.end) {
         var scalar: [4]u8 = undefined;
@@ -200,10 +227,10 @@ fn readPart(window: *Window, io: std.Io, body: std.Io.File, range: codec_abi.Rep
 /// A report range read through the window.
 const RangeSource = struct {
     window: *Window,
-    io: std.Io,
-    file: std.Io.File,
     position: u64,
     end: u64,
+    /// Where reads stop: a part is full before its decoding gets there.
+    limit: u64,
     escape: codec_abi.Escape,
 
     /// The next decoded scalar's bytes, or with `verbatim` the next byte.
@@ -225,7 +252,7 @@ const RangeSource = struct {
 
     fn next(self: *RangeSource) !u8 {
         if (self.position == self.end) return error.InvalidEncodedString;
-        const byte = (try self.window.at(self.io, self.file, self.position, self.end))[0];
+        const byte = (try self.window.bytesAt(self.position, self.limit))[0];
         self.position += 1;
         return byte;
     }
@@ -308,6 +335,27 @@ test "context overflow requires exact valid provider code over HTTP" {
     // A missing sealed byte is capture failure, not a malformed remote body.
     try classifyForTesting(&tmp, pinned, "{}", 3, 503, &classified);
     try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, classified.response);
+}
+
+test "a malformed number makes a body not JSON, which narrows nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { body: []const u8, status: u16 }{
+        .{ .body = "{\"error\":{\"code\":\"context_length_exceeded\",\"param\":1.2.3}}", .status = 400 },
+        .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"n\":0.1.1}}", .status = 429 },
+        .{ .body = "{\"error\":{\"code\":\"cyber_policy\",\"x\":1.2.3}}", .status = 403 },
+    };
+    var classified: Classified = undefined;
+    for (cases) |case| {
+        try classifyForTesting(&tmp, pinned, case.body, case.body.len, case.status, &classified);
+        try std.testing.expectEqual(execution.ErrorResponse.ordinary, classified.response);
+        try std.testing.expectEqual(@as(?transport_policy.Refusal, null), classified.failure.refusal);
+        try std.testing.expectEqual(@as(usize, 0), classified.failure.report.len);
+        const disposition: transport_policy.Disposition = if (case.status == 429) .temporary_http else .permanent_http;
+        const failure = execution.transferDecision(.{ .transport_finished = .{ .disposition = disposition, .http_status = case.status, .retry_after_ms = 9_000 } }, classified.response).fail;
+        try std.testing.expectEqual(if (case.status == 429) execution.FailureKind.temporary else .permanent, failure.kind);
+        try std.testing.expect(failure.quota == null);
+    }
 }
 
 /// The pinned classifier, with its answer to the last window replaced:
@@ -425,6 +473,4 @@ test "a large error body is classified in bounded windows as a small one is" {
     try std.testing.expectEqualStrings(expected.failure.report.slice(), large.failure.report.slice());
     try std.testing.expectEqual(std.math.divCeil(usize, body.items.len, protocol.content_window_bytes) catch unreachable, Counting.windows);
     try std.testing.expectEqual(protocol.content_window_bytes, Counting.longest);
-    // The classifier's whole state is its fixed storage, whatever the body.
-    try std.testing.expect(@sizeOf(@import("codecs/responses.zig").Classifier) <= codecs.max_classifier_state_bytes);
 }

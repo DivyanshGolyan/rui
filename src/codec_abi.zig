@@ -295,7 +295,7 @@ pub const Ops = struct {
         return .{ .bytes = self.bytes[0..self.length], .offset = offset };
     }
 
-    /// Reads the findings from the first.
+    /// Reads these ops as findings, from the first op.
     pub fn findings(self: *const Ops) FindingReader {
         return .{ .bytes = self.bytes[0..self.length] };
     }

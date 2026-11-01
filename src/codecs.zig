@@ -38,7 +38,7 @@ pub const State = struct {
 };
 
 /// A request encoder linked into the Host. Each function works on a
-/// `State` in a `Job`, never on a stack.
+/// `State` in an `EncodeJob`, never on a stack.
 pub const Encoder = struct {
     /// Replace the whole state with the one `carry` holds; false when the
     /// codec cannot read it.
@@ -75,7 +75,7 @@ pub fn native(comptime Codec: type) Encoder {
 /// The caller writes `header` for each item, steps, and runs each op `next`
 /// gives before it asks for another; once `next` gives null it writes the
 /// next item.
-pub const Job = struct {
+pub const EncodeJob = struct {
     encoder: *const Encoder,
     state: State,
     /// The codec's state at the last history-element boundary: empty at
@@ -90,14 +90,14 @@ pub const Job = struct {
 
     pub const Error = error{ CodecFailed, CodecBadOp };
 
-    pub fn begin(self: *Job, codec: *const Encoder) Error!void {
+    pub fn begin(self: *EncodeJob, codec: *const Encoder) Error!void {
         self.encoder = codec;
         self.carry = .{ .len = 0 };
         if (!codec.load(&self.state, &self.carry)) return error.CodecFailed;
     }
 
     /// Continue after a history memo whose span ended in `carry`.
-    pub fn resumeFrom(self: *Job, carry: *const codec_abi.Carry) void {
+    pub fn resumeFrom(self: *EncodeJob, carry: *const codec_abi.Carry) void {
         self.carry = carry.*;
     }
 
@@ -105,7 +105,7 @@ pub const Job = struct {
     /// history_end the state is reloaded from the carry, so nothing else
     /// crosses a boundary and a memo copy continues exactly as a rebuild
     /// does.
-    pub fn step(self: *Job) Error!void {
+    pub fn step(self: *EncodeJob) Error!void {
         const kind: codec_abi.ItemKind = self.header.item;
         if (kind.resumes() and !self.encoder.load(&self.state, &self.carry)) return error.CodecFailed;
         self.ops.length = 0;
@@ -113,7 +113,7 @@ pub const Job = struct {
     }
 
     /// Done exactly at request_end; a failure is the codec's own.
-    fn open(self: *Job, status: codec_abi.Status) Error!void {
+    fn open(self: *EncodeJob, status: codec_abi.Status) Error!void {
         const kind: codec_abi.ItemKind = self.header.item;
         switch (status) {
             .failed => return error.CodecFailed,
@@ -131,7 +131,7 @@ pub const Job = struct {
     /// carry and never returns it. Null once the item's ops end. Nothing
     /// is sent before request_end, so the ops that ran before a bad one
     /// wrote only request scratch, which the failure discards.
-    pub fn next(self: *Job) Error!?codec_abi.Op {
+    pub fn next(self: *EncodeJob) Error!?codec_abi.Op {
         const kind: codec_abi.ItemKind = self.header.item;
         var reader = self.ops.reader(self.offset);
         while (try reader.next()) |op| {
@@ -338,7 +338,7 @@ const TestItem = struct {
 
 /// Encode `items` into `out`, running each op as the Host does, with
 /// std.json's string escaping standing in for the Host's cursors.
-fn encodeForTesting(job: *Job, items: []const TestItem, out: *std.Io.Writer) !void {
+fn encodeForTesting(job: *EncodeJob, items: []const TestItem, out: *std.Io.Writer) !void {
     for (items) |item| {
         job.header.item = item.item;
         job.header.handles = 0;
@@ -358,7 +358,7 @@ fn encodeForTesting(job: *Job, items: []const TestItem, out: *std.Io.Writer) !vo
 }
 
 test "a tool entry escapes its name and description as JSON strings" {
-    var job: Job = undefined;
+    var job: EncodeJob = undefined;
     try job.begin(encoder(.@"openai-responses/1"));
     var buffer: [256]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
@@ -385,7 +385,7 @@ test "a job resumed from a history element's carry continues as the uninterrupte
     const tail = [_]TestItem{ .{ .item = .history_end }, .{ .item = .compaction_trigger }, .{ .item = .tools_start }, .{ .item = .text_format }, .{ .item = .request_end } };
     var whole_buffer: [2048]u8 = undefined;
     var whole: std.Io.Writer = .fixed(&whole_buffer);
-    var job: Job = undefined;
+    var job: EncodeJob = undefined;
     try job.begin(encoder(.@"openai-responses/1"));
     try encodeForTesting(&job, &history, &whole);
     try encodeForTesting(&job, &tail, &whole);
@@ -398,10 +398,10 @@ test "a job resumed from a history element's carry continues as the uninterrupte
         }
         var resumed_buffer: [2048]u8 = undefined;
         var resumed: std.Io.Writer = .fixed(&resumed_buffer);
-        var first: Job = undefined;
+        var first: EncodeJob = undefined;
         try first.begin(encoder(.@"openai-responses/1"));
         try encodeForTesting(&first, history[0..cut], &resumed);
-        var second: Job = undefined;
+        var second: EncodeJob = undefined;
         try second.begin(encoder(.@"openai-responses/1"));
         second.resumeFrom(&first.carry);
         try encodeForTesting(&second, history[cut..], &resumed);
@@ -413,7 +413,7 @@ test "a job resumed from a history element's carry continues as the uninterrupte
 }
 
 test "codec ops are checked as they run and a bad op fails the job" {
-    const Case = struct { item: codec_abi.Item, handles: u8 = 0, status: codec_abi.Status = .next, ops: []const u8, expected: Job.Error!?u8 };
+    const Case = struct { item: codec_abi.Item, handles: u8 = 0, status: codec_abi.Status = .next, ops: []const u8, expected: EncodeJob.Error!?u8 };
     const carry_one = [_]u8{ 3, 1, 1 };
     const close = [_]u8{ 1, 1, 0, '}' };
     const oversized = [_]u8{ 3, codec_abi.max_carry_bytes + 1 } ++ @as([codec_abi.max_carry_bytes + 1]u8, @splat(0));
@@ -465,7 +465,7 @@ test "codec ops are checked as they run and a bad op fails the job" {
         .{ .item = .request_end, .status = .done, .ops = &close, .expected = null },
         .{ .item = settings, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
     }) |case| {
-        var job: Job = undefined;
+        var job: EncodeJob = undefined;
         job.header = .{ .item = case.item, .handles = case.handles };
         job.carry = .{ .len = 0 };
         job.ops.length = @intCast(case.ops.len);
@@ -480,7 +480,7 @@ test "codec ops are checked as they run and a bad op fails the job" {
 
 /// Read every op of the item in `job` as the Host does, and return the
 /// item's carry.
-fn drainForTesting(job: *Job, status: codec_abi.Status) Job.Error!?codec_abi.Carry {
+fn drainForTesting(job: *EncodeJob, status: codec_abi.Status) EncodeJob.Error!?codec_abi.Carry {
     try job.open(status);
     while (try job.next()) |op| std.debug.assert(op != .carry);
     return if (job.carried) job.carry else null;
