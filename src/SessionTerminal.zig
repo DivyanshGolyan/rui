@@ -6,6 +6,8 @@ const Text = @import("TerminalText.zig");
 const View = @import("session_view.zig");
 const Screen = @import("SessionScreen.zig");
 const protocol = @import("protocol.zig");
+const attention = @import("attention.zig");
+const preferences = @import("preferences.zig");
 const termios = @import("posix");
 const Self = @This();
 
@@ -22,6 +24,15 @@ result: anyerror!void = {},
 /// When leaving stops waiting for output credit; `finish` sets it.
 release_deadline_ms: i64 = 0,
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
+/// The terminal's latest focus report. One that never reports stays
+/// focused: Rui notifies only when it knows the person looked away.
+focused: bool = true,
+/// How notifications reach this terminal; null sends none.
+notices: ?Notices = null,
+/// The notification the next frame writes first. News that comes while one
+/// waits joins it, so a frame's notification counts every Session's news.
+notification: ?attention.Notice = null,
+notification_bytes: [attention.max_bytes]u8 = undefined,
 /// `wanted` once the terminal reported mode 1007 reset, `on` once Rui
 /// enabled it: never inside an open clipboard sequence.
 alternate_scroll: enum { off, wanted, on } = .off,
@@ -58,9 +69,10 @@ pub fn begin(screen: *Screen) !Self {
     if (std.c.fcntl(output, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try Editor.setAttributes(.FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .output = output, .screen = screen };
-    // Query width and alternate-scroll modes without changing them. Opening
-    // never waits for a reply; unsupported queries are ignored.
-    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?2027$p\x1b[?1007$p";
+    // Query width and alternate-scroll modes without changing them, and ask
+    // for focus reports. Opening never waits for a reply; terminals ignore
+    // what they do not support.
+    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?2027$p\x1b[?1007$p";
     if (std.c.write(output, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
         owned = false;
         try self.finish();
@@ -90,6 +102,7 @@ pub fn finish(self: *Self) !void {
     const reset = writeWithin(ops, "\x1b[0m", self.release_deadline_ms);
     // Each owned mode is reset even when an earlier reset fails.
     const paste_disabled = writeWithin(ops, "\x1b[?2004l", self.release_deadline_ms);
+    const focus_disabled = writeWithin(ops, "\x1b[?1004l", self.release_deadline_ms);
     const scroll_reset = self.alternate_scroll != .on or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
@@ -105,7 +118,7 @@ pub fn finish(self: *Self) !void {
     }
     // The duplicate shares stdout's description: flags already apply to fd 1.
     if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
-    self.result = if (restored) |_| if (flags_ok and abandoned and reset and paste_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and abandoned and reset and paste_disabled and focus_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
@@ -514,7 +527,7 @@ test "a clipboard copy interrupted while the terminal is full ends with CAN befo
             // Leaving at once: restoration ends the sequence first.
             terminal.finish() catch {};
             try drain(pipe[0], &buffer, &shown);
-            try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h"));
+            try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h"));
         } else {
             // Staying, as when Esc returns to the overview: its next frame
             // ends it first, then the scroll mode reported during the copy.
@@ -524,6 +537,51 @@ test "a clipboard copy interrupted while the terminal is full ends with CAN befo
             _ = std.c.close(pipe[1]);
         }
     }
+}
+
+pub const Notices = struct {
+    signal: attention.Signal,
+    /// Where the preference that turns notifications off lives. It is read
+    /// at each notification, so /setup's change applies at once.
+    home: []const u8,
+    /// Inside tmux, which also changes the conversation's composing hint.
+    tmux: bool,
+
+    /// From the environment the terminal runs in.
+    pub fn of(environ: *const std.process.Environ.Map, home: []const u8) Notices {
+        const tmux = environ.get("TMUX") != null;
+        const multiplexed = tmux or environ.get("STY") != null;
+        return .{ .signal = attention.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", multiplexed), .home = home, .tmux = tmux };
+    }
+};
+
+/// Holds, for the next frame, a notification of `name`'s news and `more`
+/// other Sessions' while the terminal is out of focus and notifications are
+/// on. Unreadable preferences leave notifications on, the default.
+pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) void {
+    if (self.focused) return;
+    const notices = self.notices orelse return;
+    const saved = preferences.load(notices.home) catch preferences.Values{};
+    if (!saved.notifications) return;
+    const notice: attention.Notice = .of(name, kind, more);
+    if (self.notification) |*held| held.join(notice) else self.notification = notice;
+}
+
+/// The waiting notification, which the caller writes as the first bytes of
+/// its next frame, through that frame's write: so it never lands inside
+/// another sequence, and a full terminal pumps rather than fails. The bytes
+/// are good until the next take; a frame that fails drops them.
+pub fn takeNotification(self: *Self) []const u8 {
+    const notice = self.notification orelse return "";
+    self.notification = null;
+    const notices = self.notices orelse return "";
+    var out = std.Io.Writer.fixed(&self.notification_bytes);
+    attention.write(&out, notices.signal, notice.name.slice(), notice.kind, notice.more) catch unreachable;
+    return out.buffered();
+}
+
+pub fn notificationWaiting(self: *const Self) bool {
+    return self.notification != null;
 }
 
 pub fn permanent(self: *Self, bytes: []const u8) !void {
@@ -559,9 +617,45 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Foot
         }
     };
     var buffer: [4096]u8 = undefined;
+    comptime std.debug.assert(attention.max_bytes <= buffer.len);
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
+    // The empty buffer holds it whole; the frame's flush writes it first.
+    output.writer.writeAll(self.takeNotification()) catch unreachable;
     const size = self.geometry();
     const delivered = self.screen.render(&output.writer, size, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
     self.size = size;
     return delivered;
+}
+
+test "a notification waits for the next frame, only while focus is away and the person has not turned them off" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .output = -1, .screen = undefined };
+    // No way to notify, then focused: nothing.
+    terminal.focused = false;
+    terminal.notify("k7m2qx", .finished, 0);
+    terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    terminal.focused = true;
+    terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    // Away, with no saved preferences: on by default, and taken once.
+    terminal.focused = false;
+    terminal.notify("k7m2qx", .finished, 0);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx finished\x07", terminal.takeNotification());
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    // Turned off, then on again, applies to the next notification.
+    _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
+    terminal.notify("k7m2qx", .approval, 0);
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    _ = try preferences.update(home, .{ .notifications = true }, &preferences.Readinesses.initFill(.missing));
+    // News that comes while one waits joins it: the conversation's own and a
+    // listing's in one step name the most urgent and count the rest.
+    terminal.notify("k7m2qx", .finished, 0);
+    terminal.notify("b4n8wd", .approval, 1);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: b4n8wd needs approval, and 2 more\x07", terminal.takeNotification());
+    terminal.notify("k7m2qx", .failed, 0);
+    terminal.notify("b4n8wd", .failed, 0);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx failed, and 1 more\x07", terminal.takeNotification());
 }

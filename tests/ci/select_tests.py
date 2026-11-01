@@ -51,7 +51,7 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/queued_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
-    (("src/overview_view.zig",), ("test-logic",), ("test-logic",),
+    (("src/overview_view.zig", "src/attention.zig"), ("test-logic",), ("test-logic",),
      "Overview decisions and screen over values; its shell's owner selects native checks"),
     (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
      "What a saved failure code lets the person do; the conversation view renders it"),

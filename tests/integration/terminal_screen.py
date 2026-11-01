@@ -14,7 +14,7 @@ from wcwidth import wcwidth
 LIMIT = 1024 * 1024
 BOUNDARY = re.compile(r"\x1b\[\?2026([hl])")
 PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)")
-RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l"
+RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 
 
 def shown(text, screen):

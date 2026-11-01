@@ -20,6 +20,7 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
+const attention = @import("attention.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -218,8 +219,11 @@ pub const Lender = struct {
     /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
     /// any other, which clears its notice and cancels its prompt.
     step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) anyerror!void,
-    /// Answers the overview's finished job and starts its next stop; true
-    /// when an answer came.
+    /// Runs the overview between the conversation's frames, without the
+    /// screen or input: answers its finished job, keeps its listing going,
+    /// so another Session's news still notifies, and starts its next stop
+    /// or listing job. True when an answer came. Its failure is the
+    /// overview's and ends the conversation.
     service: *const fn (context: *anyopaque) anyerror!bool,
     /// What the overview says under the input, until its next step.
     line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
@@ -246,7 +250,7 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
 pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
-    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
@@ -762,6 +766,8 @@ fn driveActive(self: *Self) !void {
             self.reading.phase = .activity;
         }
         self.withdrawDecided();
+        // Another Session's notification goes out with the next frame.
+        if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
         if (self.expansion.pending) try self.expand();
         _ = try self.step(16);
@@ -1170,7 +1176,10 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
             const expired = try stream.expire();
-            if (expired != .none) try self.inputEvent(expired);
+            if (expired != .none) {
+                self.notice = null;
+                try self.inputEvent(expired);
+            }
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -1178,17 +1187,21 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         else => return err,
     }) orelse return if (pending == .none) .empty else .decoder_pending;
-    self.notice = null;
     self.dirty = true;
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
+    // Input clears the notice; a reply, such as focus returning, keeps it.
     var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
+            .focus => |focused| self.terminal.focused = focused,
         },
-        else => try self.inputEvent(decoded),
+        else => {
+            self.notice = null;
+            try self.inputEvent(decoded);
+        },
     };
     return .byte;
 }
@@ -1654,6 +1667,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
+    var news: ?attention.Kind = null;
     if (self.reading.output_started)
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
@@ -1666,6 +1680,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
+        // The state the conversation opened on is not news.
+        if (!self.reading.opening) news = attention.news(self.live.work.core(), result.work.work.core());
         self.live.work = result.work.work;
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
@@ -1688,6 +1704,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     }
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    // The next frame writes it first, once the read is applied.
+    if (news) |kind| self.terminal.notify(if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, kind, 0);
     self.dirty = true;
 }
 

@@ -476,6 +476,14 @@ def preference_edits(home, store):
     assert saved.read_text() == cleared
     defaults(home, "--model", "gpt-6-luna")
     assert saved.read_text() == pinned
+    # Notifications are on by default; off keeps every other choice and is
+    # the only choice an older Rui cannot read.
+    assert defaults(home)["notifications"] is True
+    assert defaults(home, "--notifications", "off")["notifications"] is False
+    assert saved.read_text() == pinned.replace("version=1", "version=2") + "notifications=off\n"
+    defaults(home, "--notifications", "maybe", success=False)
+    assert defaults(home, "--notifications", "on")["notifications"] is True
+    assert saved.read_text() == pinned
 
 
 def read_pipe_output(stream, *, count=None, timeout=10):
@@ -868,7 +876,7 @@ def terminal_wait_oracles():
     collect([b"\x1b[?1049htransient"], "transient", error="deadline")
     collect([b"\x1b[?1049h" + terminal_frame(["shown"])[:-8]], "shown", error="deadline")
     # The main screen is a stream: text before entry or after restoration.
-    restored = b"\x1b[?1049h" + terminal_frame(["inside"]) + b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l\r\nResume: rui session resume x\r\n"
+    restored = b"\x1b[?1049h" + terminal_frame(["inside"]) + b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l\r\nResume: rui session resume x\r\n"
     assert "Resume: rui session resume x\n" in collect([restored], "Resume: ")
     collect([b"\x1b[?1049h" + terminal_frame(["Resume: inside"])], "Resume: ")
     # Split writes still commit the whole frame, including split UTF-8.
@@ -1363,6 +1371,134 @@ def overview_cases():
             shutil.rmtree(state)
         else:
             retain_failure_state("overview failure state", state)
+
+
+def raw_output(master, until, timeout=15):
+    """Raw terminal bytes, fed on to the screen capture, until they hold the
+    bytes `until` or a committed frame `until` accepts."""
+    capture = terminal_capture(master)
+    raw = b""
+    deadline = time.monotonic() + timeout
+    while not (until in raw if isinstance(until, bytes) else until(capture.completed)):
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([master], [], [], remaining)[0], ("terminal output deadline", raw[-512:])
+        chunk = os.read(master, 65536)
+        assert chunk, ("terminal closed", raw[-512:])
+        capture.feed(chunk)
+        raw += chunk
+    return raw
+
+
+def quiet_output(master, seconds):
+    """Whatever the terminal writes within `seconds`."""
+    raw = b""
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if not select.select([master], [], [], remaining)[0]:
+            break
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
+def notification_cases():
+    """Out of focus, the overview and the conversation each notify once of a
+    Session that finished or needs approval, and an open conversation of
+    another Session's finish; in focus, or with notifications off, they write
+    none. Focus reporting is asked for and given back."""
+    state = screen_fixture_root("rui-notify.")
+    home = state / "home"
+    (home / ".config/rui").mkdir(parents=True, mode=0o700)
+    store = state / "store"
+    workspace = state / "workspace"
+    workspace.mkdir()
+    codex_fixture.credentials(home / ".config/rui/codex.json")
+    endpoint = fixture.SuccessEndpoint([], {
+        "First finish": fixture.sse_answer("notify-1", "notify-reason-1", "notify-message-1", "First done.")[0],
+        "Focused finish": fixture.sse_answer("notify-2", "notify-reason-2", "notify-message-2", "Second done.")[0],
+        "Muted finish": fixture.sse_answer("notify-3", "notify-reason-3", "notify-message-3", "Third done.")[0],
+        "Other lane finish": fixture.sse_answer("notify-4", "notify-reason-4", "notify-message-4", "Fourth done.")[0],
+        "Propose a notified Action": fixture.sse_tool_calls("notify-action", [
+            ("bash", "notify-action-call", json.dumps({"cmd": "true", "description": "Do nothing", "timeout_ms": None}))]),
+    })
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    host = caller = None
+    completed = False
+    master, slave = open_pty()
+    env = {key: value for key, value in os.environ.items() if key not in ("TMUX", "STY")}
+    env.update(HOME=str(home), TERM="xterm-256color", TERM_PROGRAM="WezTerm")
+    finish = b"\x1b]9;Rui: notify lane finished\x07"
+
+    def finished_row(label):
+        """The overview draws `label` finished. A notification of the listing
+        that brought it is written before that frame."""
+        return lambda frame: re.search(rf"[✓+] {label}", frame) is not None
+
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
+        lanes = {label: create_session(home, "--store", store, "--workspace", workspace, "--provider", "codex",
+            "--model", "gpt-6-luna", "--label", label, "--permission-mode", "ask") for label in ("notify lane", "focused lane", "muted lane")}
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        opened = raw_output(master, b"\x1b[?1004h")
+        assert opened.index(b"\x1b[?1004h") > opened.index(b"\x1b[?1049h"), opened[:256]
+        overview_frame(master, lambda frame: "muted lane" in frame)
+        # Away: a finish notifies once.
+        os.write(master, b"\x1b[O")
+        admit(home, "session", "send", "--to", lanes["notify lane"], input="First finish", cwd=workspace)
+        raw = raw_output(master, finish)
+        assert raw.count(b"\x1b]9;") == 1, raw
+        # Back in focus, the next finish shows on screen only, and the listings
+        # since the first finish never repeated it.
+        os.write(master, b"\x1b[I")
+        admit(home, "session", "send", "--to", lanes["focused lane"], input="Focused finish", cwd=workspace)
+        raw = raw_output(master, finished_row("focused lane"))
+        assert b"\x1b]9;" not in raw, raw
+        # Turned off while the overview runs, a finish while away is silent.
+        defaults(home, "--notifications", "off")
+        os.write(master, b"\x1b[O")
+        admit(home, "session", "send", "--to", lanes["muted lane"], input="Muted finish", cwd=workspace)
+        raw = raw_output(master, finished_row("muted lane"))
+        assert b"\x1b]9;" not in raw, raw
+        defaults(home, "--notifications", "on")
+        leave_overview(master)
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        # The conversation, away, notifies of its own Session's Action; the
+        # report reaches no editor, so the choice stays offered.
+        session = lanes["notify lane"]
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", session], cwd=workspace, env=env,
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "First done.", composer=True)
+        os.write(master, b"\x1b[O")
+        admit(home, "session", "send", "--to", session, input="Propose a notified Action", cwd=workspace)
+        raw_output(master, b"\x1b]9;Rui: notify lane needs approval\x07", timeout=20)
+        shown_choice = read_terminal(master, CHOICE)
+        assert "? Do nothing" in shown_choice, shown_choice
+        # Another Session's finish, while the conversation is open and away,
+        # notifies exactly once; the open Session's news stays its own.
+        admit(home, "session", "send", "--to", lanes["focused lane"], input="Other lane finish", cwd=workspace)
+        raw = raw_output(master, b"\x1b]9;Rui: focused lane finished\x07", timeout=20)
+        raw += quiet_output(master, 3)
+        assert raw.count(b"\x1b]9;") == 1, raw
+        os.write(master, b"\x03")
+        output, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        assert b"\x1b[?1004l" in output, output[-256:]
+        completed = True
+        print("Notifications: overview finish once while away, none in focus or when off, conversation approval, another Session's finish under a conversation once, focus reporting restored", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
+                    lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("notification failure state", state)
 
 
 def command_entry_cases():
@@ -5739,7 +5875,10 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications"), selected
+    if selected == "notifications":
+        notification_cases()
+        return
     if selected in ("all", "callers", "caller-core", "empty-answers"):
         persistent_empty_answer_case()
     if selected == "empty-answers":
@@ -5776,6 +5915,7 @@ def main(selected="all"):
         silent_read_edit_cases()
         command_entry_cases()
         overview_cases()
+        notification_cases()
         persistent_opening_case()
         scroll_return_case()
         persistent_pending_case()
