@@ -10,7 +10,7 @@ const std = @import("std");
 pub fn append(buffer: []u8, length: usize, segment: []const u8) ?usize {
     if (segment.len == 0 or contains(buffer[0..length], segment)) return length;
     const separator: usize = @intFromBool(length != 0);
-    if (segment.len > buffer.len - length - separator) return null;
+    if (separator + segment.len > buffer.len - length) return null;
     if (separator != 0) buffer[length] = ':';
     @memcpy(buffer[length + separator ..][0..segment.len], segment);
     return length + separator + segment.len;
@@ -74,6 +74,7 @@ test "append keeps order, skips empty and present entries, and refuses overflow"
     try std.testing.expectEqual(@as(usize, 5), append(&exact, 2, "/b").?);
     try std.testing.expectEqual(null, append(&exact, 2, "/bc"));
     try std.testing.expectEqual(@as(usize, 5), append(&exact, 5, "/a").?);
+    try std.testing.expectEqual(null, append(&exact, 5, "/c"));
     try std.testing.expectEqual(null, append(&exact, 0, "/abcde"));
 }
 
