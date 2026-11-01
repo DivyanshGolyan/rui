@@ -2,132 +2,163 @@
 
 const std = @import("std");
 const os = @import("os.zig");
+const path_list = @import("../path_list.zig");
+const stderr = @import("../stderr.zig");
 
-/// Linux has no system PATH file a login shell reads first, and this is the
-/// fallback when macOS's files cannot be read or are too long.
+/// Linux has no system PATH file a login shell reads first, and this is
+/// macOS's fallback when its files do not fit.
 pub const fixed = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// The longest system PATH kept; a longer one falls back to `fixed`.
 pub const max_bytes = 4096;
 
-const max_input_bytes = 16 * 1024;
-const max_files = 64;
+const max_name_bytes = 2048;
+const max_names = 64;
 
-pub const Buffer = struct {
-    path: [max_bytes]u8,
-    input: [max_input_bytes]u8,
-    names: [max_input_bytes]u8,
-};
+/// Scratch for one `read`; nothing outside macOS needs any.
+pub const Buffer = if (os.tag == .macos) struct {
+    line: [max_bytes]u8,
+    names: [max_name_bytes]u8,
+} else struct {};
 
-/// macOS: `/etc/paths`, then each file in `/etc/paths.d` in name order, as
-/// `path_helper` builds it. Elsewhere, or when the files are unreadable or
-/// too long, `fixed`.
-pub fn read(io: std.Io, buffer: *Buffer) []const u8 {
-    if (os.tag != .macos) return fixed;
-    return readFiles(io, buffer) catch fixed;
+/// Writes the system PATH into `out` and returns it. On macOS this is
+/// path_helper's: `/etc/paths`, then each regular file in `/etc/paths.d` in
+/// its name order, one entry per line, first copy kept. A file it cannot
+/// open is skipped with a note on stderr, as path_helper warns. Elsewhere,
+/// or when the result does not fit, `fixed`.
+pub fn read(io: std.Io, buffer: *Buffer, out: *[max_bytes]u8) error{Canceled}![]const u8 {
+    if (os.tag != .macos) return copyFixed(out);
+    var etc = std.Io.Dir.cwd().openDir(io, "/etc", .{}) catch |err| return fallback(err, out);
+    defer etc.close(io);
+    return readFrom(io, etc, buffer, out);
 }
 
-fn readFiles(io: std.Io, buffer: *Buffer) ![]const u8 {
-    var files: [1 + max_files][]const u8 = undefined;
-    var input: []u8 = &buffer.input;
-    files[0] = try readWhole(io, std.Io.Dir.cwd(), "/etc/paths", &input);
-    var count: usize = 1;
-    var directory = std.Io.Dir.cwd().openDir(io, "/etc/paths.d", .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return merge(&buffer.path, files[0..count]) orelse error.SystemPathTooLong,
+/// `read` with `etc` in place of /etc, as path_helper's PATH_HELPER_ROOT.
+fn readFrom(io: std.Io, etc: std.Io.Dir, buffer: *Buffer, out: *[max_bytes]u8) error{Canceled}![]const u8 {
+    const length = readFiles(io, etc, buffer, out) catch |err| return fallback(err, out);
+    return if (length == 0) copyFixed(out) else out[0..length];
+}
+
+fn fallback(err: anyerror, out: *[max_bytes]u8) error{Canceled}![]const u8 {
+    if (err == error.Canceled) return error.Canceled;
+    stderr.print("rui: system PATH not read ({s}); Bash uses {s}\n", .{ @errorName(err), fixed });
+    return copyFixed(out);
+}
+
+fn copyFixed(out: *[max_bytes]u8) []const u8 {
+    @memcpy(out[0..fixed.len], fixed);
+    return out[0..fixed.len];
+}
+
+fn readFiles(io: std.Io, etc: std.Io.Dir, buffer: *Buffer, out: *[max_bytes]u8) !usize {
+    var length = try appendFile(io, etc, "paths", buffer, out, 0);
+    var directory = etc.openDir(io, "paths.d", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return length,
         else => return err,
     };
     defer directory.close(io);
-    var names: [max_files][]const u8 = undefined;
-    var name_count: usize = 0;
+    var names: [max_names][]const u8 = undefined;
+    var count: usize = 0;
     var name_bytes: []u8 = &buffer.names;
     var iterator = directory.iterate();
     while (try iterator.next(io)) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (name_count == max_files or entry.name.len > name_bytes.len) return error.SystemPathTooLong;
+        // path_helper reads regular files one level deep; it never follows a link.
+        if (entry.kind != .file) continue;
+        if (count == max_names or entry.name.len > name_bytes.len) return error.SystemPathTooLong;
         @memcpy(name_bytes[0..entry.name.len], entry.name);
-        names[name_count] = name_bytes[0..entry.name.len];
+        names[count] = name_bytes[0..entry.name.len];
         name_bytes = name_bytes[entry.name.len..];
-        name_count += 1;
-    }
-    std.mem.sort([]const u8, names[0..name_count], {}, lessThan);
-    for (names[0..name_count]) |name| {
-        files[count] = try readWhole(io, directory, name, &input);
         count += 1;
     }
-    return merge(&buffer.path, files[0..count]) orelse error.SystemPathTooLong;
+    std.mem.sort([]const u8, names[0..count], {}, path_list.nameLessThan);
+    for (names[0..count]) |name| length = try appendFile(io, directory, name, buffer, out, length);
+    return length;
 }
 
-fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
-}
-
-/// Reads one whole file into the front of `remaining` and advances it. A file
-/// that fills what remains may be longer, so it counts as too long.
-fn readWhole(io: std.Io, directory: std.Io.Dir, path: []const u8, remaining: *[]u8) ![]const u8 {
-    const bytes = try directory.readFile(io, path, remaining.*);
-    if (bytes.len == remaining.len) return error.SystemPathTooLong;
-    remaining.* = remaining.*[bytes.len..];
-    return bytes;
-}
-
-/// Joins the files' lines with ':' in order, skipping blank lines and keeping
-/// only the first copy of each entry. Null when the result is empty or does
-/// not fit `buffer`.
-pub fn merge(buffer: []u8, files: []const []const u8) ?[]const u8 {
-    var length: usize = 0;
-    for (files) |file| {
-        var lines = std.mem.splitScalar(u8, file, '\n');
-        while (lines.next()) |line| {
-            const entry = std.mem.trim(u8, line, " \t\r");
-            if (entry.len == 0 or contains(buffer[0..length], entry)) continue;
-            const separator: usize = @intFromBool(length != 0);
-            if (length + separator + entry.len > buffer.len) return null;
-            if (separator != 0) buffer[length] = ':';
-            @memcpy(buffer[length + separator ..][0..entry.len], entry);
-            length += separator + entry.len;
-        }
+/// Appends each line of one regular file. A file that cannot be opened is
+/// skipped, and one that fails mid-read keeps the lines before the failure,
+/// as path_helper's fgetln loop does.
+fn appendFile(io: std.Io, directory: std.Io.Dir, path: []const u8, buffer: *Buffer, out: *[max_bytes]u8, length: usize) !usize {
+    const kind = (directory.statFile(io, path, .{ .follow_symlinks = false }) catch |err| return skip(path, err, length)).kind;
+    if (kind != .file) return length;
+    var file = directory.openFile(io, path, .{}) catch |err| return skip(path, err, length);
+    defer file.close(io);
+    var reader = file.reader(io, &buffer.line);
+    var result = length;
+    while (true) {
+        const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.SystemPathTooLong,
+            error.ReadFailed => return skip(path, reader.err.?, result),
+        } orelse return result;
+        result = path_list.append(out, result, line) orelse return error.SystemPathTooLong;
     }
-    return if (length == 0) null else buffer[0..length];
 }
 
-fn contains(path: []const u8, entry: []const u8) bool {
-    var entries = std.mem.splitScalar(u8, path, ':');
-    while (entries.next()) |existing| if (std.mem.eql(u8, existing, entry)) return true;
-    return false;
-}
-
-test "merge keeps file order, skips blank lines and repeats, and refuses overflow" {
-    var buffer: [128]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Library/Apple/usr/bin",
-        merge(&buffer, &.{ "/usr/local/bin\n/usr/bin\n\n/bin\n", " /opt/homebrew/bin\r\n/usr/bin\n", "\n/Library/Apple/usr/bin" }).?,
-    );
-    try std.testing.expectEqualStrings("/a:/a/b", merge(&buffer, &.{ "/a\n/a/b\n/a\n", "/a/b" }).?);
-    try std.testing.expectEqual(null, merge(&buffer, &.{ "\n \n", "" }));
-    try std.testing.expectEqual(null, merge(&buffer, &.{}));
-    var exact: [5]u8 = undefined;
-    try std.testing.expectEqualStrings("/a:/b", merge(&exact, &.{"/a\n/b"}).?);
-    try std.testing.expectEqual(null, merge(&exact, &.{"/a\n/bc"}));
-    try std.testing.expectEqualStrings("/a", merge(&exact, &.{"/a\n/a\n/a"}).?);
+fn skip(path: []const u8, err: anyerror, length: usize) error{Canceled}!usize {
+    if (err == error.Canceled) return error.Canceled;
+    if (err != error.FileNotFound) stderr.print("rui: system PATH skips {s} ({s})\n", .{ path, @errorName(err) });
+    return length;
 }
 
 test "read matches path_helper on macOS and the fixed list elsewhere" {
     const io = std.testing.io;
-    const buffer = try std.testing.allocator.create(Buffer);
-    defer std.testing.allocator.destroy(buffer);
-    const path = read(io, buffer);
+    const scratch = try std.testing.allocator.create(Buffer);
+    defer std.testing.allocator.destroy(scratch);
+    var out: [max_bytes]u8 = undefined;
+    const path = try read(io, scratch, &out);
     if (os.tag != .macos) return std.testing.expectEqualStrings(fixed, path);
-    // path_helper with an empty environment prints only the system files:
-    // PATH="..."; export PATH;
-    const result = try std.process.run(std.testing.allocator, io, .{
-        .argv = &.{ "/usr/libexec/path_helper", "-s" },
-        .environ_map = &std.process.Environ.Map.init(std.testing.allocator),
-    });
+    var expected: [max_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try pathHelper(io, null, &expected), path);
+}
+
+test "read matches path_helper over name order, raw lines, links and subdirectories" {
+    if (os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "etc/paths.d/sub");
+    const files = [_][2][]const u8{
+        .{ "etc/paths", "/usr/bin\n/bin\n  /spaced\n/usr/bin\n/dollar$x\n\n/cr\r\n/last" },
+        .{ "etc/paths.d/10-late", "/late\n" },
+        .{ "etc/paths.d/2-early", "/early\n/bin\n" },
+        .{ "etc/paths.d/.hidden", "/hidden\n" },
+        .{ "etc/paths.d/homebrew", "/opt/homebrew/bin\n" },
+        .{ "etc/paths.d/sub/x", "/sub\n" },
+    };
+    for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    try tmp.dir.symLink(io, "10-late", "etc/paths.d/zz-link", .{});
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var etc = try tmp.dir.openDir(io, "etc", .{});
+    defer etc.close(io);
+    const scratch = try std.testing.allocator.create(Buffer);
+    defer std.testing.allocator.destroy(scratch);
+    var out: [max_bytes]u8 = undefined;
+    var expected: [max_bytes]u8 = undefined;
+    const want = try pathHelper(io, root, &expected);
+    try std.testing.expectEqualStrings("/usr/bin:/bin:  /spaced:/dollar$x:/cr\r:/last:/hidden:/early:/late:/opt/homebrew/bin", want);
+    try std.testing.expectEqualStrings(want, try readFrom(io, etc, scratch, &out));
+}
+
+/// path_helper's PATH with an empty environment, its ", ' and $ escapes
+/// undone. `root` is its PATH_HELPER_ROOT.
+fn pathHelper(io: std.Io, root: ?[]const u8, out: *[max_bytes]u8) ![]const u8 {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    if (root) |value| try environment.put("PATH_HELPER_ROOT", value);
+    const result = try std.process.run(std.testing.allocator, io, .{ .argv = &.{ "/usr/libexec/path_helper", "-s" }, .environ_map = &environment });
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
     const prefix = "PATH=\"";
-    const start = std.mem.indexOf(u8, result.stdout, prefix) orelse return error.TestUnexpectedResult;
-    const rest = result.stdout[start + prefix.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(rest[0..end], path);
+    const suffix = "\"; export PATH;\n";
+    if (!std.mem.startsWith(u8, result.stdout, prefix) or !std.mem.endsWith(u8, result.stdout, suffix)) return error.TestUnexpectedResult;
+    const escaped = result.stdout[prefix.len .. result.stdout.len - suffix.len];
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < escaped.len) : (index += 1) {
+        if (escaped[index] == '\\' and index + 1 < escaped.len) index += 1;
+        out[length] = escaped[index];
+        length += 1;
+    }
+    return out[0..length];
 }

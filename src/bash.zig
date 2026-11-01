@@ -36,7 +36,9 @@ pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) 
     defer mapped.unmap();
     const buffers = mapped.value;
     const executable = buffers.executable[0..try std.process.executablePath(io, &buffers.executable)];
-    try result.put("PATH", try searchPath(&buffers.path, std.fs.path.dirname(executable), system_path.read(io, &buffers.system)));
+    const prefix = searchPrefix(&buffers.path, std.fs.path.dirname(executable));
+    const system = try system_path.read(io, &buffers.system, buffers.path[prefix..][0..system_path.max_bytes]);
+    try result.put("PATH", buffers.path[0 .. prefix + system.len]);
     if (home) |value| if (std.fs.path.isAbsolute(value)) try result.put("HOME", value);
     return result;
 }
@@ -56,12 +58,15 @@ pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.
     return result;
 }
 
+/// Writes "DIRECTORY:" for the system PATH to follow and returns its length.
 /// A directory containing ':' cannot be one PATH entry; the child then finds
 /// only system commands rather than a split directory.
-fn searchPath(buffer: []u8, directory: ?[]const u8, system: []const u8) ![]const u8 {
-    const value = directory orelse return system;
-    if (std.mem.indexOfScalar(u8, value, ':') != null) return system;
-    return std.fmt.bufPrint(buffer, "{s}:{s}", .{ value, system });
+fn searchPrefix(buffer: []u8, directory: ?[]const u8) usize {
+    const value = directory orelse return 0;
+    if (std.mem.indexOfScalar(u8, value, ':') != null) return 0;
+    @memcpy(buffer[0..value.len], value);
+    buffer[value.len] = ':';
+    return value.len + 1;
 }
 
 const BashObservation = extern struct {
@@ -1852,9 +1857,10 @@ test "Bash environment carries only this executable's PATH and an absolute HOME"
     try std.testing.expectEqual(@as(usize, 2), with_home.count());
     const path = with_home.get("PATH").?;
     try std.testing.expect(std.mem.startsWith(u8, path, directory));
-    const system = try std.testing.allocator.create(system_path.Buffer);
-    defer std.testing.allocator.destroy(system);
-    try std.testing.expectEqualStrings(system_path.read(std.testing.io, system), path[directory.len + 1 ..]);
+    const scratch = try std.testing.allocator.create(system_path.Buffer);
+    defer std.testing.allocator.destroy(scratch);
+    var system: [system_path.max_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try system_path.read(std.testing.io, scratch, &system), path[directory.len + 1 ..]);
     try std.testing.expectEqual(':', path[directory.len]);
     try std.testing.expectEqualStrings("/home/peer", with_home.get("HOME").?);
     var relative_home = try environment(std.testing.io, std.testing.allocator, "relative");
@@ -1872,7 +1878,7 @@ test "Bash environment carries only this executable's PATH and an absolute HOME"
     try std.testing.expect(with_home.get("RUI_ADDRESS") == null);
     try std.testing.expect(with_home.get("RUI_SENDER_HANDLE") == null);
     var buffer: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("/usr/bin:/bin", try searchPath(&buffer, "/opt/a:b/bin", "/usr/bin:/bin"));
-    try std.testing.expectEqualStrings("/opt/rui/bin:/usr/bin:/bin", try searchPath(&buffer, "/opt/rui/bin", "/usr/bin:/bin"));
-    try std.testing.expectEqualStrings("/usr/bin:/bin", try searchPath(&buffer, null, "/usr/bin:/bin"));
+    try std.testing.expectEqual(@as(usize, 0), searchPrefix(&buffer, "/opt/a:b/bin"));
+    try std.testing.expectEqual(@as(usize, 0), searchPrefix(&buffer, null));
+    try std.testing.expectEqualStrings("/opt/rui/bin:", buffer[0..searchPrefix(&buffer, "/opt/rui/bin")]);
 }

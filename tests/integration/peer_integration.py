@@ -57,7 +57,8 @@ def system_path():
     if not helper.exists():
         return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     printed = subprocess.run([str(helper), "-s"], env={}, capture_output=True, text=True, check=True).stdout
-    return re.search(r'PATH="([^"]*)"', printed).group(1)
+    escaped = re.fullmatch(r'PATH="((?:[^"\\]|\\.)*)"; export PATH;\n', printed).group(1)
+    return re.sub(r"\\(.)", r"\1", escaped)
 
 
 def model_instructions(workspace, session):
