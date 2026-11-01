@@ -1307,8 +1307,8 @@ def prove_capacity_refusal_oracle(probe):
         def connect(self, _path):
             pass  # The socketpair is already connected; send/receive/close are real.
 
-    connection_body = b'{"version":"3","type":"busy","code":"connection_capacity_exhausted"}'
-    ordinary_body = b'{"version":"3","type":"busy","code":"ordinary_capacity_exhausted"}'
+    connection_body = b'{"version":"4","type":"busy","code":"connection_capacity_exhausted"}'
+    ordinary_body = b'{"version":"4","type":"busy","code":"ordinary_capacity_exhausted"}'
     for case in ("early-complete", "ordinary-complete", "empty", "truncated", "wrong-code",
                  "wrong-status", "code-suffix", "missing-length", "duplicate-length"):
         body = connection_body

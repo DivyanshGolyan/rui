@@ -426,7 +426,7 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
 def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, **fields):
     if deadline is not None:
         deadline = min(deadline, time.monotonic() + timeout)
-    payload = json.dumps({"version": "3", "kind": kind, "store": str(store.resolve()),
+    payload = json.dumps({"version": "4", "kind": kind, "store": str(store.resolve()),
                           **fields}, separators=(",", ":")).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         def set_timeout():
@@ -439,7 +439,7 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         set_timeout()
         connection.sendall(
             f"POST /v1/{kind.replace('_', '-')} HTTP/1.1\r\n".encode()
-            + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+            + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
             + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
         )
         head, body = control.read_http_response(connection, timeout=timeout, deadline=deadline)

@@ -38,7 +38,7 @@ def maximum_json_string_bytes(length):
 
 
 MAX_SESSION_STOP_REQUEST_BYTES = (
-    len('{"version":"3","kind":"session_stop","store":')
+    len('{"version":"4","kind":"session_stop","store":')
     + maximum_json_string_bytes(MAX_STORE_BYTES)
     + len(',"key":')
     + maximum_json_string_bytes(MAX_KEY_BYTES)
@@ -47,7 +47,7 @@ MAX_SESSION_STOP_REQUEST_BYTES = (
     + 1
 )
 MAX_MODEL_INTERRUPTION_REQUEST_BYTES = (
-    len('{"version":"3","kind":"model_interruption","store":')
+    len('{"version":"4","kind":"model_interruption","store":')
     + maximum_json_string_bytes(MAX_STORE_BYTES)
     + len(',"key":')
     + maximum_json_string_bytes(MAX_KEY_BYTES)
@@ -427,7 +427,7 @@ def open_partial(socket_path, route, *, complete_headers=True):
             connection.sendall(
                 b"Content-Type: application/json\r\n"
                 b"Content-Length: 1024\r\n"
-                b"X-Rui-Wire-Version: 3\r\n\r\n{"
+                b"X-Rui-Wire-Version: 4\r\n\r\n{"
             )
     except BaseException:
         connection.close()
@@ -445,7 +445,7 @@ def raw_request(socket_path, route, body, declared_length=None):
             f"POST {route} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\n"
             + f"Content-Length: {length}\r\n".encode()
-            + b"X-Rui-Wire-Version: 3\r\n\r\n"
+            + b"X-Rui-Wire-Version: 4\r\n\r\n"
             + body
         )
         return read_http_response(connection)
@@ -461,7 +461,7 @@ def prepare_raw_request(socket_path, route, body):
         f"POST {route} HTTP/1.1\r\n".encode()
         + b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Rui-Wire-Version: 3\r\n\r\n"
+        + b"X-Rui-Wire-Version: 4\r\n\r\n"
         + body
     )
     connection.sendall(request[:-1])
@@ -484,7 +484,7 @@ def submit_prepared_request(prepared, start):
 
 def open_complete_inspection(socket_path, store, session, profile):
     request = {
-        "version": "3",
+        "version": "4",
         "kind": "inspect_session",
         "store": str(store),
         "session": session,
@@ -500,7 +500,7 @@ def open_complete_inspection(socket_path, store, session, profile):
             b"POST /v1/inspect-session HTTP/1.1\r\n"
             b"Content-Type: application/json\r\n"
             + f"Content-Length: {len(body)}\r\n".encode()
-            + b"X-Rui-Wire-Version: 3\r\n\r\n"
+            + b"X-Rui-Wire-Version: 4\r\n\r\n"
             + body
         )
     except BaseException:
@@ -600,7 +600,7 @@ def result_digest(store, key, destination):
 def open_blocked_result(socket_path, store, key):
     body = json.dumps(
         {
-            "version": "3",
+            "version": "4",
             "kind": "read_result",
             "store": str(store),
             "key": key,
@@ -616,7 +616,7 @@ def open_blocked_result(socket_path, store, key):
         b"Host: local\r\n"
         b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Rui-Wire-Version: 3\r\n"
+        + b"X-Rui-Wire-Version: 4\r\n"
         b"Connection: close\r\n\r\n"
         + body
     )
@@ -644,7 +644,7 @@ def maximum_body(kind):
     encoded_session = "\\u0001" * MAX_SESSION_BYTES
     if kind == "session_stop":
         body = (
-            '{"version":"3","kind":"session_stop","store":"'
+            '{"version":"4","kind":"session_stop","store":"'
             + encoded_store
             + '","key":"'
             + encoded_key
@@ -655,7 +655,7 @@ def maximum_body(kind):
         assert len(body) == MAX_SESSION_STOP_REQUEST_BYTES
         return body.encode()
     body = (
-        '{"version":"3","kind":"model_interruption","store":"'
+        '{"version":"4","kind":"model_interruption","store":"'
         + encoded_store
         + '","key":"'
         + encoded_key
@@ -723,7 +723,7 @@ def assert_intake_progress(socket_path, store, peers=None):
     """Both Store observation and protected discovery progress beside borrowers."""
     for kind, route in (("observe_command", "/v1/observe-command"),
                         ("host_info", "/v1/host-info")):
-        request = {"version": "3", "kind": kind, "store": str(store)}
+        request = {"version": "4", "kind": kind, "store": str(store)}
         if kind == "observe_command":
             request["key"] = "intake-progress-absent"
         def invoke():
@@ -1254,7 +1254,7 @@ def prove_real_settlement_contention(
                 route = "/v1/control/model-interruption"
                 body = json.dumps(
                     {
-                        "version": "3",
+                        "version": "4",
                         "kind": "model_interruption",
                         "store": fields["store"],
                         "key": "settlement-later-interrupt",
@@ -1270,7 +1270,7 @@ def prove_real_settlement_contention(
                 route = "/v1/control/session-stop"
                 body = json.dumps(
                     {
-                        "version": "3",
+                        "version": "4",
                         "kind": "session_stop",
                         "store": fields["store"],
                         "key": f"settlement-later-stop-{index}",

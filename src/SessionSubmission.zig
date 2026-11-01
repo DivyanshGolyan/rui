@@ -625,7 +625,7 @@ test "submission settles wire Admission only after join and releases only accept
             const invalid = std.mem.eql(u8, status, "invalid");
             var body_buffer: [1024]u8 = undefined;
             var body = std.Io.Writer.fixed(&body_buffer);
-            try body.print("{{\"version\":\"3\",\"type\":\"{s}_reply\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false,\"session\":\"k7m2qx\"", .{ if (kind == 0) "message" else "permission_decision", status });
+            try body.print("{{\"version\":\"4\",\"type\":\"{s}_reply\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false,\"session\":\"k7m2qx\"", .{ if (kind == 0) "message" else "permission_decision", status });
             if (!accepted) try body.print(",\"code\":\"{s}\"", .{if (conflict) "idempotency_key_conflict" else "not_allowed"});
             if (kind != 0) try body.print(",\"action\":\"19\",\"decision\":\"{s}\"", .{if (kind == 1) "allow_once" else "deny"});
             if (kind == 0 and accepted) try body.writeAll(",\"admission\":\"37\"");
@@ -638,7 +638,7 @@ test "submission settles wire Admission only after join and releases only accept
             }
             try body.writeAll("}");
             var response_buffer: [1536]u8 = undefined;
-            const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 3\r\n\r\n{s}", .{ if (conflict) "409 Conflict" else "200 OK", body.buffered().len, body.buffered() });
+            const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 4\r\n\r\n{s}", .{ if (conflict) "409 Conflict" else "200 OK", body.buffered().len, body.buffered() });
             var input: Input = undefined;
             input.init();
             var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input };

@@ -373,7 +373,7 @@ func openPartial(socket string) (net.Conn, error) {
 		return nil, err
 	}
 	_ = connection.SetWriteDeadline(time.Now().Add(3 * time.Second))
-	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Rui-Wire-Version: 3\r\n\r\n{")
+	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Rui-Wire-Version: 4\r\n\r\n{")
 	if err != nil {
 		connection.Close()
 		return nil, err
@@ -823,7 +823,7 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 			}
 		}
 	}
-	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\nConnection: close\r\n\r\n", route, len(body))
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\nConnection: close\r\n\r\n", route, len(body))
 	if _, err := io.WriteString(connection, request); err != nil {
 		connection.Close()
 		return nil, err
@@ -854,7 +854,7 @@ func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string,
 		connection.Close()
 		return preparedRequest{}, err
 	}
-	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\nConnection: close\r\n\r\n", route, len(body))
+	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\nConnection: close\r\n\r\n", route, len(body))
 	return preparedRequest{connection: connection, request: append([]byte(header), body...)}, nil
 }
 
@@ -951,7 +951,7 @@ func earlyResponse(connection net.Conn, wait time.Duration) (*http.Response, boo
 }
 
 func openInspections(socketPath, store, session string) ([]net.Conn, error) {
-	body, err := json.Marshal(inspectRequest{Version: "3", Kind: "inspect_session", Store: store, Session: session})
+	body, err := json.Marshal(inspectRequest{Version: "4", Kind: "inspect_session", Store: store, Session: session})
 	if err != nil {
 		return nil, err
 	}
@@ -1185,7 +1185,7 @@ func ordinaryBusy(socketPath string) error {
 }
 
 func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
-	body, err := json.Marshal(readResultRequest{Version: "3", Kind: "read_result", Store: store, Key: key})
+	body, err := json.Marshal(readResultRequest{Version: "4", Kind: "read_result", Store: store, Key: key})
 	if err != nil {
 		return nil, err
 	}
@@ -1293,7 +1293,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		return nil, fmt.Errorf("processing identity incomplete: %v", processing)
 	}
 	interruptBody, err := json.Marshal(modelInterruptionRequest{
-		Version: "3",
+		Version: "4",
 		Kind:    "model_interruption",
 		Store:   store,
 		Key:     "settlement-later-interrupt",
@@ -1312,7 +1312,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	}
 	preparedControls = append(preparedControls, prepared)
 	for index := 1; index < controlHeadroom; index++ {
-		stopBody, err := json.Marshal(sessionStopRequest{Version: "3", Kind: "session_stop", Store: store, Key: fmt.Sprintf("settlement-later-stop-%d", index), Session: session})
+		stopBody, err := json.Marshal(sessionStopRequest{Version: "4", Kind: "session_stop", Store: store, Key: fmt.Sprintf("settlement-later-stop-%d", index), Session: session})
 		if err != nil {
 			return nil, err
 		}
