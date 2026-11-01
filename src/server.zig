@@ -1203,7 +1203,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = host.store.submitMessageWithModel(command, host.hooks.storeFaults(.command));
+            const result = host.store.submitMessageWithModel(command, null, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }

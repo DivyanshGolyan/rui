@@ -2864,7 +2864,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3085,7 +3085,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3406,7 +3406,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
 
     var records: [1]execution.CustodyRecord = @splat(.{});
