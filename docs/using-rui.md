@@ -25,7 +25,7 @@ By default, Bash runs without asking (`bypass`). To review each command first, e
 /configure --permission-mode ask
 ```
 
-Rui then shows each proposed command and its working directory. Type `a` and Enter to allow it once, or `d` and Enter to deny it. Pasted choices do not grant approval.
+Rui then shows each proposed command above an Allow once / Deny choice, with Allow once highlighted. ← and → move the highlight and Enter confirms it. If you press Enter or an arrow before the choice is ready, Rui says `! Not ready; nothing authorized.` and clears the highlight, so a repeated Enter does nothing until you pick an option with ← or →. (This behaviour is pending Divyansh's decision.) Typing or pasting never decides: it goes to your draft, where slash commands still run, and Esc returns to the choice.
 
 ## Input
 

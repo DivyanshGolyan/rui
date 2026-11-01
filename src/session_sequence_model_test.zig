@@ -46,6 +46,12 @@ const Text = struct {
         self.cursor -= 1;
         while (self.cursor != 0 and self.bytes[self.cursor] & 0xc0 == 0x80) self.cursor -= 1;
     }
+
+    fn right(self: *Text) void {
+        if (self.cursor == self.len) return;
+        self.cursor += 1;
+        while (self.cursor != self.len and self.bytes[self.cursor] & 0xc0 == 0x80) self.cursor += 1;
+    }
 };
 
 fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
@@ -96,7 +102,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.front.input.init();
             self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = self.front.session, .directory = path, .input = &self.front.input };
             try self.setPage("EARLIER PAGE\n");
-            try self.action.writePositionalAll(std.testing.io, "Run Bash\nprintf exact\nWorkspace: /model\n", 0);
+            try self.action.writePositionalAll(std.testing.io, "\n? Print exact\n  $ printf exact\n", 0);
             try ops.draw(self.front);
         }
 
@@ -139,30 +145,49 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             try ops.settleReader(self.front);
         }
 
-        fn checkText(self: *Self, draft: *const Text, choice: *const Text, choosing: bool) !void {
+        /// The draft's bytes and caret, then what the next frame's input row
+        /// shows: the draft with its caret, or the choice with none.
+        fn checkText(self: *Self, draft: *const Text, choosing: ?[]const u8) !void {
             const actual = self.front.input.composition();
             try std.testing.expectEqualStrings(draft.slice(), actual.bytes);
             try std.testing.expectEqual(draft.cursor, actual.cursor);
-            try std.testing.expectEqualStrings(choice.slice(), self.screen.choiceText());
-            try std.testing.expectEqual(choice.cursor, self.screen.choice.cursor);
             try ops.draw(self.front);
-            const shown = if (choosing) choice else draft;
             const window = self.screen.vx.window();
+            if (choosing) |row| {
+                try std.testing.expect(!self.screen.vx.screen.cursor_vis);
+                var storage: [256]u8 = undefined;
+                for (0..window.height) |index| {
+                    if (std.mem.eql(u8, rowText(window, @intCast(index), &storage), row)) break;
+                } else return error.ChoiceRowMissing;
+                return;
+            }
+            try std.testing.expect(self.screen.vx.screen.cursor_vis);
             const row = self.screen.vx.screen.cursor.row;
-            try std.testing.expectEqualStrings(if (choosing) ">" else "›", window.readCell(0, row).?.char.grapheme);
+            try std.testing.expectEqualStrings("›", window.readCell(0, row).?.char.grapheme);
             var expected_column: u16 = 2;
             var column: u16 = 2;
             var index: usize = 0;
-            while (index < shown.len) {
-                const length: usize = try std.unicode.utf8ByteSequenceLength(shown.bytes[index]);
-                try std.testing.expectEqualStrings(shown.bytes[index..][0..length], window.readCell(column, row).?.char.grapheme);
-                if (index < shown.cursor) expected_column += 1;
+            while (index < draft.len) {
+                const length: usize = try std.unicode.utf8ByteSequenceLength(draft.bytes[index]);
+                try std.testing.expectEqualStrings(draft.bytes[index..][0..length], window.readCell(column, row).?.char.grapheme);
+                if (index < draft.cursor) expected_column += 1;
                 index += length;
                 column += 1;
             }
             try std.testing.expectEqual(expected_column, self.screen.vx.screen.cursor.col);
         }
     };
+}
+
+fn rowText(window: anytype, row: u16, storage: []u8) []const u8 {
+    var length: usize = 0;
+    for (0..window.width) |column| {
+        const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
+        if (length + grapheme.len > storage.len) break;
+        @memcpy(storage[length..][0..grapheme.len], grapheme);
+        length += grapheme.len;
+    }
+    return std.mem.trimEnd(u8, storage[0..length], " ");
 }
 
 pub fn run(comptime Frontend: type, comptime ops: anytype, comptime suite: Suite) !void {
@@ -175,18 +200,25 @@ pub fn run(comptime Frontend: type, comptime ops: anytype, comptime suite: Suite
     }
 }
 
+/// The choice's input row with its highlighted option.
+fn choiceRow(picked: ?Consent.Choice) []const u8 {
+    return switch (picked orelse return "    Allow once      Deny") {
+        .allow_once => "  › Allow once      Deny",
+        .deny => "    Allow once    › Deny",
+    };
+}
+
 fn focus(comptime Frontend: type, comptime ops: anytype) !void {
-    const Event = enum { unicode, left, enter, pause, latest, receipt, allow, paste };
+    const Event = enum { unicode, left, enter, pause, latest, receipt, right, paste };
     const events = std.enums.values(Event);
-    // Same exhaustive base-eight, length-three words as session_consent.zig.
-    // Complete, preview and no-Action seeds exercise both displayed editors.
+    // Exhaustive base-eight, length-three words. Complete, preview and
+    // no-Action seeds exercise both input rows.
     for (0..6) |seed| for (0..512) |sequence| {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
         const front = fixture.front;
         var draft: Text = .{};
-        var choice: Text = .{};
         draft.insert("ZX");
         draft.left();
         try fixture.bytes("ZX\x1b[D");
@@ -195,9 +227,16 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
         var fresh = false;
-        // A choice line keeps its editor through Enter even if a page hides
-        // the Action. Discarding stale text does not transfer the line.
-        var choice_line = false;
+        // A key typed beside the Action moved the input row to the draft
+        // until the latest view is shown again.
+        var typing = false;
+        // The highlighted option: Allow once until an arrow moves it while
+        // input is fresh; an arrow or Enter refused at the choice clears it.
+        var picked: ?Consent.Choice = .allow_once;
+        // Input goes to the row the latest frame drew. The first frame of an
+        // Action precedes its read receipt, so it draws the unread row; any
+        // later frame of a whole Action draws it read.
+        var drawn_read = false;
         var submitted: usize = 0;
         var decision = false;
         var sealed: Text = .{};
@@ -222,101 +261,90 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 std.debug.print("TD1 focus seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
                 printPrefix(Event, sequence, prefix + 1);
             }
-            const choosing = choice_line or (alive and visible and seed != 2);
-            // Text typed while an Action is still unread stays in its line;
-            // it cannot decide, and reading the Action clears it.
-            const keeps = fresh or (unread and alive and visible);
+            const choosing = alive and visible and seed != 2 and !typing;
+            // While a command runs, typing at the choice is ignored. A
+            // scalar completes after checkText drew a frame; a paste does not.
+            const held = choosing and blocked and !unread and (drawn_read or event == .unicode);
+            const shown: ?[]const u8 = if (!choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
             switch (event) {
                 .unicode => {
                     // Observe the incomplete UTF-8 prefix before completing it.
                     try fixture.byte(0xc3);
-                    try fixture.checkText(&draft, &choice, choosing);
+                    try fixture.checkText(&draft, shown);
                     try fixture.byte(0xa9);
-                    if (!choosing) draft.insert("é") else {
-                        choice_line = true;
-                        if (keeps) choice.insert("é");
-                    }
+                    if (!held) draft.insert("é");
                 },
                 .paste => {
-                    // Marked paste cannot authorize even beside a fresh Action.
+                    // Marked paste is typed text: it goes to the draft and
+                    // cannot authorize even beside a fresh Action.
                     try fixture.bytes("\x1b[200~a\x1b[201~");
-                    if (!choosing) draft.insert("a") else {
-                        // Rejection is reported at the unpasted line end,
-                        // not while the stream still owns paste custody.
-                        try fixture.byte(13);
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
-                    }
+                    if (!held) draft.insert("a");
                 },
-                .left => {
-                    try fixture.bytes("\x1b[D");
-                    if (!choosing) draft.left() else if (keeps) choice.left();
+                .left, .right => {
+                    try fixture.bytes(if (event == .left) "\x1b[D" else "\x1b[C");
+                    if (!choosing) {
+                        if (event == .left) draft.left() else draft.right();
+                    } else {
+                        picked = if (!fresh) null else if (event == .left) .allow_once else .deny;
+                    }
                 },
                 .enter => {
                     const send = !blocked and !alive and !decision and draft.len != 0 and submitted == 0;
                     try fixture.byte(13);
-                    if (send) {
+                    if (choosing) {
+                        if (!fresh or blocked or unread) {
+                            picked = null;
+                            fresh = false;
+                        } else if (picked) |option| {
+                            alive = false;
+                            visible = false;
+                            decision = true;
+                            fresh = false;
+                            const intent = front.submission.intent.?.decision;
+                            try std.testing.expectEqual(@as(u64, 913), intent.action);
+                            try std.testing.expectEqualStrings(@tagName(option), @tagName(intent.decision));
+                        }
+                    } else if (send) {
                         submitted += 1;
                         sealed = draft;
                         try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.message));
                         draft = .{};
                         visible = false;
-                    } else if (choosing) {
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
                     }
                 },
                 .pause => {
                     try ops.showInspection(front);
                     visible = false;
                     fresh = false;
-                    choice = .{};
                 },
                 .latest => {
                     try ops.navigation(front, .latest);
                     visible = alive;
+                    typing = false;
                 },
                 .receipt => {
                     try ops.draw(front);
+                    drawn_read = true;
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
                     // An Action taller than the view stays unread: no prompt.
-                    if (alive and visible and seed != 2 and !blocked and !unread) fresh = true;
-                },
-                .allow => {
-                    try fixture.bytes("a\r");
-                    if (choosing) {
-                        if (fresh and !blocked and !unread and choice.len == 0) {
-                            alive = false;
-                            visible = false;
-                            decision = true;
-                            try std.testing.expectEqual(@as(u64, 913), front.submission.intent.?.decision.action);
-                        }
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
-                    } else {
-                        draft.insert("a");
-                        if (!blocked and !alive and !decision and submitted == 0) {
-                            submitted += 1;
-                            sealed = draft;
-                            draft = .{};
-                        }
-                    }
+                    if (alive and visible and seed != 2 and !blocked and !unread and !typing) fresh = true;
                 },
             }
-            // Paused input invalidates the choice and never submits the draft.
-            if (alive and !choosing and (event == .unicode or event == .paste or event == .left or event == .enter or event == .allow)) {
-                fresh = false;
-                choice = .{};
-            }
+            // Typing beside the Action moves the input row to the draft.
+            if (choosing and !held and (event == .unicode or event == .paste)) typing = true;
+            // Input to the draft beside a pending Action invalidates the
+            // choice and never submits the draft.
+            if (alive and (!choosing or typing) and event != .pause and event != .latest and event != .receipt) fresh = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
             try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
-            try fixture.checkText(&draft, &choice, choice_line or (alive and visible and seed != 2));
+            try std.testing.expectEqual(picked, fixture.screen.consent.selected);
+            const now_choosing = alive and visible and seed != 2 and !typing;
+            const now_shown: ?[]const u8 = if (!now_choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
+            try fixture.checkText(&draft, now_shown);
+            drawn_read = true;
         }
     };
 }
@@ -407,7 +435,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                             try fixture.byte(0xa9);
                             draft.insert("é");
                             fragment = false;
-                            try fixture.checkText(&draft, &.{}, false);
+                            try fixture.checkText(&draft, null);
                         }
                         // Also keep the queued, not-yet-launched request in
                         // scope: send must retire both kinds of old read work.
@@ -439,7 +467,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
             try std.testing.expectEqual(selected, fixture.screen.view);
             try std.testing.expectEqual(sent, front.admission.sent);
             try std.testing.expectEqual(older, front.transcript.older);
-            try fixture.checkText(&draft, &.{}, false);
+            try fixture.checkText(&draft, null);
         }
     };
 }

@@ -18,7 +18,6 @@ const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
-const ChoiceLine = @import("ChoiceLine.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const Self = @This();
@@ -408,7 +407,7 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 const History = enum { older, latest };
 
-/// Every slash command the draft or the choice accepts.
+/// Every slash command the draft accepts.
 const Slash = union(enum) {
     exit,
     history: History,
@@ -451,9 +450,8 @@ fn requestHistory(self: *Self, history: History) void {
     self.inspection.status_requested = false;
 }
 
-/// Runs one slash command its source admitted from the draft or the choice,
-/// which never decides. Local commands answer at once; an inspection
-/// queues for the reader.
+/// Runs one slash command the draft admitted; it never decides. Local
+/// commands answer at once; an inspection queues for the reader.
 fn slashCommand(self: *Self, text: []const u8) void {
     switch (parse(text)) {
         .exit => self.leaving = .detached,
@@ -474,23 +472,6 @@ fn slashCommand(self: *Self, text: []const u8) void {
         .login => self.notice = "Login uses rui auth login codex in your shell.",
         .unknown => self.unknownCommand(text),
     }
-}
-
-/// The choice ends its line at Enter, so a command it cannot run is lost.
-/// Exit and page requests always run; others wait for any active command
-/// rather than queueing behind it or replacing its page.
-fn choiceCommand(self: *Self, text: []const u8) void {
-    switch (parse(text)) {
-        .exit, .history => {},
-        else => if (self.inspection.command_running) {
-            self.notice = "! Command still running. Try again when it finishes.";
-            return;
-        } else if (self.input.queuedCommand() != null) {
-            self.notice = "! Preparing inspection; try again when it finishes.";
-            return;
-        },
-    }
-    self.slashCommand(text);
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
@@ -633,8 +614,8 @@ fn driveActive(self: *Self) !void {
             self.reader.cancel();
         }
         // A joined read may hide or withdraw the Action, so a sequence the
-        // choice is decoding finishes there first and none reaches the draft.
-        if (self.reader.thread != null and self.reader.completed() and !(self.terminal.screen.selected.editor == .choice and self.input.pending() != .none)) {
+        // choice is decoding finishes there first and keeps its meaning.
+        if (self.reader.thread != null and self.reader.completed() and !(self.terminal.screen.selected.row == .selector and self.input.pending() != .none)) {
             try self.settleReader();
             self.withdrawDecided();
         }
@@ -692,9 +673,7 @@ fn driveActive(self: *Self) !void {
                 try self.launch(self.freeze(.history), reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
-            } else if (!self.terminal.screen.consent.active() and !self.terminal.screen.choice_line.open and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
-                // A line begun at an earlier choice ends before the next
-                // Action is presented, so it never decides that one.
+            } else if (!self.terminal.screen.consent.active() and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
                 try self.launch(self.freeze(.permission), reads.permission);
             }
         }
@@ -755,29 +734,22 @@ fn consentReceipt(self: *Self, service: ConsentPolicy.Service) bool {
 fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
     const projection = screen.select(self.commandActive());
-    const choosing = projection.editor == .choice;
-    const view: Input.View = if (choosing) .{ .bytes = screen.choiceText(), .cursor = screen.choice.cursor } else self.input.composition();
-    const base_status = if (self.reading.opening) "Opening…" else switch (projection.approval) {
-        .preview => "Approval disabled · /help for exact shell commands",
-        .paused => "Approval paused · Esc returns to Action",
-        .reading => "PgDn reads the rest · then a/d + Enter",
-        .held => "Command running · then a/d + Enter",
-        .draining, .ready => Frame.approval_choice,
-        .absent => if (self.submission.view()) |submission| switch (submission.state) {
-            .not_started => "Not sent · Ctrl-R retries original",
-            .submitting => "Sending…",
-            .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
-            .rejected => "Rejected · /discard",
-        } else if (self.admission.echo != null) "Sent" else "",
-    };
-    // An Action's own instructions speak for its approval; elsewhere the
-    // work says what it is doing now, on every view.
+    const view = self.input.composition();
+    // A waiting Action says how to decide it under the input, not here.
+    const base_status = if (self.reading.opening) "Opening…" else if (projection.approval != .absent) "" else if (self.submission.view()) |submission| switch (submission.state) {
+        .not_started => "Not sent · Ctrl-R retries original",
+        .submitting => "Sending…",
+        .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
+        .rejected => "Rejected · /discard",
+    } else if (self.admission.echo != null) "Sent" else "";
+    // A waiting Action speaks for itself; elsewhere the work says what it is
+    // doing now, on every view.
     const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
     var live_words: [work_line.max_words_bytes]u8 = undefined;
     const live = if (projection.approval != .absent) null else work_line.of(&live_words, &self.live.work.state, self.live.work.operation, now_ms);
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
-    if (choosing and screen.actionVisible())
+    if (screen.actionVisible())
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
     else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
@@ -819,57 +791,44 @@ test "status lines keep the instructions beside an oversized context" {
     // A context whose cut falls inside a two-byte scalar.
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
-    const lines = statusLines(&buffer, &context, "Type a + Enter");
-    try std.testing.expect(std.mem.endsWith(u8, lines, "…\nType a + Enter"));
+    const lines = statusLines(&buffer, &context, "Sent");
+    try std.testing.expect(std.mem.endsWith(u8, lines, "…\nSent"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
     try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "Sent"));
-    try std.testing.expectEqualStrings("Workspace: /w\nSent", statusLines(&buffer, "Workspace: /w", "Sent"));
+    try std.testing.expectEqualStrings("? Delete /w\nSent", statusLines(&buffer, "? Delete /w", "Sent"));
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
 /// It leaves before more input is read, so no key decides; a fragmented
-/// sequence finishes under the choice decoder first, and a line begun there
-/// ends there, so none of either reaches the draft.
+/// sequence finishes at the choice first and keeps its meaning.
 fn withdrawDecided(self: *Self) void {
     const consent = self.terminal.screen.consent;
     if (!consent.active() or self.live.work.first_action == consent.action or self.input.pending() != .none) return;
     self.terminal.screen.withdrawAction();
 }
 
-/// The choice keeps the Action's heading lines beside it once paging hides
-/// them; they leave again when the heading is back on screen.
+/// A paged Action keeps what it is for above the rule once paging hides its
+/// `?` row; it leaves again when that row is back on screen.
 fn approvalContext(out: *std.Io.Writer, top_hidden: bool, summary: View.ActionSummary) !void {
     if (!top_hidden) return;
-    try out.writeAll("Run Bash");
+    try out.writeAll("?");
     if (summary.description.slice().len != 0) {
-        try out.writeAll(" · ");
+        try out.writeAll(" ");
         var label: TerminalText = .{ .mode = .line };
         try label.feed(out, summary.description.slice());
         try label.finish(out);
     }
-    try out.writeAll("\nWorkspace: ");
-    var location: TerminalText = .{ .mode = .line };
-    try location.feed(out, summary.workspace.slice());
-    try location.finish(out);
-    if (summary.timeout_ms) |timeout| try out.print(" · Time limit: {d} ms", .{timeout}) else try out.writeAll(" · Time limit: Host default");
 }
 
-test "a paged Action keeps what runs, where and for how long beside the choice" {
+test "a paged Action keeps what it is for beside the choice" {
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
-    var summary: View.ActionSummary = .{ .timeout_ms = 5000 };
-    try summary.workspace.set("/work");
+    var summary: View.ActionSummary = .{};
+    try summary.description.set("Record\x1b[2J steps");
     try approvalContext(&out, false, summary);
     try std.testing.expectEqualStrings("", out.buffered());
-    try summary.description.set("Record\x1b[2J steps");
-    try summary.workspace.set("/work/a\x1bb");
     try approvalContext(&out, true, summary);
-    try std.testing.expectEqualStrings("Run Bash · Record\\x1b[2J steps\nWorkspace: /work/a\\x1bb · Time limit: 5000 ms", out.buffered());
-    out = std.Io.Writer.fixed(&buffer);
-    summary = .{};
-    try summary.workspace.set("/work");
-    try approvalContext(&out, true, summary);
-    try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
+    try std.testing.expectEqualStrings("? Record\\x1b[2J steps", out.buffered());
 }
 
 fn pump(raw: *anyopaque) !void {
@@ -900,13 +859,6 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
 /// A queued or running command ends consent freshness until it completes.
 fn commandActive(self: *const Self) bool {
     return self.input.queuedCommand() != null or self.inspection.command_running;
-}
-
-/// The choice shows decision instructions: its rows were all delivered and no
-/// command holds it. Freshness and Enter are probed separately.
-fn decisionShown(self: *const Self) bool {
-    const approval = self.terminal.screen.selected.approval;
-    return approval == .draining or approval == .ready;
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -952,24 +904,6 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_end = .latest,
 });
 
-/// What a key does beside an Action's choice.
-const ChoiceAction = union(enum) {
-    conversation: ConversationAction,
-    /// Withholds the choice's line, which then decides nothing at its Enter.
-    refuse,
-};
-
-/// The choice's one key table: the conversation's, except that recovery
-/// refuses the line. The original waits for the Action's decision.
-const choice_keys: keymap.Keymap(ChoiceAction) = blk: {
-    var map: keymap.Keymap(ChoiceAction) = .{ .meanings = .initFill(null) };
-    for (std.enums.values(keymap.Key)) |key| if (conversation_keys.get(key)) |action| map.meanings.set(key, switch (action) {
-        .recover => .refuse,
-        else => .{ .conversation = action },
-    });
-    break :blk map;
-};
-
 fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
@@ -1012,7 +946,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         // While approval is paused, recovery waits for the Action and the
         // paused draft stays as it is.
         .recover => if (screen.consent.active()) {
-            screen.invalidateChoice();
+            screen.invalidateConsent();
             self.notice = self.decisionNotice();
         } else try self.submission.requestRecovery(null),
     }
@@ -1125,83 +1059,76 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 }
 
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    // The editor the latest frame encodes takes the input; a transition
-    // changes it only at the next frame. While approval is paused, typing
-    // goes to the draft shown in the composer; it never decides, and
-    // returning to the Action needs a fresh choice.
+    // The input row the latest frame shows takes the input; a transition
+    // changes it only at the next frame. Typing beside the Action moves to
+    // the draft at once. In the draft, nothing decides, and returning to the
+    // Action needs fresh input.
     const screen = self.terminal.screen;
-    if (screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
-        if (screen.consent.active()) {
-            screen.invalidateChoice();
-            screen.restartChoice();
-        }
+    if (screen.selected.row == .selector and !screen.typing) try self.choiceEvent(decoded) else {
+        if (screen.consent.active()) screen.invalidateConsent();
         try self.draftEvent(decoded);
     }
     if (self.leaving != null) screen.interruptConsent();
 }
 
+/// One input at an Action's Allow once / Deny choice. Only arrows and Enter
+/// act on it, and only once input is fresh; any other key that reaches it
+/// spends that freshness.
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    const stream = &self.input.stream;
     const screen = self.terminal.screen;
-    const event = screen.applyChoice(choice_keys, decoded);
-    if (event == .action) switch (event.action) {
-        .conversation => |action| try self.perform(action),
-        .refuse => screen.refuseChoice(),
-    };
-    if (!screen.consent.acceptsInput()) {
-        // Discard text; the stream keeps any fragmented sequence.
-        if (event == .refused) self.notice = choiceRejection(event.refused, false);
-        // Only a slash command survives, or any text while the Action is
-        // unread: reading its last row clears it, so neither can decide.
-        const text = screen.choiceText();
-        const command = std.mem.startsWith(u8, text, "/");
-        const reading = screen.selected.approval == .reading;
-        if (event == .submit and command) self.choiceCommand(text);
-        // Enter on an unread Action says why nothing was decided.
-        if (event == .submit and !command and reading) self.notice = "! Read the whole Action first; nothing authorized.";
-        if (ChoiceLine.end(event.endsLine(), text, reading, stream.pending() != .none)) screen.restartChoice();
-        return;
+    switch (Editor.select(conversation_keys, decoded)) {
+        .none => {},
+        // While an Action waits there is no original to retry.
+        .action => |action| if (action == .recover) {
+            screen.refuseChoice();
+            self.notice = "! Action needs a decision; nothing to retry.";
+        } else try self.perform(action),
+        .left => try self.choose(.{ .pick = .allow_once }),
+        .right => try self.choose(.{ .pick = .deny }),
+        .enter => try self.choose(.enter),
+        // The draft takes this key and those after it, beside the Action;
+        // while a command runs, neither a Message nor a command could go.
+        .text => if (screen.selected.approval == .held) {
+            screen.refuseChoice();
+            self.notice = "! Command still running. Input ignored.";
+        } else {
+            screen.beginTyping();
+            try self.draftEvent(decoded);
+        },
+        .refused => {
+            screen.refuseChoice();
+            self.notice = "! Key combination not recognized; nothing authorized.";
+        },
     }
-    switch (event) {
-        .refused => |why| {
-            screen.restartChoice();
-            screen.invalidateChoice();
-            self.notice = choiceRejection(why, self.decisionShown() and !self.commandActive());
+}
+
+/// An arrow or Enter at the choice, probed against current geometry,
+/// command and selection; one that cannot act says why.
+fn choose(self: *Self, key: Screen.ChoiceKey) !void {
+    const screen = self.terminal.screen;
+    switch (screen.choose(key, self.terminal.geometry(), self.commandActive())) {
+        .undecided => {},
+        .decision => |selected| {
+            // Consumption precedes fallible submission.
+            screen.releaseAction();
+            try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = switch (selected.choice) {
+                .allow_once => .allow_once,
+                .deny => .deny,
+            } } });
         },
-        .submit => {
-            const text = screen.choiceText();
-            // Probe current geometry, command and selection; never the
-            // readiness of the frame that drew the prompt.
-            switch (screen.submitChoice(text, self.terminal.geometry(), self.commandActive())) {
-                .decision => |selected| {
-                    // Consumption precedes fallible submission.
-                    screen.releaseAction();
-                    try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
-                },
-                .blocked => |reason| if (std.mem.startsWith(u8, text, "/")) self.choiceCommand(text) else {
-                    self.notice = if (reason == .command) "! Command still running. Nothing authorized." else "! Read the whole Action first; nothing authorized.";
-                },
-                .other => if (std.mem.startsWith(u8, text, "/")) self.choiceCommand(text) else {
-                    self.notice = "! Choose a or d. Nothing authorized.";
-                },
-            }
-            screen.invalidateChoice();
-            screen.restartChoice();
+        .blocked => |why| self.notice = switch (why) {
+            .reading => "! Read the whole Action first; nothing authorized.",
+            .command => "! Command still running. Nothing authorized.",
+            .not_ready, .layout => "! Not ready; nothing authorized.",
         },
-        else => {},
     }
 }
 
 /// Why a draft waits for the Action: a previewed Action is decided only in the shell.
 fn decisionNotice(self: *const Self) []const u8 {
-    return if (self.terminal.screen.consent.presentation == .preview) "! Approval disabled · /help for exact shell commands. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
-}
-
-/// Only a choice ready to decide can ask for a or d; until then the
-/// status line names what the Action needs first, such as reading it.
-fn choiceRejection(why: keymap.Refusal, ready: bool) []const u8 {
-    if (!ready) return if (why == .unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
-    return if (why == .unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
+    const screen = self.terminal.screen;
+    if (screen.consent.presentation == .preview) return "! Approval disabled · /help for exact shell commands. Draft retained.";
+    return if (screen.actionVisible()) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
 }
 
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
@@ -1221,6 +1148,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .command => {
             self.slashCommand(self.input.composition().bytes);
             self.input.clear();
+            self.terminal.screen.endTyping();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
@@ -1273,7 +1201,7 @@ fn settleReader(self: *Self) !void {
     if (end != .complete and self.inspection.command_running) {
         // Nothing to show: the command failed before writing output.
         self.inspection.command_running = false;
-        self.terminal.screen.invalidateChoice();
+        self.terminal.screen.invalidateConsent();
     }
     if (end == .complete and self.reading.phase == .history) {
         // The user may have left the transcript while this page loaded.
@@ -1599,7 +1527,7 @@ test "frontend commits spacing only for completed visible reads" {
 
 fn showInspection(self: *Self) !void {
     // Any completed inspection or command requires a fresh choice afterwards.
-    self.terminal.screen.invalidateChoice();
+    self.terminal.screen.invalidateConsent();
     self.inspection.status_page = false;
     const size = (try self.files.inspection.stat(self.init.io)).size;
     if (size == 0) {
@@ -1629,12 +1557,12 @@ fn showInspection(self: *Self) !void {
 }
 
 /// A settled scan's /status: the page asked for, or the shown page updated in
-/// place. An update keeps the reader's place, choice, notice and consent.
+/// place. An update keeps the reader's place, notice and consent.
 fn applyStatus(self: *Self) !void {
     const screen = self.terminal.screen;
     if (self.job.open_status and self.inspection.status_requested) {
         self.inspection.status_requested = false;
-        screen.invalidateChoice();
+        screen.invalidateConsent();
         try screen.showFile(self.init.io, self.files.status, false);
         self.notice = null;
     } else if (self.inspection.status_page and screen.view == .inspection) {
@@ -1644,7 +1572,7 @@ fn applyStatus(self: *Self) !void {
     self.inspection.status_digest = self.job.result.status_digest;
 }
 
-test "a line begun at the choice ends there when the Action leaves or a page opens without a key" {
+test "typing beside a ready Action moves to the draft, which decides nothing and keeps its text when a page opens or the Action leaves" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
@@ -1658,16 +1586,16 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
     // Longer than a notice, so it opens as a page and hides the Action.
     const rows: [512]u8 = @splat('\n');
     try page.writePositionalAll(std.testing.io, &rows, 0);
-    const Change = enum { decided_elsewhere, command_page, status_page };
-    for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "status" }, .{ "a", "" } }) |line| {
-        errdefer std.debug.print("change={s} line={s}|{s}\n", .{ @tagName(change), line[0], line[1] });
+    const Change = enum { none, decided_elsewhere, command_page, status_page };
+    for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "/status" }, .{ "a", "a" } }) |line| {
+        errdefer std.debug.print("change={s} line={s}\n", .{ @tagName(change), line[1] });
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
-        try sendKeys(&self, "kept");
-        screen.restartChoice();
+        try screen.latest();
+        screen.action_view = .{ .io = std.testing.io, .file = page };
         self.live.work.first_action = 7;
         screen.consent = .{};
         screen.consent.adopt(7, .complete);
@@ -1675,11 +1603,16 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         screen.preview_complete = true;
         screen.action_seen = .end;
         try std.testing.expect(screen.consent.promptCompleted(.empty, false, false));
-        // Each change is followed by the frame that shows it.
         _ = screen.select(self.commandActive());
-        try std.testing.expectEqual(ConsentPolicy.Approval.ready, screen.selected.approval);
+        try std.testing.expectEqual(ConsentPolicy.Projection{ .row = .selector, .approval = .ready }, screen.selected);
+        // The first key typed is the draft's, and the choice is no longer fresh.
         try sendKeys(&self, line[0]);
+        try std.testing.expectEqualStrings(line[0], self.input.composition().bytes);
+        try std.testing.expect(!screen.consent.acceptsInput());
+        _ = screen.select(self.commandActive());
+        try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .paused }, screen.selected);
         switch (change) {
+            .none => {},
             .decided_elsewhere => {
                 self.live.work.first_action = null;
                 self.withdrawDecided();
@@ -1696,26 +1629,30 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
                 try self.applyStatus();
             },
         }
-        try std.testing.expect(!screen.actionVisible());
-        // The open line keeps the choice editor, with no decision prompt.
         _ = screen.select(self.commandActive());
-        try std.testing.expectEqual(ConsentPolicy.Editor.choice, screen.selected.editor);
-        try std.testing.expect(screen.selected.approval != .ready and screen.selected.approval != .draining);
-        try sendKeys(&self, line[1]);
-        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        try std.testing.expectEqual(ConsentPolicy.Row.draft, screen.selected.row);
+        try sendKeys(&self, line[1][line[0].len..]);
+        try std.testing.expectEqualStrings(line[1], self.input.composition().bytes);
+        if (change == .decided_elsewhere) continue;
         try sendKeys(&self, "\r");
-        // Nothing reached the draft or was sent, and nothing was decided.
-        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        // Nothing was decided, and the Action holds a Message back.
+        try std.testing.expectEqual(@as(?u64, 7), screen.consent.action);
         try std.testing.expect(self.submission.view() == null);
-        if (change != .decided_elsewhere) try std.testing.expectEqual(@as(?u64, 7), screen.consent.action);
-        // A slash command still runs as typed.
-        const command = self.input.queuedCommand();
-        if (line[0][0] == '/') try std.testing.expectEqualStrings("/status", command orelse "") else try std.testing.expect(command == null);
-        // The next line is the draft's again.
+        // A slash command runs as typed; other text stays the draft.
+        if (line[0][0] == '/') {
+            try std.testing.expectEqualStrings("/status", self.input.queuedCommand().?);
+            try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        } else {
+            try std.testing.expect(self.input.queuedCommand() == null);
+            try std.testing.expectEqualStrings("a", self.input.composition().bytes);
+            try std.testing.expectEqualStrings(if (change == .none) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.", self.notice.?);
+        }
+        // Esc returns to the choice, which needs fresh input again.
+        try sendKeys(&self, "\x07");
+        try std.testing.expect(screen.actionVisible() and !screen.typing);
         _ = screen.select(self.commandActive());
-        try std.testing.expectEqual(ConsentPolicy.Editor.draft, screen.selected.editor);
-        try sendKeys(&self, "!");
-        try std.testing.expectEqualStrings("kept!", self.input.composition().bytes);
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, screen.selected.row);
+        try std.testing.expect(!screen.consent.acceptsInput());
     };
 }
 
@@ -1848,7 +1785,7 @@ fn pauseApproval(held: *HeldFrontend) !void {
     held.self.dirty = true;
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Approval.paused, held.screen.selected.approval);
-    try std.testing.expectEqual(ConsentPolicy.Editor.draft, held.screen.selected.editor);
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.selected.row);
     try std.testing.expect(held.screen.consent.acceptsInput());
 }
 
@@ -1865,7 +1802,7 @@ fn stepKeys(held: *HeldFrontend, bytes: []const u8) !void {
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, Drained.done);
 }
 
-test "Ctrl-R beside a ready Action refuses its line in every encoding, so the line decides nothing" {
+test "Ctrl-R beside a ready Action ends freshness in every encoding, so the Enter after it decides nothing" {
     for ([_][]const u8{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" }) |ctrl_r| {
         errdefer std.debug.print("ctrl_r={s}\n", .{ctrl_r[1..]});
         const held = try HeldFrontend.create();
@@ -1874,13 +1811,147 @@ test "Ctrl-R beside a ready Action refuses its line in every encoding, so the li
         defer file.close(std.testing.io);
         try held.settle();
         try std.testing.expect(held.screen.consent.acceptsInput());
-        try sendKeys(&held.self, "a");
         try sendKeys(&held.self, ctrl_r);
+        try std.testing.expectEqualStrings("! Action needs a decision; nothing to retry.", held.self.notice.?);
         try sendKeys(&held.self, "\r");
         try std.testing.expect(held.self.submission.view() == null);
         try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
-        try std.testing.expectEqualStrings("! Decision input rejected. Type a or d; pasted text cannot authorize.", held.self.notice.?);
+        try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
     }
+}
+
+test "arrows move the choice only once input is fresh, and Enter decides the option shown" {
+    for ([_]ConsentPolicy.Choice{ .allow_once, .deny }) |choice| {
+        errdefer std.debug.print("choice={s}\n", .{@tagName(choice)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        try std.testing.expect(held.screen.consent.acceptsInput());
+        // Allow once is the default; Right then Left returns to it.
+        try sendKeys(&held.self, "\x1b[C\x1b[D");
+        try std.testing.expectEqual(@as(?ConsentPolicy.Choice, .allow_once), held.screen.consent.selected);
+        if (choice == .deny) try sendKeys(&held.self, "\x1b[C");
+        try std.testing.expect(held.screen.consent.acceptsInput());
+        try sendKeys(&held.self, "\r");
+        try std.testing.expect(!held.screen.consent.active());
+        try std.testing.expect(!held.screen.actionVisible());
+        const decision = held.self.submission.intent.?.decision;
+        try std.testing.expectEqual(@as(u64, 0xa), decision.action);
+        try std.testing.expectEqual(@as(protocol.PermissionDecision, if (choice == .deny) .deny else .allow_once), decision.decision);
+    }
+}
+
+test "an Enter before input is fresh decides nothing, says so and revokes the prompt, so freshness is earned again from a new frame" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    // The frame that reads the whole Action, then the choice's first frame.
+    try held.self.drawFrame();
+    try held.self.drawFrame();
+    try std.testing.expectEqual(ConsentPolicy.Projection{ .row = .selector, .approval = .draining }, held.screen.selected);
+    try std.testing.expect(held.screen.decisionPromptDelivered());
+    // Two Enters in one burst: neither decides.
+    try sendKeys(&held.self, "\r\r");
+    try std.testing.expect(held.self.submission.view() == null);
+    try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+    try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
+    try std.testing.expect(held.screen.stale());
+    try std.testing.expect(!held.screen.decisionPromptDelivered());
+    // Only a new prompt frame and empty input make the choice fresh again.
+    try std.testing.expect(!held.screen.promptCompleted(.empty, false, false));
+    held.self.dirty = true;
+    try held.settle();
+    try std.testing.expect(held.screen.consent.acceptsInput());
+}
+
+test "an arrow before input is fresh moves nothing, says so, revokes the prompt and clears the highlight" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.self.drawFrame();
+    try held.self.drawFrame();
+    try sendKeys(&held.self, "\x1b[C");
+    try std.testing.expectEqual(@as(?ConsentPolicy.Choice, null), held.screen.consent.selected);
+    try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
+    try std.testing.expect(held.screen.stale());
+    try std.testing.expect(!held.screen.decisionPromptDelivered());
+    held.self.dirty = true;
+    try held.settle();
+    try sendKeys(&held.self, "\x1b[C");
+    try std.testing.expectEqual(@as(?ConsentPolicy.Choice, .deny), held.screen.consent.selected);
+}
+
+test "Enters at a newly arrived Action never allow, whatever frames and empty input come between them, until an arrow picks" {
+    // Each word is a run of Enters; a frame and empty input follow every
+    // word but the last, which must still decide nothing.
+    for ([_][]const []const u8{
+        &.{ "\r", "\r" },
+        &.{ "\r\r", "\r" },
+        &.{ "\r", "\r", "\r" },
+        &.{ "\r\r\r", "\r\r", "\r" },
+    }) |words| {
+        errdefer std.debug.print("words={d}\n", .{words.len});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        // The frame that reads the whole Action, then the choice's first frame.
+        try held.self.drawFrame();
+        try held.self.drawFrame();
+        for (words, 0..) |word, at| {
+            if (at != 0) {
+                held.self.dirty = true;
+                try held.settle();
+                try std.testing.expect(held.screen.consent.acceptsInput());
+            }
+            try sendKeys(&held.self, word);
+            try std.testing.expect(held.self.submission.view() == null);
+            try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+            try std.testing.expectEqual(@as(?ConsentPolicy.Choice, null), held.screen.consent.selected);
+            if (at == 0) try std.testing.expectEqualStrings("! Not ready; nothing authorized.", held.self.notice.?);
+        }
+        // Only an arrow at fresh input makes Enter decide again.
+        try held.settle();
+        try sendKeys(&held.self, "\x1b[D\r");
+        try std.testing.expectEqual(protocol.PermissionDecision.allow_once, held.self.submission.intent.?.decision.decision);
+    }
+}
+
+test "a line typed beside one Action keeps the input row when the next Action arrives, so its Enter decides nothing" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const first = try held.adopt(3);
+    defer first.close(std.testing.io);
+    try held.settle();
+    try sendKeys(&held.self, "\x1b[Dx");
+    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
+    // Another client decides the first Action; a second one arrives.
+    held.self.live.work.first_action = null;
+    held.self.withdrawDecided();
+    try std.testing.expect(!held.screen.consent.active());
+    const second = try held.tmp.dir.createFile(std.testing.io, "second", .{ .read = true });
+    defer second.close(std.testing.io);
+    try second.writePositionalAll(std.testing.io, "row 000\n", 0);
+    try held.screen.adopt(std.testing.io, second, 0xb);
+    held.self.live.work.first_action = 0xb;
+    held.self.dirty = true;
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .paused }, held.screen.selected);
+    try sendKeys(&held.self, "\r");
+    try std.testing.expect(held.self.submission.view() == null);
+    try std.testing.expectEqual(@as(?u64, 0xb), held.screen.consent.action);
+    try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
+    try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice. Draft retained.", held.self.notice.?);
+    // Esc ends the line and shows the second Action's choice at Allow once.
+    try sendKeys(&held.self, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
+    try std.testing.expect(held.screen.consent.acceptsInput());
+    try std.testing.expectEqual(@as(?ConsentPolicy.Choice, .allow_once), held.screen.consent.selected);
 }
 
 test "Ctrl-R while approval is paused keeps the draft, recovers nothing and says the Action waits" {
@@ -1917,7 +1988,7 @@ test "an Esc that expires does what an Esc reported whole does, at the Action, f
                 _ = try held.adopt(3);
                 if (place == .paused) try pauseApproval(held) else {
                     try held.settle();
-                    try sendKeys(&held.self, "a");
+                    try sendKeys(&held.self, "\x1b[C");
                 }
             },
         }
@@ -1933,8 +2004,9 @@ test "an Esc that expires does what an Esc reported whole does, at the Action, f
                 try std.testing.expectEqual(place == .choice, held.screen.consent.acceptsInput());
                 try held.settle();
                 try std.testing.expect(held.screen.actionVisible());
-                try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
-                try std.testing.expectEqualStrings(if (place == .choice) "a" else "", held.screen.choiceText());
+                try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
+                // The shown option survives the return.
+                try std.testing.expectEqual(@as(?ConsentPolicy.Choice, if (place == .choice) .deny else .allow_once), held.screen.consent.selected);
                 try std.testing.expectEqualStrings(if (place == .paused) "kept" else "", held.self.input.composition().bytes);
                 try std.testing.expect(held.self.submission.view() == null);
             },
@@ -1996,23 +2068,6 @@ test "each source admits a slash command while another is active as it always di
         try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
         self.input.clear();
     }
-    // The choice runs nothing but exit and page requests meanwhile, and says why.
-    for ([_]struct { bool, []const u8 }{
-        .{ true, "! Command still running. Try again when it finishes." },
-        .{ false, "! Preparing inspection; try again when it finishes." },
-    }) |case| {
-        self.inspection.command_running = case[0];
-        for ([_][]const u8{ "/wait", "/recover 01234567-89ab-4cde-8012-0123456789ab", "/help" }) |text| {
-            self.notice = null;
-            self.choiceCommand(text);
-            try std.testing.expectEqualStrings(case[1], self.notice.?);
-            try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
-        }
-    }
-    self.choiceCommand("/details");
-    try std.testing.expectEqual(@as(?History, .latest), self.transcript.history_requested);
-    self.choiceCommand("/exit");
-    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
 }
 
 test "Esc at the latest view returns to the overview only with nothing to lose or dismiss" {
@@ -2080,8 +2135,9 @@ test "a held ready choice decides nothing after a command queued in the same fra
     try held.settle();
     // Read, prompted and fresh: the decision prompt's frame was delivered and
     // input then drained empty.
-    try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
     try std.testing.expect(held.screen.consent.acceptsInput());
+    // Typing moves to the draft, which runs the command and holds the rest.
     try held.hold("/status\ra\r");
     self.dirty = true;
     _ = try self.draw();
@@ -2117,7 +2173,7 @@ test "a transition inside a held frame leaves its remaining input with the frame
     try std.testing.expect(self.submission.view() == null);
     // The replacement frame selects the choice, which needs fresh input.
     try held.settle();
-    try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.selected.row);
     try std.testing.expectEqualStrings("a", self.input.composition().bytes);
 }
 
