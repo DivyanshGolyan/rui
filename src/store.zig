@@ -9609,7 +9609,7 @@ fn settleCallsForTestingWithFaults(
     }
     if (usage_json) |bytes| {
         const start = source_bytes.len - bytes.len;
-        try metadata.append(.{
+        try metadata.append(&.{
             .tag = .usage,
             .start = start,
             .length = bytes.len,
@@ -13274,9 +13274,10 @@ test "historical accepted assistant output completeness and provenance fence rea
         var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
-        var rejection: output_decode.Rejection = .{};
-        var validated: output_decode.Validated = undefined;
-        try output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, output_decode.testingProviderFailure(), &validated);
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
+        if (interpreted != .accepted) return error.TestUnexpectedResult;
+        const validated = &interpreted.accepted.output;
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");

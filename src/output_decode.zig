@@ -181,8 +181,8 @@ const SliceSource = struct {
 pub const max_evidence_bytes = 256;
 
 pub const Evidence = struct {
-    response_id: protocol.Bounded(max_evidence_bytes) = .{},
-    served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    response_id: protocol.Bounded(max_evidence_bytes),
+    served_model: protocol.Bounded(protocol.max_model_bytes),
 };
 
 pub const Rejection = struct {
@@ -241,12 +241,20 @@ pub const EventData = struct {
         self.* = .{ .io = io, .file = file, .budget = budget };
     }
 
-    pub fn append(self: *EventData, bytes: []const u8) !void {
-        if (!self.budget.allocate(bytes.len)) return error.EventDataScratchExhausted;
+    /// Appends `bytes`, after a newline when `newline`, in one write.
+    pub fn append(self: *EventData, newline: bool, bytes: []const u8) !void {
+        const separator: []const u8 = if (newline) "\n" else "";
+        const total = separator.len + bytes.len;
+        if (!self.budget.allocate(total)) return error.EventDataScratchExhausted;
         // A partial write remains charged until disposal, just like capture.
-        self.charged += bytes.len;
-        self.file.writeStreamingAll(self.io, bytes) catch return error.EventDataWriteFailed;
-        self.length += bytes.len;
+        self.charged += total;
+        var written: usize = 0;
+        while (written < total) {
+            const header = separator[@min(written, separator.len)..];
+            const rest = bytes[written - (separator.len - header.len) ..];
+            written += self.file.writeStreaming(self.io, header, &.{rest}, 1) catch return error.EventDataWriteFailed;
+        }
+        self.length += total;
     }
 
     pub fn seal(self: *EventData) !void {
@@ -309,104 +317,7 @@ pub const AnswerSelection = struct {
 pub const Interpret = struct {
     scratch: codecs.InterpretScratch,
     grammar: Grammar,
-    validated: Validated,
 };
-
-/// The most event data one response's map reaches: the Host's scratch
-/// ceiling (`server_host.scratch_limit_bytes`), which no request budget
-/// exceeds. Mapping it reserves address space only.
-pub const max_event_data_bytes: u64 = 8 * 1024 * 1024 * 1024;
-
-/// Interpret the sealed SSE capture, the first `source_length` bytes of
-/// `source_file`, with `codec`. The Host frames the events: each event's
-/// data is written whole to `event_data`, then given to the codec as a
-/// slice of the event data's read-only map, so an event's data is charged
-/// to the scratch budget before anything its judgement writes. The codec judges the grammar and names
-/// ranges; the Host decodes and hashes them, writes `metadata` from them,
-/// and keeps every rule that compares items with each other, the answer
-/// selection and the completion gate. A failure leaves `rejection` at its
-/// coordinates and `provider_failure` with what a provider error event
-/// said.
-pub fn interpret(
-    storage: *Interpret,
-    codec: protocol.Codec,
-    io: std.Io,
-    source_file: std.Io.File,
-    source_length: u64,
-    metadata: *output_format.OutputMetadataWriter,
-    event_data: *EventData,
-    operation: output_format.ModelOperationKind,
-    rejection: *Rejection,
-    provider_failure: *ProviderFailure,
-    validated: *Validated,
-) !void {
-    provider_failure.clear();
-    rejection.* = .{};
-    const capture = pages.mapReadOnly(io, source_file, source_length) catch |err| return switch (err) {
-        error.FileShorter => error.ShortSealedRead,
-        else => err,
-    };
-    defer pages.unmapReadOnly(capture);
-    // A write to the event data shows through a map made before it.
-    const events = try pages.mapReadOnlyAhead(event_data.file, @min(event_data.budget.limit, max_event_data_bytes));
-    defer pages.unmapReadOnly(events);
-    const grammar = &storage.grammar;
-    grammar.begin(codec, metadata, operation, rejection, provider_failure);
-    var stream = codecs.begin(codec, switch (operation) {
-        .assistant_response => .assistant_response,
-        .compaction => .compaction,
-    });
-    var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
-    // Where the open event's data begins in `event_data`, and its first
-    // byte in the capture.
-    var data: ?u64 = null;
-    var raw_start: u64 = 0;
-    while (position < capture.len) {
-        rejection.* = .{ .byte_offset = position };
-        // SSE has three line endings.
-        const line_start = position;
-        const line_end = std.mem.indexOfAnyPos(u8, capture, position, "\r\n") orelse capture.len;
-        position = line_end;
-        if (position < capture.len) {
-            position += 1;
-            if (capture[line_end] == '\r' and position < capture.len and capture[position] == '\n') position += 1;
-        }
-        const line = capture[line_start..line_end];
-        if (line.len == 0) {
-            if (data) |start| {
-                if (event_data.length == start) return error.EmptySseData;
-                if (event_data.length > events.len) return error.EventDataScratchExhausted;
-                try grammar.event(&stream, &storage.scratch, events[@intCast(start)..@intCast(event_data.length)], start, raw_start);
-                data = null;
-            }
-            continue;
-        }
-        if (std.mem.eql(u8, line, "data") or std.mem.startsWith(u8, line, "data:")) {
-            var skip: usize = @min(line.len, "data:".len);
-            if (line.len > skip and line[skip] == ' ') skip += 1;
-            if (data == null) {
-                data = event_data.length;
-                raw_start = line_start + skip;
-            } else try event_data.append("\n");
-            if (line.len > skip) try event_data.append(line[skip..]);
-        }
-        // Comments and every other field, including colonless fields, carry
-        // no provider output authority. Field names are case-sensitive.
-    }
-    if (data != null) return error.IncompleteSseEvent;
-    if (codecs.finish(&stream)) |reason| return reasonError(reason);
-    try event_data.seal();
-    validated.* = .{
-        .source = event_data.file,
-        .source_length = event_data.length,
-        .item_count = grammar.item_count,
-        .call_count = grammar.call_count,
-        .answer_item_ordinal = grammar.answer.ordinal,
-        .answer_length = grammar.answer.length,
-        .answer_digest = grammar.answer.digest,
-        .evidence = grammar.evidence,
-    };
-}
 
 /// An interpreted response: its accepted output with the model evidence
 /// certificate, or the local code and coordinates it was rejected with.
@@ -437,26 +348,48 @@ pub const ModelObservations = struct {
     alternate: []const u8 = "",
 };
 
-/// Interprets the sealed response and fills `out` with its acceptance or
-/// rejection. It neither closes nor transfers the capture, the metadata or
-/// the event data. Never inlined: the codec's interpreter, which inlines
-/// here, stays out of the engine's frames.
-pub noinline fn interpretResponse(
+/// Interpret the sealed SSE capture, the first `source_length` bytes of
+/// `source_file`, with `codec`, and fill `out` with its acceptance or
+/// rejection. The Host frames the events: each event's data is written
+/// whole to `event_data`, then given to the codec as a slice of the event
+/// data's read-only map, so an event's data is charged to the scratch
+/// budget before anything its judgement writes. The codec judges the
+/// grammar and names ranges; the Host decodes and hashes them, writes
+/// `metadata` from them, and keeps every rule that compares items with each
+/// other, the answer selection and the completion gate. `provider_failure`
+/// keeps what a provider error event said. Neither the capture, the
+/// metadata nor the event data is closed or transferred. Never inlined: the
+/// codec's interpreter, which inlines here, stays out of the engine's
+/// frames.
+pub noinline fn interpret(
     storage: *Interpret,
     codec: protocol.Codec,
     io: std.Io,
-    source: std.Io.File,
+    source_file: std.Io.File,
     source_length: u64,
     metadata: *output_format.OutputMetadataWriter,
     event_data: *EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
-    /// What a provider error event said; the caller saves its report.
     provider_failure: *ProviderFailure,
     out: *Interpretation,
 ) void {
+    out.* = .{ .accepted = .{
+        .output = .{
+            .source = event_data.file,
+            .source_length = 0,
+            .item_count = 0,
+            .call_count = 0,
+            .answer_item_ordinal = null,
+            .answer_length = 0,
+            .answer_digest = @splat(0),
+            .evidence = .{ .response_id = .{ .len = 0 }, .served_model = .{ .len = 0 } },
+        },
+        .model_evidence = .{ .len = 0 },
+    } };
+    const accepted = &out.accepted;
     var rejection: Rejection = .{};
-    interpret(storage, codec, io, source, source_length, metadata, event_data, operation, &rejection, provider_failure, &storage.validated) catch |err| {
+    read(storage, codec, io, source_file, source_length, metadata, event_data, operation, &rejection, provider_failure, &accepted.output) catch |err| {
         out.* = .{
             .rejected = .{
                 .reason = err,
@@ -472,20 +405,99 @@ pub noinline fn interpretResponse(
         };
         return;
     };
-    out.* = .{ .accepted = .{ .output = storage.validated, .model_evidence = .{} } };
     // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
     // each source independently, including absence and disagreement. Never
     // substitute the requested model for reported evidence.
-    const certificate = &out.accepted.model_evidence;
+    const certificate = &accepted.model_evidence;
     certificate.bytes[0] = 1;
     certificate.len = 1;
-    for ([_][]const u8{ out.accepted.output.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
+    for ([_][]const u8{ accepted.output.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
         std.debug.assert(value.len <= protocol.max_model_bytes);
         std.mem.writeInt(u16, certificate.bytes[certificate.len..][0..2], @intCast(value.len), .little);
         certificate.len += 2;
         @memcpy(certificate.bytes[certificate.len..][0..value.len], value);
         certificate.len += value.len;
     }
+}
+
+/// Frames the capture's events and gives each to the grammar, then fills
+/// `validated`, whose evidence the grammar writes. A failure leaves
+/// `rejection` at its coordinates.
+fn read(
+    storage: *Interpret,
+    codec: protocol.Codec,
+    io: std.Io,
+    source_file: std.Io.File,
+    source_length: u64,
+    metadata: *output_format.OutputMetadataWriter,
+    event_data: *EventData,
+    operation: output_format.ModelOperationKind,
+    rejection: *Rejection,
+    provider_failure: *ProviderFailure,
+    validated: *Validated,
+) !void {
+    provider_failure.clear();
+    const capture = pages.mapReadOnly(io, source_file, source_length) catch |err| return switch (err) {
+        error.FileShorter => error.ShortSealedRead,
+        else => err,
+    };
+    defer pages.unmapReadOnly(capture);
+    // Decoded event data is never longer than the capture it comes from,
+    // and a write to it shows through a map made before it.
+    const events = pages.mapReadOnlyAhead(event_data.file, source_length) catch return error.EventDataMapFailed;
+    defer pages.unmapReadOnly(events);
+    const grammar = &storage.grammar;
+    grammar.begin(codec, metadata, operation, rejection, provider_failure, &validated.evidence);
+    var stream = codecs.begin(codec, switch (operation) {
+        .assistant_response => .assistant_response,
+        .compaction => .compaction,
+    });
+    var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
+    // Where the open event's data begins in `event_data`, and its first
+    // byte in the capture.
+    var data: ?u64 = null;
+    var raw_start: u64 = 0;
+    while (position < capture.len) {
+        rejection.* = .{ .byte_offset = position };
+        // SSE has three line endings.
+        const line_start = position;
+        const line_end = std.mem.indexOfAnyPos(u8, capture, position, "\r\n") orelse capture.len;
+        position = line_end;
+        if (position < capture.len) {
+            position += 1;
+            if (capture[line_end] == '\r' and position < capture.len and capture[position] == '\n') position += 1;
+        }
+        const line = capture[line_start..line_end];
+        if (line.len == 0) {
+            if (data) |start| {
+                if (event_data.length == start) return error.EmptySseData;
+                try grammar.event(&stream, &storage.scratch, events[@intCast(start)..@intCast(event_data.length)], start, raw_start);
+                data = null;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, line, "data") or std.mem.startsWith(u8, line, "data:")) {
+            var skip: usize = @min(line.len, "data:".len);
+            if (line.len > skip and line[skip] == ' ') skip += 1;
+            const continued = data != null;
+            if (!continued) {
+                data = event_data.length;
+                raw_start = line_start + skip;
+            }
+            if (continued or line.len > skip) try event_data.append(continued, line[skip..]);
+        }
+        // Comments and every other field, including colonless fields, carry
+        // no provider output authority. Field names are case-sensitive.
+    }
+    if (data != null) return error.IncompleteSseEvent;
+    if (codecs.finish(&stream)) |reason| return reasonError(reason);
+    try event_data.seal();
+    validated.source_length = event_data.length;
+    validated.item_count = grammar.item_count;
+    validated.call_count = grammar.call_count;
+    validated.answer_item_ordinal = grammar.answer.ordinal;
+    validated.answer_length = grammar.answer.length;
+    validated.answer_digest = grammar.answer.digest;
 }
 
 /// The saved failure code of a rejected response.
@@ -495,7 +507,7 @@ pub fn failureCode(err: anyerror) []const u8 {
         error.TemporaryProviderFailure => "provider_temporary_error",
         error.ProviderConnectionClosed => "provider_transport_failure",
         error.EventDataScratchExhausted => "response_data_exhausted",
-        error.EventDataWriteFailed, error.EventDataSealFailed => "response_data_failed",
+        error.EventDataWriteFailed, error.EventDataSealFailed, error.EventDataMapFailed => "response_data_failed",
         error.UnsupportedProviderOutput,
         error.UnsupportedItemStatus,
         error.UnsupportedAsyncCall,
@@ -521,12 +533,6 @@ pub fn failureCode(err: anyerror) []const u8 {
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// Writes one record. Never inlined: each inlined copy of the writer's
-/// encoding would keep its own buffer in the grammar's frames.
-noinline fn put(metadata: *output_format.OutputMetadataWriter, record: *const output_format.OutputMetadataRecord) !void {
-    try metadata.append(record.*);
-}
-
 /// One provider bag: its members' raw bytes joined by commas, `m1,m2,...`,
 /// hashed as they are added.
 const Bag = struct {
@@ -547,13 +553,13 @@ const Bag = struct {
         self.hash.update(bytesOf(data, member));
         self.length = try std.math.add(u64, self.length, member.length);
         self.members += 1;
-        try put(metadata, &.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = base + member.start, .length = member.length, .scope = self.scope });
+        try metadata.append(&.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = base + member.start, .length = member.length, .scope = self.scope });
     }
 
     /// Records the trailer, even for an empty bag: every item and part has
     /// one, so a missing bag is damage rather than an absence.
     noinline fn close(self: *Bag, metadata: *output_format.OutputMetadataWriter, ordinal: u64, kind: output_format.OutputItemKind) !void {
-        try put(metadata, &.{ .tag = .extras, .kind = kind, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = self.length, .content_digest = self.hash.finalResult(), .scope = self.scope });
+        try metadata.append(&.{ .tag = .extras, .kind = kind, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = self.length, .content_digest = self.hash.finalResult(), .scope = self.scope });
     }
 };
 
@@ -579,11 +585,8 @@ const Decoded = struct {
     fn of(data: []const u8, range: codec_abi.Range, also: ?*Sha256, kept: ?*protocol.Bounded(max_evidence_bytes)) Decoded {
         var sink: Sink = .{ .hash = protocol.contentHasher(), .also = also, .kept = kept, .length = 0, .non_whitespace = false };
         if (kept) |bounded| bounded.len = 0;
-        var decoder: json.StringDecoder = undefined;
-        decoder.reset();
         // The codec's reader judged these bytes as this decoder does.
-        decoder.pushSlice(bytesOf(data, range), &sink) catch unreachable;
-        std.debug.assert(!decoder.pending());
+        json.decodeContents(bytesOf(data, range), &sink);
         return .{ .length = sink.length, .digest = sink.hash.finalResult(), .non_whitespace = sink.non_whitespace };
     }
 
@@ -627,7 +630,8 @@ const Grammar = struct {
     call_count: u64,
     compaction_count: u64,
     answer: AnswerSelection,
-    evidence: Evidence,
+    /// The caller's, which the completed response fills.
+    evidence: *Evidence,
     /// The announced item, until its done event.
     added: ?struct { kind: output_format.OutputItemKind, id_digest: [32]u8 },
     /// Where the current event's data begins in the event data.
@@ -641,7 +645,7 @@ const Grammar = struct {
     code: ReportPart,
     message: ReportPart,
 
-    fn begin(self: *Grammar, codec: protocol.Codec, metadata: *output_format.OutputMetadataWriter, operation: output_format.ModelOperationKind, rejection: *Rejection, provider_failure: *ProviderFailure) void {
+    fn begin(self: *Grammar, codec: protocol.Codec, metadata: *output_format.OutputMetadataWriter, operation: output_format.ModelOperationKind, rejection: *Rejection, provider_failure: *ProviderFailure, evidence: *Evidence) void {
         self.codec = codec;
         self.metadata = metadata;
         self.operation = operation;
@@ -651,8 +655,7 @@ const Grammar = struct {
         self.call_count = 0;
         self.compaction_count = 0;
         self.answer = .{ .digest = protocol.contentDigest("") };
-        self.evidence.response_id.len = 0;
-        self.evidence.served_model.len = 0;
+        self.evidence = evidence;
         self.added = null;
         self.base = 0;
     }
@@ -709,7 +712,7 @@ const Grammar = struct {
                     .part_kind = @fromBackingInt(@backingInt(part.kind)),
                     .part_array = @fromBackingInt(@backingInt(part.array)),
                 };
-                try put(metadata, &record);
+                try metadata.append(&record);
                 part_bag.reset(.part);
                 in_part = true;
             },
@@ -725,11 +728,11 @@ const Grammar = struct {
             .function_call => for ([_]output_format.OutputRecordTag{ .name, .call_id, .arguments }, item.call) |tag, range| {
                 const field = Decoded.of(data, range, null, null);
                 record = .{ .tag = tag, .kind = .function_call, .ordinal = ordinal, .start = self.base + range.start, .length = range.length, .decoded_length = field.length, .content_digest = field.digest };
-                try put(metadata, &record);
+                try metadata.append(&record);
             },
             .message => {
                 record = .{ .tag = .text, .kind = .message, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = text_length, .content_digest = text_digest };
-                try put(metadata, &record);
+                try metadata.append(&record);
             },
             .reasoning, .compaction => {},
         }
@@ -756,7 +759,7 @@ const Grammar = struct {
             .omit_reasoning_text = item.omit_reasoning_text,
             .phase = @fromBackingInt(@backingInt(item.phase)),
         };
-        try put(metadata, &record);
+        try metadata.append(&record);
         self.item_count += 1;
     }
 
@@ -774,14 +777,16 @@ const Grammar = struct {
         _ = Decoded.of(data, completed.response_id, null, &self.evidence.response_id);
         if (completed.served_model) |model| _ = Decoded.of(data, model, null, &self.evidence.served_model);
         const metadata = self.metadata;
-        var reader = try output_format.OutputMetadataReader.init(metadata.io, metadata.file, self.item_count);
+        const written = try pages.mapReadOnly(metadata.io, metadata.file, metadata.charged);
+        defer pages.unmapReadOnly(written);
+        var records: output_format.OutputMetadataRecords = .{ .bytes = written };
         var cursor = completed.output;
         var index: u64 = 0;
         while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
             // One item of the output list must be the streamed item at its
             // index, byte for byte.
             .terminal => |*terminal| {
-                if (!try streamedAs(&reader, data, terminal, index)) return error.ContradictoryProviderOutput;
+                if (!try streamedAs(&records, data, terminal, index)) return error.ContradictoryProviderOutput;
                 index += 1;
             },
             .terminal_failed => |reason| return reasonError(reason),
@@ -790,11 +795,11 @@ const Grammar = struct {
         // The managed stream can omit the repeated items from
         // response.completed. Any nonempty terminal list must still match
         // every streamed done item.
-        if (index != 0 and (index != self.item_count or try streamedAfter(&reader))) return error.ContradictoryProviderOutput;
+        if (index != 0 and (index != self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
         switch (completed.usage) {
             .absent => {},
             .failed => |reason| return reasonError(reason),
-            .report => |report| try put(metadata, &.{
+            .report => |report| try metadata.append(&.{
                 .tag = .usage,
                 .start = self.base + report.whole.start,
                 .length = report.whole.length,
@@ -806,16 +811,12 @@ const Grammar = struct {
     }
 
     /// Whether the next streamed item is the output list's item at `index`,
-    /// byte for byte. Never inlined, like `put`.
-    noinline fn streamedAs(reader: *output_format.OutputMetadataReader, data: []const u8, terminal: *const @FieldType(codec_abi.Member, "terminal"), index: u64) !bool {
-        const record = try reader.nextItem() orelse return false;
+    /// byte for byte.
+    fn streamedAs(records: *output_format.OutputMetadataRecords, data: []const u8, terminal: *const @FieldType(codec_abi.Member, "terminal"), index: u64) !bool {
+        const record = try records.nextItem() orelse return false;
         return record.ordinal == index and record.kind == outputKind(terminal.kind) and
             std.mem.eql(u8, &record.id_digest, &Decoded.of(data, terminal.id, null, null).digest) and
             std.mem.eql(u8, &record.content_digest, &digestOf(data, terminal.whole));
-    }
-
-    noinline fn streamedAfter(reader: *output_format.OutputMetadataReader) !bool {
-        return try reader.nextItem() != null;
     }
 
     /// The codec's verdict on the event, with the provider's report when it
@@ -1012,7 +1013,8 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     var records: output_format.OutputMetadataWriter = .{ .io = io, .file = file, .budget = .{ .used = &used, .limit = std.math.maxInt(u64) } };
     var rejection: Rejection = .{};
     const grammar = &testing_interpret.grammar;
-    grammar.begin(pinned, &records, operation, &rejection, testingProviderFailure());
+    var evidence: Evidence = .{ .response_id = .{ .len = 0 }, .served_model = .{ .len = 0 } };
+    grammar.begin(pinned, &records, operation, &rejection, testingProviderFailure(), &evidence);
     grammar.item_count = ordinal;
     var stream = codecs.begin(pinned, switch (operation) {
         .assistant_response => .assistant_response,
@@ -1027,7 +1029,7 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
             .member, .part, .name, .call_id, .arguments, .item => moved.start = record.start - testing_item_event.len + start,
             else => {},
         }
-        try metadata.append(moved);
+        try metadata.append(&moved);
         if (record.tag == .item) return moved;
     }
     unreachable;
@@ -1053,19 +1055,17 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
     };
 }
 
-fn validate(
-    io: std.Io,
-    source: std.Io.File,
-    source_length: u64,
-    metadata: *output_format.OutputMetadataWriter,
-    event_data: *EventData,
-    operation: output_format.ModelOperationKind,
-    rejection: *Rejection,
-    provider_failure: *ProviderFailure,
-) !Validated {
-    var validated: Validated = undefined;
-    try interpret(&testing_interpret, pinned, io, source, source_length, metadata, event_data, operation, rejection, provider_failure, &validated);
-    return validated;
+/// Tests' interpretation, the last one's.
+var testing_interpretation: Interpretation = undefined;
+
+/// The accepted output, or the rejection's reason; `testing_interpretation`
+/// keeps its coordinates.
+fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, operation: output_format.ModelOperationKind) anyerror!Validated {
+    interpret(&testing_interpret, pinned, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
+    return switch (testing_interpretation) {
+        .accepted => |*accepted| accepted.output,
+        .rejected => |*rejected| rejected.reason,
+    };
 }
 
 fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !struct { file: std.Io.File } {
@@ -1075,65 +1075,63 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !struct { file: st
     return .{ .file = file };
 }
 
-const replay_cases = [_]struct { item: []const u8, supported: bool, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false, import: ?anyerror = null }{
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":{\"nested\":[null,true]}}", .supported = true },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .supported = false, .import = error.ContinuationUnavailable },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":null}", .supported = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":null}", .supported = false, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"not reasoning\"}]}", .supported = false, .import = error.UnsupportedReasoningBlock },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"refusal\",\"refusal\":\"not a summary\"}]}", .supported = false, .import = error.UnsupportedReasoningBlock },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical\"}", .supported = true, .operation = .compaction },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .supported = false, .operation = .compaction, .import = error.ContinuationUnavailable },
-    .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .supported = false, .import = error.UnsupportedItemType },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = true },
-    .{ .item = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}", .supported = true },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":\"partial_answers\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = false, .import = error.UnsupportedMessagePhase },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"ok\"}]}", .supported = false, .import = error.UnsupportedContentBlock },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"caller\":{\"type\":\"future\"}}", .supported = false, .import = error.UnsupportedCaller },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"async\":17}", .supported = false, .import = error.InvalidJsonLiteral },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"in_progress\",\"encrypted_content\":\"opaque\"}", .supported = false, .import = error.UnsupportedItemStatus },
-    .{ .item = "{\"content\":[{\"text\":\"ok\",\"annotations\":[{\"url\":\"https://example.com\",\"type\":\"url_citation\"}],\"type\":\"output_text\"}],\"role\":\"assistant\",\"phase\":\"final_answer\",\"id\":\"m\",\"type\":\"message\"}", .supported = true },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"file_citation\"}]}]}", .supported = false, .import = error.UnsupportedAnnotation },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[]}", .supported = false, .import = error.MalformedProviderOutput },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"user\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = false, .import = error.UnsupportedMessageRole },
-    .{ .item = "{\"summary\":[{\"annotations\":false,\"text\":\"summary\",\"type\":\"summary_text\"}],\"content\":[{\"text\":\"private\",\"type\":\"reasoning_text\"}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true, .omits_reasoning_text = true },
-    .{ .item = "{\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true, .omits_reasoning_text = true },
-    .{ .item = "{\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"text\":null}", .supported = false, .import = error.UnsupportedReasoningText },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":null}}", .supported = false, .operation = .compaction, .import = error.UnsupportedMetadataAuthority },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"future\":{\"cell_id\":null}}}", .supported = true, .operation = .compaction },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"\",\"caller\":null,\"async\":null,\"namespace\":\"\",\"encrypted_function_args\":null}", .supported = true },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":true}", .supported = false, .import = error.UnsupportedAsyncCall },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":\"program\"}", .supported = false, .import = error.UnsupportedCallControl },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"encrypted_function_args\":\"opaque\"}", .supported = false, .import = error.UnsupportedCallControl },
+const replay_cases = [_]struct { item: []const u8, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false, import: ?anyerror = null }{
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":{\"nested\":[null,true]}}" },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .import = error.ContinuationUnavailable },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":null}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":null}", .import = error.UnexpectedJsonDelimiter },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"not reasoning\"}]}", .import = error.UnsupportedReasoningBlock },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"refusal\",\"refusal\":\"not a summary\"}]}", .import = error.UnsupportedReasoningBlock },
+    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical\"}", .operation = .compaction },
+    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .operation = .compaction, .import = error.ContinuationUnavailable },
+    .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .import = error.UnsupportedItemType },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}" },
+    .{ .item = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}" },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":\"partial_answers\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .import = error.UnsupportedMessagePhase },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"ok\"}]}", .import = error.UnsupportedContentBlock },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"caller\":{\"type\":\"future\"}}", .import = error.UnsupportedCaller },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"async\":17}", .import = error.InvalidJsonLiteral },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"in_progress\",\"encrypted_content\":\"opaque\"}", .import = error.UnsupportedItemStatus },
+    .{ .item = "{\"content\":[{\"text\":\"ok\",\"annotations\":[{\"url\":\"https://example.com\",\"type\":\"url_citation\"}],\"type\":\"output_text\"}],\"role\":\"assistant\",\"phase\":\"final_answer\",\"id\":\"m\",\"type\":\"message\"}" },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"file_citation\"}]}]}", .import = error.UnsupportedAnnotation },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[]}", .import = error.MalformedProviderOutput },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"user\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .import = error.UnsupportedMessageRole },
+    .{ .item = "{\"summary\":[{\"annotations\":false,\"text\":\"summary\",\"type\":\"summary_text\"}],\"content\":[{\"text\":\"private\",\"type\":\"reasoning_text\"}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .omits_reasoning_text = true },
+    .{ .item = "{\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .omits_reasoning_text = true },
+    .{ .item = "{\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}" },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"text\":null}", .import = error.UnsupportedReasoningText },
+    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":null}}", .operation = .compaction, .import = error.UnsupportedMetadataAuthority },
+    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"future\":{\"cell_id\":null}}}", .operation = .compaction },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"\",\"caller\":null,\"async\":null,\"namespace\":\"\",\"encrypted_function_args\":null}" },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":true}", .import = error.UnsupportedAsyncCall },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":\"program\"}", .import = error.UnsupportedCallControl },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"encrypted_function_args\":\"opaque\"}", .import = error.UnsupportedCallControl },
     // A duplicate the summary reading never consumes stays open.
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .supported = false, .import = error.UnsupportedReasoningBlock },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .import = error.UnsupportedReasoningBlock },
 };
 
 test "the item grammar rejects unsupported meaning and preserves open fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for (replay_cases) |case| {
-        const imported: ?anyerror = if (importTestingItem(&tmp, case.item, case.operation)) |_| null else |err| err;
-        try std.testing.expectEqual(case.supported, imported == null);
-        try std.testing.expectEqual(case.import, imported);
-    }
+    inline for (.{ replay_cases, agreement_cases }) |cases| for (cases) |case| {
+        if (importTestingItem(&tmp, case.item, case.operation)) |imported| {
+            try std.testing.expectEqual(@as(?anyerror, null), case.import);
+            try std.testing.expectEqual(case.omits_reasoning_text, imported.first_item.omit_reasoning_text);
+        } else |err| try std.testing.expectEqual(case.import, @as(?anyerror, err));
+    };
 }
 
 const replay_failure_cases = [_]struct { item: []const u8, operation: output_format.ModelOperationKind = .assistant_response, import: anyerror }{
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"id\":\"s\",\"encrypted_content\":\"opaque\"}", .import = error.DuplicateJsonField },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .operation = .compaction, .import = error.UnsupportedItemStatus },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .import = error.DuplicateJsonField },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .import = error.DuplicateJsonField },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .import = error.UnsupportedItemStatus },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}]}", .import = error.UnsupportedItemStatus },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .import = error.UnsupportedContentBlock },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .import = error.DuplicateJsonField },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .import = error.UnsupportedReasoningBlock },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .import = error.DuplicateJsonField },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"future_text\"},{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .import = error.UnsupportedReasoningBlock },
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .import = error.DuplicateJsonField },
     .{ .item = "{\"type\":\"future\",\"id\":\"r\",\"open\":[true,]}", .import = error.InvalidJsonValue },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .import = error.InvalidJsonUtf8 },
 };
 
 test "the item grammar refuses consumed duplicates and syntax" {
@@ -1160,46 +1158,34 @@ fn importTestingItem(tmp: *std.testing.TmpDir, item: []const u8, operation: outp
 
 const long_type_item = "{\"type\":\"" ++ @as([max_evidence_bytes + 1]u8, @splat('m')) ++ "\",\"id\":\"m\"}";
 
-/// Shapes the replay tables leave out, each judged by both entry points.
-const agreement_cases = [_]struct { item: []const u8, compatible: bool, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false, import: ?anyerror = null }{
+/// Shapes the replay table leaves out.
+const agreement_cases = [_]struct { item: []const u8, operation: output_format.ModelOperationKind = .assistant_response, omits_reasoning_text: bool = false, import: ?anyerror = null }{
     // Another kind leaves `content` open, even duplicated.
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"content\":1,\"content\":2}", .compatible = true },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", .compatible = true, .omits_reasoning_text = true },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":\"direct\"}", .compatible = false, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{}}", .compatible = false, .import = error.UnsupportedCaller },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":7}}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":\"false\"}", .compatible = false, .import = error.InvalidJsonLiteral },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":17}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .compatible = false, .import = error.EmptyProviderIdentity },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"arguments\":\"{}\"}", .compatible = false, .import = error.MissingProviderField },
-    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":null}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"message\",\"id\":\"\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .compatible = false, .import = error.EmptyProviderIdentity },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":null,\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":42,\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":{}}", .compatible = false, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\"}", .compatible = false, .import = error.MissingProviderField },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[\"ok\"]}", .compatible = false, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":{}}]}", .compatible = false, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{}]}]}", .compatible = false, .import = error.MissingProviderField },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"}]}", .compatible = false, .import = error.MissingProviderField },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":null}]}", .compatible = false, .import = error.ExpectedJsonString },
-    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"no\",\"text\":1,\"text\":2}]}", .compatible = true },
-    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"text\":\"untyped\"}]}", .compatible = false, .import = error.MissingProviderField },
-    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":[]}", .compatible = false, .operation = .compaction, .import = error.UnexpectedJsonDelimiter },
-    .{ .item = long_type_item, .compatible = false, .import = error.ProviderValueTooLong },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"content\":1,\"content\":2}" },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}", .omits_reasoning_text = true },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":\"direct\"}", .import = error.UnexpectedJsonDelimiter },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{}}", .import = error.UnsupportedCaller },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"caller\":{\"type\":7}}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":\"false\"}", .import = error.InvalidJsonLiteral },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":17}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"\",\"call_id\":\"c\",\"arguments\":\"{}\"}", .import = error.EmptyProviderIdentity },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"arguments\":\"{}\"}", .import = error.MissingProviderField },
+    .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":null}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"message\",\"id\":\"\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .import = error.EmptyProviderIdentity },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":null,\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":42,\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":{}}", .import = error.UnexpectedJsonDelimiter },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\"}", .import = error.MissingProviderField },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[\"ok\"]}", .import = error.UnexpectedJsonDelimiter },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":{}}]}", .import = error.UnexpectedJsonDelimiter },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{}]}]}", .import = error.MissingProviderField },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"}]}", .import = error.MissingProviderField },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":null}]}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"no\",\"text\":1,\"text\":2}]}" },
+    .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"text\":\"untyped\"}]}", .import = error.MissingProviderField },
+    .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":[]}", .operation = .compaction, .import = error.UnexpectedJsonDelimiter },
+    .{ .item = long_type_item, .import = error.ProviderValueTooLong },
 };
-
-test "import accepts exactly the items replay accepts and names the same broken rule" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    inline for (.{ replay_cases, agreement_cases }) |cases| for (cases) |case| {
-        if (importTestingItem(&tmp, case.item, case.operation)) |imported| {
-            try std.testing.expectEqual(@as(?anyerror, null), case.import);
-            try std.testing.expectEqual(case.omits_reasoning_text, imported.first_item.omit_reasoning_text);
-        } else |err| try std.testing.expectEqual(case.import, @as(?anyerror, err));
-    };
-    for (agreement_cases) |case| try std.testing.expectEqual(case.compatible, case.import == null);
-}
 
 test "import names the first rule broken in lookup order" {
     const cases = [_]struct {
@@ -1232,21 +1218,7 @@ test "import names the first rule broken in lookup order" {
     }
 }
 
-test "the item grammar streams opaque windows and preserves syntax failures" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const prefix = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"";
-    const suffix = "\",\"future\":[true,null]}";
-    const window: [protocol.content_window_bytes]u8 = @splat('x');
-    const item = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, &window, &window, &window, suffix });
-    defer std.testing.allocator.free(item);
-    _ = try importTestingItem(&tmp, item, .assistant_response);
-
-    const invalid = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}";
-    try std.testing.expectError(error.InvalidJsonUtf8, importTestingItem(&tmp, invalid, .assistant_response));
-}
-
-test "long strings decode and locate exactly across read windows" {
+test "long escaped strings decode and locate exactly" {
     // Long plain runs broken by escapes, an escaped quote and multibyte text,
     // in a key, in the call's own strings and in an open field.
     var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -1319,11 +1291,6 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
 }
 
 fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
-    var rejection: Rejection = .{};
-    return validateTestingRejection(tmp, bytes, metadata_limit, operation, &rejection);
-}
-
-fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind, rejection: *Rejection) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1347,7 +1314,7 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var event_data: EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingProviderFailure());
+    const validated = try validate(source, bytes.len, &metadata, &event_data, operation);
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     var result: TestingValidation = undefined;
@@ -1548,8 +1515,8 @@ test "SSE multiline data inserts exact newlines into retained items" {
     try std.testing.expectError(error.InvalidJsonString, validateTestingSse(&tmp, "data: {\"type\":\"future.\ndata: notice\"}\n\n", 4096));
     try std.testing.expectError(error.UnexpectedJsonDelimiter, validateTestingSse(&tmp, "data: [DO\ndata: NE]\n\n", 4096));
     const prefix = ": raw-only prefix\nfuture: ignored\ndata: {\"type\":\"notice\"}\n\n";
-    var rejection: Rejection = .{};
-    try std.testing.expectError(error.MissingProviderField, validateTestingRejection(&tmp, prefix ++ "data: {\"type\":\"response.output_item.done\",\ndata: \"output_index\":0}\n\n", 4096, .assistant_response, &rejection));
+    try std.testing.expectError(error.MissingProviderField, validateTestingSse(&tmp, prefix ++ "data: {\"type\":\"response.output_item.done\",\ndata: \"output_index\":0}\n\n", 4096));
+    const rejection = testing_interpretation.rejected.location;
     try std.testing.expectEqual(prefix.len + "data: ".len, rejection.byte_offset);
     try std.testing.expectEqual(.item, rejection.stage);
 }
@@ -1577,15 +1544,14 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try data.init(std.testing.io, root, "response-9-1.tmp", budget, false, &retained);
         try std.testing.expectEqual(baseline + 2, (try descriptors.observe(std.testing.io)).open_descriptors);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
-        var rejection: Rejection = .{};
         if (shortfall == 0) {
-            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure());
+            const result = try validate(source, raw.len, &metadata, &data, .assistant_response);
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure()));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
             try std.testing.expectEqual(raw.len + done.len + 6 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -1609,11 +1575,9 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
 }
 
 test "an event's data is charged whole before its metadata from a shared budget" {
-    // A message the grammar writes records for, then a field it ignores
-    // that spans several write windows: the event's data fits the shared
-    // budget, its metadata does not.
-    const padding: [3 * protocol.content_window_bytes]u8 = @splat('p');
-    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"padding\":\"" ++ padding ++ "\"}";
+    // A message the grammar writes records for, then a field it ignores:
+    // the event's data fits the shared budget, its metadata does not.
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"padding\":\"p\"}";
     const raw = "data: " ++ done ++ "\n\n";
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1630,10 +1594,9 @@ test "an event's data is charged whole before its metadata from a shared budget"
     var data: EventData = undefined;
     try data.init(std.testing.io, root, "data", budget, false, &retained);
     defer data.deinit();
-    var rejection: Rejection = .{};
-    try std.testing.expectError(error.MetadataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure()));
+    try std.testing.expectError(error.MetadataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
     try std.testing.expectEqual(@as(u64, done.len), data.length);
-    try std.testing.expectEqual(.item, rejection.stage);
+    try std.testing.expectEqual(.item, testing_interpretation.rejected.location.stage);
 }
 
 test "a 4 MiB reasoning item interprets whole as one event" {
@@ -1799,8 +1762,8 @@ test "completion gate saves which requirement failed at the completed event" {
     for (cases) |case| {
         const sse = try std.testing.allocator.print("{s}data: {s}\n\n", .{ case[2], completed });
         defer std.testing.allocator.free(sse);
-        var rejection: Rejection = .{};
-        try std.testing.expectError(case[0], validateTestingRejection(&tmp, sse, 4096, case[1], &rejection));
+        try std.testing.expectError(case[0], validateTestingOperation(&tmp, sse, 4096, case[1]));
+        const rejection = testing_interpretation.rejected.location;
         try std.testing.expectEqual(.response, rejection.stage);
         try std.testing.expectEqual(@as(u64, std.mem.indexOf(u8, sse, completed).?), rejection.byte_offset);
         try std.testing.expectEqual(@as(?u64, null), rejection.output_index);
@@ -1912,12 +1875,10 @@ test "provider proposal identity uses decoded content domain" {
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("p-é\n"), &accepted.first_item.id_digest);
 }
 
-test "provider reasoning strings preserve raw items across evidence and file window boundaries" {
+test "provider reasoning strings preserve raw items" {
     const values = .{
-        &@as([255]u8, @splat('a')),
-        &@as([256]u8, @splat('b')),
-        &@as([257]u8, @splat('c')),
-        @as([8192 * 6]u8, @bitCast(@as([8192][6]u8, @splat("\\u0041".*)))) ++ "\\u00e9\\u4e2d\\uD83D\\uDE42",
+        "plain",
+        @as([64 * 6]u8, @bitCast(@as([64][6]u8, @splat("\\u0041".*)))) ++ "\\u00e9\\u4e2d\\uD83D\\uDE42",
     };
     inline for (values) |value| {
         const reasoning = try std.testing.allocator.print(
@@ -1942,8 +1903,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
         var data: EventData = undefined;
         try data.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
-        var rejection: Rejection = .{};
-        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure());
+        const accepted = try validate(source.file, sse.len, &metadata, &data, .assistant_response);
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
@@ -2202,6 +2162,23 @@ test "metadata notification is not output or completion authority" {
     try std.testing.expectError(error.InvalidJsonValue, validateTestingSse(&tmp, "data: {\"type\":\"future.notice\",\"future\":!}\n\n" ++ done ++ terminal, 4096));
 }
 
+test "escaped envelope keys name their fields and repeated unknown keys stay unread" {
+    const item = "{\"type\":\"message\",\"id\":\"m\",\"r\\u006fle\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"te\\u0078t\":\"ok\"}]}";
+    const done = "data: {\"ty\\u0070e\":\"response.output_item.done\",\"output_\\u0069ndex\":0,\"it\\u0065m\":" ++ item ++ ",\"x\":1,\"x\":2}\n\n";
+    const completed = "data: {\"type\":\"response.completed\",\"resp\\u006fnse\":{\"id\":\"r\",\"st\\u0061tus\":\"completed\",\"output\":[],\"x\":1,\"x\":2},\"x\":1,\"x\":2}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingSse(&tmp, done ++ completed, 4096);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+    try std.testing.expectEqual(protocol.contentDigest("ok"), accepted.output.answer_digest);
+    try std.testing.expectEqual(protocol.contentDigest(item), accepted.first_item.content_digest);
+    // Item, part text, part bag trailer, item bag `id` and its trailer,
+    // message text: the escaped role is Rui's, not the bag's.
+    try std.testing.expectEqual(@as(u64, 6 * 104), accepted.metadata_bytes);
+    // An escaped spelling of a field the envelope reads is that field again.
+    try std.testing.expectError(error.DuplicateJsonField, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.completed\",\"ty\\u0070e\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n", 4096));
+}
+
 test "Bash proposal metadata growth is linear and disk-backed" {
     const action_count = 1_000;
     var bytes: [1024 * 1024]u8 = undefined;
@@ -2275,23 +2252,18 @@ test "provider authority metadata rejects every supported item" {
     }
 }
 
-test "fuzz provider decoded answers and rejection across file windows" {
+test "fuzz provider decoded answers and rejection" {
     try std.testing.fuzz({}, fuzzAnswer, .{ .corpus = &.{
-        "\xfd\x0f\x00\x00\x00\x00\x00\x00",
-        "\xfe\x0f\x00\x00\x00\x00\x00\x00",
-        "\xff\x0f\x00\x00\x00\x00\x00\x00",
-        "\x00\x10\x00\x00\x00\x00\x00\x00",
-        "\xff\x1f\x00\x00\x00\x00\x00\x00",
+        "\x00\x00\x00\x00",
+        "\x10\x41\x00\x00\x00\xe9\x00\x00\x00\x00\xd8\x00\x00",
     } });
 }
 
 fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
-    var text_buffer: [2 * protocol.content_window_bytes + 128]u8 = undefined;
+    var text_buffer: [128]u8 = undefined;
     var text = std.Io.Writer.fixed(&text_buffer);
-    const padding = smith.valueRangeAtMost(u16, 0, 2 * protocol.content_window_bytes);
-    try text.splatByteAll('p', padding);
-    // Always exercise controls, multibyte UTF-8 and surrogate-pair escaping;
-    // generated scalars vary their positions around the file-window boundary.
+    // Always exercise controls, multibyte UTF-8 and surrogate-pair escaping
+    // beside generated scalars.
     try text.writeAll("\x00\"\n\\€𐀀");
     const count = smith.valueRangeAtMost(u8, 0, 16);
     for (0..count) |_| {
@@ -2303,13 +2275,13 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
     }
     const expected_digest = protocol.contentDigest(text.buffered());
     inline for (.{ false, true }) |escape_unicode| {
-        var item_buffer: [2 * protocol.content_window_bytes + 512]u8 = undefined;
+        var item_buffer: [512]u8 = undefined;
         var item = std.Io.Writer.fixed(&item_buffer);
         try item.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
         try std.json.Stringify.value(text.buffered(), .{ .escape_unicode = escape_unicode }, &item);
         try item.writeAll("}]}");
 
-        var stream_buffer: [2 * (2 * protocol.content_window_bytes + 512) + 512]u8 = undefined;
+        var stream_buffer: [3 * 512]u8 = undefined;
         var stream = std.Io.Writer.fixed(&stream_buffer);
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
             "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n", .{ item.buffered(), item.buffered() });
@@ -2326,44 +2298,4 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
         try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
     }
-}
-
-test "the codec's JSON reader names each syntax error as validation did" {
-    // The digest of each document's error name, or `ok`, one per line, as
-    // validation's own parser named them before the codec's reader
-    // replaced it.
-    const expected = "76669bb7f8a5561499c529d7bf886895e7e4371f76d2820a7d06cf53e08b73f0";
-    const Names = struct {
-        hash: Sha256 = protocol.contentHasher(),
-
-        fn add(self: *@This(), document: []const u8) void {
-            const Ignored = struct {
-                pub fn key(_: *@This(), _: *const json.Reader, _: u8) void {}
-                pub fn begin(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
-                pub fn end(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
-            };
-            var ignored: Ignored = .{};
-            var reader: json.Reader = undefined;
-            self.hash.update(if (reader.read(document, &ignored)) |_| "ok" else |err| @errorName(err));
-            self.hash.update("\n");
-        }
-    };
-    var names: Names = .{};
-    const sample = "{\"type\":\"x\", \"a\":[1,-2.5e+3,0,true,null,{\"b\":\"\\u00e9\\n\xc3\xa9\\ud83d\\ude00\"}],\"c\":{}}";
-    // Every prefix, and every byte replaced by each byte the grammar
-    // treats apart.
-    for (0..sample.len + 1) |cut| names.add(sample[0..cut]);
-    const alphabet = "{}[]:,\"\\ 0-.eE+tfnux\x01\x7f\xc3\xe2\xf0\xff";
-    var document: [sample.len]u8 = undefined;
-    for (0..sample.len) |index| for (alphabet) |byte| {
-        document = sample.*;
-        document[index] = byte;
-        names.add(&document);
-    };
-    const open = "{\"a\":" ++ @as([protocol.max_json_depth]u8, @splat('['));
-    const close: [protocol.max_json_depth]u8 = @splat(']');
-    for ([_][]const u8{ open ++ "1" ++ close ++ "}", open ++ " ", open[0 .. open.len - 1] ++ " ", open ++ "]" }) |deep| names.add(deep);
-    var hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&hex, "{x}", .{&names.hash.finalResult()});
-    try std.testing.expectEqualStrings(expected, &hex);
 }
