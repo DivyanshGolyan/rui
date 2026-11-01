@@ -1514,6 +1514,27 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     }
 }
 
+test "launched Bash leads its own session, so no terminal can reach its prompts" {
+    // /proc carries the session ID; macOS shares the same posix_spawn flag.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
+    var entries: [8]output_retention.Entry = @splat(.{});
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    var result: Outcome = undefined;
+    try launchForTest(root, budget, &retention, 1, "set -- $(cat /proc/$$/stat); [ \"$6\" = \"$$\" ] && echo own-session; exec 3</dev/tty || echo no-terminal", &result);
+    const text = result.text();
+    if (std.mem.indexOf(u8, text, "own-session\nno-terminal\n") == null) {
+        std.debug.print("expected own-session and no-terminal; got:\n{s}\n", .{text});
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "an owned file closes its descriptor before reporting removal failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
