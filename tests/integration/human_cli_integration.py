@@ -21,7 +21,7 @@ import threading
 import time
 
 import host_process
-from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
+from host_process import canonical_fixture_root, dispose_all, screen_fixture_root, preserve_failure_metadata, retain_failure_state, stop_process
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -1169,7 +1169,7 @@ def overview_cases():
     `session resume` opens inside the overview; a start the process never
     sent recovers from its saved request; Ctrl-X twice stops a working
     Session."""
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-overview."))
+    state = screen_fixture_root("rui-overview.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
     store = state / "store"
@@ -1294,7 +1294,7 @@ def overview_cases():
 def command_entry_cases():
     """Familiar entry routes use the same captured intent and conversation."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-command-entry."))
+    state = screen_fixture_root("rui-command-entry.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
     store = state / "store"
@@ -1587,7 +1587,7 @@ def scroll_return_case():
     above it; the return must still count from the latest row. Scrolling
     never edits or sends the draft.
     """
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-scroll-return."))
+    state = screen_fixture_root("rui-scroll-return.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -1692,7 +1692,7 @@ def scroll_return_case():
 def persistent_opening_case():
     """Frozen replay uses real content once and assistant-only formatting."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-opening."))
+    state = screen_fixture_root("rui-persistent-opening.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
@@ -1981,7 +1981,7 @@ def persistent_opening_case():
 def persistent_pending_case():
     """Opening counts the frozen queue beyond its newest Activity page."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-pending."))
+    state = screen_fixture_root("rui-persistent-pending.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -2049,7 +2049,7 @@ def persistent_pending_case():
 def persistent_input_cases():
     """Real captured Admission, a next draft, original replay and input recovery."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-input."))
+    state = screen_fixture_root("rui-persistent-input.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -2230,7 +2230,7 @@ def persistent_input_cases():
 
 def persistent_empty_answer_case():
     """An empty completed result leaves a usable composer, not a failure row."""
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-empty-answer."))
+    state = screen_fixture_root("rui-empty-answer.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -2284,7 +2284,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                                lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False, stdin=None):
     """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
+    state = screen_fixture_root("rui-persistent-permission.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
@@ -3247,7 +3247,7 @@ int fsync(int fd) {
 def silent_read_edit_cases():
     """Silent observation must not hide accepted draft edits with ECHO off."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-silent-edit."))
+    state = screen_fixture_root("rui-silent-edit.")
     home, store = state / "home", state / "store"
     home.mkdir(mode=0o700)
     host = caller = proxy = None
@@ -3306,7 +3306,7 @@ def silent_read_edit_cases():
 def opaque_session_commands_case():
     """Reject old identities and execute printed commands with the exact allocated ID."""
     from control_integration import raw_request
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-opaque-session."))
+    state = screen_fixture_root("rui-opaque-session.")
     home = state / "home"
     home.mkdir()
     store = state / "store'é$(false)"
@@ -3633,7 +3633,7 @@ def renderer_cases():
     original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-renderer."))
+    state = screen_fixture_root("rui-renderer.")
     # Always wrap the Workspace, including on short Linux temporary roots.
     home, store, workspace = state / "home", state / "store", state / ("workspace-" + "w" * 80)
     home.mkdir(mode=0o700)
@@ -5471,7 +5471,7 @@ def main(selected="all"):
         canonical_failure_integration.main()
     if selected == "caller-core":
         selected = "all"
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
+    state = screen_fixture_root("rui-human-cli.")
     home = state / "home"
     home.mkdir()
     store = state / "store"
