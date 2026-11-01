@@ -7,7 +7,9 @@ pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
 pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
 pub const OutputRecordTag = enum(u8) {
     item = 1,
-    // 2 was a message text record; a message's text is its parts.
+    /// A message's text: its text parts' decoded text back to back, as one
+    /// decoded length and digest. Follows the message's parts and bag.
+    text = 2,
     usage = 3,
     // 4 was a call's provider item id; the id is in the item bag.
     name = 5,
@@ -138,6 +140,7 @@ pub const OutputMetadataWriter = struct {
         bytes[0] = @backingInt(record.tag);
         bytes[1] = @backingInt(record.kind);
         std.debug.assert(record.usage == null or record.tag == .usage);
+        std.debug.assert(record.tag != .text or record.kind == .message);
         bytes[2] = @intFromBool(record.usage != null);
         std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
         bytes[3] = @intFromBool(record.omit_reasoning_text);
@@ -211,6 +214,7 @@ pub const OutputMetadataReader = struct {
             (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
         if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
             bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
+        if (bytes[0] == @backingInt(OutputRecordTag.text) and bytes[1] != @backingInt(OutputItemKind.message)) return error.CorruptOutputMetadata;
         const usage: ?Usage = if (bytes[2] == 1) .{
             .uncached = std.mem.readInt(u64, bytes[8..16], .little),
             .cache_read = std.mem.readInt(u64, bytes[32..40], .little),
@@ -226,6 +230,7 @@ pub const OutputMetadataReader = struct {
         return .{
             .tag = switch (bytes[0]) {
                 1 => .item,
+                2 => .text,
                 3 => .usage,
                 5 => .name,
                 6 => .call_id,

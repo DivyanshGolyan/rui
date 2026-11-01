@@ -35,12 +35,22 @@ def content_reference(text):
 
 
 def stored_message_parts(database):
-    """The first message item's saved parts: kind, text and bag bytes."""
-    return [(kind, bytes(text), bytes(bag)) for kind, text, bag in database.execute(
-        "SELECT p.part_kind,t.payload,b.payload FROM model_output_part p "
-        "JOIN content t ON t.content_id=p.text_content_id JOIN content b ON b.content_id=p.extras_content_id "
-        "WHERE (p.operation_id,p.item_ordinal)=(SELECT operation_id,item_ordinal FROM model_output_item "
-        "WHERE item_kind=2 ORDER BY operation_id,item_ordinal LIMIT 1) ORDER BY p.part_ordinal")]
+    """The first message item's saved parts: kind, text and bag bytes. Each
+    text part is the next text_length bytes of the item's message text."""
+    text, operation, ordinal = database.execute(
+        "SELECT t.payload,i.operation_id,i.item_ordinal FROM model_output_item i "
+        "JOIN content t ON t.content_id=i.message_content_id WHERE i.item_kind=2 "
+        "ORDER BY i.operation_id,i.item_ordinal LIMIT 1").fetchone()
+    text = bytes(text)
+    parts, offset = [], 0
+    for kind, length, bag in database.execute(
+            "SELECT p.part_kind,p.text_length,b.payload FROM model_output_part p "
+            "JOIN content b ON b.content_id=p.extras_content_id "
+            "WHERE p.operation_id=? AND p.item_ordinal=? ORDER BY p.part_ordinal", (operation, ordinal)):
+        parts.append((kind, text[offset:offset + length], bytes(bag)))
+        offset += length
+    assert offset == len(text), (offset, len(text))
+    return parts
 
 
 def failed_response_records(store):
@@ -3323,7 +3333,7 @@ def main(mode="all", correlation_case="all"):
         with sqlite3.connect(projection_store / "rui.sqlite3") as database:
             assert database.execute("SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(projected_answer,), (b"caller-first",)]
             assert database.execute("SELECT count(*) FROM model_output_part WHERE operation_id=1 AND part_kind=1").fetchone()[0] == len(parts)
-            assert database.execute("SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id WHERE c.private<>0").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.message_content_id WHERE c.private<>0").fetchone()[0] == 0
         host = start_host(projection_store, projection_url)
         processes.append(host)
         assert read_result(projection_store, "projection-first") == projected_answer
