@@ -1203,7 +1203,7 @@ def overview_cases():
     Esc returns; the composer starts one with /configure's settings;
     `session resume` opens inside the overview; a start the process never
     sent recovers from its saved request; Ctrl-X twice stops a working
-    Session."""
+    Session, from its row and from its conversation."""
     state = screen_fixture_root("rui-overview.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -1212,10 +1212,12 @@ def overview_cases():
     workspace.mkdir()
     codex_fixture.credentials(home / ".config/rui/codex.json")
     held_release = threading.Event()
+    conversation_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([], {
         "Fix the flaky test": fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "Flaky test fixed.")[0],
         "captured then killed": fixture.sse_answer("killed-answer", "killed-reason", "killed-message", "Recovered start answered.")[0],
         "Hold for a stop": (fixture.sse_answer("held-answer", "held-reason", "held-message", "Never shown.")[0], held_release),
+        "Hold in the conversation": (fixture.sse_answer("talk-answer", "talk-reason", "talk-message", "Never shown.")[0], conversation_release),
     })
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -1324,14 +1326,35 @@ def overview_cases():
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
+        # In a conversation the line under the input offers ctrl+x stop
+        # while there is work, and Ctrl-X twice stops its Session there.
+        before = set(records.glob("*.json"))
+        sent = len(endpoint.requests)
+        os.write(master, b"Hold in the conversation\n")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == sent + 1), "conversation Turn sent")
+        record, = set(records.glob("*.json")) - before
+        talking = fixture.observe(store, record.stem)["target"]
+        session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
+        keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen) == f"Stop {talking}? ctrl+x yes · esc no")
+        # Esc only cancels the ask; the conversation stays open.
+        keyed_frame(master, b"\x1b", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen).startswith("Stop "))
+        os.write(master, b"\x18")
+        fixture.wait_for(draining(master, lambda: fixture.command("session", "inspect", "--store", store, "--session", talking)["work"]["state"]["kind"] == "stopped"), "conversation stop")
+        stopped = keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and "Session stopped." in screen)
+        assert "ctrl+x stop" not in session_line(stopped), stopped
+        overview_frame(master, lambda frame: re.search(r"[■#] Hold in the conversation", frame), keys=b"\x1b")
         held_release.set()
+        conversation_release.set()
         leave_overview(master)
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         completed = True
-        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop passed", flush=True)
+        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop from a row and a conversation passed", flush=True)
     finally:
         held_release.set()
+        conversation_release.set()
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
                     lambda: fixture.stop_host(host) if host is not None else None,

@@ -616,7 +616,7 @@ pub const Footer = struct {
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
-/// wrote for them, which the caller resets when the facts change.
+/// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
 
 /// Adopts the frame's geometry, selects its projection, encodes it and
@@ -728,6 +728,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
         _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
     }
+    // Cells borrow the rule's label until the frame is rendered too.
     var rule_label: [64]u8 = undefined;
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
