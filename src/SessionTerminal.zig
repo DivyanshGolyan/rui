@@ -24,8 +24,6 @@ result: anyerror!void = {},
 /// When leaving stops waiting for output credit; `finish` sets it.
 release_deadline_ms: i64 = 0,
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
-/// Set only after the terminal reported mode 1007 reset and Rui enabled it.
-alternate_scroll: bool = false,
 /// The terminal's latest focus report. One that never reports stays
 /// focused: Rui notifies only when it knows the person looked away.
 focused: bool = true,
@@ -35,6 +33,16 @@ notices: ?Notices = null,
 /// waits joins it, so a frame's notification counts every Session's news.
 notification: ?attention.Notice = null,
 notification_bytes: [attention.max_bytes]u8 = undefined,
+/// `wanted` once the terminal reported mode 1007 reset, `on` once Rui
+/// enabled it: never inside an open clipboard sequence.
+alternate_scroll: enum { off, wanted, on } = .off,
+/// An OSC 52 sequence begun on the wire and not yet ended: `sending` while
+/// `clipboard` writes it, `abandoned` once a failure stopped it. The next
+/// write, or `finish`, sends CAN first, so nothing lands inside it.
+clipboard_sequence: enum { closed, sending, abandoned } = .closed,
+/// While a write waits for credit the pump may run; a write it asks for
+/// waits until this one ends.
+writing: bool = false,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(screen: *Screen) !Self {
@@ -87,6 +95,7 @@ pub fn finish(self: *Self) !void {
     self.active = false;
     self.release_deadline_ms = monotonicMs() + release_wait_ms;
     const ops: NativeOutput = .{ .fd = self.output };
+    const abandoned = self.clipboard_sequence == .closed or writeWithin(ops, "\x18", self.release_deadline_ms);
     // The UI owns emitted style, even if a renderer's next window was cancelled.
     // Attempt controls independently within one shared wait.
     const synchronized = writeWithin(ops, "\x1b[?2026l", self.release_deadline_ms);
@@ -94,7 +103,7 @@ pub fn finish(self: *Self) !void {
     // Each owned mode is reset even when an earlier reset fails.
     const paste_disabled = writeWithin(ops, "\x1b[?2004l", self.release_deadline_ms);
     const focus_disabled = writeWithin(ops, "\x1b[?1004l", self.release_deadline_ms);
-    const scroll_reset = !self.alternate_scroll or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
+    const scroll_reset = self.alternate_scroll != .on or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
         if (!writeWithin(ops, sequence, self.release_deadline_ms)) screen_ok = false;
@@ -109,7 +118,7 @@ pub fn finish(self: *Self) !void {
     }
     // The duplicate shares stdout's description: flags already apply to fd 1.
     if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
-    self.result = if (restored) |_| if (flags_ok and reset and paste_disabled and focus_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and abandoned and reset and paste_disabled and focus_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
@@ -356,6 +365,21 @@ pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
 /// Writes all of `bytes`. On a full terminal the pump runs, if the borrower
 /// set one; otherwise the write fails.
 pub fn write(self: *Self, bytes: []const u8) !void {
+    std.debug.assert(!self.writing);
+    self.writing = true;
+    defer self.writing = false;
+    if (self.clipboard_sequence == .abandoned) {
+        try self.writeAll("\x18");
+        self.clipboard_sequence = .closed;
+    }
+    if (self.clipboard_sequence == .closed and self.alternate_scroll == .wanted) {
+        try self.writeAll("\x1b[?1007h");
+        self.alternate_scroll = .on;
+    }
+    try self.writeAll(bytes);
+}
+
+fn writeAll(self: *Self, bytes: []const u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         const n = std.c.write(self.output, bytes[offset..].ptr, bytes.len - offset);
@@ -381,10 +405,138 @@ pub fn geometry(self: *const Self) std.posix.winsize {
 
 /// Wheel motion then arrives as arrow keys in the alternate screen. Finish
 /// restores the reported reset state.
+/// Reported while a write or the clipboard sequence is under way, it waits
+/// for them to end.
 pub fn enableAlternateScroll(self: *Self) !void {
-    if (self.alternate_scroll) return;
-    self.alternate_scroll = true;
-    try self.write("\x1b[?1007h");
+    if (self.alternate_scroll != .off) return;
+    self.alternate_scroll = .wanted;
+    if (!self.writing and self.clipboard_sequence == .closed) try self.write("");
+}
+
+/// Sets the terminal's clipboard (OSC 52) to `length` bytes of `file` from
+/// `start`, base64-encoded a window at a time as it is written. At most
+/// `clipboard_limit` bytes.
+pub fn clipboard(self: *Self, io: std.Io, file: std.Io.File, start: u64, length: u64) !void {
+    std.debug.assert(length <= clipboard_limit);
+    try self.write("");
+    std.debug.assert(self.clipboard_sequence == .closed);
+    // CAN abandons the sequence, so a failure never sets part of the bytes.
+    // The next write or `finish` sends it.
+    self.clipboard_sequence = .sending;
+    errdefer self.clipboard_sequence = .abandoned;
+    try self.write("\x1b]52;c;");
+    var raw: [3 * 1024]u8 = undefined;
+    var encoded: [4 * 1024]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const wanted: usize = @intCast(@min(raw.len, length - offset));
+        if (try file.readPositionalAll(io, raw[0..wanted], start + offset) != wanted) return error.TruncatedDisplayScratch;
+        try self.write(std.base64.standard.Encoder.encode(&encoded, raw[0..wanted]));
+        offset += wanted;
+    }
+    try self.write("\x1b\\");
+    self.clipboard_sequence = .closed;
+    try self.write("");
+}
+
+/// The most bytes /copy sends: hterm's osc52.sh sends at most 100,000
+/// base64 bytes, the smallest limit a terminal's own tooling documents.
+pub const clipboard_limit = 100_000 / 4 * 3;
+
+test "the clipboard takes its bytes as one OSC 52 sequence, whatever their size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "answer", .{ .read = true });
+    defer file.close(io);
+    var pipe: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.TestUnexpectedResult;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    var terminal: Self = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined, .output = pipe[1] };
+    var shown: [12 * 1024]u8 = undefined;
+    try file.writePositionalAll(io, "skip:Hi `x`", 0);
+    try terminal.clipboard(io, file, 5, 6);
+    try std.testing.expectEqualStrings("\x1b]52;c;SGkgYHhg\x1b\\", shown[0..@intCast(std.c.read(pipe[0], &shown, shown.len))]);
+    // More than one window, ending in a partial group.
+    var answer: [3 * 1024 + 2]u8 = undefined;
+    for (&answer, 0..) |*byte, index| byte.* = @truncate(index * 7);
+    try file.writePositionalAll(io, &answer, 0);
+    try terminal.clipboard(io, file, 0, answer.len);
+    const sent = shown[0..@intCast(std.c.read(pipe[0], &shown, shown.len))];
+    var expected: [std.base64.standard.Encoder.calcSize(answer.len)]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b]52;c;", sent[0..7]);
+    try std.testing.expectEqualStrings(std.base64.standard.Encoder.encode(&expected, &answer), sent[7 .. sent.len - 2]);
+    try std.testing.expectEqualStrings("\x1b\\", sent[sent.len - 2 ..]);
+    // A file shorter than its range abandons the sequence: the next write
+    // ends it with CAN before anything else.
+    try std.testing.expectError(error.TruncatedDisplayScratch, terminal.clipboard(io, file, 3 * 1024, 9 * 1024));
+    try terminal.write("frame");
+    try std.testing.expectEqualStrings("\x1b]52;c;\x18frame", shown[0..@intCast(std.c.read(pipe[0], &shown, shown.len))]);
+}
+
+test "a clipboard copy interrupted while the terminal is full ends with CAN before leaving's controls" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "answer", .{ .read = true });
+    defer file.close(io);
+    // Its base64 is more than the pipe holds.
+    var answer: [clipboard_limit]u8 = undefined;
+    @memset(&answer, 'a');
+    try file.writePositionalAll(io, &answer, 0);
+    for ([_]bool{ false, true }) |leaves| {
+        var pipe: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&pipe) != 0) return error.TestUnexpectedResult;
+        defer _ = std.c.close(pipe[0]);
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        try std.testing.expect(std.c.fcntl(pipe[1], std.c.F.SETFL, nonblock) == 0);
+        try std.testing.expect(std.c.fcntl(pipe[0], std.c.F.SETFL, nonblock) == 0);
+        // The key that interrupts the copy follows the terminal's report
+        // that alternate scroll is reset.
+        const Keys = struct {
+            fn step(raw: *anyopaque) !void {
+                const terminal: *Self = @ptrCast(@alignCast(raw));
+                try terminal.enableAlternateScroll();
+                return error.InteractiveInterrupted;
+            }
+        };
+        const input = std.c.fcntl(0, std.c.F.GETFL);
+        var terminal: Self = .{ .original = Editor.getAttributes() catch undefined, .flags = .{ input, nonblock }, .screen = undefined, .output = pipe[1] };
+        terminal.pump = .{ .context = &terminal, .step = Keys.step };
+        try std.testing.expectError(error.InteractiveInterrupted, terminal.clipboard(io, file, 0, answer.len));
+        var shown: std.ArrayList(u8) = .empty;
+        defer shown.deinit(std.testing.allocator);
+        var buffer: [16 * 1024]u8 = undefined;
+        const drain = struct {
+            fn all(fd: c_int, bytes: *[16 * 1024]u8, into: *std.ArrayList(u8)) !void {
+                while (true) {
+                    const n = std.c.read(fd, bytes, bytes.len);
+                    if (n <= 0) return;
+                    try into.appendSlice(std.testing.allocator, bytes[0..@intCast(n)]);
+                }
+            }
+        }.all;
+        try drain(pipe[0], &buffer, &shown);
+        try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x1b]52;c;YWFh"));
+        try std.testing.expect(std.mem.indexOfAny(u8, shown.items[7..], "\x1b\x18") == null);
+        shown.clearRetainingCapacity();
+        terminal.pump = null;
+        if (leaves) {
+            // Leaving at once: restoration ends the sequence first.
+            terminal.finish() catch {};
+            try drain(pipe[0], &buffer, &shown);
+            try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h"));
+        } else {
+            // Staying, as when Esc returns to the overview: its next frame
+            // ends it first, then the scroll mode reported during the copy.
+            try terminal.write("frame");
+            try drain(pipe[0], &buffer, &shown);
+            try std.testing.expectEqualStrings("\x18\x1b[?1007hframe", shown.items);
+            _ = std.c.close(pipe[1]);
+        }
+    }
 }
 
 pub const Notices = struct {

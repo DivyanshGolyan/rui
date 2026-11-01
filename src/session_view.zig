@@ -1500,21 +1500,80 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
     }
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
+/// What a live page needs to show the Messages people and scripts sent as
+/// they are taken.
+pub const Taking = struct {
+    /// The newest such Message shown while it waited, at the opening or at
+    /// its Admission: its row never shows live.
+    drawn_waiting: u64,
+    /// A position before the Admission of every such Message that waits at
+    /// the page's start, where a stop's search for those it excluded begins;
+    /// null when none waits.
+    from: ?u64,
+};
+
+/// Whether live output shows a waiting Message a person or script sent at
+/// its Admission: nothing holds the queue and it is the oldest waiting, so
+/// it is taken next and never waits above the input. Any other waits in
+/// the queued row and shows as its row once taken.
+pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, drawn_waiting: u64, queued: protocol.Queued, held: bool) bool {
+    return value.state == .queued and value.admission > drawn_waiting and !held and position == queued.oldest_position;
+}
+
+test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
+    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
+    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
+    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
+    // A pending Session can wait long before it takes the Message, as after
+    // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
+    try std.testing.expect(showsAtAdmission(30, waiting, 10, alone, false));
+    // Work under way holds it: it waits in the queued row.
+    try std.testing.expect(!showsAtAdmission(30, waiting, 10, alone, true));
+    // An older Message waits, which the queued row shows: this one waits
+    // with it, so the conversation shows both in order once taken.
+    try std.testing.expect(!showsAtAdmission(34, waiting, 10, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
+    // Taken or excluded by the page's end, or shown already.
+    var taken = waiting;
+    taken.state = .applied;
+    try std.testing.expect(!showsAtAdmission(30, taken, 10, .{}, false));
+    try std.testing.expect(!showsAtAdmission(30, waiting, 12, alone, false));
+}
+
+/// Writes a page and returns the newest Message a person or script sent
+/// that it or an earlier read showed while it waited (`Taking.drawn_waiting`).
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !u64 {
     const historical = page.facts.direction == .backward;
+    var from = taking.from;
+    var drawn_waiting = taking.drawn_waiting;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        if (!historical and item.value == .stop) {
+            compact_tools.* = false;
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, drawn_waiting, sink, colour);
+        }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
             .admission => |value| {
-                if (historical and value.state == .applied) continue;
+                if (historical) {
+                    if (value.state == .applied) continue;
+                } else if (value.sender == null) {
+                    // A person's or script's Message shows live when it is
+                    // taken: as its row, or at the stop that excluded it.
+                    // Until then it waits above the input, unless it is
+                    // taken next.
+                    if (from == null and value.state != .applied) from = item.position - 1;
+                    if (!showsAtAdmission(item.position, value, drawn_waiting, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
+                    drawn_waiting = value.admission;
+                }
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour);
             },
             .user => |value| {
-                if (!historical) continue; // Live Admission already showed it.
+                // Live, another Session's Message showed as its Admission,
+                // and one shown while it waited never shows again.
+                if (!historical and (value.sender != null or value.admission <= drawn_waiting)) continue;
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, .none, sink, colour);
             },
@@ -1573,5 +1632,33 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sendFailed(sink, failed.target);
             },
         }
+    }
+    return drawn_waiting;
+}
+
+/// Shows the Messages a person or script sent that a live page's stop
+/// excluded, oldest first and labelled, before the stop's own line: those
+/// waiting just before it, at or below its cutoff and admitted after `from`,
+/// except ones shown while they waited. Their bytes belong to no item.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, drawn_waiting: u64, sink: anytype, colour: bool) !void {
+    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from };
+    var first = true;
+    while (true) {
+        const page = switch (try requests.activityPage(store, session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| {
+            var value = switch (item.value) {
+                .admission => |value| value,
+                else => continue,
+            };
+            if (value.sender != null or value.state != .queued or value.admission <= drawn_waiting or value.admission > stop.value.stop.cutoff) continue;
+            if (first) sink.excluding(item.position);
+            first = false;
+            value.state = .excluded;
+            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+        }
+        cursor = page.continuation() orelse return;
     }
 }

@@ -31,6 +31,7 @@ const cores = .{
     .{ "product_defaults.zig", @import("product_defaults.zig") },
     .{ "provider_name.zig", @import("provider_name.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
+    .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
