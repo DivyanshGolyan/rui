@@ -13,7 +13,6 @@ const h2 = @import("h2");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
-pub const Output = @import("provider_output.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -32,93 +31,15 @@ test {
 // the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 
-/// Interpretation borrows sealed bytes and the caller's metadata/data workspaces.
-/// It grants no settlement authority and neither closes nor transfers either
-/// resource. Rejections contain only local codes and structural coordinates.
-pub const OutputRejection = struct {
-    reason: anyerror,
-    code: []const u8,
-    location: Output.Rejection,
-    kind: execution.FailureKind = .permanent,
-
-    pub fn format(self: OutputRejection, buffer: *[512]u8) []const u8 {
-        return self.location.format(self.reason, buffer);
-    }
-};
-
-pub const OutputInterpretation = union(enum) {
-    accepted: struct {
-        output: Output.Validated,
-        model_evidence: protocol.Bounded(775),
-    },
-    rejected: OutputRejection,
-};
-
-/// Borrowed observations already bounded and UTF-8 validated by transport.
-pub const ModelObservations = struct {
-    openai: []const u8 = "",
-    alternate: []const u8 = "",
-};
-
 /// Schema support is checked before acquiring validation metadata, preserving
 /// the original failure precedence when metadata acquisition would also fail.
-pub fn outputSchemaRejection(structured: bool, source_length: u64) ?OutputRejection {
+pub fn outputSchemaRejection(structured: bool, source_length: u64) ?output_decode.Rejected {
     if (!structured) return null;
     return .{
         .reason = error.UnsupportedOutputSchema,
         .code = "unsupported_output_schema",
         .location = .{ .stage = .response, .byte_offset = source_length },
     };
-}
-
-/// Validates the sealed response and fills `out` with its acceptance or
-/// rejection. Never inlined: the read window and parse state live only while
-/// validation runs, not through the settlement that follows it.
-pub noinline fn interpretOutput(
-    io: std.Io,
-    source: std.Io.File,
-    source_length: u64,
-    metadata: *output_format.OutputMetadataWriter,
-    event_data: *Output.EventData,
-    operation: output_format.ModelOperationKind,
-    models: ModelObservations,
-    item_check: *Output.OutputItemCheck,
-    faults: Output.Faults,
-    /// What a provider error event said; the caller saves its report.
-    provider_failure: *output_decode.ProviderFailure,
-    out: *OutputInterpretation,
-) void {
-    var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, provider_failure, item_check, faults) catch |err| {
-        out.* = .{
-            .rejected = .{
-                .reason = err,
-                // A refusal saves the code it names, whatever carried it.
-                .code = if (provider_failure.refusal) |refusal| refusal.failureCode() else Output.failureCode(err),
-                .location = rejection,
-                .kind = switch (err) {
-                    error.ContextOverflow => .context_overflow,
-                    error.TemporaryProviderFailure, error.ProviderConnectionClosed => .temporary,
-                    else => .permanent,
-                },
-            },
-        };
-        return;
-    };
-    out.* = .{ .accepted = .{ .output = validated, .model_evidence = .{} } };
-    // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
-    // each source independently, including absence and disagreement. Never
-    // substitute the requested model for reported evidence.
-    const certificate = &out.accepted.model_evidence;
-    certificate.bytes[0] = 1;
-    certificate.len = 1;
-    for ([_][]const u8{ validated.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
-        std.debug.assert(value.len <= protocol.max_model_bytes);
-        std.mem.writeInt(u16, certificate.bytes[certificate.len..][0..2], @intCast(value.len), .little);
-        certificate.len += 2;
-        @memcpy(certificate.bytes[certificate.len..][0..value.len], value);
-        certificate.len += value.len;
-    }
 }
 
 /// Classifies an HTTP error body in `decode` through `codec`, the one the
@@ -139,7 +60,7 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
-        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, output_decode.testingProviderFailure());
         const decision = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
@@ -179,14 +100,14 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         const file = try tmp.dir.createFile(std.testing.io, "quota-authority", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, case.bytes);
-        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 429, output_decode.testingProviderFailure());
         const failure = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
         } }, response).fail;
         try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
         if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
-        try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, Output.testingProviderFailure()) == .ordinary);
+        try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, output_decode.testingProviderFailure()) == .ordinary);
     }
 }
 
@@ -195,7 +116,7 @@ test "provider interpretation preserves independently reported model evidence" {
     const prefix = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
     const model_255 = @as([254]u8, @splat('m')) ++ "z";
     const model_256 = @as([255]u8, @splat('m')) ++ "z";
-    const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool, certificate: []const u8 = "" }{
+    const cases = [_]struct { body: []const u8, models: output_decode.ModelObservations, accepted: bool, certificate: []const u8 = "" }{
         .{ .body = "", .models = .{}, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x00\x00" },
         .{ .body = ",\"model\":null", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x07\x00model-a" },
@@ -229,11 +150,11 @@ test "provider interpretation preserves independently reported model evidence" {
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
         var data_used: std.atomic.Value(u64) = .init(0);
-        var event_data: Output.EventData = undefined;
+        var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, output_decode.testingProviderFailure(), &interpreted);
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -273,9 +194,9 @@ test "provider interpretation closes failure variants without granting settlemen
     const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, overflow);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 400, Output.testingProviderFailure()) == .context_overflow);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 200, Output.testingProviderFailure()) == .ordinary);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len + 1, 503, Output.testingProviderFailure()) == .unreadable);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 400, output_decode.testingProviderFailure()) == .context_overflow);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 200, output_decode.testingProviderFailure()) == .ordinary);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len + 1, 503, output_decode.testingProviderFailure()) == .unreadable);
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
@@ -294,12 +215,13 @@ test "provider interpretation closes failure variants without granting settlemen
         var retained: ?named_scratch.Owner = null;
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
         defer metadata.deinit();
+        metadata.fail_writes = case.fault;
         var data_used: std.atomic.Value(u64) = .init(0);
-        var event_data: Output.EventData = undefined;
+        var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault }, Output.testingProviderFailure(), &interpreted);
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -318,11 +240,11 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     var retained: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer metadata.deinit();
-    var event_data: Output.EventData = undefined;
+    var event_data: output_decode.EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    var result: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &result);
+    var result: output_decode.Interpretation = undefined;
+    output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &result);
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -2195,9 +2117,9 @@ test "a prepared request carries the Responses codec's headers with its Session'
 
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
-// Independently authored tool definitions for full-request goldens. These
-// literals must match the provider's frozen tool catalog, not reference it.
-const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"stdin\":{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"},\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
+// Share the tool's prose and schema, not the request's tool envelope.
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_definition.description ++
+    "\",\"strict\":true,\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
 
 // Share prose, not request construction: independently JSON-encode fixture inputs.
 fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8) ![]u8 {
@@ -2368,7 +2290,7 @@ fn settleComposedForTesting(
     defer metadata.deinit();
     const operation: output_format.ModelOperationKind = if (item_kind == .compaction) .compaction else .assistant_response;
     for (ranges[0 .. 1 + calls.len], 0..) |range, ordinal| {
-        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
+        const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
         if (ordinal == 0 and record.kind != item_kind) return error.TestUnexpectedItemKind;
     }
     try metadata.sealForRead();
@@ -3464,7 +3386,7 @@ fn settleItemsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     defer metadata.deinit();
     var calls: u64 = 0;
     for (ranges[0..items.len], 0..) |range, ordinal| {
-        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
+        const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
         if (record.kind == .function_call) calls += 1;
     }
     try metadata.sealForRead();
@@ -3685,11 +3607,11 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
-    var event_data: Output.EventData = undefined;
+    var event_data: output_decode.EventData = undefined;
     try event_data.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    var interpreted: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
+    var interpreted: output_decode.Interpretation = undefined;
+    output_decode.interpretResponse(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, output_decode.testingProviderFailure(), &interpreted);
     const accepted = switch (interpreted) {
         .accepted => |*value| value,
         .rejected => return error.UnexpectedOutputRejection,

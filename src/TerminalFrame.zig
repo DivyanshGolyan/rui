@@ -9,7 +9,6 @@ const Self = @This();
 pub const Call = Viewport.Sized(512, false);
 /// Bytes of status text a frame holds; the frontend fits its status to this.
 pub const status_capacity = 2048;
-pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
 pub const max_cells = 24 * 2048;
@@ -17,6 +16,24 @@ pub const max_cells = 24 * 2048;
 pub fn validateGeometry(width: u16, height: u16) !void {
     if (height < 2 or width < 8) return error.TerminalTooSmall;
     if (@as(u32, width) * height > max_cells) return error.TerminalTooLarge;
+}
+
+/// The input row of a waiting Action: Allow once, then Deny. Each option is
+/// a two-cell marker, its label and a space; the labels shorten to fit.
+pub const Choice = struct { labels: [2][]const u8, columns: [2]u16 };
+
+pub fn choice(width: u16) Choice {
+    const forms = [_]struct { labels: [2][]const u8, start: u16, gap: u16 }{
+        .{ .labels = .{ "Allow once", "Deny" }, .start = 2, .gap = 3 },
+        .{ .labels = .{ "Allow", "Deny" }, .start = 2, .gap = 3 },
+        .{ .labels = .{ "A", "D" }, .start = 0, .gap = 0 },
+    };
+    for (forms) |form| {
+        const second: u16 = @intCast(form.start + form.labels[0].len + 3 + form.gap);
+        if (second + form.labels[1].len + 3 <= width) return .{ .labels = form.labels, .columns = .{ form.start, second } };
+    }
+    // validateGeometry keeps every frame at least as wide as the last form.
+    unreachable;
 }
 
 status: Viewport.Sized(status_capacity, false),
@@ -32,6 +49,9 @@ height: u16,
 browsing_height: u16,
 first: Position,
 document_rows: usize,
+/// Rows above a whole Action, so that it ends right above the input. The
+/// conversation's latest rows fill them; they are never Action rows.
+document_offset: u16,
 navigation_height: u16,
 overflow_height: u16,
 status_height: u16,
@@ -46,8 +66,8 @@ live_height: u16,
 /// The rule above the input; its row is `draft_top - 1` when this is one.
 rule_height: u16,
 /// The rows under the input, from `height - line_height`: the notice's rows
-/// when there is one, else one row for the Session line once three rows
-/// remain under the status.
+/// when there is one, else one row for the Session line, or how to decide a
+/// waiting Action, once three rows remain under the status.
 line_height: u16,
 /// The draft lines shown, `draft.rows` of `draft_lines` from the top, and
 /// the lines the rule says are hidden.
@@ -69,7 +89,6 @@ pub const Input = struct {
     draft_anchor: usize = 0,
     status: []const u8,
     notice: []const u8 = "",
-    approval: bool,
     calls: []const []const u8,
     total_calls: u64,
     /// Work is under way: a line saying what it is doing now follows the
@@ -116,6 +135,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .browsing_height = 0,
         .first = .{},
         .document_rows = 0,
+        .document_offset = 0,
         .navigation_height = 0,
         .overflow_height = 0,
         .status_height = 0,
@@ -133,17 +153,12 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .approval_ready = false,
     };
     try self.status.append(input.status);
-    const reserve: u16 = if (input.approval) 2 else 1;
-    var status_rows = try rows(&self.status, layout);
-    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, input.status, approval_choice)) {
-        self.status.clear();
-        try self.status.append("a Allow / d Deny\nEnter");
-        status_rows = try rows(&self.status, layout);
-    }
-    self.status_height = status_rows;
+    self.status_height = try rows(&self.status, layout);
     try self.notice.append(input.notice);
     self.line_height = if (input.notice.len != 0) try rows(&self.notice, layout) else @intFromBool(input.height -| self.status_height >= 3);
-    if (@as(u32, self.status_height) + self.line_height > input.height - reserve) return error.TerminalTooSmall;
+    // The input keeps one row: the draft's first line, or a waiting Action's
+    // choice.
+    if (@as(u32, self.status_height) + self.line_height > input.height - 1) return error.TerminalTooSmall;
     const pieces: Viewport.DraftPieces = .{ .bytes = input.draft, .method = input.method };
     const shape = draft_layout.shape(pieces, input.width - 2, input.cursor, input.draft_anchor);
     // The rows the draft asks for, up to its cap.
@@ -217,6 +232,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     const shown = document.measure(layout, self.first, self.height);
     self.document_rows = shown.rows;
     if (input.action_visible and input.preview_complete) {
+        // A whole Action sits right above the input; a taller one pages from
+        // its top.
+        if (self.first.order(.{}) == .eq and shown.next.order(.end) == .eq) self.document_offset = self.height - @as(u16, @intCast(shown.rows));
         // Only rows delivered contiguously from the top count as read.
         if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt) self.action_seen = shown.next;
         self.approval_ready = self.action_seen.order(.end) == .eq;
@@ -232,10 +250,10 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     // The input keeps the bottom rows above the line under it, with the
     // status and the rule above it. The shown text starts at the top and the
     // calls and live line follow it, so short text leaves the gap under its
-    // last line.
+    // last line; only a whole Action is pushed down to the input.
     self.draft_top = input.height - self.line_height - self.draft.rows;
     self.status_row = self.draft_top - self.rule_height - self.status_height;
-    self.calls_row = self.navigation_height + @as(u16, @intCast(self.document_rows));
+    self.calls_row = self.navigation_height + self.document_offset + @as(u16, @intCast(self.document_rows));
     self.live_row = self.calls_row + call_rows + self.overflow_height;
     self.caret_row = self.draft_top + @as(u16, @intCast(shape.caret_line - self.draft.first));
     self.caret_column = @min(shape.caret_column + 2, input.width - 1);
@@ -252,7 +270,7 @@ test "the draft keeps the bottom rows under a rule and over the Session line, an
     var document: Viewport.Document = .{};
     try document.append("› inspect\n  Done.\n");
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.rule_height);
     try std.testing.expectEqual(@as(u16, 1), frame.line_height);
@@ -282,7 +300,7 @@ test "the draft keeps the bottom rows under a rule and over the Session line, an
 test "the status stays above the rule while calls and the live line follow the conversation's last line" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "Sending…", .approval = false, .calls = &.{"• Inspect layout"}, .total_calls = 1, .live = true, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "Sending…", .calls = &.{"• Inspect layout"}, .total_calls = 1, .live = true, .selected = false, .action_visible = false, .preview_complete = true };
     for ([_][]const u8{ "", "Done.", "Done.\n\nMore." }, [_]usize{ 0, 1, 3 }) |text, document_rows| {
         document.clear();
         try document.append(text);
@@ -325,23 +343,23 @@ test "the live line takes a row after every required row and before call rows" {
     // Without a free row the line is dropped; the frame still renders.
     for ([_][]const u8{ "Idle", "Two lines\nof status" }, [_]u16{ 3, 4 }) |status, height| {
         for ([_]bool{ false, true }) |live| {
-            try frame.plan(&document, .{ .width = 24, .height = height, .status = status, .cursor = 0, .approval = false, .calls = &.{}, .total_calls = 100, .live = live, .selected = false, .action_visible = false, .preview_complete = true });
+            try frame.plan(&document, .{ .width = 24, .height = height, .status = status, .cursor = 0, .calls = &.{}, .total_calls = 100, .live = live, .selected = false, .action_visible = false, .preview_complete = true });
             try std.testing.expectEqual(@as(u16, 1), frame.overflow_height);
             try std.testing.expectEqual(@as(u16, 0), frame.live_height);
         }
     }
-    try frame.plan(&document, .{ .width = 24, .height = 4, .status = "Idle", .notice = "! a notice", .cursor = 0, .approval = false, .calls = &.{}, .total_calls = 0, .live = true, .selected = false, .action_visible = false, .preview_complete = true });
+    try frame.plan(&document, .{ .width = 24, .height = 4, .status = "Idle", .notice = "! a notice", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     // The live line keeps its row before a call does; the overflow row
     // counts the call.
-    try frame.plan(&document, .{ .width = 24, .height = 5, .status = "", .cursor = 0, .approval = false, .calls = &.{ "• First", "• Second" }, .total_calls = 2, .live = true, .selected = false, .action_visible = false, .preview_complete = true });
+    try frame.plan(&document, .{ .width = 24, .height = 5, .status = "", .cursor = 0, .calls = &.{ "• First", "• Second" }, .total_calls = 2, .live = true, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(usize, 0), frame.used);
     try std.testing.expectEqualStrings("+2 more calls · /status", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     // A running call whose row is not shown leaves its clock to the live
     // line.
     const calls = [_][]const u8{ "• First", "• Second call whose description wraps over three rows · 4s" };
-    try frame.plan(&document, .{ .width = 24, .height = 6, .status = "", .cursor = 0, .approval = false, .calls = &calls, .total_calls = 2, .live = true, .clock_call = 1, .selected = false, .action_visible = false, .preview_complete = true });
+    try frame.plan(&document, .{ .width = 24, .height = 6, .status = "", .cursor = 0, .calls = &calls, .total_calls = 2, .live = true, .clock_call = 1, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(usize, 1), frame.used);
     try std.testing.expectEqual(@as(u16, 1), frame.overflow_height);
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
@@ -368,7 +386,7 @@ test "the live row is kept only while the live line draws" {
         .{ .height = 5, .total = 3, .clock_call = 2, .used = 0, .live = 1 },
     };
     for (cases) |case| {
-        try frame.plan(&document, .{ .width = 80, .height = case.height, .status = "", .cursor = 0, .approval = false, .calls = &calls, .total_calls = case.total, .live = true, .clock_call = case.clock_call, .selected = false, .action_visible = false, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 80, .height = case.height, .status = "", .cursor = 0, .calls = &calls, .total_calls = case.total, .live = true, .clock_call = case.clock_call, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(case.used, frame.used);
         try std.testing.expectEqual(case.live, frame.live_height);
         try std.testing.expectEqual(@as(u16, @intFromBool(case.total > case.used)), frame.overflow_height);
@@ -378,7 +396,7 @@ test "the live row is kept only while the live line draws" {
     // A page or transcript with no text draws no live line, so it keeps no
     // row for one.
     for ([_]bool{ false, true }) |selected| {
-        const input: Input = .{ .width = 80, .height = 24, .status = "", .cursor = 0, .approval = false, .calls = &.{}, .total_calls = 0, .live = true, .selected = selected, .action_visible = false, .preview_complete = true };
+        const input: Input = .{ .width = 80, .height = 24, .status = "", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .selected = selected, .action_visible = false, .preview_complete = true };
         try frame.plan(&document, input);
         const height = frame.height;
         const browsing = frame.browsing_height;
@@ -397,7 +415,7 @@ test "the Session line shows once three rows remain under the status, then the r
     for ([_][]const u8{ "", "Sending…" }, [_]u16{ 0, 1 }) |status, status_rows| for ([_][]const u8{ "", "! notice" }) |notice| for (2..10) |h| {
         const height: u16 = @intCast(h);
         const notice_rows: u16 = @intFromBool(notice.len != 0);
-        const input: Input = .{ .width = 20, .height = height, .draft = "draft", .cursor = 5, .status = status, .notice = notice, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+        const input: Input = .{ .width = 20, .height = height, .draft = "draft", .cursor = 5, .status = status, .notice = notice, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
         if (height < status_rows + notice_rows + 1) {
             try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
             continue;
@@ -416,7 +434,7 @@ test "a full-capacity draft of spaces keeps the caret on screen" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
     const spaces: [65536]u8 = @splat(' ');
-    try frame.plan(&document, .{ .width = 80, .height = 24, .draft = &spaces, .cursor = spaces.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+    try frame.plan(&document, .{ .width = 80, .height = 24, .draft = &spaces, .cursor = spaces.len, .status = "", .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(u16, 2), frame.draft.rows);
     try std.testing.expectEqual(@as(u16, 22), frame.caret_row);
     try std.testing.expectEqual(@as(u16, 2), frame.caret_column);
@@ -427,7 +445,7 @@ test "an exactly filled draft row puts the caret on the next row" {
     var frame: Self = undefined;
     // Eight columns leave six for the draft: "abcdef" fills its row.
     for ([_][]const u8{ "abcde", "abcdef" }, [_]u16{ 1, 2 }, [_]u16{ 7, 2 }) |draft, height, column| {
-        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = "", .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(height, frame.draft.rows);
         try std.testing.expectEqual(frame.draft_top + height - 1, frame.caret_row);
         try std.testing.expectEqual(column, frame.caret_column);
@@ -443,7 +461,7 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
     // more than the cap of six (twenty rows) or eight (twenty-four).
     for ([_]u16{ 20, 24 }, [_]u16{ 6, 8 }) |height, cap| {
         for ([_]usize{ 0, draft.len }, [_]usize{ 0, 13 - cap }) |cursor, first| {
-            try frame.plan(&document, .{ .width = 100, .height = height, .draft = draft, .cursor = cursor, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+            try frame.plan(&document, .{ .width = 100, .height = height, .draft = draft, .cursor = cursor, .status = "", .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
             try std.testing.expectEqual(cap, frame.draft.rows);
             try std.testing.expectEqual(first, frame.draft.first);
             try std.testing.expectEqual(first, frame.draft.hidden_above);
@@ -457,7 +475,7 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
     var tall: [200]u8 = undefined;
     for (0..40) |index| @memcpy(tall[index * 5 ..][0..5], "line\n");
     for ([_]u16{ 8, 24 }, [_]u16{ 1, 8 }) |height, draft_rows| {
-        try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = "Sending…", .approval = false, .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = "Sending…", .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.used);
         try std.testing.expectEqualStrings("+1 more calls · /status", frame.heading.text());
         try std.testing.expectEqual(draft_rows, frame.draft.rows);
@@ -468,7 +486,7 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
     // page shows whole, so an Action on it is read.
     document.top = .{};
     for ([_]bool{ false, true }) |action| {
-        try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.document_rows);
         try std.testing.expectEqualStrings(if (action) "" else "Browsing · Esc returns", frame.heading.text());
         try std.testing.expectEqual(action, frame.approval_ready);
@@ -478,23 +496,65 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
 test "complete approval and overflow survive short layouts or fail before rendering" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = "Idle", .approval = false, .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = "Idle", .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqualStrings("+100 · /status", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 2), frame.draft_top);
     input.height = 2;
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
-    input.height = 3;
-    input.width = 12;
-    input.approval = true;
-    input.status = approval_choice ++ "\n! Original retained";
+    // At the smallest geometry the input row is a waiting Action's choice;
+    // a status that leaves the input no row fails before rendering.
+    input = .{ .width = 8, .height = 2, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 1), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 0), frame.line_height);
+    input.status = "? Delete\n! Original retained";
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
+}
+
+test "the choice fits every width, its labels shortening only when they must" {
+    for (8..2049) |columns| {
+        const width: u16 = @intCast(columns);
+        const row = choice(width);
+        const first_end = row.columns[0] + row.labels[0].len + 3;
+        try std.testing.expect(first_end <= row.columns[1]);
+        try std.testing.expect(row.columns[1] + row.labels[1].len + 3 <= width);
+        const full = width >= 25;
+        try std.testing.expectEqualStrings(if (full) "Allow once" else if (width >= 20) "Allow" else "A", row.labels[0]);
+        try std.testing.expectEqualStrings(if (width >= 20) "Deny" else "D", row.labels[1]);
+    }
+    // The mock's row: the input's two cells, then Allow once, then Deny.
+    try std.testing.expectEqual([2]u16{ 2, 18 }, choice(80).columns);
+}
+
+test "a whole Action ends right above the input, a taller one pages from the top" {
+    var document: Viewport.Document = .{};
+    try document.append("\n? Delete the Zig build cache\n  $ rm -rf .zig-cache zig-out\n");
+    var frame: Self = undefined;
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    document.top = .{};
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(usize, 3), frame.document_rows);
+    try std.testing.expectEqual(@as(u16, 0), frame.navigation_height);
+    // Its last row is the row above the rule.
+    try std.testing.expectEqual(frame.draft_top - frame.rule_height - frame.status_height, frame.document_offset + 3);
+    try std.testing.expect(frame.approval_ready);
+    // An inspection page or transcript keeps its text at the top.
+    input.action_visible = false;
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 0), frame.document_offset);
+    // A taller Action pages under its heading from the top.
+    input.action_visible = true;
+    for (0..40) |_| try document.append("  more\n");
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 0), frame.document_offset);
+    try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
 }
 
 test "inspection navigation names its actual return target at narrow widths" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 20, .height = 16, .cursor = 0, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 20, .height = 16, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
     for ([_]bool{ false, true }) |pending| {
         input.action_pending = pending;
         for ([_]u16{ 20, 8 }) |width| {
@@ -509,7 +569,7 @@ test "Action approval requires contiguous displayed rows and resets after resize
     var document: Viewport.Document = .{};
     for (0..100) |_| try document.append("command line\n");
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = approval_choice, .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
     const layout: Viewport.Layout = .{ .width = 80, .method = .wcwidth };
     document.top = .{};
     try frame.plan(&document, input);

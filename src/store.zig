@@ -13,7 +13,7 @@ comptime {
     // The schema's fixed literal for the seal's length.
     std.debug.assert(prefix_seal.encoded_bytes == 56);
 }
-const provider_output = @import("provider_output.zig");
+const output_decode = @import("output_decode.zig");
 const retry_policy = @import("retry_policy.zig");
 const turn_policy = @import("turn_policy.zig");
 const session_work = @import("session_work.zig");
@@ -9604,7 +9604,7 @@ fn settleCallsForTestingWithFaults(
     defer metadata.deinit();
     // Acceptance's own recorder, so the metadata is what acceptance writes.
     for (ranges, 0..) |range, ordinal| {
-        const record = try provider_output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
+        const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
         std.debug.assert(record.kind == .function_call);
     }
     if (usage_json) |bytes| {
@@ -9614,7 +9614,7 @@ fn settleCallsForTestingWithFaults(
             .start = start,
             .length = bytes.len,
             .content_digest = protocol.contentDigest(bytes),
-            .usage = try provider_output.readUsage(std.testing.io, source, start, bytes.len),
+            .usage = try output_decode.readUsageForTesting(std.testing.io, source, start, bytes.len),
         });
     }
     try metadata.sealForRead();
@@ -13271,11 +13271,12 @@ test "historical accepted assistant output completeness and provenance fence rea
         var retained: ?named_scratch.Owner = null;
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
-        var event_data: provider_output.EventData = undefined;
+        var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer event_data.deinit();
-        var rejection: @import("provider_output.zig").Rejection = .{};
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, provider_output.testingProviderFailure(), provider_output.testingItemCheck(), .{});
+        var rejection: output_decode.Rejection = .{};
+        var validated: output_decode.Validated = undefined;
+        try output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, output_decode.testingProviderFailure(), &validated);
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");
@@ -17186,7 +17187,7 @@ test "private-only model output never becomes public conversation" {
     var retained: ?named_scratch.Owner = null;
     var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "private-metadata", .{ .used = &used, .limit = 1024 }, false, &retained);
     defer metadata.deinit();
-    _ = try provider_output.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
+    _ = try output_decode.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
     try metadata.sealForRead();
     try storage.settleModelSuccess(binding, &.{
         .source = source,
@@ -17312,7 +17313,7 @@ fn answerTestTurn(
     var retained: ?named_scratch.Owner = null;
     var metadata = try OutputMetadataWriter.init(std.testing.io, root_buffer[0..root_length], name ++ "-metadata", .{ .used = &metadata_used, .limit = 1 << 20 }, false, &retained);
     defer metadata.deinit();
-    _ = try provider_output.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
+    _ = try output_decode.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
     try metadata.sealForRead();
     const output = ValidatedOutput{
         .source = source,
@@ -17891,7 +17892,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     );
     defer metadata.deinit();
     try std.testing.expect(retained_metadata == null);
-    _ = try provider_output.recordItemForTesting(&metadata, source, 0, source_bytes.len, 0, .assistant_response);
+    _ = try output_decode.recordItemForTesting(&metadata, source, 0, source_bytes.len, 0, .assistant_response);
     try metadata.sealForRead();
     const output = ValidatedOutput{
         .source = source,
@@ -19721,7 +19722,7 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         // Each item is judged under the Operation that accepts its kind, so
         // the Store's own Operation check is what rejects a misplaced item.
         const operation: output_format.ModelOperationKind = if (kind == .compaction) .compaction else .assistant_response;
-        _ = try provider_output.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, operation);
+        _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, operation);
         offset += bytes.len;
     }
     try metadata.sealForRead();

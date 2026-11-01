@@ -13,7 +13,7 @@ from strict_paths import strict
 
 # Renderer, terminal and frontend owners select the roots that run their unit
 # tests and PTY callers, not the Store-native check, unless a strict path changes.
-FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig",
+FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
@@ -42,7 +42,7 @@ RULES = (
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
-    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig", "src/session_departure.zig",
+    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
@@ -104,7 +104,7 @@ RULES = (
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
-    (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig", "src/history_memo.zig",
+    (("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/model_adapter.zig", "src/history_memo.zig",
       "src/model_capability.zig", "src/failed_responses.zig"),
      ("test", "dispatch-integration", "transport-h2-integration"),
      ("test", "dispatch-integration", "transport-h2-integration"), "Model admission and transport"),
@@ -130,6 +130,8 @@ RULES = (
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      "Credential mutation and synthetic managed transport"),
+    (("src/path_list.zig",), ("test-logic", "check"), ("test-logic", "test"),
+     "Search path values; the system PATH reader and Bash's environment build on them"),
     (("src/os/*",),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
