@@ -440,6 +440,8 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         connection.sendall(
             f"POST /v1/{kind.replace('_', '-')} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+            # A Message carries the sending terminal's environment; these carry none.
+            + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
             + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
         )
         head, body = control.read_http_response(connection, timeout=timeout, deadline=deadline)
