@@ -310,34 +310,43 @@ pub const Reader = struct {
         const rest = self.bytes[self.offset..];
         if (rest.len == 0) return null;
         const tag = std.enums.fromInt(OpTag, rest[0]) orelse return error.CodecBadOp;
+        // Lengths are widened to usize before any sum, so no op can wrap
+        // the arithmetic that bounds it.
         switch (tag) {
             .literal => {
                 if (rest.len < 3) return error.CodecBadOp;
-                const count = std.mem.readInt(u16, rest[1..3], .little);
+                const count: usize = std.mem.readInt(u16, rest[1..3], .little);
                 if (count == 0 or rest.len - 3 < count) return error.CodecBadOp;
-                self.offset += 3 + count;
+                self.advance(3 + count);
                 return .{ .literal = rest[3..][0..count] };
             },
             .content => {
                 if (rest.len < 3) return error.CodecBadOp;
                 const escape = std.enums.fromInt(Escape, rest[2]) orelse return error.CodecBadOp;
-                self.offset += 3;
+                self.advance(3);
                 return .{ .content = .{ .handle = rest[1], .escape = escape } };
             },
             .carry => {
-                if (rest.len < 2 or rest[1] > max_carry_bytes or rest.len - 2 < rest[1]) return error.CodecBadOp;
-                self.offset += 2 + rest[1];
-                return .{ .carry = .of(rest[2..][0..rest[1]]) };
+                if (rest.len < 2) return error.CodecBadOp;
+                const length: usize = rest[1];
+                if (length > max_carry_bytes or rest.len - 2 < length) return error.CodecBadOp;
+                self.advance(2 + length);
+                return .{ .carry = .of(rest[2..][0..length]) };
             },
             .header => {
                 if (rest.len < 4 or rest[1] == 0) return error.CodecBadOp;
-                const name_length = rest[1];
-                const value_length = std.mem.readInt(u16, rest[2..4], .little);
+                const name_length: usize = rest[1];
+                const value_length: usize = std.mem.readInt(u16, rest[2..4], .little);
                 if (rest.len - 4 < name_length + value_length) return error.CodecBadOp;
-                self.offset += 4 + name_length + value_length;
+                self.advance(4 + name_length + value_length);
                 return .{ .header = .{ .name = rest[4..][0..name_length], .value = rest[4 + name_length ..][0..value_length] } };
             },
         }
+    }
+
+    /// `count` is at most the bytes left, so the offset stays within them.
+    fn advance(self: *Reader, count: usize) void {
+        self.offset = @intCast(self.offset + count);
     }
 };
 

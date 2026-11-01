@@ -137,13 +137,14 @@ pub const Shown = struct {
     }
 };
 
-fn cells(bytes: []const u8, method: Method) usize {
+pub fn cells(bytes: []const u8, method: Method) usize {
     return gwidth.gwidth(bytes, method);
 }
 
 /// The longest run of whole clusters at the start of `bytes` within `limit`
-/// cells: its byte length and the cells it takes.
-fn fit(bytes: []const u8, limit: usize, method: Method) struct { len: usize, cells: usize } {
+/// cells: its byte length and the cells it takes. The conversation's work
+/// line cuts its words with it too.
+pub fn fit(bytes: []const u8, limit: usize, method: Method) struct { len: usize, cells: usize } {
     var used: usize = 0;
     var end: usize = 0;
     var clusters = unicode.graphemeIterator(bytes);

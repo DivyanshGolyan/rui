@@ -442,12 +442,16 @@ test "codec ops are checked as they run and a bad op fails the job" {
         .{ .item = .tool_result, .handles = 0b11, .ops = &(header ++ carry_one), .expected = error.CodecBadOp },
         // Malformed ops: an unknown tag or escape, an empty or cut literal,
         // a cut content, carry or header, a carry past its bound, a header
-        // without a name.
+        // without a name, a header whose lengths sum past u16 or past the
+        // ops.
         .{ .item = .tools_start, .ops = &.{0}, .expected = error.CodecBadOp },
         .{ .item = .tools_start, .ops = &.{5}, .expected = error.CodecBadOp },
         .{ .item = settings, .ops = header[0 .. header.len - 1], .expected = error.CodecBadOp },
         .{ .item = settings, .ops = header[0..3], .expected = error.CodecBadOp },
         .{ .item = settings, .ops = &.{ 4, 0, 1, 0, 'v' }, .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = &.{ 4, 0x10, 0xff, 0xff }, .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = &.{ 4, 0xff, 0xff, 0xff }, .expected = error.CodecBadOp },
+        .{ .item = settings, .ops = &.{ 4, 0xff, 0, 0 }, .expected = error.CodecBadOp },
         .{ .item = .tool, .handles = 1, .ops = &.{ 2, 0, 2 }, .expected = error.CodecBadOp },
         .{ .item = .tools_start, .ops = &.{ 1, 0, 0 }, .expected = error.CodecBadOp },
         .{ .item = .tools_start, .ops = &.{ 1, 2, 0, '[' }, .expected = error.CodecBadOp },

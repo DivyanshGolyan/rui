@@ -1221,7 +1221,7 @@ const Capture = struct {
         if (!self.active) return;
         if (self.file_open) self.file.close(self.io);
         if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
-            @import("TerminalText.zig").diagnostic("rui: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
+            @import("stderr.zig").diagnostic("rui: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
         };
         self.lock_file.close(self.io);
         self.parent.close(self.io);

@@ -4365,7 +4365,7 @@ pub const Store = struct {
     }
 
     /// One aggregate over the Operation's Actions, bounded by its calls, and
-    /// the oldest running Action's saved description.
+    /// the oldest running Action's call ordinal and saved description.
     fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bounded(protocol.max_tool_description_bytes)) !session_work.Inputs.Actions {
         const group = try self.cached(
             "SELECT count(*),count(*) FILTER (WHERE a.resolution_code IS NULL)," ++
@@ -4394,7 +4394,7 @@ pub const Store = struct {
         };
         if (actions.running == 0) return actions;
         const oldest = try self.cached(
-            "SELECT a.attempt_at,call.description FROM action_operation a " ++
+            "SELECT a.attempt_at,call.description,a.call_ordinal FROM action_operation a " ++
                 "JOIN model_tool_call call ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
                 "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
         );
@@ -4403,7 +4403,7 @@ pub const Store = struct {
         if (c.sqlite3_step(oldest) != c.SQLITE_ROW) return error.CorruptStore;
         const described = c.sqlite3_column_type(oldest, 1) != c.SQLITE_NULL;
         if (described) try readText(oldest, 1, description);
-        actions.oldest_running = .{ .at = try readPositive(oldest, 0), .description = if (described) description.slice() else null };
+        actions.oldest_running = .{ .at = try readPositive(oldest, 0), .call = try readCount(oldest, 2), .description = if (described) description.slice() else null };
         return actions;
     }
 
@@ -13319,14 +13319,14 @@ test "historical accepted assistant output completeness and provenance fence rea
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            var progress = preparation.advance(7, 2);
+            const progress = preparation.advance(7, 2);
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(case.failure, err);
                     break;
                 },
-                .prepared => |*request| {
+                .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCorruptionFailure;
                 },
@@ -13373,14 +13373,14 @@ test "historical preparation fences a served call that does not match its certif
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         while (true) {
-            var progress = preparation.advance(1, 1);
+            const progress = preparation.advance(1, 1);
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
                     try std.testing.expectEqual(error.CorruptStore, err);
                     break;
                 },
-                .prepared => |*request| {
+                .prepared => |request| {
                     request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCompatibilityFailure;
                 },
