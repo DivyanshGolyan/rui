@@ -16,6 +16,7 @@ const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
+const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const unseen = @import("unseen.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
@@ -120,32 +121,32 @@ pub const Hint = union(enum) {
     line: Bounded(session_line.max_line_bytes),
 };
 
-/// Reads the hint from the first Message at `position`. A refusal or content
-/// that is not text answers it with the reference; a canonical Store,
-/// transport or cancellation failure fails the read, as the page's would.
+/// Reads the hint from the first Message at `position`.
 fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
+    const line = try readFirstLine(requests, job, position);
+    return if (line.len == 0) .absent else .{ .line = line };
+}
+
+/// The first line of the Message at `position`, terminal-safe; empty when
+/// the Host refuses it or it is not text. A canonical Store, transport or
+/// cancellation failure fails the read, as the page's would.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64) !queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
     const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
-        error.InvalidResponse => return .absent,
+        error.InvalidResponse => return .{ .len = 0 },
         else => return err,
     };
-    switch (reply) {
-        .line => |bytes| {
-            const line = session_line.firstLine(bytes);
-            return if (line.len == 0) .absent else .{ .line = plain(session_line.max_line_bytes, line) };
-        },
-        .failure => |failure| {
-            if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
-            return .absent;
-        },
-    }
+    return switch (reply) {
+        .line => |bytes| plain(session_line.max_line_bytes, session_line.firstLine(bytes)),
+        .failure => |failure| if (failure.err() == error.CanonicalStoreFailure) requests.failRead(failure) else .{ .len = 0 },
+    };
 }
 
 /// Text the Host holds, without terminal controls and with its tabs and line
 /// ends as spaces, within `limit` bytes: cut at a code point and ended with
 /// an ellipsis when longer. One pass, straight into the value.
 fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
-    var value: Bounded(limit) = .{};
+    var value: Bounded(limit) = .{ .len = 0 };
     var text: TerminalText = .{ .mode = .multiline };
     // The longest kept text an ellipsis can still follow.
     var room: usize = 0;
@@ -209,6 +210,13 @@ pub const Job = struct {
     held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
+    // The Messages waiting at the live cursor, as the Host reported them;
+    // the newest live output showed while it waited (see View.Taking),
+    // which each read sets in place; and the Message whose first line the
+    // queued row holds.
+    queued: protocol.Queued = .{},
+    drawn_waiting: u64 = 0,
+    queued_line: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -246,7 +254,8 @@ pub const Job = struct {
         echoes: Echoes = .{},
         // The Messages of the collapsed blocks in this read's output, in order.
         collapsed: Collected = .{},
-        // The opening's lowest unapplied position (see View.Pending).
+        // The opening's lowest unapplied position (see View.Pending), or the
+        // lowest a stop showed.
         lowest: ?u64 = null,
         // The Session's read-through position, as the opening's page read it.
         read_through: ?u64 = null,
@@ -257,6 +266,10 @@ pub const Job = struct {
         newer: Newer = .{ .next = null, .through = 0 },
         // The job's Messages after this read.
         messages: Messages = .{},
+        // The Messages waiting at this read's cursor, and the newest one's
+        // first line when the row shows it and does not hold it yet.
+        queued: protocol.Queued = .{},
+        queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -435,10 +448,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.hint = try readHint(requests, job, position);
     };
     job.result.live = View.Live.init(page.facts.call_activity);
-    // Admission ids follow Session positions, so the newest one shown
-    // means every earlier Message was delivered too.
+    // Selection and a stop take admission-order prefixes, so a row or a
+    // stop takes every earlier Message too.
     for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .admission, .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .stop => |stop| job.result.delivered = @max(job.result.delivered, stop.cutoff),
         else => {},
     };
     if (job.opening) {
@@ -457,11 +471,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end, .colour = job.colour };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end, .colour = job.colour };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(page.facts.work.work.state.holdsQueue(), &output);
         job.result.lowest = pending.lowest;
+        job.drawn_waiting = pending.newest;
         // A queued Message older than the page shows only in a transcript's
         // listing, at the opening's seam. No later boundary may precede its
         // row, which shows nothing live.
@@ -474,12 +489,23 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .none => {},
         }
     }
-    try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
+    // A stop searches only from the oldest Message that waited at the last
+    // read: queued input joins the work at its next input boundary, so that
+    // is at most one model step back, never the history.
+    const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
+    job.drawn_waiting = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn_waiting = job.drawn_waiting, .from = from });
+    // One shown at its Admission is delivered too.
+    job.result.delivered = @max(job.result.delivered, job.drawn_waiting);
     if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
-    job.result.collapsed = output.blocks;
+    if (output.lowest) |lowest| job.result.lowest = lowest;
+    const queued = page.facts.queued;
+    job.result.queued = queued;
+    if (queued_line.shows(queued.count, queued.newest_admission, job.drawn_waiting) and queued.newest_admission != job.queued_line) {
+        job.result.queued_line = .{ .admission = queued.newest_admission, .line = try readFirstLine(requests, job, queued.newest_position) };
+    }
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
         if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
@@ -526,10 +552,9 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
-    job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
@@ -545,12 +570,11 @@ fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
     };
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .end = page.facts.end, .colour = job.colour };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .end = page.facts.end, .colour = job.colour };
     if (cursor.ordinal == null) try output.rule();
     var compact = false;
-    try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact);
+    _ = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, .{ .drawn_waiting = 0, .from = null });
     _ = output.finish();
-    job.result.collapsed = output.blocks;
     const next = page.continuation();
     // Later rows of a page's last position may be on the next page.
     job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, cursor.position) else page.facts.end };
@@ -561,8 +585,7 @@ fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
 fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
-    defer job.result.collapsed = output.blocks;
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
@@ -578,11 +601,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 };
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
-                    const value = switch (item.value) {
-                        .admission => |value| value,
-                        else => continue,
-                    };
-                    if (!range.all and value.state == .applied) continue;
+                    const value = listed(item, range.all, job.drawn_waiting) orelse continue;
                     try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
@@ -599,25 +618,145 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     }
 }
 
-/// The collapsed blocks one read writes: a page shows each item at most once.
+/// Whether a range lists this item, and its Message: every Message the live
+/// output of the range showed (`all`), or each one not applied at the
+/// range's end. Live output shows another Session's Message as its
+/// Admission, and a person's or script's at its Admission when it showed
+/// while it waited (`drawn_waiting`), otherwise as its row or at the stop
+/// that excluded it. One still queued that has not shown shows live later,
+/// so it is never listed.
+fn listed(item: protocol.ActivityItem, all: bool, drawn_waiting: u64) ?protocol.ActivityItem.Message {
+    return switch (item.value) {
+        .admission => |value| if (all)
+            (if (value.sender != null or value.admission <= drawn_waiting) value else null)
+        else if (value.state == .applied or (value.sender == null and value.state == .queued and value.admission > drawn_waiting))
+            null
+        else
+            value,
+        .user => |value| if (all and value.sender == null and value.admission > drawn_waiting) value else null,
+        else => null,
+    };
+}
+
+test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
+    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
+    const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
+    const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, all: bool, listed: bool };
+    // Live output showed admissions up to 10 while they waited.
+    const drawn_waiting = 10;
+    for ([_]Case{
+        // A dropped live span: what live output showed. Another Session's
+        // Admission and a person's or script's row after the opening.
+        .{ .kind = .admission, .sender = true, .state = .applied, .admission = 12, .all = true, .listed = true },
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 12, .all = true, .listed = true },
+        // A person's Message that showed at its Admission, taken next.
+        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 10, .all = true, .listed = true },
+        // Not the Admission of a person's Message that waited above the
+        // input, another Session's row, or the row of a Message that showed
+        // while it waited, which live output never showed.
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 12, .all = true, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 12, .all = true, .listed = false },
+        .{ .kind = .user, .sender = true, .state = .applied, .admission = 12, .all = true, .listed = false },
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 10, .all = true, .listed = false },
+        // A seam: each Message not applied at its end, except one sent
+        // after the opening that is still queued, which waits above the
+        // input and shows live once taken.
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .all = false, .listed = true },
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 11, .all = false, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 11, .all = false, .listed = true },
+        .{ .kind = .admission, .sender = true, .state = .queued, .admission = 11, .all = false, .listed = true },
+        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 9, .all = false, .listed = false },
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 11, .all = false, .listed = false },
+    }) |case| {
+        const message: protocol.ActivityItem.Message = .{ .admission = case.admission, .key = .{}, .turn = null, .state = case.state, .content = content, .admitted_at = 1, .sender = if (case.sender) peer else null };
+        const item: protocol.ActivityItem = .{ .position = 30, .at = 1, .value = switch (case.kind) {
+            .admission => .{ .admission = message },
+            .user => .{ .user = message },
+        } };
+        try std.testing.expectEqual(case.listed, listed(item, case.all, drawn_waiting) != null);
+    }
+    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, true, drawn_waiting) == null);
+}
+
+test "a stop answers every Message up to its cutoff, and no boundary precedes queued Messages it shows" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "output", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null } } };
+    const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 5, .completion = .completed } } };
+    // Another Session's Message 5 showed as its Admission and has no row:
+    // nothing may begin a transcript until the stop answers it.
+    var answered: DisplayCapture = .{ .task = &task, .file = file, .messages = .{ .shown = 5, .answered = 3 }, .end = 30 };
+    answered.item(outcome);
+    try answered.feed("✓ done\n");
+    try std.testing.expectEqual(@as(usize, 0), answered.boundaries.count);
+    answered.item(stop);
+    try answered.feed("! Session stopped.\n");
+    try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
+    try std.testing.expect(answered.finish().settled());
+    // The Messages a stop shows belong to no item, and nothing before the
+    // stop in this read begins a transcript: once they are excluded, one
+    // beginning there would list them at its seam too.
+    var shown: DisplayCapture = .{ .task = &task, .file = file, .end = 30 };
+    shown.item(outcome);
+    try shown.feed("✓ done\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    shown.excluding(12);
+    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
+    try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
+    try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
+    shown.item(stop);
+    try shown.feed("! Session stopped.\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
+}
+
+/// The collapsed blocks one read writes, oldest first. A page shows each
+/// item at most once, but its stop also shows every queued Message it
+/// excluded: beyond capacity only the newest blocks are kept, and older ones
+/// are only counted, as `View.Blocks` keeps them.
 pub const Collected = struct {
-    items: [@max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items)]View.Collapsed = undefined,
+    pub const capacity = @max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items);
+    items: [capacity]View.Collapsed = undefined,
     count: usize = 0,
 
-    pub fn slice(self: *const Collected) []const View.Collapsed {
-        return self.items[0..self.count];
+    fn add(self: *Collected, value: View.Collapsed) void {
+        self.items[self.count % capacity] = value;
+        self.count += 1;
+    }
+
+    /// The block at `index` in write order, if kept.
+    pub fn at(self: *const Collected, index: usize) ?View.Collapsed {
+        std.debug.assert(index < self.count);
+        return if (self.count - index > capacity) null else self.items[index % capacity];
     }
 };
+
+test "a read's collapsed blocks keep the newest beyond capacity, as a stop's queued Messages may need" {
+    var blocks: Collected = .{};
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    for (0..Collected.capacity + 3) |index| blocks.add(.{ .source = .activity, .position = index, .ordinal = 0, .content = content, .row = false });
+    for (0..3) |index| try std.testing.expect(blocks.at(index) == null);
+    for (3..blocks.count) |index| try std.testing.expectEqual(@as(u64, index), blocks.at(index).?.position);
+}
 
 const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
-    blocks: Collected = .{},
+    /// Where its collapsed blocks are recorded, if anywhere: the job's
+    /// result, filled in place.
+    blocks: ?*Collected = null,
     /// The page's end, for boundary cursors.
     end: u64 = 0,
     /// Messages shown before the current item.
     messages: Messages = .{},
+    /// The lowest Admission position of a Message a stop showed.
+    lowest: ?u64 = null,
     /// Shown items where a transcript may begin.
     boundaries: Boundaries = .{},
     /// Shown Messages.
@@ -633,6 +772,9 @@ const DisplayCapture = struct {
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         _ = self.finish();
+        // Every Message up to a stop's cutoff has its row before the stop,
+        // or never gets one.
+        if (value.value == .stop) self.messages.answered = @max(self.messages.answered, value.value.stop.cutoff);
         self.current = value;
         self.current_start = self.offset;
     }
@@ -651,10 +793,18 @@ const DisplayCapture = struct {
         self.offset += bytes.len;
     }
 
+    /// A stop shows the queued Messages it excluded next, from the one
+    /// admitted at `position`. Their bytes, until the stop's own item, belong
+    /// to no item, and no transcript begins earlier in this read: once they
+    /// are excluded, it would list them at its seam too.
+    pub fn excluding(self: *@This(), position: u64) void {
+        _ = self.finish();
+        self.boundaries.count = 0;
+        self.lowest = @min(self.lowest orelse position, position);
+    }
+
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
-        if (self.blocks.count == self.blocks.items.len) return error.TooManyCollapsedBlocks;
-        self.blocks.items[self.blocks.count] = value;
-        self.blocks.count += 1;
+        if (self.blocks) |blocks| blocks.add(value);
     }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -717,16 +867,17 @@ test "the rule precedes the first shown item after the read-through position, on
     try std.testing.expectEqualStrings("\n› new\n", written[@intCast(output.echoes.items[0].output)..@intCast(output.echoes.items[0].end)]);
 }
 
-/// Messages shown in live output, by admission id. A Message shows first as
-/// its Admission, or is listed at the opening's seam, and gains its
-/// conversation row later:
-/// at model-attempt admission, after a running tool's result when steered, or
-/// after the answer it queued behind. Admission ids follow Session positions,
-/// so the newest of each stands for every earlier one.
+/// Messages shown in live output, by admission id. Another Session's Message
+/// shows first as its Admission, and one queued at the opening is listed at
+/// its seam; each gains its conversation row later: at model-attempt
+/// admission, after a running tool's result when steered, or after the
+/// answer it queued behind. Admission ids follow Session positions, so the
+/// newest of each stands for every earlier one.
 pub const Messages = struct {
     /// The newest Message shown as its Admission or listed at the opening's seam.
     shown: u64 = 0,
-    /// The newest Message whose conversation row a read returned.
+    /// The newest Message whose conversation row a read returned, or up to
+    /// which a stop excluded every Message without one.
     answered: u64 = 0,
 
     /// Every shown Message has its conversation row before the next item, so
@@ -757,8 +908,9 @@ pub const Boundary = struct {
     admitted: u64,
 };
 
-/// One Message as a read's output shows it: its Admission live, or in the
-/// opening its row or unapplied input. `output` and `end` are output offsets
+/// One Message as a read's output shows it: live, another Session's
+/// Admission or a person's or script's row; in the opening, its row or
+/// unapplied input. `output` and `end` are output offsets
 /// until the UI records live ones. The state is as of `read_end`.
 pub const Echo = struct {
     output: u64,
@@ -789,9 +941,9 @@ pub const Echoes = struct {
 pub const Listing = union(enum) {
     /// A shown Message whose output left the view, from its own item.
     echo: Echo,
-    /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
-    /// only those not applied at `end`. `cursor` is where the next one is
-    /// searched for, backward.
+    /// Messages at positions in `[lowest, before)` at `end`, newest first:
+    /// every one live output showed, or those not applied at `end` (see
+    /// `listed`). `cursor` is where the next one is searched for, backward.
     range: struct { end: u64, lowest: u64, all: bool, cursor: protocol_reply.ActivityCursor },
 
     pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
@@ -811,8 +963,9 @@ pub const Record = struct {
     opening_count: usize = 0,
     live: [capacity]Echo = undefined,
     live_count: usize = 0,
-    /// Live echoes dropped beyond capacity: admissions echo live in position
-    /// order, so they are every admission in `[low, high]`.
+    /// Live echoes dropped beyond capacity: live echoes follow position
+    /// order, so they are every item live output showed as a Message in
+    /// `[low, high]` (see `listed`).
     dropped: ?struct { low: u64, high: u64, end: u64, read_end: u64 } = null,
 
     pub fn add(self: *Record, echo: Echo, opening: bool) void {

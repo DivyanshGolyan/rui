@@ -37,7 +37,7 @@ def main():
                 elif mode == "scope":
                     page["sessions"][0]["workspace"] = str(root) + "-other"
                 elif mode == "version":
-                    page["version"] = "1"
+                    page["version"] = "2"
                 elif mode == "cursor":
                     page["next"]["after"] = "0" + page["next"]["after"]
                 elif mode == "delta":

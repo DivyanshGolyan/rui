@@ -9,6 +9,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
+const queued_line = @import("queued_line.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
@@ -645,12 +646,43 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         }
         cursor = page.continuation();
     } else return error.HistoryDidNotDrain;
+    // A Message still queued shows above the input until it is taken: its
+    // Admission, found by exact content identity, must be among the
+    // Messages the row shows, by admission ID.
+    for (messages, digests, &reachable) |text, digest, *found| if (!found.*) {
+        found.* = try queuedAbove(front, requests, text.len, digest);
+    };
     var all_reachable = true;
     for (reachable, 0..) |found, index| {
         if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript.older });
         all_reachable = all_reachable and found;
     }
     try std.testing.expect(all_reachable);
+}
+
+fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest: [32]u8) !bool {
+    var cursor: protocol_reply.ActivityCursor = .{};
+    for (0..64) |_| {
+        const page = switch (try requests.activityPage(front.store, front.session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
+            .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
+                // The row shows the Messages the Host reports waiting,
+                // newest last, past those shown while they waited, by the newest one's own
+                // line. This Message is among those it counts: admitted at
+                // or after the oldest.
+                const queued = front.live.queued;
+                const line = front.live.queued_line orelse return false;
+                return message.state == .queued and queued_line.shows(queued.count, queued.newest_admission, front.live.drawn_waiting) and
+                    line.admission == queued.newest_admission and front.live.drawn_waiting < message.admission and
+                    message.admission <= queued.newest_admission and item.position >= queued.oldest_position;
+            },
+            else => {},
+        };
+        cursor = page.continuation() orelse return false;
+    } else return error.ActivityDidNotDrain;
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {

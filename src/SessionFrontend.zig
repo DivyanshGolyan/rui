@@ -25,6 +25,7 @@ const Self = @This();
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const unseen = @import("unseen.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
@@ -89,7 +90,8 @@ admission: struct {
     // The newest accepted Message admission not yet in delivered output.
     // Admission order is Session order, so it stands for every earlier one.
     echo: ?u64 = null,
-    // The newest Message admission live pages have delivered.
+    // The newest Message admission live pages have taken: shown as its
+    // conversation row, or at the stop that excluded it.
     delivered: u64 = 0,
     /// Messages begun; a /details read begun before the latest one never covers it.
     sent: u64 = 0,
@@ -115,6 +117,13 @@ live: struct {
     // The lowest position of a Message seen unapplied, where a transcript's
     // search for them may stop; a stale value only costs reads.
     lowest: ?u64 = null,
+    // The Messages a person or script sent that wait behind the work, as
+    // the Host reported them at the cursor; the first line the queued row
+    // last read, with its Message; and the newest live output showed while
+    // it waited (see View.Taking).
+    queued: protocol.Queued = .{},
+    queued_line: ?queued_line.Shown = null,
+    drawn_waiting: u64 = 0,
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -182,7 +191,7 @@ const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .unrecorded_read = self.unrecorded_read };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn_waiting = self.live.drawn_waiting, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .unrecorded_read = self.unrecorded_read };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -778,13 +787,16 @@ fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
     const waiting = screen.consent != null;
     const view = self.input.composition();
-    // A waiting Action says how to decide it under the input, not here.
-    const base_status = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
+    // A waiting Action says how to decide it under the input, not here. A
+    // sent Message reads Sent until live output shows it: as its row, at
+    // its stop, or in the queued row, which the frame may drop.
+    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
         .not_started => "Not sent · Ctrl-R retries original",
         .submitting => "Sending…",
         .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
         .rejected => "Rejected · /discard",
-    } else if (self.admission.echo != null) "Sent" else "";
+    } else null;
+    const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
     const now_ms: u64 = @intCast(@max(std.Io.Clock.real.now(self.init.io).toMilliseconds(), 0));
@@ -798,9 +810,14 @@ fn drawFrame(self: *Self) !void {
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status);
+    var queued_buffer: [Frame.status_capacity]u8 = undefined;
+    const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
+        .waiting = row.waiting,
+        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else ""),
+    } else null;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     // What this frame showed of the conversation.
     if (screen.view == .live and !self.reading.opening and self.live.cursor.end == null)
         self.seen.live(if (self.seen.live_from) |at| screen.liveShows(at) else false, self.live.cursor.position, try screen.liveEnd());
@@ -1156,7 +1173,7 @@ fn showNewer(self: *Self) !void {
     const result = &self.job.result;
     const newer = &self.transcript.newer.?;
     const whole = try self.terminal.screen.appendFile(self.init.io, self.files.inspection);
-    for (result.collapsed.slice()) |block| self.transcript.blocks.append(block);
+    for (0..result.collapsed.count) |index| self.transcript.blocks.append(result.collapsed.at(index));
     if (!whole and !self.transcript.newer_skipped) {
         self.transcript.newer_skipped = true;
         self.notice = "Some newer rows were too long to keep here; they stay new.";
@@ -1385,12 +1402,12 @@ fn settleReader(self: *Self) !void {
         if (screen.view == .transcript and self.job.transcript == self.transcript.id) if (self.job.target == .newer) try self.showNewer() else {
             const prepended = try screen.prependFile(self.init.io, self.files.inspection);
             // The page's newest blocks are those its kept rows show.
-            const collapsed = self.job.result.collapsed.slice();
-            var older: [@typeInfo(@FieldType(reads.Collected, "items")).array.len]?View.Collapsed = @splat(null);
+            const collapsed = &self.job.result.collapsed;
+            var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
             const kept = @min(prepended.older, older.len);
             for (0..kept) |index| {
                 const from_end = kept - index;
-                older[index] = if (from_end <= collapsed.len) collapsed[collapsed.len - from_end] else null;
+                older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
             }
             self.transcript.blocks.prepend(older[0..kept]);
             self.transcript.blocks.dropNewest(prepended.trimmed);
@@ -1425,6 +1442,16 @@ fn settleReader(self: *Self) !void {
         self.inspection.command_running = false; // Shown; exit no longer prints it.
     }
     try self.applyReader(end);
+}
+
+/// What the queued row shows, if it shows (see `queued_line.shows`): the
+/// newest waiting Message, by the line read from it, and how many wait.
+fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+    const queued = self.live.queued;
+    if (!queued_line.shows(queued.count, queued.newest_admission, self.live.drawn_waiting)) return null;
+    const shown = if (self.live.queued_line) |*shown| shown else return null;
+    if (shown.admission != queued.newest_admission) return null;
+    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -1482,7 +1509,7 @@ fn showStaged(self: *Self) !?u64 {
         }
     }
     _ = try staged.to(staged.length);
-    for (result.collapsed.slice()) |block| self.live.blocks.append(block);
+    for (0..result.collapsed.count) |index| self.live.blocks.append(result.collapsed.at(index));
     if (staged.length != 0) self.reading.output_started = true;
     return rule;
 }
@@ -1663,6 +1690,11 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
+        self.live.work = result.work.work;
+        // A taken Message leaves the queued row in the frame that shows it.
+        self.live.queued = result.queued;
+        if (result.queued_line) |shown| self.live.queued_line = shown;
+        self.live.drawn_waiting = self.job.drawn_waiting;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
@@ -1675,7 +1707,6 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.hint = hint.*;
             self.shown.width = null;
         }
-        self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
@@ -1719,6 +1750,47 @@ test "frontend commits spacing only for completed visible reads" {
         try self.applyReader(case.end);
         try std.testing.expectEqual(case.expected, self.live.compact_tools);
         try std.testing.expectEqual(@as(u64, if (case.end == .complete) 12 else 7), self.live.cursor.position);
+    }
+}
+
+test "the queued row shows what waits until it is taken, whatever the work is doing" {
+    const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn_waiting: u64 = 0, line: ?u64 = 9, shown: bool };
+    var line: queued_line.Line = .{ .len = 0 };
+    try line.set("check the cache");
+    for ([_]Case{
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
+        // A Message held back and then left pending, which live output
+        // shows only once taken: the row shows it meanwhile.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
+        // Nothing waits, or the newest showed while it waited.
+        .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .drawn_waiting = 9, .shown = false },
+        // The line held is another Message's, or none was read.
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
+        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
+    }) |case| {
+        var self: Self = .{
+            .init = undefined,
+            .store = "unused",
+            .session = "unused",
+            .directory = "unused",
+            .files = undefined,
+            .command = undefined,
+            .terminal = undefined,
+            .colour = false,
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn_waiting = case.drawn_waiting, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+        };
+        const row = self.queuedRow() orelse {
+            try std.testing.expect(!case.shown);
+            continue;
+        };
+        try std.testing.expect(case.shown);
+        try std.testing.expectEqual(@as(u64, 9), row.newest);
+        try std.testing.expectEqual(@as(u64, 2), row.waiting.count);
+        try std.testing.expectEqualStrings("check the cache", row.waiting.line);
     }
 }
 

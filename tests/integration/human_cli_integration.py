@@ -5140,14 +5140,24 @@ def renderer_cases():
             proxy = None
         print("renderer: a page asked for before a Message never opens over it", flush=True)
 
-        # A Message's conversation row shows nothing live (its Admission did),
-        # so a later read cannot begin a transcript before it. Once eviction
-        # cuts the Admission, older pages still hold the Message, whether its
-        # row arrives alone (held reply) or with the reply.
+        # A Message sent while an answer runs waits above the input, then
+        # shows live as its conversation row. Once eviction cuts the row,
+        # older pages still hold the Message, whether its row arrives alone
+        # (held reply) or with the reply.
         # A long Message shows collapsed live, so the reply alone outgrows
         # the live view. Older pages show the Message as a bare fold row.
         reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4400))
         omitted = "› ┄"
+
+        def message_once(shown, form, row=None):
+            # The long Message shows exactly once, in the form the case
+            # expects: `› ┄` where eviction cut its live row and older pages
+            # show it, or its live row's first characters. Never both.
+            other = (row or live_row) if form == omitted else omitted
+            assert shown.count(form) == 1 and other not in shown, (form, shown)
+            return shown.index(form)
+
+        live_row = "› " + "m" * 40
 
         def after_message(shown, reply="REPLY-00000"):
             # What follows the Message: its reply live, the long reply's own
@@ -5227,8 +5237,9 @@ def renderer_cases():
                 assert "PASTE-END" in end and "PASTE-0299" in end, end
                 tty.send(return_key, predicate=lambda: "Message ·" not in tty.capture.completed)
                 assert tty.capture.completed == before, (return_key, before, tty.capture.completed)
-            # In the transcript the same block opens and returns to its rows.
-            tty.send("\x1b[A", "Browsing · Esc returns")
+            # In the transcript the same block opens and returns to its rows,
+            # once the transcript has loaded what precedes it.
+            tty.send("\x1b[A", predicate=lambda: "Browsing · Esc returns" in tty.capture.completed and "Start of conversation" in tty.capture.completed)
             browsing = tty.capture.completed
             tty.send("\x0f", heading)
             tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
@@ -5271,7 +5282,14 @@ def renderer_cases():
                 if "┄ 299 more lines" in tty.capture.completed:
                     break
                 tty.send("\x1b[5~", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
-            assert "┄ 299 more lines" in tty.capture.completed, tty.capture.completed
+            # The older page the top asked for joins above the rows in view;
+            # a line down and a page up always draw, and show it once it has.
+            for _ in range(10):
+                if "Start of conversation" in tty.capture.completed:
+                    break
+                tty.send("\x1b[B", predicate=lambda: True)
+                tty.send("\x1b[5~", predicate=lambda: True)
+            assert "┄ 299 more lines" in tty.capture.completed and "Start of conversation" in tty.capture.completed, tty.capture.completed
             holding.set()
             held.clear()
             release.clear()
@@ -5300,6 +5318,11 @@ def renderer_cases():
             tty.finish()
         print("renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows", flush=True)
 
+        def waiting(tty, text, label="queued"):
+            # The dimmed row above the input: the newest queued Message's
+            # first line, cut to fit, and how many wait at the right edge.
+            return any(row.startswith("› " + text) and row.endswith(" " + label) for row in tty.capture.completed.split("\n"))
+
         def traverse(tty, steps=10):
             tty.send("\x1b[A", "Browsing · Esc returns")
             # Each step loads one older page or one listed Message.
@@ -5311,17 +5334,16 @@ def renderer_cases():
             # Session by its first Message.
             return tty.capture.completed.rsplit("\n", 1)[0]
 
-        def reachable(shown, before, reply="REPLY-00000"):
-            # Older pages reach the Message exactly once, after what preceded
-            # it and before its reply, or before the rows that left the view.
+        def reachable(shown, before, row, reply="REPLY-00000", form=omitted):
+            # The transcript reaches the Message exactly once, after what
+            # preceded it and before its reply, or before the rows that left
+            # the view.
             assert "Start of conversation" in shown, shown
-            assert shown.count(omitted) == 1, shown
-            assert shown.index(before) < shown.index(omitted) < after_message(shown, reply), shown
+            assert shown.index(before) < message_once(shown, form, row) < after_message(shown, reply), shown
 
-        # A Message sent while a tool runs shows as its Admission at once but
-        # gains its conversation row only after the tool's result shows. No
-        # transcript may start between them, and after eviction older pages
-        # still reach the Message.
+        # A Message sent while a tool runs waits above the input and gains its
+        # conversation row only after the tool's result shows; after
+        # eviction older pages still reach the Message.
         session = configure()
         gate = workspace / "steer-gate"
         endpoint.responses.append(fixture.sse_tool_calls("evicted-steer", [
@@ -5330,18 +5352,18 @@ def renderer_cases():
         endpoint.responses.append(fixture.sse_answer("evicted-steer", "reason", "message", reply)[0])
         with terminal(session) as tty:
             tty.send("start steering\n", "Wait for steer")
-            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "m" * 40))
             assert not gate.exists()
             gate.touch()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "Wait for steer")
+            reachable(shown, "Wait for steer", live_row)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message steered into a running tool stays in the transcript after eviction", flush=True)
 
-        # A Message queued behind a running answer shows as its Admission
-        # before that answer, but its conversation row follows it.
+        # A Message queued behind a running answer waits above the input,
+        # and its conversation row follows the answer.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("evicted-first", "reason", "message", "FIRST-ANSWER-DONE")[0], first_release))
@@ -5350,19 +5372,18 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("FIRST-SMALL-QUESTION\n", predicate=lambda: "› FIRST-SMALL-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "q" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "q" * 40))
             first_release.set()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "FIRST-ANSWER-DONE")
+            reachable(shown, "FIRST-ANSWER-DONE", "› " + "q" * 40)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message queued behind an answer stays in the transcript after eviction", flush=True)
 
         # One page holds a long answer, the conversation row of the Message
-        # queued behind it and that Message's reply. The page cannot begin a
-        # transcript at the answer, which the Message's Admission preceded,
-        # but can at the reply; older pages from there reach the Message.
+        # queued behind it and that Message's reply; the transcript reaches
+        # the Message once, after the answer.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("batched-first", "reason", "message", reply)[0], first_release))
@@ -5382,12 +5403,16 @@ def renderer_cases():
             release.set()
             tty.wait("SECOND-REPLY-DONE", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "DRIVER-QUESTION", "SECOND-REPLY-DONE")
+            # Live output showed the Message as its own row, after the answer
+            # it waited behind, so the transcript reaches it there, once.
+            assert "Start of conversation" in shown, shown
+            assert shown.index("DRIVER-QUESTION") < shown.index("Historical item omitted: position") < message_once(shown, live_row), shown
+            tty.send("\x1b[6~", "SECOND-REPLY-DONE")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a Message whose row and reply share a page with a long answer stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row and reply share a page with a long answer evicted before them shows once, as its row", flush=True)
 
         # The same page shape with an answer that live output shortens: its
         # styling is not kept and its oversized cluster is escaped. Eviction
@@ -5418,7 +5443,9 @@ def renderer_cases():
             tty.wait("REPLY-04099", timeout=30)
             shown = traverse(tty)
             assert "Earlier rows left this view." not in shown, shown
-            reachable(shown, "STYLED-END")
+            # The Message's row is the last row before the reply, so it stays
+            # live with it.
+            reachable(shown, "STYLED-END", live_row, form=live_row)
             # The reply starts whole, once, where older pages end.
             assert shown.count("REPLY-00000") == 1 and "\nREPLY-00000 " in shown, shown
             assert shown.count("STYLED-END") == 1 and shown.count("bold11") == 1, shown
@@ -5464,8 +5491,8 @@ def renderer_cases():
 
         # A Message queued behind a long answer gains its conversation row
         # once that answer ends, but its own answer is still held: the read
-        # that holds its row shows nothing. After eviction cuts its preview,
-        # older pages must still reach it.
+        # that holds its row shows only that row, after the answer evicted
+        # everything before it, and the transcript reaches it there, once.
         session = configure()
         first_release, second_release = threading.Event(), threading.Event()
         endpoint.responses.append((fixture.sse_answer("silent-first", "reason", "message", reply)[0], first_release))
@@ -5484,18 +5511,17 @@ def renderer_cases():
                 assert "SILENT-SECOND-DONE" not in tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count(omitted) == 1, shown
-                # Its row, after the omitted reply's row, not the live preview before it.
-                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
+                # Its row, after the omitted reply's row.
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < message_once(shown, live_row), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             second_release.set()
-        print("renderer: a Message whose row a silent read holds stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row a read holds alone, after a long answer, shows once as its row", flush=True)
 
         # The same, with the Message's own turn waiting on an Action: a call
-        # is outstanding while reads hold the row, and once decided its
-        # result takes a later position and shows once.
+        # is outstanding after the row, and once decided its result takes a
+        # later position and shows once.
         session = configure("ask")
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("asked-first", "reason", "message", reply)[0], first_release))
@@ -5517,20 +5543,21 @@ def renderer_cases():
                 tty.send(ALLOW.decode(), "ASKED-DONE")
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count(omitted) == 1 and shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
-                assert shown.count("✓ Rowed call") == 1 and shown.index(omitted) < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
+                at = message_once(shown, live_row)
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < at, shown
+                assert shown.count("✓ Rowed call") == 1 and at < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
             os.close(ready_read)
             os.close(ready_write)
-        print("renderer: a Message whose turn waits on an Action stays reachable, and its result shows once", flush=True)
+        print("renderer: a Message whose turn waits on an Action shows once as its row, and its result shows once", flush=True)
 
-        # Messages queued behind an answer that evicts their echoes, and
-        # still queued while its call runs: the gap lists each once, two with
-        # equal content included, labelled as queued; once they run, each is
-        # its row, never also listed.
+        # Messages queued behind an answer that evicts everything before it,
+        # and still queued while its call runs, wait above the input and no
+        # transcript lists them; once they run, each is its row, once, two
+        # with equal content included.
         def text_and_call(response_id, text, call_id, arguments):
             message = {"type": "message", "id": f"{response_id}-message", "status": "completed", "role": "assistant", "phase": "commentary",
                 "content": [{"type": "output_text", "text": text, "annotations": []}]}
@@ -5546,9 +5573,9 @@ def renderer_cases():
             return fixture.encode_sse(payloads)
 
         def queue_three(tty):
-            # Each admission shows before the next is sent.
-            for text, marker, count in (("EQUAL-CONTENT", "› EQUAL-CONTENT", 1), ("EQUAL-CONTENT", "› EQUAL-CONTENT", 2), (big, big_size, 1)):
-                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: tty.capture.completed.count(marker) == count and tty.capture.draft("", 2))
+            # Each waits above the input before the next is sent.
+            for text, label in (("EQUAL-CONTENT", "queued"), ("EQUAL-CONTENT", "2 queued"), (big, "3 queued")):
+                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: waiting(tty, text[:9], label) and tty.capture.draft("", 2))
 
         long_reply = "\n".join(f"LONG-{index:05d} " + "y" * 50 for index in range(4400))
         big = "BIG-START " + "é ñ ü " * 300 + "BIG-END"
@@ -5581,13 +5608,10 @@ def renderer_cases():
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 tty.wait("Held call", timeout=30)
+                assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 shown = traverse(tty)
-                assert "Start of conversation" in shown and "Earlier rows left this view." in shown, shown
-                listed = shown.split("Earlier rows left this view.", 1)[1]
-                assert shown.index("DRIVER-QUESTION") < shown.index("Earlier rows left this view."), shown
-                assert listed.count("Queued") == 3 and listed.count("EQUAL-CONTENT") == 2, shown
-                assert shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-START") == 1 and shown.count(big_size) == 1, shown
-                assert big_whole(shown), shown
+                assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
+                assert "EQUAL-CONTENT" not in shown and "BIG-START" not in shown and "Queued" not in shown, shown
                 assert "LONG-00000" not in shown, "the copy started before the front"
                 tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
                 (workspace / "listed-release").write_text("")
@@ -5602,11 +5626,10 @@ def renderer_cases():
         finally:
             first_release.set()
             (workspace / "listed-release").write_text("")
-        print("renderer: queued Messages whose echoes left the view are listed once, then are their rows", flush=True)
+        print("renderer: queued Messages wait above the input, never listed, then are their rows once", flush=True)
 
-        # More queued echoes than the record keeps, wrapped twice, with no
-        # boundary between them: the dropped span is listed through Activity
-        # pages, the kept echoes from the record, each once.
+        # More queued Messages than one Activity page holds wait as one row
+        # that counts them; once they run, each is its row, once, in order.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(text_and_call("dropped-first", long_reply, "dropped-call", json.dumps({
@@ -5620,29 +5643,30 @@ def renderer_cases():
                 tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 for index in range(66):
-                    tty.send(f"DROPPED-QUEUED-{index:02d}\n", predicate=lambda index=index: f"› DROPPED-QUEUED-{index:02d}" in tty.capture.completed and tty.capture.draft("", 2))
+                    label = f"{index + 1} queued" if index else "queued"
+                    tty.send(f"DROPPED-QUEUED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"DROPPED-QUEUED-{index:02d}", label) and tty.capture.draft("", 2))
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 tty.wait("Held call", timeout=30)
-                shown = traverse(tty, 80)
-                assert all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
-                assert "Start of conversation" in shown and shown.count("Queued") == 66, shown
-                order = [shown.index(f"DROPPED-QUEUED-{index:02d}") for index in range(66)]
-                assert order == sorted(order) and shown.index("DRIVER-QUESTION") < order[0], shown
-                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                assert waiting(tty, "DROPPED-QUEUED-65", "66 queued"), tty.capture.completed
                 (workspace / "dropped-release").write_text("")
                 tty.wait("DROPPED-DONE", timeout=30)
-                shown = traverse(tty)
-                assert "Queued" not in shown and all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
+                assert "queued" not in tty.capture.completed, tty.capture.completed
+                shown = traverse(tty, 80)
+                assert "Start of conversation" in shown and "Queued" not in shown, shown
+                assert all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
+                order = [shown.index(f"DROPPED-QUEUED-{index:02d}") for index in range(66)]
+                assert order == sorted(order) and shown.index("DRIVER-QUESTION") < order[0], shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
             (workspace / "dropped-release").write_text("")
-        print("renderer: queued echoes beyond the record's capacity are listed once, in order", flush=True)
+        print("renderer: many queued Messages wait as one counted row, then are their rows once, in order", flush=True)
 
-        # Messages a Stop excludes never gain rows: after later output evicts
-        # them, a transcript lists each once, labelled, at its seam.
+        # Messages a Stop excludes never gain rows: the stop shows each,
+        # labelled, before its own line, and after later output evicts them
+        # a transcript lists each once, at its seam.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
@@ -5655,12 +5679,18 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 queue_three(tty)
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "listed-stop.json", "--key", "listed-stop")
-                tty.wait("Session stopped", timeout=30)
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                # Live, the stop shows each Message it excluded, labelled,
+                # before its own line, and the queued row is gone.
+                stopped = "! Stopped before it ran · send it again to run it"
+                assert live.count(stopped) == 3 and live.rindex(stopped) < live.index("! Session stopped."), live
+                assert live.index("› EQUAL-CONTENT") < live.index("› BIG-START") < live.index("! Session stopped."), live
+                assert not any(row.endswith("queued") for row in live.split("\n")), live
                 first_release.set()
                 tty.send("AFTER-STOP\n", predicate=lambda: "LONG-04399" in tty.capture.completed)
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                stopped = "! Stopped before it ran · send it again to run it"
                 assert shown.count(stopped) == 3 and shown.count("EQUAL-CONTENT") == 2, shown
                 assert shown.count("BIG-START") == 1 and shown.count(big_size) == 1 and shown.count("AFTER-STOP") == 1, shown
                 assert big_whole(shown), shown
@@ -5669,6 +5699,36 @@ def renderer_cases():
         finally:
             first_release.set()
         print("renderer: Messages a Stop excluded are listed once, labelled, after later output evicts them", flush=True)
+
+        # A stop that excluded more Messages than one Activity page holds
+        # shows each once, oldest first, labelled, and its line follows the
+        # last.
+        session = configure()
+        first_release = threading.Event()
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
+        try:
+            with terminal(session, rows=200) as tty:
+                tty.capture.resize(80, 200)
+                requests = len(endpoint.requests)
+                tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
+                fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
+                for index in range(40):
+                    label = f"{index + 1} queued" if index else "queued"
+                    tty.send(f"MANY-STOPPED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"MANY-STOPPED-{index:02d}", label) and tty.capture.draft("", 2))
+                run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                rows = [untimed(row) for row in live.split("\n")]
+                order = [rows.index(f"› MANY-STOPPED-{index:02d}") for index in range(40)]
+                assert all(rows.count(f"› MANY-STOPPED-{index:02d}") == 1 for index in range(40)), live
+                assert order == sorted(order) and order[-1] < rows.index("! Session stopped."), live
+                assert all(rows[at - 1] == stopped for at in order) and rows.count(stopped) == 40, live
+                assert not any(row.endswith("queued") for row in rows) and "NEVER-SHOWN" not in live, live
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            first_release.set()
+        print("renderer: a stop that excluded more Messages than a page holds labels each once, before its line", flush=True)
 
         # A queued Message older than the opening's page, which holds only
         # its turn's commentary and held calls, is applied in the same read
