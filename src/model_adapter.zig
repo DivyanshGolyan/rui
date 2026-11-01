@@ -125,7 +125,7 @@ pub noinline fn interpretOutput(
 /// request was encoded with. Also fills `provider_failure` with what the
 /// body said, for every answer.
 pub fn interpretErrorResponse(decode: *output_decode.Decode, codec: protocol.Codec, io: std.Io, source: std.Io.File, length: u64, status: u16, provider_failure: *output_decode.ProviderFailure) execution.ErrorResponse {
-    return output_decode.classify(decode, codecs.classifier(codec), io, source, length, status, provider_failure);
+    return output_decode.classify(decode, codec, io, source, length, status, provider_failure);
 }
 
 var testing_decode: output_decode.Decode = undefined;
