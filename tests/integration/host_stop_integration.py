@@ -78,10 +78,10 @@ def instance(store):
 
 
 def request(sock, store, identity=None, *, extra=b""):
-    body = json.dumps({"version": "3", "kind": "host_stop", "store": str(store.resolve())}).encode()
+    body = json.dumps({"version": "4", "kind": "host_stop", "store": str(store.resolve())}).encode()
     header = (
         b"POST /v1/control/host-stop HTTP/1.1\r\nHost: local\r\n"
-        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
     )
     if identity is not None:
@@ -285,10 +285,10 @@ def main():
                     fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
                         "configuration": {name: {"state": "value", "value": "x" * 8192} if name == "instructions" else {"state": "omitted"}
                             for name in ("workspace", "provider", "model", "instructions", "tools", "permission_mode", "output_schema")}}
-                    body = json.dumps({"version": "3", "kind": kind, "store": str(store),
+                    body = json.dumps({"version": "4", "kind": kind, "store": str(store),
                         "key": f"late-{kind}-{phase}", "session": session, **fields}).encode()
                     header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
-                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
                         + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
                     upload = socket.socket(socket.AF_UNIX)
@@ -387,7 +387,7 @@ def main():
             current_cli = subprocess.run([RUI, "host", "stop", "--store", store],
                                          capture_output=True, text=True, timeout=10)
             assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
-                "version": "3", "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
+                "version": "4", "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
                 "instance": newer, "retirement": "unconfirmed",
             }, current_cli
             notice = current_cli.stderr

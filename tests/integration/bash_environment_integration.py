@@ -109,7 +109,7 @@ def run(environment, *args, expect=0, input=None):
 
 
 def raw_message(socket_path, store, key, session, header, entries):
-    body = json.dumps({"version": "3", "kind": "message", "store": str(store), "key": key, "session": session,
+    body = json.dumps({"version": "4", "kind": "message", "store": str(store), "key": key, "session": session,
                        "sender": None, "sender_handle": None, "text": {"state": "value", "value": "show"}},
                       separators=(",", ":")).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -118,7 +118,7 @@ def raw_message(socket_path, store, key, session, header, entries):
         # The refusal comes before the Host reads the request itself, so its
         # bytes stay unsent: unread bytes would reset the connection. The
         # declared length is never reached.
-        connection.sendall(b"POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n"
+        connection.sendall(b"POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
                            + header + f"Content-Length: {65537 + len(body)}\r\n\r\n".encode() + entries)
         response = b""
         while part := connection.recv(65536):

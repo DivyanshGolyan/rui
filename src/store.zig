@@ -9940,7 +9940,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
     var expected_empty: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"4\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;

@@ -1748,7 +1748,7 @@ test "canonical failure classifier accepts every production mutation failure env
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ &Command{}, .infrastructure_failure });
-        try std.testing.expectEqualStrings("{\"version\":\"3\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
+        try std.testing.expectEqualStrings("{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
     }
 }
@@ -2427,7 +2427,7 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     var sockets: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
     defer _ = std.c.close(sockets[1]);
-    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: 0\r\n\r\n";
+    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 0\r\n\r\n";
     try writeAll(std.testing.io, sockets[1], header);
     Clock.fd = sockets[0];
     var vtable = std.testing.io.vtable.*;
@@ -2701,7 +2701,7 @@ test "message observation renders every closed queue state without fabricated re
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ zero_digest ++ "\"}";
-    const accepted_prefix = "{\"version\":\"3\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
+    const accepted_prefix = "{\"version\":\"4\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
     const binding = ",\"processing\":{\"turn\":\"2\",\"operation\":\"3\",\"attempt\":\"4\"}";
     const Expect = struct {
         fn rendered(observation: store_module.CommandObservation, expected: []const u8) !void {
@@ -2726,7 +2726,7 @@ test "message observation renders every closed queue state without fabricated re
     try rejected.code.set("unknown_session");
     try Expect.rendered(
         rejected,
-        "{\"version\":\"3\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
+        "{\"version\":\"4\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
     );
 
     var observation = rejected;
@@ -2867,7 +2867,7 @@ test "control response variants fit exact worst-case JSON bounds" {
     } }, protocol.shapeBytes(protocol.session_stop_reply.rejected));
     try Cases.expectStop(&stop_command, .conflict, protocol.shapeBytes(protocol.session_stop_reply.conflict));
     // Canonical faults use the fixed invocation error, not a command answer.
-    const canonical_error = "{\"version\":\"3\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
+    const canonical_error = "{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
     try Cases.expectStop(
         &stop_command,
         .infrastructure_failure,
@@ -2951,7 +2951,7 @@ test "an unchanged listing echoes its token with no rows, as a client reads it" 
     const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
     var response: protocol.ResponseBuffer = .{};
     try response.render(renderSessionsNotModified, .{since});
-    try std.testing.expectEqualStrings("{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
+    try std.testing.expectEqualStrings("{\"version\":\"4\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
@@ -3285,7 +3285,7 @@ test "disconnected reserved peers release classification while half-closed peers
                     try intake.accept(sockets[0]);
                     const peer = intake.exchanges.items[index];
                     try writeAll(host.io, sockets[1], line);
-                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: 2\r\n\r\n{");
+                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 2\r\n\r\n{");
                     try peer.read();
                     if (half_closed) {
                         try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(sockets[1], std.c.SHUT.WR));
@@ -3401,7 +3401,7 @@ test "retired ordinary capture still consumes its intake classification and reso
                 });
                 retained.ingress = ingress;
                 // Seal the content file, but leave request framing incomplete.
-                try ingress.feed("{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+                try ingress.feed("{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
@@ -3615,7 +3615,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         fn send(fd: c_int, route: []const u8, body: []const u8, identity: bool) !void {
             var header: [512]u8 = undefined;
             const message = std.mem.eql(u8, route, "/v1/message");
-            const bytes = try std.fmt.bufPrint(&header, "POST {s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n{s}{s}Content-Length: {d}\r\n\r\n", .{ route, if (identity) "X-Rui-Host-Instance: 00000000000000000000000000000000\r\n" else "", if (message) "X-Rui-Environment-Bytes: 0\r\n" else "", body.len });
+            const bytes = try std.fmt.bufPrint(&header, "POST {s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n{s}{s}Content-Length: {d}\r\n\r\n", .{ route, if (identity) "X-Rui-Host-Instance: 00000000000000000000000000000000\r\n" else "", if (message) "X-Rui-Environment-Bytes: 0\r\n" else "", body.len });
             try writeAll(std.testing.io, fd, bytes);
             if (phase == .cleanup and message) {
                 try writeAll(std.testing.io, fd, body[0 .. body.len - 3]);
@@ -3655,7 +3655,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const message_template = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message_template = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -3704,7 +3704,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         // EOF later proves retirement rather than unconsumed input.
         for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }, [_][]const u8{
             "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n",
-            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: 1024\r\n\r\n{",
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 1024\r\n\r\n{",
         }, [_]Intake.Exchange.State{ .header, .body }) |peer, bytes, state| {
             try writeAll(std.testing.io, peer, bytes);
             const accepted = try intake.acceptSocket(listener.socket.handle);
@@ -3747,9 +3747,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try test_poll.waitUntil(std.testing.io, deadline, Uploads{ .host = &host, .expected = before_uploads + 2 }, Uploads.classified);
         try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
         for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: protocol.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
-            .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"3\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
-            .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"3\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
-            .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"3\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
+            .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"4\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
+            .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"4\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
+            .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"4\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
         }) |control| {
             const peer = try address.connect(std.testing.io);
             defer peer.socket.close(std.testing.io);
@@ -3764,11 +3764,11 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         }
         const discovery = try address.connect(std.testing.io);
         defer discovery.socket.close(std.testing.io);
-        try Probe.send(discovery.socket.handle, "/v1/host-info", "{\"version\":\"3\",\"kind\":\"host_info\",\"store\":\"s\"}", false);
+        try Probe.send(discovery.socket.handle, "/v1/host-info", "{\"version\":\"4\",\"kind\":\"host_info\",\"store\":\"s\"}", false);
         try Probe.response(discovery.socket.handle);
         const stop = try address.connect(std.testing.io);
         defer stop.socket.close(std.testing.io);
-        try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"3\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
+        try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"4\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
         try Probe.response(stop.socket.handle);
         try std.testing.expect(host.stopping());
         try std.testing.expect(!Probe.released.load(.acquire));
@@ -3816,9 +3816,9 @@ test "readable ingress cannot cross its header or body deadline" {
                 exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
                 defer std.debug.assert(exchange.destroy());
                 var body_buffer: [128]u8 = undefined;
-                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"3\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
+                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"4\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
                 var header_buffer: [256]u8 = undefined;
-                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
+                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
                 if (body_only) {
                     try writeAll(std.testing.io, sockets[1], header);
                     try exchange.read();
@@ -3877,9 +3877,9 @@ test "ingress resumes its peer wait after local capture completion" {
     defer _ = std.c.close(sockets[1]);
     try setNonblocking(sockets[0]);
     const payload = @as([4097]u8, @splat('x'));
-    const body = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    const body = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
     var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nX-Rui-Environment-Bytes: 0\r\nContent-Length: {d}\r\n\r\n", .{body.len});
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Environment-Bytes: 0\r\nContent-Length: {d}\r\n\r\n", .{body.len});
     try writeAll(std.testing.io, sockets[1], header);
     try writeAll(std.testing.io, sockets[1], body);
     const exchange = try std.testing.allocator.create(Intake.Exchange);
@@ -3922,7 +3922,7 @@ test "a Message's environment header and entries are checked before admission" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
-    const request = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
+    const request = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
     const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", record: bool = true, result: anyerror!?[]const u8 };
     for ([_]Case{
         .{ .header = "", .result = error.EnvironmentRequired },
@@ -3947,7 +3947,7 @@ test "a Message's environment header and entries are checked before admission" {
         try setNonblocking(sockets[0]);
         var header_buffer: [256]u8 = undefined;
         const record: []const u8 = if (case.record) request else "";
-        const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n{s}Content-Length: {d}\r\n\r\n", .{ case.route, case.header, case.entries.len + record.len });
+        const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n{s}Content-Length: {d}\r\n\r\n", .{ case.route, case.header, case.entries.len + record.len });
         try writeAll(std.testing.io, sockets[1], header);
         try writeAll(std.testing.io, sockets[1], case.entries);
         try writeAll(std.testing.io, sockets[1], record);
@@ -3997,13 +3997,13 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     const Send = struct {
         fn message(owner: *Host, key: []const u8, to: []const u8, entries: []const u8) !void {
             var request_buffer: [512]u8 = undefined;
-            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
+            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
             var sockets: [2]c_int = undefined;
             try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
             defer _ = std.c.close(sockets[1]);
             try setNonblocking(sockets[0]);
             var header_buffer: [256]u8 = undefined;
-            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nX-Rui-Environment-Bytes: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entries.len, entries.len + request.len }));
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Environment-Bytes: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entries.len, entries.len + request.len }));
             try writeAll(std.testing.io, sockets[1], entries);
             try writeAll(std.testing.io, sockets[1], request);
             const exchange = try std.testing.allocator.create(Intake.Exchange);
@@ -4061,7 +4061,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         .lease = &lease,
         .store = undefined, // Failed/incomplete captures never reach admission.
     };
-    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
     const suffix = "\"}}";
     for ([_]bool{ false, true }) |seal| {
