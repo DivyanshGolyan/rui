@@ -37,24 +37,17 @@ pub const Carry = struct { input_comma: bool };
 /// The carry before the first history element.
 pub const initial: Carry = .{ .input_comma = false };
 
-pub fn resumeFrom(carry: Carry) Encoder {
-    return .{ .input_comma = carry.input_comma };
-}
-
-pub fn carryOf(self: *const Encoder) Carry {
-    return .{ .input_comma = self.input_comma };
-}
-
 /// The request encoder. Beyond its carry, its state lives only within one
-/// output item or the tools array.
+/// output item or the tools array. A function call's open and a tool take
+/// the most pieces of any item, `codec_abi.max_pieces`.
 pub const Encoder = struct {
-    input_comma: bool = false,
+    carry: Carry,
     /// The open output item's replay rule and the part array it has open.
     omit_reasoning_text: bool = false,
     array: codec_abi.PartArray = .none,
     tool_comma: bool = false,
 
-    pub fn encodeItem(self: *Encoder, header: *const ItemHeader, out: *Pieces) error{Unsupported}!void {
+    pub fn encodeItem(self: *Encoder, header: *const ItemHeader, out: *Pieces) error{Declined}!void {
         out.len = 0;
         switch (header.item) {
             .settings => |*settings| {
@@ -126,7 +119,7 @@ pub const Encoder = struct {
                         .refusal => "{\"type\":\"refusal\",\"refusal\":\"",
                         .summary_text => "{\"type\":\"summary_text\",\"text\":\"",
                         .reasoning_text => "{\"type\":\"reasoning_text\",\"text\":\"",
-                        .opaque_block => return error.Unsupported,
+                        .opaque_block => return error.Declined,
                     });
                     out.content(0, .json_string_v1);
                     if (header.has(1)) {
@@ -185,17 +178,20 @@ pub const Encoder = struct {
 
     /// An input item after another takes a comma.
     fn separateInput(self: *Encoder, out: *Pieces) void {
-        if (self.input_comma) out.literal(",");
-        self.input_comma = true;
+        if (self.carry.input_comma) out.literal(",");
+        self.carry.input_comma = true;
     }
 };
+
+/// The request headers this codec writes, by name.
+pub const RequestHeader = enum(u8) { accept, @"session-id", originator };
 
 /// Codex routes a Session's requests by its session id.
 pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
     out.count = 0;
-    out.add("accept", "text/event-stream");
-    out.add("session-id", &std.fmt.bytesToHex(settings.session_affinity, .lower));
-    out.add("originator", "rui");
+    out.add(RequestHeader.accept, "text/event-stream");
+    out.add(RequestHeader.@"session-id", &std.fmt.bytesToHex(settings.session_affinity, .lower));
+    out.add(RequestHeader.originator, "rui");
 }
 
 /// Reads an HTTP error body. A Responses body is one JSON object whose
@@ -213,8 +209,8 @@ pub const Classifier = struct {
     inner: ?Inner,
     /// Whether the body's `error` member is an object.
     error_object: bool,
-    envelope: std.EnumArray(Outer, Member),
-    failure: std.EnumArray(Inner, Member),
+    envelope: std.enums.EnumArray(Outer, Member),
+    failure: std.enums.EnumArray(Inner, Member),
     /// The error object's code, when it is a string of at most
     /// max_code_bytes; empty otherwise.
     code: [codec_abi.max_code_bytes]u8 = undefined,
@@ -372,17 +368,16 @@ test "only the pinned table's models send parallel tool calls" {
         try std.testing.expect(!parallelToolCalls(model));
 }
 
-test "a carry holds exactly the comma state the span ended in" {
-    for ([_]bool{ false, true }) |input_comma| {
-        var encoder = resumeFrom(.{ .input_comma = input_comma });
-        try std.testing.expectEqual(Encoder{ .input_comma = input_comma }, encoder);
-        const header: ItemHeader = .{ .item = .tool_result, .handles = 0b11 };
-        var pieces: Pieces = .{ .len = 0 };
-        try encoder.encodeItem(&header, &pieces);
-        try std.testing.expectEqual(Carry{ .input_comma = true }, carryOf(&encoder));
-        try std.testing.expectEqual(input_comma, std.mem.eql(u8, pieces.items[0].literal, ","));
-    }
-    try std.testing.expectEqual(Encoder{}, resumeFrom(initial));
+test "an encoder resumed from a carry separates its next input item only after an earlier one" {
+    const header: ItemHeader = .{ .item = .tool_result, .handles = 0b11 };
+    var pieces: Pieces = .{ .len = 0 };
+    var first: Encoder = .{ .carry = initial };
+    try first.encodeItem(&header, &pieces);
+    try std.testing.expect(!std.mem.eql(u8, pieces.items[0].literal, ","));
+    // A fresh encoder given only the carry that element ended in.
+    var next: Encoder = .{ .carry = first.carry };
+    try next.encodeItem(&header, &pieces);
+    try std.testing.expectEqualStrings(",", pieces.items[0].literal);
 }
 
 test "every item at its longest fits max_pieces and names only handles it has" {
@@ -424,7 +419,7 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     var longest: u8 = 0;
     for (cases[0..count]) |case| for (case.handles) |handles| {
         for ([_]bool{ false, true }) |comma| for ([_]bool{ false, true }) |omit| for (std.enums.values(codec_abi.PartArray)) |array| {
-            var encoder: Encoder = .{ .input_comma = comma, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
+            var encoder: Encoder = .{ .carry = .{ .input_comma = comma }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
             try encoder.encodeItem(&header, &pieces);
@@ -442,14 +437,14 @@ test "the request headers ask for the stream, the Session's id and Rui as origin
     const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = .{ 0x00, 0x01, 0x7f, 0x80, 0xab, 0xff } ++ @as([10]u8, @splat(0x10)), .model_length = 0 };
     var headers: codec_abi.Headers = .{ .count = 0 };
     requestHeaders(&settings, &headers);
-    const expected = [_]codec_abi.Header{
-        .{ .name = "accept", .value = "text/event-stream" },
-        .{ .name = "session-id", .value = "00017f80abff10101010101010101010" },
-        .{ .name = "originator", .value = "rui" },
+    const expected = [_]struct { RequestHeader, []const u8 }{
+        .{ .accept, "text/event-stream" },
+        .{ .@"session-id", "00017f80abff10101010101010101010" },
+        .{ .originator, "rui" },
     };
     try std.testing.expectEqual(@as(u8, expected.len), headers.count);
     for (expected, 0..) |want, index| {
-        try std.testing.expectEqualStrings(want.name, headers.at(index).name);
-        try std.testing.expectEqualStrings(want.value, headers.at(index).value);
+        try std.testing.expectEqual(want[0], @as(RequestHeader, @fromBackingInt(@intCast(headers.names[index]))));
+        try std.testing.expectEqualStrings(want[1], headers.value(index));
     }
 }

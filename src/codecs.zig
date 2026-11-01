@@ -7,59 +7,79 @@ const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
 const responses = @import("codecs/responses.zig");
 
+/// The module of each codec this Host serves, the one place a codec is
+/// added: everything below is derived from it.
+fn module(comptime codec: protocol.Codec) type {
+    return switch (codec) {
+        .@"openai-responses/1" => responses,
+    };
+}
+
 pub fn manifest(codec: protocol.Codec) *const codec_abi.Manifest {
     return switch (codec) {
-        .@"openai-responses/1" => &responses.manifest,
+        inline else => |tag| &module(tag).manifest,
     };
 }
 
 comptime {
     for (@typeInfo(protocol.Codec).@"enum".field_names) |name| {
-        if (!manifest(@field(protocol.Codec, name)).valid()) @compileError("codec " ++ name ++ " observes a header that is not a lowercase token");
+        const codec = module(@field(protocol.Codec, name));
+        if (!codec.manifest.valid()) @compileError("codec " ++ name ++ " observes a header that is not a lowercase token");
+        const headers = @typeInfo(codec.RequestHeader).@"enum".field_names;
+        if (headers.len > codec_abi.max_request_headers) @compileError("codec " ++ name ++ " names more request headers than a request holds");
+        for (headers) |header| if (!codec_abi.lowercaseToken(header)) @compileError("codec " ++ name ++ " names a request header that is not a lowercase token");
     }
     // The Responses classifier accepts exactly the bodies the Host's own
     // JSON reading did.
     std.debug.assert(@import("codecs/json.zig").max_depth == protocol.max_json_depth);
 }
 
-/// A pinned codec's request encoder state, which its caller stores.
-pub const Encoder = union(protocol.Codec) {
-    @"openai-responses/1": responses.Encoder,
-
-    /// The state at a history-element boundary, which is all of it that
-    /// crosses one.
-    pub fn resumeFrom(carry: Carry) Encoder {
-        return switch (carry) {
-            inline else => |value, codec| @unionInit(Encoder, @tagName(codec), module(codec).resumeFrom(value)),
-        };
-    }
-
-    pub fn carryOf(self: *const Encoder) Carry {
-        return switch (self.*) {
-            inline else => |*state, codec| @unionInit(Carry, @tagName(codec), module(codec).carryOf(state)),
-        };
-    }
-
-    /// Write the item's pieces into `out`. `error.Unsupported` is the
-    /// codec declining a request it cannot encode.
-    pub fn encodeItem(self: *Encoder, header: *const codec_abi.ItemHeader, out: *codec_abi.Pieces) error{Unsupported}!void {
-        return switch (self.*) {
-            inline else => |*state| state.encodeItem(header, out),
-        };
-    }
-};
+/// A pinned codec's request encoder state, which its caller stores. Each
+/// codec's `Encoder` holds its `Carry` as `carry`, and its other fields'
+/// defaults are its state at a history-element boundary.
+pub const Encoder = PerCodec("Encoder");
 
 /// A pinned codec's encoder state at a history-element boundary.
-pub const Carry = union(protocol.Codec) {
-    @"openai-responses/1": responses.Carry,
+pub const Carry = PerCodec("Carry");
 
-    /// The carry before a request's first history element.
-    pub fn initial(codec: protocol.Codec) Carry {
-        return switch (codec) {
-            inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial),
-        };
+/// The union over every codec of the type each declares as `name`.
+fn PerCodec(comptime name: []const u8) type {
+    const codecs = @typeInfo(protocol.Codec).@"enum".field_names;
+    var names: [codecs.len][]const u8 = undefined;
+    var types: [codecs.len]type = undefined;
+    for (codecs, &names, &types) |codec, *field, *T| {
+        field.* = codec;
+        T.* = @field(module(@field(protocol.Codec, codec)), name);
     }
-};
+    return @Union(.auto, protocol.Codec, &names, &types, &@splat(.{}));
+}
+
+/// The carry before a request's first history element.
+pub fn initialCarry(codec: protocol.Codec) Carry {
+    return switch (codec) {
+        inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial),
+    };
+}
+
+pub fn resumeFrom(carry: Carry) Encoder {
+    return switch (carry) {
+        inline else => |value, tag| @unionInit(Encoder, @tagName(tag), .{ .carry = value }),
+    };
+}
+
+pub fn carryOf(encoder: *const Encoder) Carry {
+    return switch (encoder.*) {
+        inline else => |*state, tag| @unionInit(Carry, @tagName(tag), state.carry),
+    };
+}
+
+/// Write the item's pieces into `out`. `error.Declined` is the codec
+/// declining a request it cannot encode.
+pub fn encodeItem(encoder: *Encoder, header: *const codec_abi.ItemHeader, out: *codec_abi.Pieces) error{Declined}!void {
+    return switch (encoder.*) {
+        inline else => |*state| state.encodeItem(header, out),
+    };
+}
 
 /// The pinned codec's request headers for `settings`, written over `out`.
 pub fn requestHeaders(codec: protocol.Codec, settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
@@ -68,20 +88,22 @@ pub fn requestHeaders(codec: protocol.Codec, settings: *const codec_abi.Settings
     }
 }
 
-fn module(comptime codec: protocol.Codec) type {
+/// The name `codec` gives the request header `Headers.names` holds as
+/// `name`.
+pub fn headerName(codec: protocol.Codec, name: u8) []const u8 {
     return switch (codec) {
-        .@"openai-responses/1" => responses,
+        inline else => |tag| @tagName(@as(module(tag).RequestHeader, @fromBackingInt(@intCast(name)))),
     };
 }
 
 /// The HTTP error classifier of a pinned codec.
 pub fn classifier(codec: protocol.Codec) *const Classifier {
     return switch (codec) {
-        .@"openai-responses/1" => &responses_classifier,
+        inline else => |tag| &struct {
+            const value = nativeClassifier(module(tag).Classifier);
+        }.value,
     };
 }
-
-const responses_classifier = nativeClassifier(responses.Classifier);
 
 pub const max_classifier_state_bytes = 512;
 
@@ -200,10 +222,9 @@ test "classifier findings are checked as they are read and a bad one fails the j
         .{ .ops = &([_]u8{ 8, 1, 1 } ++ std.mem.toBytes(@as(u64, 0)) ++ std.mem.toBytes(@as(u64, 11))), .expected = error.CodecBadOp },
         .{ .ops = &([_]u8{ 8, 1, 1 } ++ std.mem.toBytes(@as(u64, 11)) ++ std.mem.toBytes(@as(u64, 0))), .expected = error.CodecBadOp },
         .{ .ops = &([_]u8{ 8, 1, 1 } ++ std.mem.toBytes(@as(u64, 4)) ++ std.mem.toBytes(@as(u64, std.math.maxInt(u64)))), .expected = error.CodecBadOp },
-        // Malformed: an encode op, an unknown tag, field or escape, an empty
-        // or overlong code, a cut finding, a reset flag past 1 or a reset
-        // time without its flag.
-        .{ .ops = &.{ 1, 1, 0, '{' }, .expected = error.CodecBadOp },
+        // Malformed: an unknown tag, field or escape, an empty or overlong
+        // code, a cut finding, a reset flag past 1 or a reset time without
+        // its flag.
         .{ .ops = &.{9}, .expected = error.CodecBadOp },
         .{ .ops = &([_]u8{ 8, 2, 1 } ++ std.mem.toBytes(@as(u64, 0)) ++ std.mem.toBytes(@as(u64, 0))), .expected = error.CodecBadOp },
         .{ .ops = &([_]u8{ 8, 0, 2 } ++ std.mem.toBytes(@as(u64, 0)) ++ std.mem.toBytes(@as(u64, 0))), .expected = error.CodecBadOp },
@@ -257,9 +278,10 @@ const TestItem = struct {
     handles: []const ?[]const u8 = &.{},
 };
 
-/// Encode `items` into `out` from `encoder` and `carry`, as the Host does,
-/// with std.json's string escaping standing in for the Host's cursors.
-fn encodeForTesting(encoder: *Encoder, carry: *Carry, items: []const TestItem, out: *std.Io.Writer) !void {
+/// Encode `items` into `out` as the Host does, resuming `encoder` from
+/// `carry` before each item that resumes when `carry` is given, with
+/// std.json's string escaping standing in for the Host's cursors.
+fn encodeForTesting(encoder: *Encoder, carry: ?*Carry, items: []const TestItem, out: *std.Io.Writer) !void {
     var pieces: codec_abi.Pieces = .{ .len = 0 };
     for (items) |item| {
         var header: codec_abi.ItemHeader = .{ .item = item.item, .handles = 0 };
@@ -267,9 +289,13 @@ fn encodeForTesting(encoder: *Encoder, carry: *Carry, items: []const TestItem, o
             if (handle != null) header.handles |= @as(u8, 1) << @intCast(index);
         }
         const kind: codec_abi.ItemKind = header.item;
-        if (kind.resumes()) encoder.* = .resumeFrom(carry.*);
-        try encoder.encodeItem(&header, &pieces);
-        if (kind.endsElement()) carry.* = encoder.carryOf();
+        if (carry) |kept| if (kind.resumes()) {
+            encoder.* = resumeFrom(kept.*);
+        };
+        try encodeItem(encoder, &header, &pieces);
+        if (carry) |kept| if (kind.endsElement()) {
+            kept.* = carryOf(encoder);
+        };
         for (pieces.slice()) |piece| switch (piece) {
             .literal => |bytes| try out.writeAll(bytes),
             .content => |content| switch (content.escape) {
@@ -280,16 +306,13 @@ fn encodeForTesting(encoder: *Encoder, carry: *Carry, items: []const TestItem, o
     }
 }
 
-fn beginForTesting() struct { Encoder, Carry } {
-    const carry: Carry = .initial(.@"openai-responses/1");
-    return .{ .resumeFrom(carry), carry };
-}
+const responses_initial = initialCarry(.@"openai-responses/1");
 
 test "a tool entry escapes its name and description as JSON strings" {
-    var encoder, var carry = beginForTesting();
+    var encoder = resumeFrom(responses_initial);
     var buffer: [256]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
-    try encodeForTesting(&encoder, &carry, &.{.{ .item = .tool, .handles = &.{ "t", "say \"hi\"\\\n\x01é", "{}" } }}, &out);
+    try encodeForTesting(&encoder, null, &.{.{ .item = .tool, .handles = &.{ "t", "say \"hi\"\\\n\x01é", "{}" } }}, &out);
     const json = out.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
@@ -310,11 +333,13 @@ test "a resumed encoder writes what an uninterrupted one writes" {
         .{ .item = .{ .message = .instruction }, .handles = &.{ "two", "from peer" } },
     };
     const tail = [_]TestItem{ .{ .item = .history_end }, .{ .item = .compaction_trigger }, .{ .item = .tools_start }, .{ .item = .text_format }, .{ .item = .request_end } };
+    // One encoder over the whole request, never resumed: the bytes a
+    // carry that held less than the codec needs would change.
     var whole_buffer: [2048]u8 = undefined;
     var whole: std.Io.Writer = .fixed(&whole_buffer);
-    var encoder, var carry = beginForTesting();
-    try encodeForTesting(&encoder, &carry, &history, &whole);
-    try encodeForTesting(&encoder, &carry, &tail, &whole);
+    var uninterrupted = resumeFrom(responses_initial);
+    try encodeForTesting(&uninterrupted, null, &history, &whole);
+    try encodeForTesting(&uninterrupted, null, &tail, &whole);
     // Cut before the first element and after every one: a fresh encoder
     // given only the carry writes the same remaining bytes.
     for (0..history.len + 1) |cut| {
@@ -324,11 +349,12 @@ test "a resumed encoder writes what an uninterrupted one writes" {
         }
         var resumed_buffer: [2048]u8 = undefined;
         var resumed: std.Io.Writer = .fixed(&resumed_buffer);
-        var first, var first_carry = beginForTesting();
-        try encodeForTesting(&first, &first_carry, history[0..cut], &resumed);
-        var second = beginForTesting()[0];
-        try encodeForTesting(&second, &first_carry, history[cut..], &resumed);
-        try encodeForTesting(&second, &first_carry, &tail, &resumed);
+        var carry = responses_initial;
+        var first = resumeFrom(carry);
+        try encodeForTesting(&first, &carry, history[0..cut], &resumed);
+        var second = resumeFrom(responses_initial);
+        try encodeForTesting(&second, &carry, history[cut..], &resumed);
+        try encodeForTesting(&second, &carry, &tail, &resumed);
         try std.testing.expectEqualStrings(whole.buffered(), resumed.buffered());
     }
     try std.testing.expectStringStartsWith(whole.buffered(), "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");

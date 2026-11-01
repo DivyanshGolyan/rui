@@ -101,6 +101,8 @@ RULES = (
     (("src/codec_runtime*",), ("test-codec-runtime",), ("test-codec-runtime",),
      "The codec sandbox's own tests against tiny modules"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
+    (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
+     "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
     (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig", "src/history_memo.zig",
       "src/model_capability.zig", "src/failed_responses.zig"),

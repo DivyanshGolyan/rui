@@ -373,7 +373,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
         .admission_position = admission_position,
         .history_position = admission_position - 1,
         .tool_group_cursor = 0,
-        .carry = .initial(.@"openai-responses/1"),
+        .carry = codecs.initialCarry(.@"openai-responses/1"),
         .length = length,
         .digest = 0,
     };
