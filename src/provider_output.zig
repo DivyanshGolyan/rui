@@ -1631,6 +1631,9 @@ test "the item grammar rejects unsupported meaning and preserves open fields" {
         defer source.file.close(std.testing.io);
         const verdict = try judgeFile(std.testing.io, source.file, case.item.len, case.operation);
         try std.testing.expectEqual(case.supported, verdict == .compatible);
+        // Validation, and the interpreter beside it, judges it alike.
+        const imported = if (importTestingItem(&tmp, case.item, case.operation)) |_| true else |_| false;
+        try std.testing.expectEqual(case.supported, imported);
     }
 }
 
@@ -1659,6 +1662,7 @@ test "the item grammar refuses consumed duplicates and syntax" {
         const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
             try std.testing.expectEqual(error.SyntaxError, err);
             try std.testing.expectEqual(case.failure, err);
+            if (importTestingItem(&tmp, case.item, case.operation)) |_| return error.TestExpectedError else |_| {}
             continue;
         };
         // A consumed duplicate fails the item; an earlier broken rule may
@@ -1793,11 +1797,27 @@ test "the item grammar streams opaque windows and preserves syntax failures" {
     for (0..3) |_| try file.writeStreamingAll(std.testing.io, &window);
     try file.writeStreamingAll(std.testing.io, suffix);
     try expectCompatible(try judgeFile(std.testing.io, file, prefix.len + 3 * window.len + suffix.len, .assistant_response));
+    const item = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, &window, &window, &window, suffix });
+    defer std.testing.allocator.free(item);
+    try importTestingItem(&tmp, item, .assistant_response);
 
     const invalid = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}";
     const source = try testingObject(&tmp, invalid);
     defer source.file.close(std.testing.io);
     try std.testing.expectError(error.InvalidJsonUtf8, judgeFile(std.testing.io, source.file, invalid.len, .assistant_response));
+    try std.testing.expectError(error.InvalidJsonUtf8, importTestingItem(&tmp, invalid, .assistant_response));
+}
+
+test "every item of the grammar tables is interpreted beside its validation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const before = Oracle.accepted + Oracle.rejected;
+    var items: u64 = 0;
+    inline for (.{ replay_cases, replay_failure_cases, agreement_cases }) |cases| for (cases) |case| {
+        importTestingItem(&tmp, case.item, case.operation) catch {};
+        items += 1;
+    };
+    try std.testing.expectEqual(before + items, Oracle.accepted + Oracle.rejected);
 }
 
 test "replay compatibility cursor bounds actual sequential reads including open fields" {
@@ -2203,7 +2223,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
                 response.compaction_count += 1;
                 if (response.compaction_count > 1) return error.UnsupportedProviderOutput;
             },
-            .message => response.answer.accept(validation.phase, validation.non_whitespace, validation.text_length, validation.text_digest, index),
+            .message => response.answer.accept(&.{ .ordinal = index, .phase = validation.phase, .length = validation.text_length, .digest = validation.text_digest, .non_whitespace = validation.non_whitespace }),
             .function_call => response.call_count += 1,
             .reasoning => {},
         }
@@ -2279,12 +2299,17 @@ pub fn validate(
 
 /// In tests, every stream validated here is interpreted again by the
 /// codec's interpreter under several window cuts, and both must agree:
-/// the same acceptance, event data and metadata, or the same rejection at
-/// the same coordinates with the same provider report. A JSON syntax error
-/// is one reason to the codec, so it agrees with any of today's.
+/// the same acceptance, event data and metadata, or the same rejection
+/// detail, which names the error and its coordinates, with the same
+/// provider report.
 const Oracle = struct {
+    // Tests validate one at a time on the test thread: no unit test runs a
+    // Host's execution thread, so one interpretation's storage serves all.
     var storage: output_decode.Interpret = undefined;
     var events: EventData = undefined;
+    /// The streams compared, by today's verdict on them.
+    var accepted: u64 = 0;
+    var rejected: u64 = 0;
     const cuts = [_]usize{ 1, 3, 64, protocol.content_window_bytes };
 
     /// The budgets and faults validation began with.
@@ -2322,6 +2347,9 @@ const Oracle = struct {
     ) void {
         // Only a fresh validation's offsets compare.
         if (before.metadata_records != 0 or before.event_length != 0) return;
+        if (today.*) |_| {
+            accepted += 1;
+        } else |_| rejected += 1;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         for (cuts) |most| {
@@ -2364,22 +2392,27 @@ const Oracle = struct {
         var rejection: Rejection = .{};
         var failure: ProviderFailure = undefined;
         const interpreter = @import("codecs.zig").interpreter(.@"openai-responses/1");
-        const result = output_decode.interpret(&storage, interpreter, io, source_file, source_length, &writer, &events, operation, &rejection, &failure, .{ .most = most });
-        if (today.*) |accepted| {
-            const interpreted = result catch |err| return disagree(most, "today accepts; the interpreter rejects with {t} at {any}", .{ err, rejection });
+        var interpreted: Validated = undefined;
+        const result = output_decode.interpret(&storage, interpreter, io, source_file, source_length, &writer, &events, operation, &rejection, &failure, .{ .most = most }, &interpreted);
+        if (today.*) |*expected| {
+            result catch |err| return disagree(most, "today accepts; the interpreter rejects with {t} at {any}", .{ err, rejection });
             inline for (.{ "source_length", "item_count", "call_count", "answer_item_ordinal", "answer_length" }) |name| {
-                if (@field(accepted, name) != @field(interpreted, name)) return disagree(most, name ++ ": today {any}, interpreted {any}", .{ @field(accepted, name), @field(interpreted, name) });
+                if (@field(expected, name) != @field(interpreted, name)) return disagree(most, name ++ ": today {any}, interpreted {any}", .{ @field(expected, name), @field(interpreted, name) });
             }
-            if (!std.mem.eql(u8, &accepted.answer_digest, &interpreted.answer_digest)) return disagree(most, "answer digests differ", .{});
-            if (!accepted.evidence.response_id.eql(interpreted.evidence.response_id.slice()) or
-                !accepted.evidence.served_model.eql(interpreted.evidence.served_model.slice())) return disagree(most, "evidence differs", .{});
+            if (!std.mem.eql(u8, &expected.answer_digest, &interpreted.answer_digest)) return disagree(most, "answer digests differ", .{});
+            if (!expected.evidence.response_id.eql(interpreted.evidence.response_id.slice()) or
+                !expected.evidence.served_model.eql(interpreted.evidence.served_model.slice())) return disagree(most, "evidence differs", .{});
             try sameFile(most, "event data", io, event_data.window.file, event_file);
             try sameFile(most, "metadata", io, metadata.file, metadata_file);
         } else |today_error| {
             const err = if (result) |_| return disagree(most, "today rejects with {t} at {any}; the interpreter accepts", .{ today_error, today_rejection.* }) else |err| err;
-            const same = err == today_error or (err == error.InvalidJson and isSyntaxError(today_error));
-            if (!same) return disagree(most, "today rejects with {t}, the interpreter with {t}", .{ today_error, err });
-            if (!std.meta.eql(today_rejection.*, rejection)) return disagree(most, "{t}: today at {any}, interpreted at {any}", .{ err, today_rejection.*, rejection });
+            // The saved detail names the error and its coordinates, and the
+            // error decides the saved code and kind.
+            var today_buffer: [512]u8 = undefined;
+            var interpreted_buffer: [512]u8 = undefined;
+            const today_detail = today_rejection.format(today_error, &today_buffer);
+            const interpreted_detail = rejection.format(err, &interpreted_buffer);
+            if (!std.mem.eql(u8, today_detail, interpreted_detail)) return disagree(most, "today rejects with {s}, the interpreter with {s}", .{ today_detail, interpreted_detail });
             if (today_failure.refusal != failure.refusal or !std.mem.eql(u8, today_failure.report.slice(), failure.report.slice()))
                 return disagree(most, "{t}: provider failures differ: today {?t} \"{s}\", interpreted {?t} \"{s}\"", .{ err, today_failure.refusal, today_failure.report.slice(), failure.refusal, failure.report.slice() });
         }
@@ -2406,27 +2439,6 @@ const Oracle = struct {
             }
             offset += count;
         }
-    }
-
-    /// Today's names for JSON that does not parse, which the codec gives
-    /// as one reason.
-    fn isSyntaxError(err: anyerror) bool {
-        return switch (err) {
-            error.UnexpectedJsonEnd,
-            error.TrailingJson,
-            error.UnexpectedJsonDelimiter,
-            error.ExpectedJsonString,
-            error.InvalidJsonString,
-            error.InvalidJsonEscape,
-            error.InvalidJsonSurrogate,
-            error.InvalidJsonUtf8,
-            error.InvalidJsonNumber,
-            error.InvalidJsonLiteral,
-            error.InvalidJsonValue,
-            error.JsonTooDeep,
-            => true,
-            else => false,
-        };
     }
 };
 
@@ -3712,4 +3724,52 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
         try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
     }
+}
+
+/// The codec's JSON reader and validation's own parser name the same error
+/// for `document`, however the reader is fed.
+fn expectSyntaxAgrees(tmp: *std.testing.TmpDir, document: []const u8) !void {
+    const json = @import("codecs/json.zig");
+    var window = try testingObject(tmp, document);
+    defer window.file.close(std.testing.io);
+    const expected: ?anyerror = if (readFields(&window, .{ .start = 0, .length = document.len }, &.{"type"})) |_| null else |err| err;
+    const Ignored = struct {
+        pub fn key(_: *@This(), _: *const json.Reader, _: u8) void {}
+        pub fn begin(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+        pub fn end(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+    };
+    var ignored: Ignored = .{};
+    for ([_]usize{ 1, 3, document.len + 1 }) |cut| {
+        var reader: json.Reader = undefined;
+        reader.init();
+        var offset: usize = 0;
+        const actual: ?anyerror = while (offset < document.len) {
+            const end = @min(document.len, offset + cut);
+            reader.feed(document[offset..end], &ignored) catch |err| break err;
+            offset = end;
+        } else if (reader.complete()) null else reader.unfinished();
+        if (expected != actual) {
+            std.debug.print("\"{s}\": validation {?t}, reader {?t}\n", .{ document, expected, actual });
+            return error.TestUnexpectedError;
+        }
+    }
+}
+
+test "the codec's JSON reader names each syntax error as validation does" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sample = "{\"type\":\"x\", \"a\":[1,-2.5e+3,0,true,null,{\"b\":\"\\u00e9\\n\xc3\xa9\\ud83d\\ude00\"}],\"c\":{}}";
+    // Every prefix, and every byte replaced by each byte the grammar
+    // treats apart.
+    for (0..sample.len + 1) |cut| try expectSyntaxAgrees(&tmp, sample[0..cut]);
+    const alphabet = "{}[]:,\"\\ 0-.eE+tfnux\x01\x7f\xc3\xe2\xf0\xff";
+    var document: [sample.len]u8 = undefined;
+    for (0..sample.len) |index| for (alphabet) |byte| {
+        document = sample.*;
+        document[index] = byte;
+        try expectSyntaxAgrees(&tmp, &document);
+    };
+    const open = "{\"a\":" ++ @as([protocol.max_json_depth]u8, @splat('['));
+    const close: [protocol.max_json_depth]u8 = @splat(']');
+    for ([_][]const u8{ open ++ "1" ++ close ++ "}", open ++ " ", open[0 .. open.len - 1] ++ " ", open ++ "]" }) |deep| try expectSyntaxAgrees(&tmp, deep);
 }

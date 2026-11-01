@@ -162,11 +162,15 @@ pub fn classifier(codec: protocol.Codec) *const Classifier {
 
 const responses_classifier = nativeClassifier(responses.Classifier);
 
-pub const max_classifier_state_bytes = 512;
+/// The alignment of a classifier's and an interpreter's state.
+const state_alignment = 16;
+
+/// What the built-in classifier needs: the Host serves no other.
+pub const max_classifier_state_bytes = std.mem.alignForward(usize, @sizeOf(responses.Classifier), state_alignment);
 
 /// A codec's classifier state, opaque to the Host.
 pub const ClassifierState = struct {
-    bytes: [max_classifier_state_bytes]u8 align(16),
+    bytes: [max_classifier_state_bytes]u8 align(state_alignment),
 };
 
 /// An HTTP error classifier linked into the Host. Each function works on a
@@ -267,11 +271,12 @@ pub fn interpreter(codec: protocol.Codec) *const Interpreter {
 
 const responses_interpreter = nativeInterpreter(responses.Interpreter);
 
-pub const max_interpreter_state_bytes = 8 * 1024;
+/// What the built-in interpreter needs: the Host serves no other.
+pub const max_interpreter_state_bytes = std.mem.alignForward(usize, @sizeOf(responses.Interpreter), state_alignment);
 
 /// A codec's interpreter state, opaque to the Host.
 pub const InterpreterState = struct {
-    bytes: [max_interpreter_state_bytes]u8 align(16),
+    bytes: [max_interpreter_state_bytes]u8 align(state_alignment),
 };
 
 /// A response interpreter linked into the Host. Each function works on an

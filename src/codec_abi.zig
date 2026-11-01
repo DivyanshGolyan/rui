@@ -284,70 +284,42 @@ pub const Ops = struct {
     }
 
     pub fn record(self: *Ops, value: Record) error{OpsOverflow}!void {
-        switch (value) {
+        const tag: RecordTag = switch (value) {
             .refusal => |code| return self.finding(.{ .refusal = code }),
             .report => |range| return self.finding(.{ .report = range }),
-            else => {},
-        }
-        var bytes: [max_record_bytes]u8 = @splat(0);
-        bytes[0] = switch (value) {
-            .refusal, .report => unreachable,
-            inline else => |_, tag| @backingInt(@field(RecordTag, @tagName(tag))),
+            inline else => |_, name| @field(RecordTag, @tagName(name)),
         };
-        const size: usize = switch (value) {
-            .raw => |raw| size: {
+        const bytes = try self.reserve(recordSize(tag));
+        bytes[0] = @backingInt(tag);
+        switch (value) {
+            .raw => |raw| {
                 bytes[1] = @backingInt(raw.span);
                 std.mem.writeInt(u64, bytes[2..10], raw.start, .little);
                 std.mem.writeInt(u64, bytes[10..18], raw.length, .little);
-                break :size 18;
             },
-            .string => |string| size: {
+            .string => |string| {
                 bytes[1..3].* = .{ @backingInt(string.field), @intFromBool(string.last) };
                 std.mem.writeInt(u64, bytes[3..11], string.start, .little);
                 std.mem.writeInt(u64, bytes[11..19], string.length, .little);
-                break :size 19;
             },
-            .item, .added, .terminal => |kind| size: {
-                bytes[1] = @backingInt(kind);
-                break :size 2;
+            .item, .added, .terminal => |kind| bytes[1] = @backingInt(kind),
+            .part => |part| bytes[1..3].* = .{ @backingInt(part.array), @backingInt(part.kind) },
+            .terminal_failed, .failed => |reason| bytes[1] = @backingInt(reason),
+            .member_end, .part_end, .completed, .terminal_end, .finish => {},
+            .item_end => |item| bytes[1..4].* = .{ @backingInt(item.answer_phase), @backingInt(item.phase), @intFromBool(item.omit_reasoning_text) },
+            .usage => |usage| {
+                bytes[1] = @intFromBool(usage != null);
+                const counts = usage orelse Usage{ .uncached = 0, .cache_read = 0, .cache_write = 0, .output = 0 };
+                inline for (.{ counts.uncached, counts.cache_read, counts.cache_write, counts.output }, 0..) |count, index|
+                    std.mem.writeInt(u64, bytes[2 + 8 * index ..][0..8], count, .little);
             },
-            .part => |array| size: {
-                bytes[1] = @backingInt(array);
-                break :size 2;
-            },
-            .part_end => |kind| size: {
-                bytes[1] = @backingInt(kind);
-                break :size 2;
-            },
-            .terminal_failed, .failed => |reason| size: {
-                bytes[1] = @backingInt(reason);
-                break :size 2;
-            },
-            .member_end, .completed, .terminal_end, .finish => 1,
-            .item_end => |item| size: {
-                bytes[1..4].* = .{ @backingInt(item.answer_phase), @backingInt(item.phase), @intFromBool(item.omit_reasoning_text) };
-                break :size 4;
-            },
-            .usage => |usage| size: {
-                if (usage) |counts| {
-                    bytes[1] = 1;
-                    inline for (.{ counts.uncached, counts.cache_read, counts.cache_write, counts.output }, 0..) |count, index|
-                        std.mem.writeInt(u64, bytes[2 + 8 * index ..][0..8], count, .little);
-                }
-                break :size 34;
-            },
-            .at => |at| size: {
+            .at => |at| {
                 bytes[1..3].* = .{ @backingInt(at.stage), @intFromBool(at.output_index != null) };
                 std.mem.writeInt(u64, bytes[3..11], at.output_index orelse 0, .little);
-                break :size 11;
             },
-            .need => |offset| size: {
-                std.mem.writeInt(u64, bytes[1..9], offset, .little);
-                break :size 9;
-            },
+            .need => |offset| std.mem.writeInt(u64, bytes[1..9], offset, .little),
             .refusal, .report => unreachable,
-        };
-        @memcpy(try self.reserve(size), bytes[0..size]);
+        }
     }
 
     /// Reads these ops as an interpreter's records, from the first.
@@ -600,9 +572,7 @@ pub const Stage = enum(u8) { stream = 0, event = 1, item = 2, response = 3 };
 /// A codec's verdict, named as the Host names the rejection it becomes. The
 /// Host maps each to its code and kind; a codec cannot choose either.
 pub const Reason = enum(u8) {
-    /// The event's data is not one JSON object.
-    invalid_json = 0,
-    contradictory_provider_output,
+    contradictory_provider_output = 0,
     late_provider_output,
     provider_connection_closed,
     missing_provider_field,
@@ -639,6 +609,16 @@ pub const Reason = enum(u8) {
     unsupported_annotation,
     unsupported_caller,
     unsupported_metadata_authority,
+    // The event's data is not one JSON object, for the reason the JSON
+    // reader names.
+    unexpected_json_end,
+    invalid_json_string,
+    invalid_json_escape,
+    invalid_json_surrogate,
+    invalid_json_utf8,
+    invalid_json_number,
+    invalid_json_value,
+    json_too_deep,
 };
 
 /// The Host's name for a reason: its words, capitalized and joined.
@@ -670,10 +650,10 @@ pub const RecordTag = enum(u8) {
     item = 11,
     /// No payload: the open member's bytes are complete.
     member_end = 12,
-    /// u8 PartArray: a part of the open item begins.
+    /// u8 PartArray, u8 PartKind: a part of the open item begins.
     part = 13,
-    /// u8 PartKind: the open part ends; its last `string` part_text, if
-    /// any, is its text.
+    /// No payload: the open part ends; its last `string` part_text is its
+    /// text.
     part_end = 14,
     /// u8 Phase for answer selection, u8 Phase for Rui's form, u8 1 when
     /// replay leaves the item's reasoning text out: the open item is
@@ -714,8 +694,8 @@ pub const Record = union(enum) {
     string: struct { field: Field, last: bool, start: u64, length: u64 },
     item: OutputKind,
     member_end,
-    part: PartArray,
-    part_end: PartKind,
+    part: struct { array: PartArray, kind: PartKind },
+    part_end,
     item_end: struct { answer_phase: Phase, phase: Phase, omit_reasoning_text: bool },
     added: OutputKind,
     completed,
@@ -731,8 +711,20 @@ pub const Record = union(enum) {
     report: ReportRange,
 };
 
-/// The most bytes one record takes.
-pub const max_record_bytes = 2 + max_code_bytes;
+/// The bytes a record of `tag` takes.
+pub fn recordSize(tag: RecordTag) usize {
+    return switch (tag) {
+        .raw => 18,
+        .string => 19,
+        .item, .added, .terminal, .terminal_failed, .failed => 2,
+        .part => 3,
+        .member_end, .part_end, .completed, .terminal_end, .finish => 1,
+        .item_end => 4,
+        .usage => 34,
+        .at => 11,
+        .need => 9,
+    };
+}
 
 /// Decodes records; anything malformed is `error.CodecBadOp`.
 pub const RecordReader = struct {
@@ -753,16 +745,7 @@ pub const RecordReader = struct {
             };
         }
         const tag = std.enums.fromInt(RecordTag, rest[0]) orelse return error.CodecBadOp;
-        const size: usize = switch (tag) {
-            .raw => 18,
-            .string => 19,
-            .item, .part, .part_end, .added, .terminal, .terminal_failed, .failed => 2,
-            .member_end, .completed, .terminal_end, .finish => 1,
-            .item_end => 4,
-            .usage => 34,
-            .at => 11,
-            .need => 9,
-        };
+        const size = recordSize(tag);
         if (rest.len < size) return error.CodecBadOp;
         self.offset += @intCast(size);
         return switch (tag) {
@@ -770,8 +753,8 @@ pub const RecordReader = struct {
             .string => .{ .string = .{ .field = try value(Field, rest[1]), .last = try flag(rest[2]), .start = int(rest[3..11]), .length = int(rest[11..19]) } },
             .item => .{ .item = try value(OutputKind, rest[1]) },
             .member_end => .member_end,
-            .part => .{ .part = try value(PartArray, rest[1]) },
-            .part_end => .{ .part_end = try value(PartKind, rest[1]) },
+            .part => .{ .part = .{ .array = try value(PartArray, rest[1]), .kind = try value(PartKind, rest[2]) } },
+            .part_end => .part_end,
             .item_end => .{ .item_end = .{ .answer_phase = try value(Phase, rest[1]), .phase = try value(Phase, rest[2]), .omit_reasoning_text = try flag(rest[3]) } },
             .added => .{ .added = try value(OutputKind, rest[1]) },
             .completed => .completed,
@@ -875,4 +858,40 @@ test "a header value is printable ASCII without edge spaces" {
     try std.testing.expect(lowercaseToken("session-id"));
     for ([_][]const u8{ "", "Accept", ":path", "a b", "a\x00" }) |name|
         try std.testing.expect(!lowercaseToken(name));
+}
+
+test "every record reads back as written, in the bytes its tag's size gives" {
+    const records = [_]Record{
+        .{ .raw = .{ .span = .member, .start = 7, .length = 9 } },
+        .{ .string = .{ .field = .call_arguments, .last = true, .start = 1 << 40, .length = 3 } },
+        .{ .item = .function_call },
+        .member_end,
+        .{ .part = .{ .array = .summary, .kind = .summary_text } },
+        .part_end,
+        .{ .item_end = .{ .answer_phase = .final_answer, .phase = .commentary, .omit_reasoning_text = true } },
+        .{ .added = .message },
+        .completed,
+        .{ .terminal = .reasoning },
+        .{ .terminal_failed = .json_too_deep },
+        .terminal_end,
+        .{ .usage = .{ .uncached = 1, .cache_read = 2, .cache_write = 3, .output = 4 } },
+        .{ .usage = null },
+        .finish,
+        .{ .at = .{ .stage = .item, .output_index = 5 } },
+        .{ .at = .{ .stage = .stream, .output_index = null } },
+        .{ .failed = .unexpected_json_end },
+        .{ .need = 11 },
+    };
+    for (records) |record| {
+        var ops: Ops = .{};
+        try ops.record(record);
+        const tag = std.enums.fromInt(RecordTag, ops.bytes[0]).?;
+        try std.testing.expectEqual(recordSize(tag), ops.length);
+        var reader = ops.records();
+        try std.testing.expectEqualDeep(record, (try reader.next()).?);
+        try std.testing.expectEqual(@as(?Record, null), try reader.next());
+        // A record cut short is malformed.
+        var cut: RecordReader = .{ .bytes = ops.bytes[0 .. ops.length - 1] };
+        if (ops.length > 1) try std.testing.expectError(error.CodecBadOp, cut.next());
+    }
 }
