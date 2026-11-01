@@ -198,8 +198,67 @@ def run(*, observed=False, intake=100):
             incoming_error.add_note("Codex H2 cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def openai_base_url_run():
+    """RUI_OPENAI_BASE_URL sends the OpenAI key to the Responses endpoint
+    under that base, over TLS, and nowhere else."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai-base.")).resolve()
+    private = root / "private"
+    private.mkdir(mode=0o700)
+    key_file = private / "openai.key"
+    key_file.write_text(codex.OPENAI_KEY + "\n")
+    key_file.chmod(0o600)
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+        "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "store"
+    host = None
+    complete = False
+    try:
+        # A served provider uses system trust, which this certificate joins.
+        host, _ = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai"], env={
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
+        })
+        configuration = fixture.command(
+            "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
+            "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
+        )
+        assert configuration["answer"]["status"] == "accepted", configuration
+        session = configuration["answer"]["session"]
+        fixture.message(root, store, "custom-base", session, "custom-base")
+        observation, answer, _ = fixture.wait_for_result_release(store, "custom-base", session, time.monotonic() + 20)
+        assert observation["result"]["status"] == "completed", observation
+        assert answer == b"answer-custom-base", answer
+        [headers] = endpoint.request_headers
+        assert headers[b":path"] == b"/custom/v1/responses", headers
+        assert headers[b":authority"].startswith(b"localhost:"), headers
+        assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
+        assert b"chatgpt-account-id" not in headers, headers
+        print("openai base URL passed: the key goes over TLS to /custom/v1/responses under RUI_OPENAI_BASE_URL")
+        complete = True
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if complete:
+            shutil.rmtree(root)
+        else:
+            retain_failure_state("OpenAI base URL failure state", root)
+
+
 if __name__ == "__main__":
     host_process.enter()
+    openai_base_url_run()
     run()
     run(observed=True)
     run(intake=10)
