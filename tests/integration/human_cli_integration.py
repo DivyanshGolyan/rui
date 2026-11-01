@@ -45,6 +45,15 @@ CHOICE = "› Allow once"
 ALLOW = b"\r"
 # The choice's input row at any width, picked or not.
 CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
+# What the line under a draft beside an Action says once Enter there denies
+# the Action and sends the draft as the reason.
+REASON = "enter denies the command and sends this"
+# The refusal of an Enter there before such a frame was offered.
+REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
+
+
+def reason_shown(shown):
+    return REASON in shown
 
 
 def pick_deny(master, ready):
@@ -54,6 +63,14 @@ def pick_deny(master, ready):
     """
     os.write(master, b"\x1b[C")
     return read_terminal(master, "› Deny") + action_ready(ready, master)
+
+
+def send_reason(master, ready, description):
+    """Once a frame saying Enter denies is offered, press Enter in the draft
+    beside the Action; return the frames up to the Action's denial."""
+    shown = action_ready(ready, master, shows=reason_shown)
+    os.write(master, b"\r")
+    return shown + read_terminal(master, f"• {description} — Denied")
 
 
 def time_limit(milliseconds):
@@ -2411,7 +2428,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
-    answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
+    answer = "after explicit approval" if decision == "allow-action" else "after explicit denial"
     description = "Inspect café output"
     command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
     if exit_code:
@@ -2477,11 +2494,44 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
             os.write(master, b"\x1b[201~\n")
         transcript = read_terminal(master, json.loads(arguments)["cmd"])
+        if fragmented_paste:
+            # The Enter after the paste may be read before or after the
+            # Action is adopted. Only a refusal beside the Action says what
+            # Enter there does, and only then is its frame offered.
+            while next_frame(master, 0.5) is not None:
+                pass
+            if REASON_NOT_READY in current_screen(master):
+                transcript += action_ready(ready_read, master, shows=lambda shown: REASON_NOT_READY in shown)
         header = drawn_style(master, f"? {description}")
         assert header is not None and header.fg in ATTENTION_COLOUR, (header, current_screen(master))
         # The Action arrived beside the line being written, which keeps the
         # input row, so its Enter could not approve; Ctrl-G shows the choice.
         assert "Allow once" not in current_screen(master), current_screen(master)
+        if decision == "reason":
+            # Enter there sends the line as the reason, then denies the Action.
+            reason = "next cafXaé!"
+            # A caret move clears the earlier notice, so the line under the
+            # draft says what Enter does.
+            os.write(master, b"\x1b[C")
+            read_terminal(master, REASON + " · esc back to the choice")
+            settled = send_reason(master, ready_read, description)
+            settled += await_screen(master, answer, composer=True)
+            assert not (state / "effect-count").exists(), "the denied Bash ran"
+            saved = [json.loads(path.read_text()) for path in set(records.glob("*.json")) - before_choice]
+            assert sorted(row["kind"] for row in saved) == ["message", "permission_decision"], saved
+            assert [row["decision"] for row in saved if row["kind"] == "permission_decision"] == ["deny"], saved
+            # One continuation carries the denial, then the reason.
+            assert len(endpoint.requests) == 2, endpoint.requests
+            continuation = json.loads(endpoint.requests[1])["input"]
+            assert continuation[-2:] == [
+                {"type": "function_call_output", "call_id": "persistent-call-id", "output": "Permission denied."},
+                {"role": "user", "content": [{"type": "input_text", "text": reason}]}], continuation
+            assert f"• {description} — Denied" in settled and reason in settled, settled
+            os.write(master, b"/exit\n")
+            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+            completed = True
+            return
         os.write(master, b"\x07")
         transcript += action_ready(ready_read, master)
         transcript += await_screen(master, CHOICE)
@@ -2537,11 +2587,14 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert current_screen(master).count(f"? {description}") == 1, ("invalid choice repeated command", current_screen(master))
             assert set(records.glob("*.json")) == before_choice, "invalid choice captured authority"
             assert not (state / "effect-count").exists()
-        # Typing beside the Action edits the retained draft at its caret; its
-        # Enter sends nothing, and Esc returns to the choice.
+        # Typing beside the Action edits the retained draft at its caret; an
+        # Enter in the same burst finds no frame that offered the line as a
+        # reason, so it sends and denies nothing, and Esc returns to the choice.
         os.write(master, b"Y\n")
-        typed = read_terminal(master, "! Action needs a decision; Esc returns to the choice. Draft retained.")
+        typed = read_terminal(master, REASON_NOT_READY)
         assert "› next cafXaYé!" in current_screen(master), current_screen(master)
+        # The refusal says what Enter there does, so its frame is offered.
+        typed += action_ready(ready_read, master, shows=reason_shown)
         os.write(master, b"\x7f\x07")
         typed += read_terminal(master, CHOICE)
         typed += action_ready(ready_read, master)
@@ -3118,14 +3171,15 @@ def store_selection_cases(state, workspace, valid_store):
                         lambda: os.close(slave), stop_created_host)
 
 
-def action_ready(descriptor, master, timeout=15, *, return_to_action=True):
+def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None):
     """Supply normal terminal credit until the actual fresh-input boundary.
 
     Read exactly one notification, never a future choice's byte. Return the
     distinct committed frames shown meanwhile. A selected inspection keeps
     the Action behind it; like a user, return to it once with Ctrl-G unless
     the caller is checking that paused state itself. Deliberately
-    withheld-credit controls must select the pipe directly.
+    withheld-credit controls must select the pipe directly. `shows` names
+    the offered frame awaited when it is not the choice, such as a reason's.
     """
     capture = terminal_capture(master)
     deadline = time.monotonic() + timeout
@@ -3163,7 +3217,7 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True):
                 # page selected, or approval readiness redrawn) is stale:
                 # readiness is the visible Action with its choice.
                 shown = capture.completed
-                if "Approval paused" not in shown and CHOICE_ROW.search(shown):
+                if shows(shown) if shows else "Approval paused" not in shown and CHOICE_ROW.search(shown):
                     return "\n".join(frames)
     finally:
         capture.listener = None
@@ -4151,8 +4205,10 @@ def renderer_cases():
                 release.set()
                 opened = tty.wait("Action continues · PgDn")
                 # The Action arrived beside the pasted draft, which keeps the
-                # input row until Ctrl-G returns to the Action's own row.
+                # input row until Ctrl-G returns to the Action's own row. The
+                # line under it says Enter denies, so that frame is offered.
                 assert "Allow once" not in opened and "PgDn reads the rest" not in opened, opened
+                tty.ready(ready_read)
                 shown = tty.send("\x07", "PgDn reads the rest")
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
@@ -4186,8 +4242,11 @@ def renderer_cases():
                 assert exact["arguments"] == arguments
                 assert not (workspace / "renderer-effect").exists()
                 # A paste is typing: it joins the retained draft, whose Enter
-                # sends nothing while the Action waits.
-                tty.send("\x1b[200~a\x1b[201~\n", predicate=lambda: "! Action needs a decision; Esc returns to the choice. Draft retained." in tty.capture.completed and tty.capture.draft("aa", 4))
+                # in the same burst was offered nothing, so it sends nothing.
+                tty.send("\x1b[200~a\x1b[201~\n", predicate=lambda: REASON_NOT_READY in tty.capture.completed and tty.capture.draft("aa", 4))
+                # The refusal says what Enter there does, so its frame is
+                # offered.
+                tty.ready(ready_read)
                 tty.send("\x7f\x07", CHOICE)
                 tty.ready(ready_read)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
@@ -5648,6 +5707,7 @@ def main(selected="all"):
         persistent_permission_case("deny-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
+        persistent_permission_case("reason")
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
