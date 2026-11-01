@@ -31,7 +31,7 @@ pub const Inspection = union(enum) { status, requests, help, command, copy: Copy
 
 /// What a /copy sends: the last answer or its last code block to the
 /// clipboard, or the last answer to a file.
-pub const Copy = enum { answer, code, file };
+pub const Copy = slash_commands.Copy;
 
 /// What a /copy read found. The clipboard takes its range of the scratch
 /// file after the UI joins the read.

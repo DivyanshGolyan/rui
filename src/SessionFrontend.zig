@@ -53,6 +53,8 @@ colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
 input: Input = undefined,
+/// The draft revision Esc closed the command list on; any edit reopens it.
+commands_closed: ?u64 = null,
 submission: Submission = undefined,
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
@@ -163,8 +165,6 @@ dirty: bool = true,
 leaving: ?Outcome = null,
 /// Shown under the input until the next key, in place of the Session line.
 notice: ?[]const u8 = null,
-/// The draft revision Esc closed the command list on; any edit reopens it.
-commands_closed: ?u64 = null,
 notice_buffer: [notice_capacity]u8 = undefined,
 /// The Session line's facts from the latest read that took them, the
 /// unlabelled Session's name, and the line as last written.
@@ -455,7 +455,8 @@ fn parse(text: []const u8) Slash {
         .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
         .help => .{ .inspection = .help },
-        .copy => .{ .inspection = .{ .copy = std.meta.stringToEnum(reads.Copy, command.argument) orelse .answer } },
+        // The table's /copy words are `reads.Copy`'s own names.
+        .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
         .effort => if (command.argument.len == 0) .efforts else .{ .inspection = .command },
         .@"inspect-action", .setup, .configure, .result, .rename => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
@@ -1017,7 +1018,8 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
         .latest, .back, .close => {
-            if (action == .close and screen.inputRow() == .draft and self.commandList() != null) {
+            // Esc closes only a list the person saw.
+            if (action == .close and screen.listed and screen.inputRow() == .draft and self.commandList() != null) {
                 self.commands_closed = self.input.revision;
                 self.dirty = true;
                 return;
@@ -2585,6 +2587,44 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     // Ctrl-G stands for Esc and Alt-Esc.
     try sendKeys(self, "\x07");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
+}
+
+test "Esc closes the command list first only when the latest frame drew it" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Drawn: the first Esc closes only the list, the next one acts as Esc.
+    try stepKeys(held, "/st");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\x07");
+    try std.testing.expect(self.notice == null);
+    try held.settle();
+    try std.testing.expect(!held.screen.listed);
+    try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    // Typed since the latest frame, so never seen: Esc acts at once.
+    try stepKeys(held, "\x15/st\x07");
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    // Over a waiting Action: a shown list closes first, then Esc returns to
+    // the choice; an unseen one never holds the choice back.
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+    try stepKeys(held, "x\x7f");
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());
+    try std.testing.expectEqualStrings("/st", self.input.composition().bytes);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
 }
 
 test "End on an empty draft goes to the latest view and never leaves the conversation" {

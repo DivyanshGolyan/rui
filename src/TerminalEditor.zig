@@ -709,15 +709,42 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
     }
 }
 
+/// Completes a clean command word; a partial character or a rejected draft
+/// takes the tab as it always did.
 fn tab(self: *Editor) KeyOutcome {
     const completion = self.completion orelse return self.insert('\t', false);
+    if (self.partial_length != 0 or self.rejected != null) return self.insert('\t', false);
     const added = completion(self.buffer[0..self.length]) orelse return self.insert('\t', false);
-    if (added.len == 0 or self.partial_length != 0 or self.rejected != null) return .none;
+    if (added.len == 0) return .none;
     self.cursor = self.length;
     return switch (self.insertText(added, false)) {
         .append => .redraw,
         else => |outcome| outcome,
     };
+}
+
+test "Tab over a partial character or a rejected draft does what it did before completion" {
+    const Complete = struct {
+        fn status(_: []const u8) ?[]const u8 {
+            return "atus";
+        }
+    };
+    // A lead byte waiting for the rest of its character, or a NUL.
+    for ([_][]const u8{ "\xc3", "\x00" }) |state| {
+        errdefer std.debug.print("state={any}\n", .{state});
+        var storage: [2][64]u8 = undefined;
+        var editors = [_]Editor{ .{ .buffer = &storage[0] }, .{ .buffer = &storage[1], .completion = Complete.status } };
+        for (&editors) |*editor| {
+            var stream: Input = .{};
+            for ("/st") |byte| _ = editor.feed(&stream, byte);
+            if (state[0] == 0) _ = editor.feed(&stream, 0) else _ = editor.insert(state[0], false);
+            try std.testing.expect(editor.partial_length != 0 or editor.rejected != null);
+            _ = editor.feed(&stream, '\t');
+        }
+        try std.testing.expectEqualStrings(editors[0].buffer[0..editors[0].length], editors[1].buffer[0..editors[1].length]);
+        try std.testing.expectEqual(editors[0].partial_length, editors[1].partial_length);
+        try std.testing.expectEqual(editors[0].rejected, editors[1].rejected);
+    }
 }
 
 fn insertText(self: *Editor, text: []const u8, pasted_input: bool) KeyOutcome {

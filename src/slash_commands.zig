@@ -35,6 +35,9 @@ pub const Argument = union(enum) {
     choice: []const []const u8,
 };
 
+/// What /copy copies: the last answer, or what its one word names.
+pub const Copy = enum { answer, code, file };
+
 pub const Command = struct {
     argument: Argument = .none,
     /// Null keeps the command out of the list and /help: it exists only to
@@ -44,7 +47,7 @@ pub const Command = struct {
 
 pub const table = std.enums.EnumArray(Name, Command).init(.{
     .configure = .{ .argument = .{ .optional = "OPTIONS" }, .description = "change this Session's settings" },
-    .copy = .{ .argument = .{ .choice = &.{ "code", "file" } }, .description = "copy the last answer; code its last block, file saves it here" },
+    .copy = .{ .argument = .{ .choice = copy_words }, .description = "copy the last answer; code its last block, file saves it here" },
     .details = .{ .description = "saved tool output" },
     .discard = .{ .description = "release rejected input, retaining the draft" },
     .effort = .{ .argument = .{ .optional = "LEVEL" }, .description = "list this model's efforts, or switch" },
@@ -61,6 +64,15 @@ pub const table = std.enums.EnumArray(Name, Command).init(.{
     .status = .{ .description = "settings and work" },
     .wait = .{ .description = null },
 });
+
+/// /copy's words: every `Copy` but the answer, which /copy alone copies.
+const copy_words = blk: {
+    const fields = @typeInfo(Copy).@"enum".field_names;
+    var words: [fields.len - 1][]const u8 = undefined;
+    for (&words, fields[1..]) |*word, field| word.* = field;
+    const final = words;
+    break :blk &final;
+};
 
 /// The command as typed with its argument's shape, as in `/copy [code|file]`.
 pub const usage = blk: {
@@ -166,7 +178,7 @@ pub const Matches = struct {
             unique = false;
             common = common[0 .. std.mem.indexOfDiff(u8, common, @tagName(name)) orelse common.len];
         }
-        if (unique and table.get(first).argument != .none) return named.get(first)[1 + self.prefix.len ..];
+        if (unique and table.get(first).argument != .none) return spaced.get(first)[1 + self.prefix.len ..];
         return common[self.prefix.len..];
     }
 };
@@ -179,7 +191,7 @@ pub fn complete(draft: []const u8) ?[]const u8 {
 const names = std.enums.values(Name);
 
 /// `/name ` for each command, so a completion borrows static bytes.
-const named = blk: {
+const spaced = blk: {
     var texts: std.enums.EnumArray(Name, []const u8) = undefined;
     for (names) |name| texts.set(name, "/" ++ @tagName(name) ++ " ");
     break :blk texts;
@@ -262,4 +274,12 @@ test "the list order is the names' order and every listed usage fits before the 
     try std.testing.expectEqualStrings("/copy [code|file]", usage.get(.copy));
     try std.testing.expectEqualStrings("/rename NAME", usage.get(.rename));
     try std.testing.expectEqualStrings("/effort [LEVEL]", usage.get(.effort));
+}
+
+test "/copy takes each Copy's name but the answer's, which it copies alone" {
+    for (std.enums.values(Copy)) |copy| {
+        var text: [16]u8 = undefined;
+        const parsed = parse(try std.fmt.bufPrint(&text, "/copy {s}", .{@tagName(copy)}));
+        if (copy == .answer) try std.testing.expectEqual(Name.copy, parsed.misused) else try std.testing.expectEqualStrings(@tagName(copy), parsed.command.argument);
+    }
 }

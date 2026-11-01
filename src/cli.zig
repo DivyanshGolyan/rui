@@ -1873,9 +1873,13 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
-    const text = input_buffer;
-    // The Session frontend queues only commands the table admits.
-    const command = slash_commands.parse(text).command;
+    const command = switch (slash_commands.parse(input_buffer)) {
+        .command => |command| command,
+        // The Session frontend queues only commands the table admits.
+        .unknown, .misused => return error.UnknownArgument,
+    };
+    // Decoding rewrites the argument's own bytes in the editor's line.
+    const argument = input_buffer[@intFromPtr(command.argument.ptr) - @intFromPtr(input_buffer.ptr) ..][0..command.argument.len];
     const live: LiveAddress = .{ .store = destination, .session = reference };
     switch (command.name) {
         .@"inspect-action" => {
@@ -1903,7 +1907,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         .setup => {
             const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [6][]const u8 = undefined;
-            const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
+            const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
             const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
@@ -1925,27 +1929,95 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
             };
         },
-        .configure => {
+        .configure, .effort, .rename => {
+            const typed_usage = liveUsage(command.name);
             var arguments: [20][]const u8 = undefined;
-            const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch
-                return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-            return liveConfigure(init, requests_context, live, arguments[0..argument_count]);
+            const spelled = liveArguments(command.name, argument, &arguments) catch
+                return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+            return liveConfigure(init, requests_context, live, spelled, typed_usage);
         },
-        // The short forms are their /configure flag, the argument one word.
-        .effort => return liveConfigure(init, requests_context, live, &.{ "--reasoning-effort", command.argument }),
-        .rename => return liveConfigure(init, requests_context, live, &.{ "--label", command.argument }),
         // The Session frontend runs every other command itself.
         else => return error.UnknownArgument,
     }
 }
 
-/// The live /configure: its checks, its usage and its messages, whichever
-/// command spelled the arguments.
-fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8) !void {
+/// The /configure arguments a command spells. /effort LEVEL is
+/// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
+/// name as one value, decoded as /configure decodes a quoted one.
+fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[20][]const u8) ![]const []const u8 {
+    switch (name) {
+        .configure => return arguments[0..try interactiveTokens(argument, arguments)],
+        .effort => {
+            arguments[0] = "--reasoning-effort";
+            return arguments[0 .. 1 + try interactiveTokens(argument, arguments[1..])];
+        },
+        .rename => {
+            arguments[0..2].* = .{ "--label", try interactiveText(argument) };
+            return arguments[0..2];
+        },
+        else => unreachable,
+    }
+}
+
+/// What a live /configure spelling prints when its arguments do not parse:
+/// the usage of the command typed.
+fn liveUsage(name: slash_commands.Name) []const u8 {
+    return switch (name) {
+        .configure => interactive_configure_usage,
+        inline .effort, .rename => |short| "Rui: Usage: " ++ comptime slash_commands.usage.get(short) ++ "\n",
+        else => unreachable,
+    };
+}
+
+test "/effort and /rename give what their /configure spelling gives" {
+    const cases = [_]struct { short: []const u8, spelled: []const u8, option: []const u8 }{
+        .{ .short = "/rename \"lane four\"", .spelled = "/configure --label \"lane four\"", .option = "label" },
+        .{ .short = "/rename lane four", .spelled = "/configure --label \"lane four\"", .option = "label" },
+        .{ .short = "/rename a\\\"b", .spelled = "/configure --label a\\\"b", .option = "label" },
+        .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
+        .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("short={s}\n", .{case.short});
+        var values: [2][]const u8 = undefined;
+        var lines: [2][64]u8 = undefined;
+        var storage: [2][20][]const u8 = undefined;
+        for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
+            @memcpy(line[0..text.len], text);
+            const command = slash_commands.parse(line[0..text.len]).command;
+            const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
+            var nothing = std.heap.FixedBufferAllocator.init(&.{});
+            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator());
+            value.* = parsed.get(case.option).?;
+        }
+        try std.testing.expectEqualStrings(values[1], values[0]);
+    }
+    // A line that does not decode names the command typed.
+    for ([_][]const u8{ "/effort \"high", "/rename \"lane" }) |text| {
+        var line: [64]u8 = undefined;
+        @memcpy(line[0..text.len], text);
+        const command = slash_commands.parse(line[0..text.len]).command;
+        var arguments: [20][]const u8 = undefined;
+        try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
+        try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
+    }
+}
+
+test "the CLI refuses a line the table does not admit, which the frontend never queues" {
+    for ([_][]const u8{ "/nope", "/status now", "/rename", "/copy all" }) |text| {
+        var line: [16]u8 = undefined;
+        @memcpy(line[0..text.len], text);
+        try std.testing.expectError(error.UnknownArgument, sessionCommand(undefined, undefined, "", "", line[0..text.len]));
+    }
+}
+
+/// The live /configure: its checks and its messages, whichever command
+/// spelled the arguments, and the usage of the one typed.
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !void {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
     const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch
-        return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+        return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
     for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
         return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
     configure(init, requests_context, &parsed, live, false) catch |err| {
@@ -1959,6 +2031,17 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
+    return decodeInteractive(input, tokens, true);
+}
+
+/// The whole line as one value: a space outside quotes stays, as inside them.
+fn interactiveText(input: []u8) ![]const u8 {
+    var text: [1][]const u8 = .{""};
+    _ = try decodeInteractive(input, &text, false);
+    return text[0];
+}
+
+fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
     var read: usize = 0;
     var write: usize = 0;
     var count: usize = 0;
@@ -1970,7 +2053,7 @@ fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
         var quoted = false;
         while (read < input.len) {
             const byte = input[read];
-            if (!quoted and byte == ' ') break;
+            if (split and !quoted and byte == ' ') break;
             if (byte == '"') {
                 quoted = !quoted;
                 read += 1;

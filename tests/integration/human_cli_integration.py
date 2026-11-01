@@ -427,6 +427,9 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert "Reasoning effort: high (Session override)" in status and "Label: lane five" in status, status
         configured_frame(master, "/effort default")
         assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
+        configured_frame(master, '/rename "lane four"')
+        assert "Label: lane four" in flat(status_frame(master, session))
+        terminal_step(master, '/effort "high', "Usage: /effort [LEVEL]", composer=True)
         told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
         for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
                                        ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
