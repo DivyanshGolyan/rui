@@ -21,7 +21,7 @@ import threading
 import time
 
 import host_process
-from host_process import canonical_fixture_root, dispose_all, screen_fixture_root, preserve_failure_metadata, retain_failure_state, stop_process
+from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -3637,7 +3637,7 @@ def renderer_cases():
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
     state = screen_fixture_root("rui-renderer.")
-    # Always wrap the Workspace, including on short Linux temporary roots.
+    # Always wrap the Workspace, whatever the temporary root.
     home, store, workspace = state / "home", state / "store", state / ("workspace-" + "w" * 80)
     home.mkdir(mode=0o700)
     workspace.mkdir()
