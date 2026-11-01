@@ -823,7 +823,7 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
         const departure = frontend.leave(left.ended, restored);
         const end = departure.end catch |err| {
             if (departure.failure_notice) self.terminal.detached(store, session, departure.action) catch |notice_error|
-                TerminalText.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
+                stderr.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
             break :run err;
         };
         switch (end) {

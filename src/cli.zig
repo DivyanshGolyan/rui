@@ -1,6 +1,7 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
+const stderr = @import("stderr.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
 const TestObservation = @import("TestObservation.zig");
@@ -44,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.EmptyMessageInput) {
             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        } else stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -65,7 +66,7 @@ fn run(init: std.process.Init) !void {
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] });
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
+        stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
         return error.InvalidArguments;
     }
     const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] });
@@ -73,7 +74,7 @@ fn run(init: std.process.Init) !void {
         return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
-        TerminalText.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
+        stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
         return error.InvalidArguments;
     };
     const definition = command.definition();
@@ -92,7 +93,7 @@ fn run(init: std.process.Init) !void {
             error.InvalidHexIdentity => "a hex selector is not even-length UTF-8 hex within its bound",
             error.OutOfMemory => "out of memory",
         };
-        TerminalText.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
+        stderr.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
         return err;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
@@ -100,14 +101,14 @@ fn run(init: std.process.Init) !void {
     dispatching = true;
     dispatch(init, command, &parsed, args) catch |err| {
         if (err == error.InvalidArguments) {
-            TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
+            stderr.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return err;
         }
         // Model rejection already names the ID, supported IDs and repair;
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
         if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
-        TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
+        stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
     try postCommandHold(init);
@@ -129,14 +130,14 @@ noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Defi
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try definition.writeGroup(&writer, group);
-    TerminalText.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, writer.buffered(), @tagName(resource), definition.name });
+    stderr.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, writer.buffered(), @tagName(resource), definition.name });
     return error.InvalidArguments;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
     if (parsed.get("session")) |id| {
         if (!protocol.validSessionId(id)) {
-            TerminalText.diagnostic("rui: Session ID must be exactly six lowercase Crockford characters, for example k7m2qx. Nothing was captured or sent.\n", .{});
+            stderr.diagnostic("rui: Session ID must be exactly six lowercase Crockford characters, for example k7m2qx. Nothing was captured or sent.\n", .{});
             return error.InvalidSession;
         }
     }
@@ -224,7 +225,7 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
     if (parsed.get("model")) |model| try requireSupportedModel(model);
     const home = init.environ_map.get("HOME") orelse {
-        TerminalText.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
+        stderr.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
     };
     var edit: preferences.Edit = .{};
@@ -246,18 +247,18 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep;
     const values = (if (changed) preferences.update(home, edit, readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
-            TerminalText.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
+            stderr.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
         } else if (err == error.UnsupportedPreferenceProvider) {
-            TerminalText.diagnostic("rui: setup supports only --provider codex; no preferences saved.\n", .{});
+            stderr.diagnostic("rui: setup supports only --provider codex; no preferences saved.\n", .{});
         } else if (err == error.PreferenceProviderRequired) {
-            TerminalText.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
+            stderr.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
         } else if (err == error.UnsupportedPreferenceModel) {
-            TerminalText.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ model_capability.model_help, .{});
+            stderr.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ model_capability.model_help, .{});
         } else if (err == error.InvalidPreferenceModel) {
-            TerminalText.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
+            stderr.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
-            TerminalText.diagnostic("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
-        } else TerminalText.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
+            stderr.diagnostic("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
+        } else stderr.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
         return err;
     };
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -270,7 +271,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         notice.writeAll("rui: saved ") catch break :notice;
         TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
         notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
-        TerminalText.diagnostic("{s}", .{notice.buffered()});
+        stderr.diagnostic("{s}", .{notice.buffered()});
     }
     if (!interactive) return writeDefaultsJson(init.io, .{
         .changed = changed,
@@ -387,7 +388,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
 fn homeRequired(comptime need: []const u8) error{HomeUnavailable} {
-    TerminalText.diagnostic("rui: HOME is not set; " ++ need ++ ". Set HOME to an absolute directory and retry. Nothing was captured or sent.\n", .{});
+    stderr.diagnostic("rui: HOME is not set; " ++ need ++ ". Set HOME to an absolute directory and retry. Nothing was captured or sent.\n", .{});
     return error.HomeUnavailable;
 }
 
@@ -406,7 +407,7 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
     if (init.environ_map.get("RUI_ADDRESS") != null or init.environ_map.get("RUI_SENDER_HANDLE") != null) return error.InvalidRuiAddress;
     const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
     const defaults = preferences.load(home) catch |err| {
-        TerminalText.diagnostic("rui: cannot read private setup defaults ({s}); use rui defaults inspect to inspect them. No Store selected.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: cannot read private setup defaults ({s}); use rui defaults inspect to inspect them. No Store selected.\n", .{@errorName(err)});
         return err;
     };
     if (defaults.store.len != 0) {
@@ -459,7 +460,7 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
         .ready => |ready| ready.instance,
         .unavailable, .owned_unavailable => {
-            TerminalText.diagnostic("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
+            stderr.diagnostic("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
             return error.HostStopUnconfirmed;
         },
         .incompatible => return error.IncompatibleHost,
@@ -475,7 +476,7 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        TerminalText.diagnostic("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
         return err;
     };
     switch (outcome) {
@@ -488,11 +489,11 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
             try output.finish();
         },
         .instance_changed => {
-            TerminalText.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
+            stderr.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
             return error.HostInstanceChanged;
         },
         .unavailable => {
-            TerminalText.diagnostic("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
+            stderr.diagnostic("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
             return error.HostStopUnconfirmed;
         },
     }
@@ -570,9 +571,9 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 try header.writeAll(":\n");
                 _ = @import("stderr.zig").write(header.buffered());
                 _ = @import("stderr.zig").write(startup);
-                if (startup_length == 0) TerminalText.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
+                if (startup_length == 0) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {
-                    TerminalText.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
+                    stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                     return error.HostReadinessUnconfirmed;
                 }
                 return error.HostStartupFailed;
@@ -600,7 +601,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
     if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
-    TerminalText.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
+    stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }
 
@@ -613,7 +614,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
         notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
         TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
         notice.writeByte('\n') catch break :notice;
-        TerminalText.diagnostic("{s}", .{notice.buffered()});
+        stderr.diagnostic("{s}", .{notice.buffered()});
     };
     if (!quiet) try writeHostStatus(io, .{ .ready = ready });
 }
@@ -1021,11 +1022,11 @@ const NewSessionOptions = struct {
 /// any Host or Session change when that terminal is absent or cannot draw.
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed.\n", .{purpose});
+        stderr.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
-        TerminalText.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed.\n", .{purpose});
+        stderr.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
 }
@@ -1095,7 +1096,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         // Rebuild in stable storage on every pass; fully explicit intent never
         // reads preferences, even after login's independent default-save failure.
         snapshot = .{ .intent = intent, .defaults = if (intent.needsPreferences()) preferences.load(home) catch |err| {
-            if (!after_choice) TerminalText.diagnostic("rui: private setup defaults unreadable ({s}); use rui defaults inspect before creating a Session.\n", .{@errorName(err)});
+            if (!after_choice) stderr.diagnostic("rui: private setup defaults unreadable ({s}); use rui defaults inspect before creating a Session.\n", .{@errorName(err)});
             return err;
         } else .{} };
         const destination = try snapshot.destination(home, &fallback);
@@ -1105,8 +1106,8 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         // identifier syntax and release support are separate policies.
         const prospective = snapshot.resolve(.configured) catch |err| {
             if (after_choice) {
-                TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
-            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
+                stderr.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
+            } else stderr.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
             return err;
         };
         if (prospective) |binding| try requireSupportedModel(binding.model.slice());
@@ -1119,7 +1120,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
             .refresh_required => .refresh_required,
         } else |err| blk: {
             if (after_choice) {
-                TerminalText.diagnostic("rui: credential still unreadable ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
+                stderr.diagnostic("rui: credential still unreadable ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
                 return err;
             }
             break :blk .credential_error;
@@ -1141,7 +1142,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         else => return error.HostReadinessUnconfirmed,
     };
     if (!ready.capabilities.model) {
-        TerminalText.diagnostic("rui: selected Host has no model capability; it was not restarted. Inspect rui host status before creating a Session.\n", .{});
+        stderr.diagnostic("rui: selected Host has no model capability; it was not restarted. Inspect rui host status before creating a Session.\n", .{});
         return error.HostModelUnavailable;
     }
     entry.binding = selected;
@@ -1419,17 +1420,17 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         return err;
     };
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
-        TerminalText.diagnostic("rui: Configuration {s}; use rui request inspect {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
+        stderr.diagnostic("rui: Configuration {s}; use rui request inspect {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
     };
 }
 
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
     const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
     if (admitted == null) {
-        TerminalText.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @errorName(err), key, key });
+        stderr.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @errorName(err), key, key });
         return;
     }
-    TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
+    stderr.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
 }
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
@@ -1438,7 +1439,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     errdefer reportFailureStep(step);
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
-        TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
+        stderr.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
@@ -1451,7 +1452,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
         if (address == null or sender_store == null or input.sender_handle == null or
             !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
         {
-            TerminalText.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
+            stderr.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
             return error.InvalidRuiAddress;
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
@@ -1463,7 +1464,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
         if (parsed.get("store")) |override| {
             const override_paths = try platform.resolveClientPaths(io, override);
             if (!override_paths.store.eql(sender_paths.store.slice())) {
-                TerminalText.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
+                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
                 return error.CrossStorePeerSend;
             }
         }
@@ -1512,9 +1513,9 @@ fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationRepl
 /// Null once the Host's reply was presented.
 fn reportFailureStep(held: ?client.Step) void {
     const step = held orelse return;
-    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
+    stderr.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
     if (step.mayHaveReachedHost())
-        TerminalText.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
+        stderr.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
 /// An explicit --record and --key identity, which the grammar requires
@@ -1636,7 +1637,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try startHost(init, destination, true, null);
     const open = reference[0..protocol.session_id_bytes].*;
     confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
-        if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
+        if (err == error.SessionNotConfigured) stderr.diagnostic("rui: configure this Session before entering it\n", .{});
         return Overview.printFailure(err, destination, open, null);
     };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -1695,21 +1696,21 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
         const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-            TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             return;
         };
         if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
         setup(init, &parsed, true) catch |err| {
-            if (err != error.UnsupportedModel) TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
         };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
-            TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
+            stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
             return;
         };
         showResult(init, requests_context, &saved) catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
-            TerminalText.diagnostic("rui: result: {s}\n", .{@errorName(err)});
+            stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
         };
     } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) {
         var arguments: [20][]const u8 = undefined;
@@ -1723,7 +1724,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
             if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
-            TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+            stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
             if (err == error.CanonicalStoreFailure) return err;
         };
     } else return error.UnknownArgument; // The Session frontend admits only the commands above.
@@ -2131,7 +2132,7 @@ const MutationPresentation = enum {
 fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation, replay: client.Replay) !void {
     if (reply.answer) |answer| {
         if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
-            TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
+            stderr.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
     } else |_| {}
     if (presentation == .json) {
         var output: JsonOutput = undefined;
@@ -2153,7 +2154,7 @@ fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: client.Re
     var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
     writeNotAccepted(&notice, context, replay) catch return;
-    TerminalText.diagnostic("{s}", .{notice.buffered()});
+    stderr.diagnostic("{s}", .{notice.buffered()});
 }
 
 fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay) !void {

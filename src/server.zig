@@ -3026,7 +3026,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
         .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
-        .{ .bash = .{ .since = max, .description = description, .running = max, .approvals = max } },
+        .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } },
         .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
         .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
         .{ .approval = .{ .since = max } },
