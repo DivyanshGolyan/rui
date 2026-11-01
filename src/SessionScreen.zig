@@ -728,7 +728,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
         _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
     }
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
+    var rule_label: [64]u8 = undefined;
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -864,9 +865,8 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
-fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View) !void {
-    var buffer: [64]u8 = undefined;
-    const label = draft_layout.label(&buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
+fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
+    const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
     const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
     _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});

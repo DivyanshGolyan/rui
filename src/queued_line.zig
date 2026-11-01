@@ -7,7 +7,6 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
-const protocol = @import("protocol.zig");
 
 pub const Method = session_line.Method;
 
@@ -21,8 +20,8 @@ pub const Shown = struct { admission: u64, line: Line };
 /// newest while it waited (`View.Taking`). Live output shows such a Message
 /// only once it is taken, so the row shows it until then, whatever the
 /// work is doing.
-pub fn shows(queued: protocol.Queued, drawn_waiting: u64) bool {
-    return queued.count != 0 and queued.newest_admission > drawn_waiting;
+pub fn shows(count: u64, newest_admission: u64, drawn_waiting: u64) bool {
+    return count != 0 and newest_admission > drawn_waiting;
 }
 
 /// What the row shows: the newest Message's first line, and how many wait.

@@ -1355,7 +1355,7 @@ fn settleReader(self: *Self) !void {
 /// newest waiting Message, by the line read from it, and how many wait.
 fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    if (!queued_line.shows(queued, self.live.drawn_waiting)) return null;
+    if (!queued_line.shows(queued.count, queued.newest_admission, self.live.drawn_waiting)) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
     return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
