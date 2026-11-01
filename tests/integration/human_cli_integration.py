@@ -1329,8 +1329,9 @@ def overview_cases():
         # In a conversation the line under the input offers ctrl+x stop
         # while there is work, and Ctrl-X twice stops its Session there.
         before = set(records.glob("*.json"))
+        sent = len(endpoint.requests)
         os.write(master, b"Hold in the conversation\n")
-        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == 4), "conversation Turn sent")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == sent + 1), "conversation Turn sent")
         record, = set(records.glob("*.json")) - before
         talking = fixture.observe(store, record.stem)["target"]
         session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
