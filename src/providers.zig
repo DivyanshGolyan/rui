@@ -131,7 +131,7 @@ test "a base URL names the https Responses endpoint under it, or nothing" {
         try std.testing.expectEqualStrings(case[1], under);
     }
     for ([_][]const u8{
-        "http://api.openai.com/v1", "http://127.0.0.1:9/v1", "https://",   "https:///v1",
+        "http://api.openai.com/v1", "http://127.0.0.1:9/v1",   "https://",            "https:///v1",
         "https://:443/v1",          "https://user:pw@host/v1", "https://host/v1?x=1", "https://host/v1#f",
         "ftp://host",               "api.openai.com/v1",
     }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad));
