@@ -288,6 +288,183 @@ pub const ErrorBody = struct {
     report: struct { code: ?ReportRange, message: ?ReportRange },
 };
 
+// ------------------------------------------------------------- interpret
+//
+// The Host frames a sealed response stream's server-sent events itself and
+// gives the codec each event's data whole, as one read-only slice, with the
+// codec's `Stream` state. The codec answers with an `Event`: its verdict and
+// the ranges of that slice the Host decodes, hashes and records. For an
+// accepted item, and for a completed response's output list, the Host walks
+// the members in document order with `nextMember`, one `Member` at a time
+// from a `Cursor`. The codec judges the provider's grammar; the Host keeps
+// every rule across items, maps each `Reason` to its saved code and kind,
+// and never lets a codec decide either.
+
+/// What the response answers, which decides which items it may hold.
+pub const Operation = enum(u8) { assistant_response = 0, compaction = 1 };
+
+/// Where in the stream a verdict stands, for its diagnostic coordinates.
+/// `stream` keeps the coordinates of the line the Host frames.
+pub const Stage = enum(u8) { stream = 0, event = 1, item = 2, response = 3 };
+
+/// A codec's verdict, named as the Host names the rejection it becomes. The
+/// Host maps each to its code and kind; a codec cannot choose either.
+pub const Reason = enum(u8) {
+    contradictory_provider_output = 0,
+    late_provider_output,
+    provider_connection_closed,
+    missing_provider_field,
+    duplicate_json_field,
+    expected_json_string,
+    provider_value_too_long,
+    invalid_provider_index,
+    trailing_json,
+    overflow,
+    unexpected_json_delimiter,
+    unsupported_event_type,
+    unsupported_item_type,
+    empty_provider_identity,
+    unfinished_provider_output_item,
+    unsupported_response_status,
+    incomplete_provider_output,
+    temporary_provider_failure,
+    context_overflow,
+    /// The provider reported a failure; a refusal code the Host knows makes
+    /// it permanent.
+    reported_provider_failure,
+    unsupported_item_status,
+    continuation_unavailable,
+    unsupported_content_block,
+    unsupported_reasoning_block,
+    unsupported_reasoning_text,
+    unsupported_provider_output,
+    unsupported_async_call,
+    invalid_json_literal,
+    unsupported_call_control,
+    unsupported_message_role,
+    unsupported_message_phase,
+    malformed_provider_output,
+    unsupported_annotation,
+    unsupported_caller,
+    unsupported_metadata_authority,
+    // The event's data is not one JSON object, for the reason the JSON
+    // reader names.
+    unexpected_json_end,
+    invalid_json_string,
+    invalid_json_escape,
+    invalid_json_surrogate,
+    invalid_json_utf8,
+    invalid_json_number,
+    invalid_json_value,
+    json_too_deep,
+};
+
+/// The Host's name for a reason: its words, capitalized and joined.
+pub fn reasonName(comptime reason: Reason) []const u8 {
+    comptime var out: []const u8 = "";
+    comptime var upper = true;
+    inline for (@tagName(reason)) |byte| {
+        if (byte == '_') {
+            upper = true;
+            continue;
+        }
+        out = out ++ .{if (upper) std.ascii.toUpper(byte) else byte};
+        upper = false;
+    }
+    return out;
+}
+
+/// Rui's four token counts.
+pub const Usage = struct { uncached: u64, cache_read: u64, cache_write: u64, output: u64 };
+
+/// Bytes of the event data the call was given.
+pub const Range = struct { start: u64, length: u64 };
+
+/// Where an event's verdict stands.
+pub const At = struct { stage: Stage, output_index: ?u64 };
+
+/// Where a walk reads next, which the Host keeps between `nextMember` calls.
+pub const Cursor = struct {
+    /// The offset in the event data of the next byte the walk reads.
+    offset: u64,
+    scope: enum(u8) { item, array, part, output },
+    /// The item's kind and the phase Rui's form holds of it, and the array
+    /// and the text member of the part the scope is in, as far as it is.
+    kind: OutputKind,
+    phase: Phase,
+    array: PartArray,
+    text: Range,
+};
+
+/// An output item the codec accepted. (`Item` is a request's.)
+pub const OutputItem = struct {
+    kind: OutputKind,
+    /// The phase Rui's form holds, and the one answer selection reads.
+    phase: Phase,
+    answer_phase: Phase,
+    omit_reasoning_text: bool,
+    whole: Range,
+    /// The contents of the id string, and of a function call's name,
+    /// call_id and arguments strings.
+    id: Range,
+    call: [3]Range,
+    /// The walk over its members.
+    members: Cursor,
+};
+
+/// A completed response, the stages after the Host's completion gate.
+pub const Completed = struct {
+    /// The verdict on the response's status, id, model and output list.
+    check: ?Reason,
+    /// The contents of the id string, and of the model string unless it is
+    /// absent or null.
+    response_id: Range,
+    served_model: ?Range,
+    /// The walk over the output list.
+    output: Cursor,
+    usage: union(enum) {
+        absent,
+        report: struct { whole: Range, counts: ?Usage },
+        failed: Reason,
+    },
+};
+
+pub const Failed = struct {
+    reason: Reason,
+    /// A reported failure's code, when it is at most `max_code_bytes`.
+    refusal: ?Code,
+    report: struct { code: ?ReportRange, message: ?ReportRange },
+};
+
+/// The codec's answer to one event.
+pub const Event = struct {
+    at: At,
+    what: union(enum) {
+        other,
+        done_marker,
+        /// The next item is announced; `id` holds its id string's contents.
+        added: struct { kind: OutputKind, id: Range },
+        item: OutputItem,
+        completed: Completed,
+        failed: Failed,
+    },
+};
+
+/// One step of a walk, in document order.
+pub const Member = union(enum) {
+    /// A `"key":value` member of the open item's or part's provider bag.
+    bag: Range,
+    /// A part of the open item begins; its bag members follow. `text` holds
+    /// its text string's contents.
+    part: struct { array: PartArray, kind: PartKind, text: Range },
+    part_end,
+    /// One element of a completed response's output list, and its id
+    /// string's contents.
+    terminal: struct { kind: OutputKind, whole: Range, id: Range },
+    /// One element of the output list that is not an item.
+    terminal_failed: Reason,
+};
+
 /// A tool as the model is told about it; each codec writes its own envelope.
 pub const ToolDefinition = struct {
     name: []const u8,

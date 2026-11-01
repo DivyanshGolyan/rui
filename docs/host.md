@@ -36,11 +36,11 @@ An acknowledgment means Rui accepted the shutdown request. Cleanup can still be 
 ## Run in the foreground
 
 ```sh
-rui host serve --store PATH --codex
-rui host serve --store PATH --active-capacity 8 --codex
+rui host serve --store PATH --provider codex
+rui host serve --store PATH --active-capacity 8 --provider codex
 ```
 
-Without `--codex` or a development endpoint, `host serve` makes no model requests. The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
+Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential. Sessions of a provider the Host does not serve wait until a Host that serves it starts. Without `--provider` or a development endpoint, `host serve` makes no model requests. The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response
 

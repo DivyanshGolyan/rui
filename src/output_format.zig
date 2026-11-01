@@ -127,7 +127,7 @@ pub const OutputMetadataWriter = struct {
         return .{ .io = io, .file = file, .budget = budget };
     }
 
-    pub fn append(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
+    pub fn append(self: *OutputMetadataWriter, record: *const OutputMetadataRecord) !void {
         std.debug.assert(!self.sealed);
         if (self.fail_writes) return error.InjectedMetadataFailure;
         if (!self.budget.allocate(output_metadata_record_bytes)) {
@@ -205,61 +205,7 @@ pub const OutputMetadataReader = struct {
         const count = try self.file.readPositionalAll(self.io, &bytes, self.offset);
         if (count != bytes.len) return error.CorruptOutputMetadata;
         self.offset += bytes.len;
-        if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
-        if (bytes[3] > 1 or (bytes[3] == 1 and (bytes[0] != @backingInt(OutputRecordTag.item) or
-            bytes[1] != @backingInt(OutputItemKind.reasoning)))) return error.CorruptOutputMetadata;
-        const is_part = bytes[0] == @backingInt(OutputRecordTag.part);
-        const is_bag = bytes[0] == @backingInt(OutputRecordTag.extras) or bytes[0] == @backingInt(OutputRecordTag.member);
-        if (bytes[4] > 4 or bytes[5] > 1 or bytes[6] > 2 or (!is_part and (bytes[4] != 0 or bytes[6] != 0)) or
-            (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
-        if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
-            bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
-        if (bytes[0] == @backingInt(OutputRecordTag.text) and bytes[1] != @backingInt(OutputItemKind.message)) return error.CorruptOutputMetadata;
-        const usage: ?Usage = if (bytes[2] == 1) .{
-            .uncached = std.mem.readInt(u64, bytes[8..16], .little),
-            .cache_read = std.mem.readInt(u64, bytes[32..40], .little),
-            .cache_write = std.mem.readInt(u64, bytes[40..48], .little),
-            .output = std.mem.readInt(u64, bytes[48..56], .little),
-        } else null;
-        if (usage != null) {
-            // The counts' slots end at 56; the rest of the id slot is unused.
-            if (!std.mem.allEqual(u8, bytes[56..72], 0)) return error.CorruptOutputMetadata;
-            @memset(bytes[8..16], 0);
-            @memset(bytes[32..72], 0);
-        }
-        return .{
-            .tag = switch (bytes[0]) {
-                1 => .item,
-                2 => .text,
-                3 => .usage,
-                5 => .name,
-                6 => .call_id,
-                7 => .arguments,
-                8 => .part,
-                9 => .extras,
-                10 => .member,
-                else => return error.CorruptOutputMetadata,
-            },
-            .kind = switch (bytes[1]) {
-                1 => .reasoning,
-                2 => .message,
-                3 => .function_call,
-                4 => .compaction,
-                else => return error.CorruptOutputMetadata,
-            },
-            .ordinal = std.mem.readInt(u64, bytes[8..16], .little),
-            .start = std.mem.readInt(u64, bytes[16..24], .little),
-            .length = std.mem.readInt(u64, bytes[24..32], .little),
-            .decoded_length = std.mem.readInt(u64, bytes[32..40], .little),
-            .id_digest = bytes[40..72].*,
-            .content_digest = bytes[72..104].*,
-            .usage = usage,
-            .omit_reasoning_text = bytes[3] == 1,
-            .part_kind = @fromBackingInt(@intCast(bytes[4])),
-            .scope = @fromBackingInt(@intCast(bytes[5])),
-            .part_array = @fromBackingInt(@intCast(bytes[6])),
-            .phase = @fromBackingInt(@intCast(bytes[7])),
-        };
+        return try decodeRecord(&bytes);
     }
 
     pub fn nextItem(self: *OutputMetadataReader) !?OutputMetadataRecord {
@@ -267,6 +213,77 @@ pub const OutputMetadataReader = struct {
         return null;
     }
 };
+
+/// Records already in memory, such as a metadata file mapped read-only.
+pub const OutputMetadataRecords = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+
+    pub fn nextItem(self: *OutputMetadataRecords) !?OutputMetadataRecord {
+        while (self.offset != self.bytes.len) {
+            if (self.bytes.len - self.offset < output_metadata_record_bytes) return error.CorruptOutputMetadata;
+            const record = try decodeRecord(self.bytes[self.offset..][0..output_metadata_record_bytes]);
+            self.offset += output_metadata_record_bytes;
+            if (record.tag == .item) return record;
+        }
+        return null;
+    }
+};
+
+fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataRecord {
+    if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
+    if (bytes[3] > 1 or (bytes[3] == 1 and (bytes[0] != @backingInt(OutputRecordTag.item) or
+        bytes[1] != @backingInt(OutputItemKind.reasoning)))) return error.CorruptOutputMetadata;
+    const is_part = bytes[0] == @backingInt(OutputRecordTag.part);
+    const is_bag = bytes[0] == @backingInt(OutputRecordTag.extras) or bytes[0] == @backingInt(OutputRecordTag.member);
+    if (bytes[4] > 4 or bytes[5] > 1 or bytes[6] > 2 or (!is_part and (bytes[4] != 0 or bytes[6] != 0)) or
+        (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
+    if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
+        bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
+    if (bytes[0] == @backingInt(OutputRecordTag.text) and bytes[1] != @backingInt(OutputItemKind.message)) return error.CorruptOutputMetadata;
+    const usage: ?Usage = if (bytes[2] == 1) .{
+        .uncached = std.mem.readInt(u64, bytes[8..16], .little),
+        .cache_read = std.mem.readInt(u64, bytes[32..40], .little),
+        .cache_write = std.mem.readInt(u64, bytes[40..48], .little),
+        .output = std.mem.readInt(u64, bytes[48..56], .little),
+    } else null;
+    // The counts' slots end at 56; the rest of the id slot is unused, and
+    // the record has no ordinal, decoded length or id.
+    if (usage != null and !std.mem.allEqual(u8, bytes[56..72], 0)) return error.CorruptOutputMetadata;
+    return .{
+        .tag = switch (bytes[0]) {
+            1 => .item,
+            2 => .text,
+            3 => .usage,
+            5 => .name,
+            6 => .call_id,
+            7 => .arguments,
+            8 => .part,
+            9 => .extras,
+            10 => .member,
+            else => return error.CorruptOutputMetadata,
+        },
+        .kind = switch (bytes[1]) {
+            1 => .reasoning,
+            2 => .message,
+            3 => .function_call,
+            4 => .compaction,
+            else => return error.CorruptOutputMetadata,
+        },
+        .ordinal = if (usage == null) std.mem.readInt(u64, bytes[8..16], .little) else 0,
+        .start = std.mem.readInt(u64, bytes[16..24], .little),
+        .length = std.mem.readInt(u64, bytes[24..32], .little),
+        .decoded_length = if (usage == null) std.mem.readInt(u64, bytes[32..40], .little) else 0,
+        .id_digest = if (usage == null) bytes[40..72].* else @splat(0),
+        .content_digest = bytes[72..104].*,
+        .usage = usage,
+        .omit_reasoning_text = bytes[3] == 1,
+        .part_kind = @fromBackingInt(@intCast(bytes[4])),
+        .scope = @fromBackingInt(@intCast(bytes[5])),
+        .part_array = @fromBackingInt(@intCast(bytes[6])),
+        .phase = @fromBackingInt(@intCast(bytes[7])),
+    };
+}
 
 /// Decode one scalar from an already-delimited JSON string. The byte source
 /// owns bounds and storage; this function retains at most one UTF-8 scalar.
