@@ -1,6 +1,5 @@
 const std = @import("std");
 const bash = @import("bash.zig");
-const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
@@ -2205,7 +2204,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .charged = 4,
             .structured_output = false,
             .codec = .@"openai-responses/1",
-            .headers = .{},
+            .headers = .{ .count = 0 },
         };
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
@@ -2327,7 +2326,7 @@ test "HTTP error capture retires before execution custody" {
             .charged = 2,
             .structured_output = false,
             .codec = .@"openai-responses/1",
-            .headers = .{},
+            .headers = .{ .count = 0 },
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
@@ -3346,17 +3345,6 @@ test "Host fences dispose admitted preparation without touching canonical state"
 }
 
 test "an encode failure settles unanswered and releases request scratch" {
-    // The pinned codec, failing at request_end: every earlier item has
-    // already written request scratch.
-    const Failing = struct {
-        const pinned = codecs.encoder(.@"openai-responses/1");
-        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
-
-        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
-            const status = pinned.step(state, header, ops);
-            return if (header.item == .request_end) .failed else status;
-        }
-    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -3416,7 +3404,9 @@ test "an encode failure settles unanswered and releases request scratch" {
         .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
         .endpoint,
         null,
-        .{ .codec = &Failing.encoder },
+        // The codec declines at request_end: every earlier item has already
+        // written request scratch.
+        .{ .codec_unsupported = .request_end },
         &retained,
     );
     defer if (preparation.state.active) preparation.cancel();
@@ -3468,7 +3458,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .charged = 2,
             .structured_output = false,
             .codec = .@"openai-responses/1",
-            .headers = .{},
+            .headers = .{ .count = 0 },
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };
