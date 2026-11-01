@@ -53,6 +53,16 @@ pub fn Mapped(comptime T: type) type {
 pub fn mapReadOnly(io: std.Io, file: std.Io.File, length: u64) ![]align(std.heap.page_size_min) const u8 {
     if (length == 0) return &.{};
     if (try file.length(io) < length) return error.FileShorter;
+    return mapReadOnlyAhead(file, length);
+}
+
+/// The first `length` bytes of `file` mapped read-only and shared, however
+/// long the file is now: address space only. A byte the file holds reads
+/// through the map, including one written after the map was made; a byte
+/// past the file's end faults, so a caller reads only below the length it
+/// wrote. Borrowed until `unmapReadOnly`.
+pub fn mapReadOnlyAhead(file: std.Io.File, length: u64) ![]align(std.heap.page_size_min) const u8 {
+    if (length == 0) return &.{};
     const count = std.math.cast(usize, length) orelse return error.FileTooBig;
     return std.posix.mmap(null, count, .{ .READ = true }, .{ .TYPE = .SHARED }, file.handle, 0);
 }
@@ -84,4 +94,27 @@ test "a file maps read-only as its bytes, and an empty length maps nothing" {
     try std.testing.expectEqual(@as(usize, 0), empty.len);
     unmapReadOnly(empty);
     try std.testing.expectError(error.FileShorter, mapReadOnly(std.testing.io, file, 11));
+}
+
+test "a write after the map is visible through it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "growing", .{ .read = true });
+    defer file.close(std.testing.io);
+    const page = std.heap.pageSize();
+    const mapped = try mapReadOnlyAhead(file, 3 * page);
+    defer unmapReadOnly(mapped);
+    // Appended in pieces that end inside a page and cross into the next,
+    // each read through the map made while the file was empty.
+    const Piece = struct {
+        var bytes: [std.heap.page_size_max + 8]u8 = undefined;
+    };
+    var written: usize = 0;
+    for ([_]usize{ 5, page - 5, page + 7, 1 }) |count| {
+        const piece = Piece.bytes[0..count];
+        for (piece, written..) |*byte, index| byte.* = @truncate(index * 7 + 1);
+        try file.writeStreamingAll(std.testing.io, piece);
+        try std.testing.expectEqualSlices(u8, piece, mapped[written..][0..count]);
+        written += count;
+    }
 }
