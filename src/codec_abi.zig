@@ -265,12 +265,6 @@ pub const Code = struct {
     }
 };
 
-pub const Quota = struct {
-    code: Code,
-    /// The Unix second the quota resets, when the provider gives one.
-    resets_at: ?u64,
-};
-
 /// Where one part of the report is, as a range of the body. With
 /// `json_string_v1` the range holds the contents of a JSON string, without
 /// its quotes, which the Host decodes; with `verbatim` it holds the text
@@ -285,10 +279,11 @@ pub const ReportRange = struct {
 pub const ErrorBody = struct {
     /// The request exceeds the model's context.
     context_overflow: bool,
-    /// A quota refusal, if the Host knows the code as one.
-    quota: ?Quota,
-    /// A refusal, if the Host knows the code as one.
-    refusal: ?Code,
+    /// Any other code the error names, which the Host reads as a quota or a
+    /// refusal if it knows it as one.
+    code: ?Code,
+    /// The Unix second a quota resets, when the provider gives one.
+    resets_at: ?u64,
     /// The two parts of the report, `code: message`.
     report: struct { code: ?ReportRange, message: ?ReportRange },
 };

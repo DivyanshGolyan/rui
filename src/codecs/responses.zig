@@ -198,13 +198,15 @@ pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Heade
 /// and its `message`, else a bare `detail`; a body without `error` reports
 /// only its own `message` or `detail`. Only a whole valid body and members
 /// that appear once count.
-pub fn classify(scratch: *ClassifyScratch, body: []const u8) codec_abi.ErrorBody {
+pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
+    out.context_overflow = false;
+    out.code = null;
+    out.resets_at = null;
+    out.report = .{ .code = null, .message = null };
     scratch.init();
-    var found: codec_abi.ErrorBody = .{ .context_overflow = false, .quota = null, .refusal = null, .report = .{ .code = null, .message = null } };
-    // A body that is not JSON establishes nothing.
-    scratch.reader.feed(body, scratch) catch return found;
-    if (scratch.reader.complete()) scratch.find(&found);
-    return found;
+    // A body that is not one whole JSON document establishes nothing.
+    scratch.reader.read(body, scratch) catch return;
+    scratch.find(out);
 }
 
 /// The classifier's working state over one body, which `classify` writes
@@ -256,7 +258,6 @@ pub const ClassifyScratch = struct {
             .code_length = 0,
             .resets_at = null,
         };
-        self.reader.init();
     }
 
     fn find(self: *const ClassifyScratch, found: *codec_abi.ErrorBody) void {
@@ -268,13 +269,12 @@ pub const ClassifyScratch = struct {
         if (failure.count > 1 or !self.error_object) return;
         const code = self.failure.get(.code);
         if (code.count == 1 and self.code_length != 0) {
-            const text: codec_abi.Code = .of(self.code[0..self.code_length]);
-            if (std.mem.eql(u8, text.slice(), "context_length_exceeded")) {
+            const text = self.code[0..self.code_length];
+            if (std.mem.eql(u8, text, "context_length_exceeded")) {
                 found.context_overflow = true;
             } else {
-                const resets_at = if (self.failure.get(.resets_at).count == 1) self.resets_at else null;
-                found.quota = .{ .code = text, .resets_at = resets_at };
-                found.refusal = text;
+                found.code = .of(text);
+                if (self.failure.get(.resets_at).count == 1) found.resets_at = self.resets_at;
             }
         }
         // An error object's type stands in for a code that is absent, empty
@@ -461,32 +461,31 @@ test "classify answers the same with 0xAA or leftover scratch" {
         "",
     };
     const same = struct {
-        fn code(expected: ?codec_abi.Code, actual: ?codec_abi.Code) !void {
-            try std.testing.expectEqual(expected == null, actual == null);
-            if (expected) |value| try std.testing.expectEqualStrings(value.slice(), actual.?.slice());
-        }
-
         fn body(expected: *const codec_abi.ErrorBody, actual: *const codec_abi.ErrorBody) !void {
             try std.testing.expectEqual(expected.context_overflow, actual.context_overflow);
-            try code(if (expected.quota) |quota| quota.code else null, if (actual.quota) |quota| quota.code else null);
-            if (expected.quota) |quota| try std.testing.expectEqual(quota.resets_at, actual.quota.?.resets_at);
-            try code(expected.refusal, actual.refusal);
+            try std.testing.expectEqual(expected.code == null, actual.code == null);
+            if (expected.code) |*code| try std.testing.expectEqualStrings(code.slice(), actual.code.?.slice());
+            try std.testing.expectEqual(expected.resets_at, actual.resets_at);
             try std.testing.expectEqual(expected.report.code, actual.report.code);
             try std.testing.expectEqual(expected.report.message, actual.report.message);
         }
     };
     var scratch: ClassifyScratch = undefined;
+    var fresh: codec_abi.ErrorBody = undefined;
+    var again: codec_abi.ErrorBody = undefined;
     for (bodies) |body| {
         @memset(std.mem.asBytes(&scratch), 0xAA);
-        const fresh = classify(&scratch, body);
+        @memset(std.mem.asBytes(&fresh), 0xAA);
+        classify(&scratch, body, &fresh);
         for (bodies) |other| {
-            _ = classify(&scratch, other);
-            try same.body(&fresh, &classify(&scratch, body));
+            classify(&scratch, other, &again);
+            classify(&scratch, body, &again);
+            try same.body(&fresh, &again);
         }
     }
     @memset(std.mem.asBytes(&scratch), 0xAA);
-    const quota = classify(&scratch, bodies[0]);
-    try std.testing.expectEqualStrings("usage_limit_reached", quota.quota.?.code.slice());
-    try std.testing.expectEqual(@as(?u64, 1_800_000_123), quota.quota.?.resets_at);
-    try std.testing.expectEqualStrings("Out.", bodies[0][quota.report.message.?.start..][0..quota.report.message.?.length]);
+    classify(&scratch, bodies[0], &fresh);
+    try std.testing.expectEqualStrings("usage_limit_reached", fresh.code.?.slice());
+    try std.testing.expectEqual(@as(?u64, 1_800_000_123), fresh.resets_at);
+    try std.testing.expectEqualStrings("Out.", bodies[0][fresh.report.message.?.start..][0..fresh.report.message.?.length]);
 }

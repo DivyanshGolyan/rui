@@ -98,15 +98,15 @@ pub fn headerName(codec: protocol.Codec, name: u8) []const u8 {
 /// each `classify`.
 pub const ClassifyScratch = PerCodec("ClassifyScratch");
 
-/// What the pinned codec reads in the HTTP error body `body`, naming report
-/// text by range of `body`.
-pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const u8) codec_abi.ErrorBody {
-    return switch (codec) {
+/// Writes into `out` what the pinned codec reads in the HTTP error body
+/// `body`, naming report text by range of `body`.
+pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
+    switch (codec) {
         inline else => |tag| {
             if (std.meta.activeTag(scratch.*) != tag) scratch.* = @unionInit(ClassifyScratch, @tagName(tag), undefined);
-            return module(tag).classify(&@field(scratch.*, @tagName(tag)), body);
+            module(tag).classify(&@field(scratch.*, @tagName(tag)), body, out);
         },
-    };
+    }
 }
 
 const TestItem = struct {
