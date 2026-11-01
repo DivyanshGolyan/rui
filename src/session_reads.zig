@@ -18,13 +18,30 @@ const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const unseen = @import("unseen.zig");
+const AnswerRenderer = @import("AnswerRenderer.zig");
+const Terminal = @import("SessionTerminal.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 /// Writes /status from one Current capture whose attention rows are in the file.
 pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
-pub const Inspection = enum { status, requests, help, command };
+pub const Inspection = union(enum) { status, requests, help, command, copy: Copy };
+
+/// What a /copy sends: the last answer or its last code block to the
+/// clipboard, or the last answer to a file.
+pub const Copy = enum { answer, code, file };
+
+/// What a /copy read found. The clipboard takes its range of the scratch
+/// file after the UI joins the read.
+pub const Copied = union(enum) { no_answer, no_code, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
+
+pub const copy_name_bytes = "rui--answer.md".len + protocol.session_id_bytes;
+
+/// The file /copy file writes, in the directory Rui runs in.
+pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui-{s}-answer.md", .{session}) catch unreachable;
+}
 
 /// One read. Inputs are frozen at launch; the worker writes only `result`,
 /// which the UI reads after join. No worker reads or writes the controller.
@@ -254,6 +271,7 @@ pub const Job = struct {
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
+        copied: Copied = .no_answer,
         // The sent Message a recall step found, its text staged in scratch.
         recalled: ?Input.Found = null,
         // The step passed over a sent Message the draft cannot hold.
@@ -1253,6 +1271,81 @@ const MessagePage = struct {
     }
 };
 
+/// /copy: the newest answer, bound to its length and digest before its last
+/// window arrives. A file takes it as it arrives; the clipboard's bytes wait
+/// in scratch, which only the UI may write to the terminal.
+pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const answer = (try lastAnswer(requests, job.store, job.session)) orelse return;
+    const Sink = struct {
+        io: std.Io,
+        file: std.Io.File,
+        offset: u64 = 0,
+        code: ?AnswerRenderer.LastCode,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
+            self.offset += bytes.len;
+            if (self.code) |*code| code.feed(bytes);
+        }
+    };
+    const copy = job.inspection_kind.copy;
+    if (copy == .file) {
+        var name: [copy_name_bytes]u8 = undefined;
+        const path = copyName(&name, job.session);
+        const directory = std.Io.Dir.cwd();
+        var random: [8]u8 = undefined;
+        try std.Io.randomSecure(task.io, &random);
+        var temporary_name: [copy_name_bytes + 22]u8 = undefined;
+        const temporary = std.fmt.bufPrint(&temporary_name, ".{s}.{s}.tmp", .{ path, std.fmt.bytesToHex(random, .lower) }) catch unreachable;
+        // Exclusive creation never follows a link planted at either name, and
+        // the rename replaces whatever sits at the export name, never its
+        // target.
+        const file = try directory.createFile(task.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        var published = false;
+        defer if (!published) directory.deleteFile(task.io, temporary) catch {};
+        {
+            defer file.close(task.io);
+            var sink: Sink = .{ .io = task.io, .file = file, .code = null };
+            if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+            if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+        }
+        try directory.rename(temporary, directory, path, task.io);
+        published = true;
+        job.result.copied = .saved;
+        return;
+    }
+    if (copy == .answer and answer.content.bytes > Terminal.clipboard_limit) {
+        job.result.copied = .too_large;
+        return;
+    }
+    try job.files.scratch.setLength(task.io, 0);
+    var sink: Sink = .{ .io = task.io, .file = job.files.scratch, .code = if (copy == .code) .{} else null };
+    if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+    if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+    const range: AnswerRenderer.LastCode.Range = if (sink.code) |*code|
+        code.finish() orelse {
+            job.result.copied = .no_code;
+            return;
+        }
+    else
+        .{ .start = 0, .length = sink.offset };
+    job.result.copied = if (range.length > Terminal.clipboard_limit) .too_large else .{ .clipboard = range };
+}
+
+/// The Conversation's newest assistant answer, or null before the first.
+fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?protocol_reply.ConversationPage.Item {
+    var cursor: protocol_reply.ConversationCursor = .{ .end = 0 };
+    while (true) {
+        const page = switch (try requests.conversationPage(store, session, cursor)) {
+            .page => |value| value,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.items[0..page.count]) |item| if (item.kind == .assistant) return item;
+        cursor = page.continuation() orelse return null;
+    }
+}
+
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try job.files.inspection.setLength(task.io, 0);
@@ -1270,7 +1363,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\n/copy the last answer · /copy code its last code block · /copy file saves it here\nIn tmux, /copy needs set-clipboard on\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);

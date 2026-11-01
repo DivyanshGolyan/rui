@@ -640,8 +640,114 @@ def forced_refresh_journey():
             raise errors[0]
 
 
+OPENAI_KEY = "sk-synthetic-openai-key"
+
+
+def openai_journey():
+    """One Host serves Codex and an OpenAI API key side by side. The key goes
+    out as a bearer with no ChatGPT account, the body matches a Codex
+    Session's, a 401 is final, and a Host never starts openai without a key."""
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai.")).resolve()
+    private = state / "private"
+    private.mkdir(mode=0o700)
+    credential_file = private / "codex.json"
+    key_file = private / "openai.key"
+    os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential_file)
+    os.environ["RUI_OPENAI_KEY_FILE"] = str(key_file)
+    credentials(credential_file)
+    answer = fixture.sse_answer("same", "same-r", "same-m", "same answer")[0]
+    endpoint = fixture.SuccessEndpoint([], {
+        "same turn": answer,
+        "rejected": fixture.ResponseSpec(b"invalid api key", {"X-Request-Id": "key-rejected"}, 401),
+    })
+    endpoint.RequestHandlerClass = ManagedHandler
+    endpoint.header_observations = []
+    endpoint.user_agents = []
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    store = state / "store"
+    host = None
+    complete = False
+    try:
+        # No key: the Host refuses to start rather than serve openai unready.
+        for serve in (["--test-openai-fixture-endpoint", url], ["--provider", "openai"]):
+            refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, *serve],
+                                     capture_output=True, text=True, timeout=15)
+            assert refused.returncode != 0 and "no OpenAI API key" in refused.stderr, refused
+            assert not refused.stdout.startswith("ready "), refused.stdout
+        # The real endpoint takes the key only from an owner-only file.
+        key_file.write_text(OPENAI_KEY + "\n")
+        key_file.chmod(0o644)
+        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--test-openai-fixture-endpoint", url],
+                                 capture_output=True, text=True, timeout=15)
+        assert refused.returncode != 0, refused
+        key_file.chmod(0o600)
+
+        host = start(store, url, "--test-openai-fixture-endpoint", url)
+        status = fixture.command("host", "status", "--store", store)
+        assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file"}, status
+        sessions = {}
+        for provider in ("codex", "openai"):
+            configured = fixture.command(
+                "session", "configure", "--store", store, "--record", state / f"configure-{provider}.json",
+                "--key", f"configure-{provider}", "--workspace", fixture.ROOT,
+                "--provider", provider, "--model", "gpt-6-sol", "--tools", "none",
+            )
+            assert configured["answer"]["status"] == "accepted", configured
+            sessions[provider] = configured["answer"]["session"]
+            fixture.message(state, store, f"same-{provider}", sessions[provider], "same turn")
+            fixture.wait_for(lambda: fixture.completed_observation(store, f"same-{provider}"), f"{provider} answer")
+            assert fixture.read_result(store, f"same-{provider}") == b"same answer"
+        assert len(endpoint.requests) == 2
+        codex_body, openai_body = (json.loads(body) for body in endpoint.requests)
+        # The only difference is each Session's own reference in its context.
+        codex_instructions = codex_body.pop("instructions").replace(sessions["codex"], "SESSION")
+        assert codex_instructions == openai_body.pop("instructions").replace(sessions["openai"], "SESSION")
+        assert codex_body == openai_body, (codex_body, openai_body)
+        (codex_path, codex_bearer, codex_account, codex_affinity, _), (path, bearer, account, affinity, originator) = endpoint.header_observations
+        assert codex_bearer == "Bearer " + ACCESS and codex_account == ACCOUNT
+        assert path == "/responses" and bearer == "Bearer " + OPENAI_KEY and account is None and originator == "rui"
+        assert re.fullmatch(r"[0-9a-f]{32}", affinity) and affinity != codex_affinity
+        assert endpoint.user_agents[1] == expected_user_agent()
+
+        # A rejected key is final: no refresh, no resend, the key untouched.
+        fixture.message(state, store, "rejected", sessions["openai"], "rejected")
+        failure = fixture.wait_for(
+            lambda: (value := fixture.observe(store, "rejected")).get("result", {}).get("code") and value,
+            "API key rejection",
+        )
+        assert failure["result"]["code"] == "provider_api_key_rejected", failure
+        # A resend would come before the Operation settles, so none came.
+        assert len(endpoint.requests) == 3, "a rejected API key was resent"
+        assert key_file.read_text() == OPENAI_KEY + "\n"
+        # The Host holds its Store exclusively; inspect rows after it stops.
+        fixture.stop_host(host)
+        host = None
+        assert not bash.rows(store, "SELECT 1 FROM content WHERE instr(payload, ?) > 0", (OPENAI_KEY.encode(),))
+        print("openai provider passed: Codex and OpenAI on one Host, bearer key with no account, same body, 401 final, no start without a key")
+        complete = True
+    finally:
+        incoming_error = sys.exc_info()[1]
+        errors = []
+        for dispose in (lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        del os.environ["RUI_OPENAI_KEY_FILE"]
+        if complete and incoming_error is None and not errors:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("OpenAI provider failure state", state)
+        if errors and incoming_error is None:
+            raise errors[0]
+
+
 if __name__ == "__main__":
     host_process.enter()
     run()
     turn_state_journey()
     forced_refresh_journey()
+    openai_journey()

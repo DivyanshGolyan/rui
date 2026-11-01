@@ -472,7 +472,7 @@ def main():
             noncanonical = json.dumps({
                 "version": "3", "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
-                "capabilities": {"bash": True, "providers": {"codex": "unserved"}},
+                "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
@@ -612,7 +612,7 @@ def main():
                 "version": "3", "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device"}},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
@@ -631,7 +631,7 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device"}},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
@@ -671,7 +671,7 @@ def main():
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
             assert selected["active_capacity"] == "7", selected
-            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved"}}, selected
+            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}}, selected
             assert selected["instance"] == match_second.group(1), selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
             old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

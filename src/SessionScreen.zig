@@ -20,14 +20,18 @@ const Self = @This();
 /// reads.
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
-/// What a frame encoded: its Action rows and the option its choice showed.
+/// What a reason's line under the input says, as its hint or a notice.
+pub const deny_words = "enter denies the command and sends this";
+
+/// What a frame encoded: its Action rows and the option Enter would decide.
 pub const Ticket = struct {
     frame: u64,
     scope: u64,
     /// The Action whose rows the frame showed; null when it showed none.
     action: ?u64,
-    /// The option the frame's choice showed highlighted; null when it showed
-    /// no choice.
+    /// The option the frame's choice showed highlighted, or Deny when it
+    /// showed the draft beside the Action as a reason and said Enter denies;
+    /// null otherwise.
     shown: ?ConsentPolicy.Choice,
     /// `inputs` when the frame was issued: any later input answered it.
     inputs: u64,
@@ -277,7 +281,7 @@ pub fn offered(self: *const Self) ?ConsentPolicy.Decision {
     return self.standing(self.offer);
 }
 
-/// The latest frame showed a choice, was delivered and is current, no input
+/// The latest frame offered a decision, was delivered and is current, no input
 /// followed it, and it is not yet offered: the frontend services input to
 /// see whether it may be.
 pub fn awaitsOffer(self: *const Self) bool {
@@ -311,7 +315,7 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
         self.invalidateLayout();
         return .{ .blocked = .layout };
     }
-    switch (ConsentPolicy.project(self.consent, self.shownAction(), command_blocked).approval) {
+    switch (self.liveApproval(command_blocked)) {
         .choice => {},
         .reading => return .{ .blocked = .reading },
         .held => return .{ .blocked = .command },
@@ -328,11 +332,34 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
             return .picked;
         },
         .enter => {
-            self.consent = null;
-            self.invalidateScope();
+            self.decide(shown);
             return .{ .decision = shown };
         },
     }
+}
+
+/// Enter in the draft beside an Action, with the offer `spendOffer` returned
+/// for this key: the denial the draft is sent with, when that offer is the
+/// latest frame, unchanged since, and it showed this draft as the reason.
+/// A probe: nothing changes until `decide`.
+pub fn reasonOffered(self: *const Self, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
+    const shown = self.standing(offer) orelse return null;
+    if (self.liveApproval(command_blocked) != .reason) return null;
+    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) return null;
+    const denial: ConsentPolicy.Decision = .{ .action = self.consent.?.action, .choice = .deny };
+    return if (std.meta.eql(shown, denial)) denial else null;
+}
+
+/// Consent ends with this decision, before fallible submission starts.
+pub fn decide(self: *Self, decision: ConsentPolicy.Decision) void {
+    std.debug.assert(self.consent.?.action == decision.action);
+    self.consent = null;
+    self.invalidateScope();
+}
+
+/// What the input row would show now, without selecting a frame.
+pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Approval {
+    return ConsentPolicy.project(self.consent, self.shownAction(), command_blocked).approval;
 }
 
 /// Starts browsing a copy of live text from absolute offset `front`, a
@@ -788,14 +815,19 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         }
     }
     const line_row = size.row - layout.line_height;
+    // Whether the line under the input says Enter denies: only then does a
+    // reason's frame offer the denial.
+    var says_deny = false;
     if (footer.notice.len != 0) {
         _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
+        says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
             approvalHint(self.selected.approval, self.actionVisible(), size.col, self.vx.caps.unicode)
         else if (footer.session) |line| line.shown.text(line.facts, size.col, self.vx.caps.unicode) else "";
         _ = window.child(.{ .y_off = line_row, .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
+        says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
     // Finish consuming every borrowed cell before output can pump input and
@@ -813,7 +845,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .frame = self.frames,
         .scope = self.scope,
         .action = if (!self.actionVisible()) null else if (self.consent) |pending| pending.action else null,
-        .shown = if (self.selected.approval == .choice) self.consent.?.highlight else null,
+        .shown = if (self.selected.approval == .reason and !says_deny) null else ConsentPolicy.offered(self.consent, self.selected.approval),
         .inputs = self.inputs,
         .first = layout.first,
         .next = layout.action_seen,
@@ -856,6 +888,7 @@ fn approvalHint(approval: ConsentPolicy.Approval, action_visible: bool, width: u
         .choice => &.{ "←→ choose · enter confirms", "←→ · enter" },
         .reading => &.{ "PgDn reads the rest · then choose", "PgDn · then choose" },
         .held => &.{ "the choice returns when it ends", "then the choice" },
+        .reason => &.{ deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
         .paused => if (action_visible) &.{ "Approval paused · Esc returns to the choice", "Esc · choice" } else &.{ "Approval paused · Esc returns to Action", "Esc · Action" },
         .preview => &.{ "Approval disabled · /help for exact shell commands", "Approval disabled" },
     };

@@ -65,7 +65,7 @@ pub const Command = enum {
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
-            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
+            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
 };
@@ -135,7 +135,7 @@ const destination = &[_]Option{ value("store", "PATH"), hex("store-hex", "store"
 const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
-const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
+const binding = &[_]Option{ value("provider", "codex|openai"), value("model", "MODEL") };
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
@@ -155,11 +155,13 @@ const endpoint_conflicts = &[_][2][]const u8{
     .{ "provider", "provider-ca-file" },
     .{ "provider", "test-codex-fixture-endpoint" },
     .{ "test-codex-fixture-endpoint", "provider-endpoint" },
+    .{ "test-openai-fixture-endpoint", "provider-endpoint" },
 };
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
     hiddenValue("test-codex-fixture-endpoint"),
+    hiddenValue("test-openai-fixture-endpoint"),
     hiddenValue("test-bash-scratch-limit-bytes"),
     hiddenValue("test-retention-entry-capacity"),
     hiddenFlag("test-retention-removal-failure"),

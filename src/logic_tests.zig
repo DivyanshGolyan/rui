@@ -28,6 +28,7 @@ const cores = .{
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
+    .{ "provider_name.zig", @import("provider_name.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
