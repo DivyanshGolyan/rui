@@ -77,7 +77,7 @@ If a command loses its reply or exits nonzero, Rui may still have accepted the w
 
 ## Agents calling Rui
 
-Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host. It gets the Host's `HOME` but none of the Host's other environment, such as credentials.
+Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host, then the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's). It gets the Host's `HOME` but none of the Host's other environment, such as credentials.
 
 Each model request tells the agent its own bare ID. Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority. To get an answer from another Session, an agent puts its own ID in the Message. The other Session replies with an ordinary `session send --to ID`.
 

@@ -130,6 +130,8 @@ RULES = (
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      "Credential mutation and synthetic managed transport"),
+    (("src/os/system_path.zig",), ("test-logic", "check"), ("test-logic", "check"),
+     "System PATH: the pure merge in test-logic, the path_helper oracle in native unit tests"),
     (("src/os/*",),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),
      ("check", "codex-credential-integration", "codex-h2-integration", "transport-h2-integration"),

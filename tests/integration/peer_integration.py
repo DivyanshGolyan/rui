@@ -50,6 +50,16 @@ A_LABEL = "Lead: arithmetic check"
 B_LABEL = "Worker: multiply"
 
 
+def system_path():
+    """The OS system PATH Bash follows the installation with: path_helper's
+    view of /etc/paths and /etc/paths.d where it exists, else the fixed list."""
+    helper = pathlib.Path("/usr/libexec/path_helper")
+    if not helper.exists():
+        return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    printed = subprocess.run([str(helper), "-s"], env={}, capture_output=True, text=True, check=True).stdout
+    return re.search(r'PATH="([^"]*)"', printed).group(1)
+
+
 def model_instructions(workspace, session):
     prefix, address, suffix = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
     return prefix + json.dumps(str(workspace), ensure_ascii=False)[1:-1] + address + session + suffix
@@ -369,7 +379,7 @@ def main(report_source):
         # Audit the controlled environment without recording the private Action
         # handle: this installation first on PATH, HOME, and the exact address.
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
-        assert environment["PATH"].split(":")[0] == str(installed.parent), environment
+        assert environment["PATH"] == f"{installed.parent}:{system_path()}", environment
         assert environment["HOME"] == str(home), environment
         assert environment["RUI_ADDRESS"] == session_a and environment["RUI_STORE"] == canonical_store, environment
         assert set(environment) <= {"PATH", "HOME", "RUI_ADDRESS", "RUI_STORE", "PWD", "OLDPWD", "SHLVL", "_"}, environment

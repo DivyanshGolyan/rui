@@ -59,6 +59,8 @@ test {
     _ = @import("TerminalEditor.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
+    // Only `merge` is a pure decision; its file also reads the OS files.
+    _ = @import("os/system_path.zig");
     inline for (cores) |core| _ = core[1];
 }
 
