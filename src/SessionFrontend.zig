@@ -1660,14 +1660,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
-        if (result.line) |*line| {
-            self.line = line.*;
-            self.shown.width = null;
-        }
-        if (result.hint) |*hint| {
-            self.hint = hint.*;
-            self.shown.width = null;
-        }
+        if (result.line) |*line| self.line = line.*;
+        if (result.hint) |*hint| self.hint = hint.*;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
