@@ -1518,22 +1518,22 @@ pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, dra
 }
 
 test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
-    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const message: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1, .sender = null };
+    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
+    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
     const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
     // A pending Session can wait long before it takes the Message, as after
     // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
-    try std.testing.expect(showsAtAdmission(30, message, 10, alone, false));
+    try std.testing.expect(showsAtAdmission(30, waiting, 10, alone, false));
     // Work under way holds it: it waits in the queued row.
-    try std.testing.expect(!showsAtAdmission(30, message, 10, alone, true));
+    try std.testing.expect(!showsAtAdmission(30, waiting, 10, alone, true));
     // An older Message waits, which the queued row shows: this one waits
     // with it, so the conversation shows both in order once taken.
-    try std.testing.expect(!showsAtAdmission(34, message, 10, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
+    try std.testing.expect(!showsAtAdmission(34, waiting, 10, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
     // Taken or excluded by the page's end, or shown already.
-    var taken = message;
+    var taken = waiting;
     taken.state = .applied;
     try std.testing.expect(!showsAtAdmission(30, taken, 10, .{}, false));
-    try std.testing.expect(!showsAtAdmission(30, message, 12, alone, false));
+    try std.testing.expect(!showsAtAdmission(30, waiting, 12, alone, false));
 }
 
 /// Writes a page and returns the newest Message a person or script sent
