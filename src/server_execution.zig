@@ -101,9 +101,11 @@ const ModelPreparingSlot = struct {
     binding: store_module.AttemptBinding,
 };
 
+/// A prepared request waiting for its credential. The request stays where
+/// it was built, in `Workspace.model_preparation`, which no other Attempt
+/// opens while this slot waits (`modelPreparationOpen`).
 const ModelAuthenticatingSlot = struct {
     owner: ModelPreparingSlot,
-    request: provider.PreparedRequest,
     /// The shared worker accepted this slot's lease job.
     requested: bool = false,
     cancelled: bool = false,
@@ -890,8 +892,13 @@ fn cancelSupersededTransfers(
 
 test "an execution slot is sized for a model Attempt, not for Bash" {
     // Bash keeps its large state in Host.bash_work, so no arm outgrows the
-    // provider arm every held model agent occupies.
-    try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
+    // model arms a held model agent occupies: the provider arm, or an
+    // Attempt waiting for its credential or its forced refresh. A request
+    // waiting for its credential stays in the preparation, so its arm is
+    // small; the provider arm keeps no request headers, so the refresh arm
+    // (its 256-byte request id) is the largest.
+    const model = @max(@sizeOf(ProviderSlot), @sizeOf(ModelAuthenticatingSlot), @sizeOf(ModelRefreshingSlot));
+    try std.testing.expect(@sizeOf(ExecutionSlot) <= model + @alignOf(ExecutionSlot));
 }
 
 test "zeroed pages are free slots and empty Turn and history memo entries" {
@@ -1401,7 +1408,7 @@ fn advanceModelPreparation(
     item_allowance: usize,
 ) bool {
     if (host.auth_worker) |worker| {
-        if (advanceCredentialWork(host, reactor.?, slots, worker)) return true;
+        if (advanceCredentialWork(host, reactor.?, slots, worker, &preparation.request)) return true;
         for (slots) |*slot| if (slot.* == .model_authenticating) return false;
     }
     const slot = for (slots) |*candidate| switch (candidate.*) {
@@ -1428,16 +1435,15 @@ fn advanceModelPreparation(
             preparation.cancel();
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
-        .prepared => |value| {
+        .prepared => |request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            var request = value;
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
                 .authenticate => {
-                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner, .request = request });
-                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
+                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
+                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
                 },
-                .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
+                .launch => launchPreparedRequest(host, reactor.?, slot, owner, request, null),
                 else => unreachable,
             }
         },
@@ -1447,9 +1453,10 @@ fn advanceModelPreparation(
 
 /// The one worker serves one job at a time: first the slot whose job it
 /// holds, then, once idle, the next waiting lease or refresh job.
-fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker) bool {
+/// `request` is the authenticating slot's prepared request.
+fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest) bool {
     for (slots) |*slot| switch (slot.*) {
-        .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot),
+        .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot, request),
         .model_refreshing => |*active| if (active.requested) return advanceRefresh(host, slot),
         else => {},
     };
@@ -1457,7 +1464,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                active.request.deinit(host.io, host.scratch_budget.?);
+                request.deinit(host.io, host.scratch_budget.?);
                 finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
@@ -1518,7 +1525,7 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
     return true;
 }
 
-fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
+fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot, request: *provider.PreparedRequest) bool {
     const worker = host.auth_worker.?;
     const result = worker.take();
     const active = &slot.model_authenticating;
@@ -1530,9 +1537,8 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
     if (decision == .wait) return false;
     defer if (result.? == .ready) worker.finish();
     const owner = active.owner;
-    var request = active.request;
     switch (decision) {
-        .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
+        .launch => launchPreparedRequest(host, reactor, slot, owner, request, result.?.ready),
         .abandon, .settle_authentication_failure => {
             request.deinit(host.io, host.scratch_budget.?);
             if (decision == .settle_authentication_failure)
@@ -1593,7 +1599,7 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, request.session_affinity, replay.value) catch |err| {
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
@@ -1607,7 +1613,7 @@ fn launchPreparedRequest(
         .credential_generation = if (credential) |value| value.record.generation else null,
     });
     const active = &slot.provider;
-    active.transfer.start(reactor, request.*, binding, .{
+    active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
         .turn_state = turn_state,
@@ -1949,8 +1955,8 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             workspace.model_preparation.cancel();
             finishCustodyNow(host, slot);
         },
-        .model_authenticating => |*active| {
-            active.request.deinit(host.io, host.scratch_budget.?);
+        .model_authenticating => {
+            workspace.model_preparation.request.deinit(host.io, host.scratch_budget.?);
             finishCustodyNow(host, slot);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
@@ -2190,21 +2196,21 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try tmp.dir.deleteFile(io, "request");
         host.scratch_used.store(4, .release);
         host.scratch_budget = .{ .used = &host.scratch_used, .limit = 4 };
+        var request: provider.PreparedRequest = .{
+            .file = input,
+            .length = 4,
+            .charged = 4,
+            .structured_output = false,
+            .headers = .{},
+        };
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
             .cancelled = true,
-            .request = .{
-                .file = input,
-                .length = 4,
-                .charged = 4,
-                .structured_output = false,
-                .session_affinity = @splat(0),
-            },
         } };
-        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, host.scratch_budget.?);
+        defer if (slot == .model_authenticating) request.deinit(io, host.scratch_budget.?);
         var reactor: provider.Reactor = undefined;
         worker.state = .requested;
-        try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .model_authenticating);
         try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
         try std.testing.expect(host.custody.reserve() == null);
@@ -2215,7 +2221,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             worker.failure = error.AuthenticationFailed;
             worker.state = .failed;
         }
-        try std.testing.expect(advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -2311,12 +2317,12 @@ test "HTTP error capture retires before execution custody" {
         });
         defer reactor.deinit();
         var retained: ?named_scratch.Owner = null;
-        try slot.provider.transfer.start(&reactor, .{
+        try slot.provider.transfer.start(&reactor, &.{
             .file = request_file,
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .headers = .{},
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
@@ -3455,7 +3461,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .headers = .{},
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };

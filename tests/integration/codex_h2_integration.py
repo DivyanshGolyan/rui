@@ -139,6 +139,15 @@ def run(*, observed=False, intake=100):
             request = json.loads(body)
             assert request["text"] == {"verbosity": "low"}, request
             assert request["parallel_tool_calls"] is False, request
+        # The codec's headers follow h2's and content-type, ahead of the
+        # credential path's fields.
+        for index, headers in enumerate(endpoint.request_headers):
+            regular = [name for name in headers if not name.startswith(b":")]
+            assert regular == [b"content-length", b"accept-encoding", b"content-type",
+                               b"accept", b"session-id", b"originator",
+                               b"authorization", b"chatgpt-account-id", b"user-agent",
+                               *([b"x-openai-fedramp"] if index == 2 else [])], regular
+            assert headers[b"accept"] == b"text/event-stream", headers
         session_ids = {headers[b"session-id"] for headers in endpoint.request_headers}
         assert len(session_ids) == 1 and re.fullmatch(rb"[0-9a-f]{32}", next(iter(session_ids)))
         for headers in endpoint.request_headers[:2]:

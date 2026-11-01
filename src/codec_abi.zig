@@ -62,7 +62,8 @@ pub const Carry = struct {
 /// enabled tool, text_format, request_end.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
-    /// which the codec writes by a content op so the Host escapes it.
+    /// which the codec writes by a content op so the Host escapes it. The
+    /// only item whose ops may include request headers.
     settings,
     /// Handle 0: Rui's instruction text, Workspace, Session and baseline.
     instructions,
@@ -141,6 +142,9 @@ pub const max_model_bytes = 256;
 pub const Settings = struct {
     /// Null when the binding has no effort; the codec then sends none.
     effort: ?Effort,
+    /// The Session's provider affinity: fixed for the Session's life and
+    /// distinct across Sessions and Stores.
+    session_affinity: [16]u8,
     model_length: u16,
     /// A literal that names the other fields leaves these bytes unwritten.
     model: [max_model_bytes]u8 = undefined,
@@ -180,13 +184,32 @@ pub const OpTag = enum(u8) {
     /// u8 length (at most max_carry_bytes), then the bytes: the codec's
     /// state after this history element.
     carry = 3,
+    /// u8 name length (at least 1), u16 little-endian value length, the
+    /// name, the value: one request header (settings only).
+    header = 4,
 };
 
 pub const Op = union(OpTag) {
     literal: []const u8,
     content: struct { handle: u8, escape: Escape },
     carry: Carry,
+    header: Header,
 };
+
+/// A request header a codec asks for. The Host sends it ahead of its own
+/// fields when the name is a lowercase token that no Host field uses and
+/// the value is header-safe (`headerValue`), up to `max_request_headers`
+/// headers of `max_request_header_bytes` names and values in all.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const max_request_headers = 8;
+/// Names and values together. The settings item's ops hold its headers and
+/// its body literals in `Ops.capacity` bytes, so a larger bound could never
+/// be reached; the prepared request stores this many bytes.
+pub const max_request_header_bytes = 192;
 
 pub const Status = enum(u8) {
     /// The item is encoded; its ops are ready.
@@ -225,6 +248,16 @@ pub const Ops = struct {
         @memcpy(head[2..], state);
     }
 
+    pub fn header(self: *Ops, name: []const u8, value: []const u8) error{OpsOverflow}!void {
+        std.debug.assert(name.len != 0 and name.len <= std.math.maxInt(u8));
+        const head = try self.reserve(4 + name.len + value.len);
+        head[0] = @backingInt(OpTag.header);
+        head[1] = @intCast(name.len);
+        std.mem.writeInt(u16, head[2..4], @intCast(value.len), .little);
+        @memcpy(head[4..][0..name.len], name);
+        @memcpy(head[4 + name.len ..], value);
+    }
+
     fn reserve(self: *Ops, count: usize) error{OpsOverflow}![]u8 {
         if (capacity - self.length < count) return error.OpsOverflow;
         defer self.length += @intCast(count);
@@ -247,26 +280,43 @@ pub const Reader = struct {
         const rest = self.bytes[self.offset..];
         if (rest.len == 0) return null;
         const tag = std.enums.fromInt(OpTag, rest[0]) orelse return error.CodecBadOp;
+        // Lengths are widened to usize before any sum, so no op can wrap
+        // the arithmetic that bounds it.
         switch (tag) {
             .literal => {
                 if (rest.len < 3) return error.CodecBadOp;
-                const count = std.mem.readInt(u16, rest[1..3], .little);
+                const count: usize = std.mem.readInt(u16, rest[1..3], .little);
                 if (count == 0 or rest.len - 3 < count) return error.CodecBadOp;
-                self.offset += 3 + count;
+                self.advance(3 + count);
                 return .{ .literal = rest[3..][0..count] };
             },
             .content => {
                 if (rest.len < 3) return error.CodecBadOp;
                 const escape = std.enums.fromInt(Escape, rest[2]) orelse return error.CodecBadOp;
-                self.offset += 3;
+                self.advance(3);
                 return .{ .content = .{ .handle = rest[1], .escape = escape } };
             },
             .carry => {
-                if (rest.len < 2 or rest[1] > max_carry_bytes or rest.len - 2 < rest[1]) return error.CodecBadOp;
-                self.offset += 2 + rest[1];
-                return .{ .carry = .of(rest[2..][0..rest[1]]) };
+                if (rest.len < 2) return error.CodecBadOp;
+                const length: usize = rest[1];
+                if (length > max_carry_bytes or rest.len - 2 < length) return error.CodecBadOp;
+                self.advance(2 + length);
+                return .{ .carry = .of(rest[2..][0..length]) };
+            },
+            .header => {
+                if (rest.len < 4 or rest[1] == 0) return error.CodecBadOp;
+                const name_length: usize = rest[1];
+                const value_length: usize = std.mem.readInt(u16, rest[2..4], .little);
+                if (rest.len - 4 < name_length + value_length) return error.CodecBadOp;
+                self.advance(4 + name_length + value_length);
+                return .{ .header = .{ .name = rest[4..][0..name_length], .value = rest[4 + name_length ..][0..value_length] } };
             },
         }
+    }
+
+    /// `count` is at most the bytes left, so the offset stays within them.
+    fn advance(self: *Reader, count: usize) void {
+        self.offset = @intCast(self.offset + count);
     }
 };
 
@@ -292,6 +342,22 @@ pub const Manifest = struct {
     }
 };
 
+/// A name that HTTP/2 can carry: a nonempty RFC 9110 token, lowercase.
+pub fn lowercaseToken(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |byte| if (!lowercaseTokenByte(byte)) return false;
+    return true;
+}
+
+/// Printable ASCII (0x20-0x7e) that neither starts nor ends with a space.
+/// Stricter than h2, which refuses only NUL, CR and LF: RFC 9113 8.2.1 also
+/// forbids leading and trailing whitespace, and RFC 9110 5.5 excludes other
+/// controls and keeps values to US-ASCII.
+pub fn headerValue(value: []const u8) bool {
+    for (value) |byte| if (byte < 0x20 or byte > 0x7e) return false;
+    return value.len == 0 or (value[0] != ' ' and value[value.len - 1] != ' ');
+}
+
 fn lowercaseTokenByte(byte: u8) bool {
     return switch (byte) {
         'a'...'z', '0'...'9', '-', '_', '.', '!', '#', '$', '%', '&', '\'', '*', '+', '^', '`', '|', '~' => true,
@@ -311,4 +377,19 @@ test "a manifest names its observed headers as lowercase tokens" {
     }
     const unnamed: Manifest = .{ .observe = .{} };
     try std.testing.expect(unnamed.valid());
+}
+
+test "a header value is printable ASCII without edge spaces" {
+    for (0..256) |value| {
+        const byte: u8 = @intCast(value);
+        const inner = [_]u8{ 'a', byte, 'b' };
+        try std.testing.expectEqual(byte >= 0x20 and byte <= 0x7e, headerValue(&inner));
+    }
+    try std.testing.expect(headerValue(""));
+    try std.testing.expect(headerValue("text/event-stream"));
+    for ([_][]const u8{ " rui", "rui ", " ", "a\tb", "a\r\nb", "a\x00", "\xc3\xa9" }) |value|
+        try std.testing.expect(!headerValue(value));
+    try std.testing.expect(lowercaseToken("session-id"));
+    for ([_][]const u8{ "", "Accept", ":path", "a b", "a\x00" }) |name|
+        try std.testing.expect(!lowercaseToken(name));
 }
