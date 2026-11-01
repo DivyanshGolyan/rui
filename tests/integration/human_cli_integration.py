@@ -5673,7 +5673,7 @@ def main(selected="all"):
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         missing_setup = defaults(preferences_home)
         assert (missing_setup["store"], missing_setup["store_source"]) == (str(store.resolve()), "saved"), missing_setup
-        assert missing_setup["local_credential"] == "missing" and missing_setup["next_session"] == {
+        assert missing_setup["local_credentials"]["codex"] == "missing" and missing_setup["next_session"] == {
             "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
         assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
@@ -5711,7 +5711,7 @@ def main(selected="all"):
         assert not credential.exists() and not lock.exists()
         codex_fixture.credentials(credential)
         configured_setup = defaults(preferences_home)
-        assert configured_setup["local_credential"] == "configured", configured_setup
+        assert configured_setup["local_credentials"]["codex"] == "configured", configured_setup
         assert configured_setup["next_session"]["local_credential"] == "configured", configured_setup
         assert not lock.exists(), "status must not create a credential lock"
         fresh_provider_home = state / "fresh-provider-home"
@@ -5726,14 +5726,14 @@ def main(selected="all"):
             blocked = subprocess.run([str(fixture.RUI), "defaults", "inspect"],
                 env={**os.environ, "HOME": str(preferences_home)},
                 capture_output=True, text=True, timeout=2)
-            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credential"] == "credential_error", blocked
+            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credentials"]["codex"] == "credential_error", blocked
         finally:
             dispose_all(credential.unlink)
         codex_fixture.credentials(credential, state="refresh_pending")
-        assert defaults(preferences_home)["local_credential"] == "refresh_required"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "refresh_required"
         assert "state=refresh_pending" in credential.read_text(), "status must not refresh"
         credential.chmod(0o644)
-        assert defaults(preferences_home)["local_credential"] == "credential_error"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "credential_error"
         credential.unlink()
         defaults(preferences_home, "--provider", "other", success=False)
         defaults(preferences_home, "--model", "gpt-5.5")
@@ -5764,7 +5764,7 @@ def main(selected="all"):
         codex_fixture.credentials(credential)
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
-        assert stale["local_credential"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
+        assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
@@ -5886,8 +5886,8 @@ def main(selected="all"):
                 ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
                 ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
                 ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
-                ("d\x1b[114;999u", "Rui: Choose c or d. No login or preference change.", None),
-                ("d\x1b[27;2;13;1~", "Rui: Choose c or d. No login or preference change.", None)):
+                ("d\x1b[114;999u", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("d\x1b[27;2;13;1~", "Rui: Choose c, o or d. No login or preference change.", None)):
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -5968,7 +5968,7 @@ def main(selected="all"):
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
-            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credential"] == "renewal_due"
+            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
             welcome = overview_frame(master, overview_title, keys=b"d\n")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
