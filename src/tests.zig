@@ -1,4 +1,5 @@
 test {
+    _ = @import("api_key.zig");
     _ = @import("attempt.zig");
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");
@@ -29,8 +30,8 @@ test {
     _ = @import("failed_responses.zig");
     _ = @import("provider.zig");
     _ = @import("provider_selection.zig");
+    _ = @import("providers.zig");
     _ = @import("preferences.zig");
-    _ = @import("provider_output.zig");
     _ = @import("output_decode.zig");
     _ = @import("output_format.zig");
     _ = @import("request_encoding.zig");

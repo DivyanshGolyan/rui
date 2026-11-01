@@ -29,7 +29,7 @@ Rui then shows each proposed command above an Allow once / Deny choice, with All
 
 ## Input
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`. If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
+You can edit and paste multiline text at the prompt. On an empty prompt, Ctrl-P brings back the last message you sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past your newest message the prompt is empty again. Messages from other Sessions never come back this way. There is no completion. For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`. If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
 
 ## Screen and scrolling
 

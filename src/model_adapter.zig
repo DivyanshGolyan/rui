@@ -13,7 +13,7 @@ const h2 = @import("h2");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
-pub const Output = @import("provider_output.zig");
+const api_key = @import("api_key.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -32,93 +32,15 @@ test {
 // the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 
-/// Interpretation borrows sealed bytes and the caller's metadata/data workspaces.
-/// It grants no settlement authority and neither closes nor transfers either
-/// resource. Rejections contain only local codes and structural coordinates.
-pub const OutputRejection = struct {
-    reason: anyerror,
-    code: []const u8,
-    location: Output.Rejection,
-    kind: execution.FailureKind = .permanent,
-
-    pub fn format(self: OutputRejection, buffer: *[512]u8) []const u8 {
-        return self.location.format(self.reason, buffer);
-    }
-};
-
-pub const OutputInterpretation = union(enum) {
-    accepted: struct {
-        output: Output.Validated,
-        model_evidence: protocol.Bounded(775),
-    },
-    rejected: OutputRejection,
-};
-
-/// Borrowed observations already bounded and UTF-8 validated by transport.
-pub const ModelObservations = struct {
-    openai: []const u8 = "",
-    alternate: []const u8 = "",
-};
-
 /// Schema support is checked before acquiring validation metadata, preserving
 /// the original failure precedence when metadata acquisition would also fail.
-pub fn outputSchemaRejection(structured: bool, source_length: u64) ?OutputRejection {
+pub fn outputSchemaRejection(structured: bool, source_length: u64) ?output_decode.Rejected {
     if (!structured) return null;
     return .{
         .reason = error.UnsupportedOutputSchema,
         .code = "unsupported_output_schema",
         .location = .{ .stage = .response, .byte_offset = source_length },
     };
-}
-
-/// Validates the sealed response and fills `out` with its acceptance or
-/// rejection. Never inlined: the read window and parse state live only while
-/// validation runs, not through the settlement that follows it.
-pub noinline fn interpretOutput(
-    io: std.Io,
-    source: std.Io.File,
-    source_length: u64,
-    metadata: *output_format.OutputMetadataWriter,
-    event_data: *Output.EventData,
-    operation: output_format.ModelOperationKind,
-    models: ModelObservations,
-    item_check: *Output.OutputItemCheck,
-    faults: Output.Faults,
-    /// What a provider error event said; the caller saves its report.
-    provider_failure: *output_decode.ProviderFailure,
-    out: *OutputInterpretation,
-) void {
-    var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, provider_failure, item_check, faults) catch |err| {
-        out.* = .{
-            .rejected = .{
-                .reason = err,
-                // A refusal saves the code it names, whatever carried it.
-                .code = if (provider_failure.refusal) |refusal| refusal.failureCode() else Output.failureCode(err),
-                .location = rejection,
-                .kind = switch (err) {
-                    error.ContextOverflow => .context_overflow,
-                    error.TemporaryProviderFailure, error.ProviderConnectionClosed => .temporary,
-                    else => .permanent,
-                },
-            },
-        };
-        return;
-    };
-    out.* = .{ .accepted = .{ .output = validated, .model_evidence = .{} } };
-    // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
-    // each source independently, including absence and disagreement. Never
-    // substitute the requested model for reported evidence.
-    const certificate = &out.accepted.model_evidence;
-    certificate.bytes[0] = 1;
-    certificate.len = 1;
-    for ([_][]const u8{ validated.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
-        std.debug.assert(value.len <= protocol.max_model_bytes);
-        std.mem.writeInt(u16, certificate.bytes[certificate.len..][0..2], @intCast(value.len), .little);
-        certificate.len += 2;
-        @memcpy(certificate.bytes[certificate.len..][0..value.len], value);
-        certificate.len += value.len;
-    }
 }
 
 /// Classifies an HTTP error body in `decode` through `codec`, the one the
@@ -139,7 +61,7 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
-        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, output_decode.testingProviderFailure());
         const decision = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
@@ -179,14 +101,14 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         const file = try tmp.dir.createFile(std.testing.io, "quota-authority", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, case.bytes);
-        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 429, Output.testingProviderFailure());
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 429, output_decode.testingProviderFailure());
         const failure = execution.transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
             .http_status = 429,
         } }, response).fail;
         try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
         if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
-        try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, Output.testingProviderFailure()) == .ordinary);
+        try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, output_decode.testingProviderFailure()) == .ordinary);
     }
 }
 
@@ -195,7 +117,7 @@ test "provider interpretation preserves independently reported model evidence" {
     const prefix = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
     const model_255 = @as([254]u8, @splat('m')) ++ "z";
     const model_256 = @as([255]u8, @splat('m')) ++ "z";
-    const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool, certificate: []const u8 = "" }{
+    const cases = [_]struct { body: []const u8, models: output_decode.ModelObservations, accepted: bool, certificate: []const u8 = "" }{
         .{ .body = "", .models = .{}, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x00\x00" },
         .{ .body = ",\"model\":null", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x07\x00model-a" },
@@ -229,11 +151,11 @@ test "provider interpretation preserves independently reported model evidence" {
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
         var data_used: std.atomic.Value(u64) = .init(0);
-        var event_data: Output.EventData = undefined;
+        var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
         defer event_data.deinit();
-        var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, output_decode.testingProviderFailure(), &interpreted);
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -273,9 +195,9 @@ test "provider interpretation closes failure variants without granting settlemen
     const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, overflow);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 400, Output.testingProviderFailure()) == .context_overflow);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 200, Output.testingProviderFailure()) == .ordinary);
-    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len + 1, 503, Output.testingProviderFailure()) == .unreadable);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 400, output_decode.testingProviderFailure()) == .context_overflow);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len, 200, output_decode.testingProviderFailure()) == .ordinary);
+    try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, overflow.len + 1, 503, output_decode.testingProviderFailure()) == .unreadable);
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
@@ -294,12 +216,13 @@ test "provider interpretation closes failure variants without granting settlemen
         var retained: ?named_scratch.Owner = null;
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
         defer metadata.deinit();
+        metadata.fail_writes = case.fault;
         var data_used: std.atomic.Value(u64) = .init(0);
-        var event_data: Output.EventData = undefined;
+        var event_data: output_decode.EventData = undefined;
         try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
         defer event_data.deinit();
-        var interpreted: OutputInterpretation = undefined;
-        interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{ .metadata = case.fault }, Output.testingProviderFailure(), &interpreted);
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -318,11 +241,11 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     var retained: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer metadata.deinit();
-    var event_data: Output.EventData = undefined;
+    var event_data: output_decode.EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer event_data.deinit();
-    var result: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &result);
+    var result: output_decode.Interpretation = undefined;
+    output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &result);
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -415,6 +338,14 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
         return error.InvalidCodexFixtureEndpoint;
 }
 
+/// An API key goes only to its provider's own endpoint, or for a fixture to
+/// a loopback one.
+pub fn validateKeyEndpoint(endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
+    if (fixture) {
+        if (!fixtureEndpoint(endpoint, ca_file)) return error.InvalidKeyFixtureEndpoint;
+    } else if (!std.mem.eql(u8, endpoint, own_endpoint)) return error.KeyEndpointMismatch;
+}
+
 /// The fields the credential path writes after the codec's headers:
 /// the credential, user-agent, FedRAMP and the Turn's turn state, each named
 /// in `provider.host_request_fields` so no codec header can name it.
@@ -462,6 +393,21 @@ pub const Headers = struct {
             self.entries[self.length] = .{ .name = "x-codex-turn-state", .value = turn_state };
             self.length += 1;
         }
+    }
+
+    /// An API key's fields: the key and user-agent. The key goes only to
+    /// `own_endpoint`, its provider's own, or for a fixture to a loopback one.
+    pub fn initKey(self: *Headers, endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider.Credentials) !void {
+        try validateKeyEndpoint(endpoint, own_endpoint, ca_file, fixture);
+        if (!api_key.valid(key)) return error.InvalidCredentialHeader;
+        const shared = try shared_credentials.share(key, "");
+        self.credentials = shared_credentials;
+        self.credential = shared;
+        self.entries[0..2].* = .{
+            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
+            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
+        };
+        self.length = 2;
     }
 
     pub fn fields(self: *const Headers) []const h2.Field {
@@ -700,6 +646,34 @@ test "Codex turn state owner changes invalidate paused Turns and stale completio
     }
 }
 
+test "an API key goes only to its own endpoint or a loopback fixture, with no account" {
+    var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
+    const own = "https://api.openai.com/v1/responses";
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try headers.initKey(own, own, null, "sk-test", false, &credentials);
+        const entries = headers.fields();
+        try std.testing.expectEqual(@as(usize, 2), entries.len);
+        try std.testing.expectEqualStrings("authorization", entries[0].name);
+        try std.testing.expectEqualStrings("Bearer sk-test", entries[0].value);
+        try std.testing.expect(entries[0].sensitive);
+        try std.testing.expectEqualStrings("user-agent", entries[1].name);
+        for (entries) |entry| try std.testing.expect(provider.hostField(entry.name));
+    }
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try headers.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", true, &credentials);
+    }
+    var refused: Headers = .{};
+    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey(managed_endpoint, own, null, "sk-test", false, &credentials));
+    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", false, &credentials));
+    try std.testing.expectError(error.InvalidKeyFixtureEndpoint, refused.initKey(own, own, null, "sk-test", true, &credentials));
+    try std.testing.expectError(error.InvalidCredentialHeader, refused.initKey(own, own, null, "sk test", false, &credentials));
+    try std.testing.expectEqual(@as(?*provider.SharedCredential, null), credentials.head);
+}
+
 test "Codex headers carry turn state only when the Turn has one" {
     var credential: Credential = undefined;
     var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
@@ -770,10 +744,6 @@ test "the Responses headers are lowercase tokens, header-safe, within bounds and
         try std.testing.expect(value_bytes <= codec_abi.max_request_header_bytes);
     };
 }
-
-/// Where a prepared request is sent. The managed Codex route accepts no
-/// structured output, so preparing a Session with an output schema for it fails.
-pub const Route = enum { endpoint, managed };
 
 pub const PreparationFaults = struct {
     first_step: bool = false,
@@ -1007,7 +977,10 @@ pub const Preparation = struct {
     /// What one preparation starts from, reset by `init` in one assignment.
     /// The storage above stays in place and unwritten until its stage.
     const State = struct {
-        route: Route,
+        /// How the Host serves each provider. The ChatGPT route accepts no
+        /// structured output, so preparing a Session with an output schema
+        /// for it fails.
+        routes: protocol.Routes,
         faults: PreparationFaults,
         /// The Host's history memos, borrowed for the preparation's life.
         /// Null rebuilds every request in full and keeps nothing.
@@ -1138,14 +1111,14 @@ pub const Preparation = struct {
         io: std.Io,
         scratch_path: []const u8,
         budget: ScratchBudget,
-        route: Route,
+        routes: protocol.Routes,
         memos: ?*history_memo.Table,
         faults: PreparationFaults,
         retained: *?named_scratch.Owner,
     ) !void {
         retained.* = null;
         errdefer self.view.close();
-        self.state = .{ .route = route, .faults = faults, .memos = memos };
+        self.state = .{ .routes = routes, .faults = faults, .memos = memos };
         if (faults.first_step) return error.InjectedFirstPreparationFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -1236,7 +1209,7 @@ pub const Preparation = struct {
         switch (self.state.stage) {
             .settings => {
                 try self.view.settings(&self.settings);
-                if (self.state.route == .managed and self.settings.output_schema != null)
+                if (protocol.routeOf(self.state.routes, self.settings.provider) == .chatgpt_device and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
                 const codec = self.settings.provider.codec();
                 self.carry = codecs.initialCarry(codec);
@@ -1754,6 +1727,7 @@ pub const Preparation = struct {
         self.request.length = self.writer.offset;
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
+        self.request.provider = self.settings.provider;
         self.request.codec = self.settings.provider.codec();
         return .{ .prepared = &self.request };
     }
@@ -1901,7 +1875,7 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
-    const configured = storage.configure(&configuration, true, .{});
+    const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
 
@@ -1919,7 +1893,7 @@ test "real preparation consumes the configured allowance across multiple advance
         .digest = protocol.contentDigest(text),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -1931,7 +1905,7 @@ test "real preparation consumes the configured allowance across multiple advance
         std.testing.io,
         root,
         .{ .used = &used, .limit = 4096 },
-        .endpoint,
+        protocol.routesAll(.endpoint),
         null,
         .{},
         &retained,
@@ -2038,7 +2012,7 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
-        const configured = self.storage.configure(&command, true, .{});
+        const configured = self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
         return configured.accepted.session;
@@ -2068,7 +2042,7 @@ const PreparationTestSetup = struct {
             .digest = protocol.contentDigest(text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(self.storage.submitMessageWithModel(&command, true, .{}) == .accepted);
+        try std.testing.expect(self.storage.submitMessageWithModel(&command, .{}) == .accepted);
     }
 };
 
@@ -2084,7 +2058,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     configuration.configuration.tools = .{ .state = .value, .count = 1, .values = .{.bash} };
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(setup.storage.configure(&configuration, true, .{}) == .accepted);
+    try std.testing.expect(setup.storage.configure(&configuration, .{}) == .accepted);
     try setup.submit("peer-seed", "peer-seed", peer.slice(), "send a report");
     const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleComposedForTesting(&setup, model, "peer-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer-reasoning\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
@@ -2098,7 +2072,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(try admitted.permit.consume(), &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, 7, 3, 1 << 16);
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
@@ -2177,7 +2151,7 @@ test "a prepared request carries the Responses codec's headers with its Session'
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     const request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
     defer request.deinit(std.testing.io, preparation.writer.budget);
@@ -2368,7 +2342,7 @@ fn settleComposedForTesting(
     defer metadata.deinit();
     const operation: output_format.ModelOperationKind = if (item_kind == .compaction) .compaction else .assistant_response;
     for (ranges[0 .. 1 + calls.len], 0..) |range, ordinal| {
-        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
+        const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, operation);
         if (ordinal == 0 and record.kind != item_kind) return error.TestUnexpectedItemKind;
     }
     try metadata.sealForRead();
@@ -2415,7 +2389,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
             .digest = protocol.contentDigest(schema_json),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, true, .{});
+        const reply = setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2480,7 +2454,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
             try ingress.feed(bytes);
             const request = try ingress.finish();
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-            const reply = storage.submitMessageWithModel(&request.message, true, .{});
+            const reply = storage.submitMessageWithModel(&request.message, .{});
             try std.testing.expect(reply == .accepted);
             try std.testing.expect(!reply.accepted.replayed);
             admitted = true;
@@ -2538,7 +2512,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     var retained_provider: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained_provider);
+    try preparation.init(io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_provider);
     defer preparation.cancel();
     if (Overlap.failure) |err| return err;
     if (!provider_first) try Overlap.admit(body[split..]);
@@ -2587,7 +2561,7 @@ test "request preparation minimal golden is exact across schedules" {
             update.session = golden_session;
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
-            try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
+            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
         }
         var file_name: [32]u8 = undefined;
         const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
@@ -2600,7 +2574,7 @@ test "request preparation minimal golden is exact across schedules" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         try std.testing.expect(retained == null);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
         defer std.testing.allocator.free(result.bytes);
@@ -2658,7 +2632,7 @@ test "request preparation retains the allocated ID across reopen and replacement
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         const result = try drainPreparation(&preparation, 7, 3, 16384);
         defer std.testing.allocator.free(result.bytes);
@@ -2710,7 +2684,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup.storage.configure(&command, true, .{});
+        const reply = setup.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2722,7 +2696,7 @@ test "request preparation escapes instructions and user content" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const first = try drainPreparation(&preparation, 2, 2, 4096);
     defer std.testing.allocator.free(first.bytes);
     try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
@@ -2765,7 +2739,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        const reply = setup_two.storage.configure(&command, true, .{});
+        const reply = setup_two.storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         break :configured reply.accepted.session;
     };
@@ -2776,7 +2750,7 @@ test "request preparation escapes instructions and user content" {
     var retained_two: ?named_scratch.Owner = null;
     var preparation_two: Preparation = undefined;
     try setup_two.storage.openHistoricalView(binding_two, &preparation_two.view);
-    try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained_two);
+    try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_two);
     const second = try drainPreparation(&preparation_two, 1, 1, 8192);
     defer std.testing.allocator.free(second.bytes);
     // Only each Operation's own address differs between the two Stores.
@@ -2797,7 +2771,7 @@ test "request preparation frozen selection excludes later messages" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     // Advance partially, then submit a later message while the admitted
     // historical view stays frozen.
     var partial: usize = 0;
@@ -2838,7 +2812,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
         }
-        const configured = setup.storage.configure(&command, true, .{});
+        const configured = setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
@@ -2854,13 +2828,13 @@ test "request preparation emits catalog or explicit effort through sealed custod
                 update.session = session;
                 update.configuration.reasoning_effort.state = .value;
                 try update.configuration.reasoning_effort.value.set("low");
-                try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
+                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
             }
             var used: std.atomic.Value(u64) = .init(0);
             var retained: ?named_scratch.Owner = null;
             var preparation: Preparation = undefined;
             try setup.storage.openHistoricalView(binding, &preparation.view);
-            try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+            try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
             const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
@@ -2907,7 +2881,7 @@ test "request preparation freezes settings at admission" {
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 1;
         update.configuration.tools.values[0] = .bash;
-        try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", session.slice(), "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2921,13 +2895,13 @@ test "request preparation freezes settings at admission" {
         update.session = session;
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 0;
-        try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
     }
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
@@ -2954,7 +2928,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     // Guard the active preparation separately from any sealed request: a
     // sealed preparation is inactive, so this guard never cancels a
     // transferred owner.
@@ -2971,7 +2945,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         try setup.storage.openHistoricalView(binding, &probe.view);
-        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
         const probe_result = try drainPreparation(&probe, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
@@ -3032,14 +3006,14 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
             try setup.storage.openHistoricalView(binding, &probe.view);
-            try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+            try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
             defer if (probe.state.active) probe.cancel();
             const probe_result = try drainPreparation(&probe, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
@@ -3063,7 +3037,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .first_step = true }, &retained));
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .first_step = true }, &retained));
         try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
@@ -3074,7 +3048,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, faults, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, faults, &retained);
         var seen_failure: ?anyerror = null;
         var steps: usize = 0;
         while (steps < 4096) : (steps += 1) {
@@ -3107,7 +3081,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var reclaimed = false;
@@ -3147,7 +3121,7 @@ test "request preparation completed request is fenced by later stop before hando
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     // Guard the active preparation before any fallible observation: an
     // error before the request reaches the caller must still cancel it.
     // After sealing the preparation is inactive and this guard is inert.
@@ -3211,7 +3185,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var probe_retained: ?named_scratch.Owner = null;
         var probe: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &probe.view);
-        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &probe_retained);
+        try probe.init(std.testing.io, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &probe_retained);
         defer if (probe.state.active) probe.cancel();
         var count: usize = 0;
         while (count < 4096) {
@@ -3244,7 +3218,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         // Validation may precede output; establish the charged checkpoint
         // independently of the first advance's incidental phase count.
@@ -3268,7 +3242,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], seal_steps - 1));
         try std.testing.expect(!preparation.state.active);
@@ -3297,7 +3271,7 @@ test "request preparation fences a saved provider bag whose bytes changed" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
             request.deinit(std.testing.io, preparation.writer.budget);
@@ -3348,7 +3322,7 @@ test "request preparation replays a large private reasoning item within each adv
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         var turns: usize = 0;
         while (true) {
@@ -3390,7 +3364,7 @@ test "request preparation composes replay tool results and schema" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
         const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
@@ -3414,14 +3388,14 @@ test "request preparation authenticates the historical requested model binding" 
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     revision.session = session;
-    try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
+    try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     {
         var prep: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &prep.view);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const request = try drainLivePreparation(&prep, 1, 1, 32768);
         defer request.deinit(std.testing.io, prep.writer.budget);
@@ -3429,7 +3403,7 @@ test "request preparation authenticates the historical requested model binding" 
     try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
     var prep: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &prep.view);
-    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
     if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
         prepared.deinit(std.testing.io, prep.writer.budget);
@@ -3464,7 +3438,7 @@ fn settleItemsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     defer metadata.deinit();
     var calls: u64 = 0;
     for (ranges[0..items.len], 0..) |range, ordinal| {
-        const record = try Output.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
+        const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
         if (record.kind == .function_call) calls += 1;
     }
     try metadata.sealForRead();
@@ -3590,7 +3564,7 @@ test "request preparation replays reasoning continuation without its private rea
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
@@ -3619,7 +3593,7 @@ test "request preparation cancellation yields inside history discovery" {
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var pending_turns: usize = 0;
     for (0..4096) |_| {
@@ -3660,7 +3634,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
         var retained: ?named_scratch.Owner = null;
         var prep: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &prep.view);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         const request = try drainPreparation(&prep, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
@@ -3685,11 +3659,11 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
-    var event_data: Output.EventData = undefined;
+    var event_data: output_decode.EventData = undefined;
     try event_data.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer event_data.deinit();
-    var interpreted: OutputInterpretation = undefined;
-    interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, Output.testingItemCheck(), .{}, Output.testingProviderFailure(), &interpreted);
+    var interpreted: output_decode.Interpretation = undefined;
+    output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, output_decode.testingProviderFailure(), &interpreted);
     const accepted = switch (interpreted) {
         .accepted => |*value| value,
         .rejected => return error.UnexpectedOutputRejection,
@@ -3715,7 +3689,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained: ?named_scratch.Owner = null;
     var prep: Preparation = undefined;
     try setup.storage.openHistoricalView(next_binding, &prep.view);
-    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+    try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
     defer if (prep.state.active) prep.cancel();
     const request = try drainPreparation(&prep, 1, 1, 32768);
     defer std.testing.allocator.free(request.bytes);
@@ -3756,20 +3730,20 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var revision: protocol.ConfigureCommand = .{};
         try revision.key.set("binding-revision-two");
         revision.session = session;
-        try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session.slice(), "later");
         try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", &.{});
         try revision.key.set("binding-revision-three");
-        try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         {
             var prep: Preparation = undefined;
             try setup.storage.openHistoricalView(binding, &prep.view);
-            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (prep.state.active) prep.cancel();
             const request = try drainLivePreparation(&prep, 1, 1, 32768);
             defer request.deinit(std.testing.io, prep.writer.budget);
@@ -3777,7 +3751,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
         var prep: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &prep.view);
-        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (prep.state.active) prep.cancel();
         if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
             prepared.deinit(std.testing.io, prep.writer.budget);
@@ -3813,7 +3787,7 @@ test "request preparation cancels inside schema and replay emissions" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, target, 16384);
         // Direct owner prerequisite for each emission family: the intended
@@ -3837,7 +3811,7 @@ fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, faults, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, faults, &retained);
     defer if (preparation.state.active) preparation.cancel();
     // A rewound copy shrinks the request, so this drain does not require
     // monotonic growth as drainPreparation does.
@@ -3916,7 +3890,7 @@ fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounde
     command.configuration.tools.values[0] = .bash;
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    const reply = setup.storage.configure(&command, true, .{});
+    const reply = setup.storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
 }
@@ -4141,7 +4115,7 @@ test "a codec that declines fails provider_codec_failed before any request exist
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec_declines = kind }, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{ .codec_declines = kind }, &retained);
         defer if (preparation.state.active) preparation.cancel();
         // No request is prepared, so nothing can be sent.
         try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, 16, 2, 1 << 16));
@@ -4284,7 +4258,7 @@ test "a cold history memo build yields under the preparation allowance" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
-        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, &memos, .{}, &retained);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
         defer if (preparation.state.active) preparation.cancel();
         // Advances after the request reached its final length copy the
         // span into the memo file, each within the byte allowance.
@@ -4339,7 +4313,7 @@ fn expectMemoStoreCancelForTesting(setup: *PreparationTestSetup, session: []cons
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, memos, .{}, &retained);
+    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), memos, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
     var final_advances: usize = 0;
     var steps: usize = 0;

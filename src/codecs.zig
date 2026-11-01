@@ -3,6 +3,7 @@
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
+const json = @import("codecs/json.zig");
 const responses = @import("codecs/responses.zig");
 
 /// The module of each codec this Host serves, the one place a codec is
@@ -29,7 +30,7 @@ comptime {
     }
     // The Responses classifier accepts exactly the bodies the Host's own
     // JSON reading did.
-    std.debug.assert(@import("codecs/json.zig").max_depth == protocol.max_json_depth);
+    std.debug.assert(json.max_depth == protocol.max_json_depth);
 }
 
 /// A pinned codec's request encoder state, which its caller stores. Each
@@ -50,6 +51,20 @@ fn PerCodec(comptime name: []const u8) type {
         T.* = @field(module(@field(protocol.Codec, codec)), name);
     }
     return @Union(.auto, protocol.Codec, &names, &types, &@splat(.{}));
+}
+
+/// Every codec's `name` type side by side, for scratch a caller lends: each
+/// call writes its own codec's field before it reads it, so no tag says
+/// which one was last used.
+fn EachCodec(comptime name: []const u8) type {
+    const codecs = @typeInfo(protocol.Codec).@"enum".field_names;
+    var names: [codecs.len][]const u8 = undefined;
+    var types: [codecs.len]type = undefined;
+    for (codecs, &names, &types) |codec, *field, *T| {
+        field.* = codec;
+        T.* = @field(module(@field(protocol.Codec, codec)), name);
+    }
+    return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
 
 /// The carry before a request's first history element.
@@ -96,17 +111,53 @@ pub fn headerName(codec: protocol.Codec, name: u8) []const u8 {
 
 /// A pinned codec's error classifier scratch, which its caller lends for
 /// each `classify`.
-pub const ClassifyScratch = PerCodec("ClassifyScratch");
+pub const ClassifyScratch = EachCodec("ClassifyScratch");
 
 /// Writes into `out` what the pinned codec reads in the HTTP error body
 /// `body`, naming report text by range of `body`.
 pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
     switch (codec) {
-        inline else => |tag| {
-            if (std.meta.activeTag(scratch.*) != tag) scratch.* = @unionInit(ClassifyScratch, @tagName(tag), undefined);
-            module(tag).classify(&@field(scratch.*, @tagName(tag)), body, out);
-        },
+        inline else => |tag| module(tag).classify(&@field(scratch, @tagName(tag)), body, out),
     }
+}
+
+/// A pinned codec's response stream state between events, which its
+/// caller stores.
+pub const Stream = PerCodec("Stream");
+
+/// A pinned codec's interpreter scratch, which its caller lends for each
+/// `interpretEvent`.
+pub const InterpretScratch = EachCodec("InterpretScratch");
+
+/// The state before a response's first event.
+pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
+    return switch (codec) {
+        inline else => |tag| @unionInit(Stream, @tagName(tag), module(tag).begin(operation)),
+    };
+}
+
+/// The codec's verdict on one event's data, `data`, naming bytes by range
+/// of it. Never inlined, like `nextMember`: the codec's frames stay apart
+/// from the shell's, which hold the Host's rules across items.
+pub noinline fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
+    switch (stream.*) {
+        inline else => |*state, tag| return module(tag).interpretEvent(state, &@field(scratch, @tagName(tag)), data),
+    }
+}
+
+/// The next step of a walk over an event `interpretEvent` accepted, from
+/// a cursor its answer gave.
+pub noinline fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
+    return switch (codec) {
+        inline else => |tag| module(tag).nextMember(data, cursor),
+    };
+}
+
+/// The stream ended between events: its verdict, if it fails.
+pub fn finish(stream: *const Stream) ?codec_abi.Reason {
+    return switch (stream.*) {
+        inline else => |*state, tag| module(tag).finish(state),
+    };
 }
 
 const TestItem = struct {
@@ -149,11 +200,11 @@ test "a tool entry escapes its name and description as JSON strings" {
     var buffer: [256]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
     try encodeForTesting(&encoder, null, &.{.{ .item = .tool, .handles = &.{ "t", "say \"hi\"\\\n\x01é", "{}" } }}, &out);
-    const json = out.buffered();
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    const written = out.buffered();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, written, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("say \"hi\"\\\n\x01é", parsed.value.object.get("description").?.string);
-    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", json);
+    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", written);
 }
 
 test "a resumed encoder writes what an uninterrupted one writes" {
@@ -195,4 +246,44 @@ test "a resumed encoder writes what an uninterrupted one writes" {
     }
     try std.testing.expectStringStartsWith(whole.buffered(), "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
+}
+
+test "the codec's JSON reader names each syntax error as validation did" {
+    // The digest of each document's error name, or `ok`, one per line, as
+    // validation's own parser named them before the codec's reader
+    // replaced it.
+    const expected = "76669bb7f8a5561499c529d7bf886895e7e4371f76d2820a7d06cf53e08b73f0";
+    const Names = struct {
+        hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
+
+        fn add(self: *@This(), document: []const u8) void {
+            const Ignored = struct {
+                pub fn key(_: *@This(), _: *const json.Reader, _: u8) void {}
+                pub fn begin(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+                pub fn end(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+            };
+            var ignored: Ignored = .{};
+            var reader: json.Reader = undefined;
+            self.hash.update(if (reader.read(document, &ignored)) |_| "ok" else |err| @errorName(err));
+            self.hash.update("\n");
+        }
+    };
+    var names: Names = .{};
+    const sample = "{\"type\":\"x\", \"a\":[1,-2.5e+3,0,true,null,{\"b\":\"\\u00e9\\n\xc3\xa9\\ud83d\\ude00\"}],\"c\":{}}";
+    // Every prefix, and every byte replaced by each byte the grammar
+    // treats apart.
+    for (0..sample.len + 1) |cut| names.add(sample[0..cut]);
+    const alphabet = "{}[]:,\"\\ 0-.eE+tfnux\x01\x7f\xc3\xe2\xf0\xff";
+    var document: [sample.len]u8 = undefined;
+    for (0..sample.len) |index| for (alphabet) |byte| {
+        document = sample.*;
+        document[index] = byte;
+        names.add(&document);
+    };
+    const open = "{\"a\":" ++ @as([json.max_depth]u8, @splat('['));
+    const close: [json.max_depth]u8 = @splat(']');
+    for ([_][]const u8{ open ++ "1" ++ close ++ "}", open ++ " ", open[0 .. open.len - 1] ++ " ", open ++ "]" }) |deep| names.add(deep);
+    var hex: [64]u8 = undefined;
+    _ = try std.fmt.bufPrint(&hex, "{x}", .{&names.hash.finalResult()});
+    try std.testing.expectEqualStrings(expected, &hex);
 }

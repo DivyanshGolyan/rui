@@ -62,10 +62,10 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
             .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
-            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
+            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications" }} },
-            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
+            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
 };
@@ -135,7 +135,7 @@ const destination = &[_]Option{ value("store", "PATH"), hex("store-hex", "store"
 const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
-const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
+const binding = &[_]Option{ value("provider", "codex|openai"), value("model", "MODEL") };
 const notifications = value("notifications", "on|off");
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
@@ -152,15 +152,17 @@ const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settin
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 const endpoint_conflicts = &[_][2][]const u8{
-    .{ "codex", "provider-endpoint" },
-    .{ "codex", "provider-ca-file" },
-    .{ "codex", "test-codex-fixture-endpoint" },
+    .{ "provider", "provider-endpoint" },
+    .{ "provider", "provider-ca-file" },
+    .{ "provider", "test-codex-fixture-endpoint" },
     .{ "test-codex-fixture-endpoint", "provider-endpoint" },
+    .{ "test-openai-fixture-endpoint", "provider-endpoint" },
 };
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
     hiddenValue("test-codex-fixture-endpoint"),
+    hiddenValue("test-openai-fixture-endpoint"),
     hiddenValue("test-bash-scratch-limit-bytes"),
     hiddenValue("test-retention-entry-capacity"),
     hiddenFlag("test-retention-removal-failure"),
@@ -297,7 +299,15 @@ pub const Definition = struct {
             if (index == args.len) return error.MissingArgumentValue;
             if (option.repeated) {
                 if (parsed.repeat_count == parsed.repeats.len) return error.DuplicateArgument;
-                parsed.repeats[parsed.repeat_count] = args[index];
+                // Each option's values stay together, in order, so `all`
+                // answers a slice.
+                var at = parsed.repeat_count;
+                while (at > 0 and parsed.repeat_options[at - 1] != n) : (at -= 1) {}
+                if (at == 0) at = parsed.repeat_count;
+                std.mem.copyBackwards([]const u8, parsed.repeats[at + 1 .. parsed.repeat_count + 1], parsed.repeats[at..parsed.repeat_count]);
+                std.mem.copyBackwards(usize, parsed.repeat_options[at + 1 .. parsed.repeat_count + 1], parsed.repeat_options[at..parsed.repeat_count]);
+                parsed.repeats[at] = args[index];
+                parsed.repeat_options[at] = n;
                 parsed.repeat_count += 1;
                 continue;
             }
@@ -342,6 +352,8 @@ pub const Parsed = struct {
     /// Options spelled in the invocation, by index.
     seen: u64 = 0,
     repeats: [16][]const u8 = undefined,
+    /// The option index of each of `repeats`.
+    repeat_options: [16]usize = undefined,
     repeat_count: usize = 0,
     positional: ?[]const u8 = null,
     /// The positional followed `--`, so a lone dash is literal text.
@@ -363,8 +375,12 @@ pub const Parsed = struct {
 
     /// Every value of the repeatable option, in order.
     pub fn all(self: *const Parsed, name: []const u8) []const []const u8 {
-        const option = self.definition.optionNamed(name) orelse return &.{};
-        return if (option.repeated) self.repeats[0..self.repeat_count] else &.{};
+        const n = self.definition.indexOf(name) orelse return &.{};
+        if (!self.definition.options[n].repeated) return &.{};
+        const first = std.mem.indexOfScalar(usize, self.repeat_options[0..self.repeat_count], n) orelse return &.{};
+        var end = first;
+        while (end < self.repeat_count and self.repeat_options[end] == n) end += 1;
+        return self.repeats[first..end];
     }
 
     /// A decimal value of `name`, when given.
@@ -483,7 +499,7 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     // Resume is exact; there is no newest-Session guess.
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
-    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--codex" }, false);
+    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--provider", "codex" }, false);
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -534,6 +550,12 @@ test "hidden test options belong to their operation and stay out of help" {
     const serve = try testParse(Command.host_serve.definition(), &.{ "--fault", "before-commit", "--test-phase-trace", "--fault", "content-read", "--test-retry-waits-ms", "1,1,1" }, &storage);
     try std.testing.expectEqual(@as(usize, 2), serve.all("fault").len);
     try std.testing.expectEqualStrings("content-read", serve.all("fault")[1]);
+    // Two repeatable options keep their own values, in order.
+    var mixed_storage: [1024]u8 = undefined;
+    const mixed = try testParse(Command.host_serve.definition(), &.{ "--fault", "a", "--provider", "p", "--fault", "b", "--provider", "q" }, &mixed_storage);
+    try std.testing.expectEqualSlices([]const u8, &.{ "a", "b" }, mixed.all("fault"));
+    try std.testing.expectEqualSlices([]const u8, &.{ "p", "q" }, mixed.all("provider"));
+    try std.testing.expectEqual(@as(usize, 0), mixed.all("store").len);
     try std.testing.expect(serve.has("test-phase-trace") and serve.get("test-phase-trace") == null);
     try std.testing.expectEqualStrings("1,1,1", serve.get("test-retry-waits-ms").?);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--test-phase-trace" }, error.DuplicateArgument);

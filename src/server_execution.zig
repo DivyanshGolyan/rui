@@ -2,6 +2,7 @@ const std = @import("std");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -12,6 +13,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const process = @import("os/process.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -62,7 +64,15 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
+    /// The transfer presented an API key, so a 401 rejects that key.
+    presented_key: bool = false,
     transfer: provider.Transfer = undefined,
+
+    /// The code a failure saves: a rejected API key names its remedy.
+    fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
+        if (self.presented_key and execution.rejectsCredential(failure)) return failure_class.api_key_rejected;
+        return failure.codeText(buffer);
+    }
 };
 
 const NamedScratchSlot = struct {
@@ -348,9 +358,6 @@ const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     /// Live Bash service and shutdown share this window.
     bash_window: [bash.copy_window_bytes]u8,
-    /// Response import's output item grammar; only the pages one item uses
-    /// become resident.
-    item_check: model_adapter.Output.OutputItemCheck,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
     /// One Bash Action's state. The slots say which part is live: a
@@ -364,14 +371,25 @@ const Workspace = struct {
     /// One transfer's response import: the decoded event data, the
     /// interpretation and the settled output, live from a completed transfer
     /// to its settlement.
-    event_data: model_adapter.Output.EventData,
-    interpretation: model_adapter.OutputInterpretation,
+    event_data: output_decode.EventData,
+    /// The codec's interpretation scratch and the Host's grammar state.
+    interpret: output_decode.Interpret,
+    interpretation: output_decode.Interpretation,
     /// What the provider said of a failure, from its HTTP error body or
     /// error event, live from interpretation to settlement.
     provider_failure: output_decode.ProviderFailure,
     /// An HTTP error body's classification, live while it is classified.
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
+};
+
+/// The codec whose headers the Reactor observes: every provider's, so far.
+const observed_codec = blk: {
+    const codec = protocol.Provider.codex.codec();
+    for (std.enums.values(protocol.Provider)) |served| {
+        if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
+    }
+    break :blk codec;
 };
 
 pub fn executionMain(host: *Host) void {
@@ -381,7 +399,7 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
+    const auth_worker: ?*AuthWorker = if (host.providers.chatgpt()) |authentication| worker: {
         workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
         break :worker &workspace.auth_worker;
     } else null;
@@ -438,17 +456,19 @@ pub fn executionMain(host: *Host) void {
     var reactor_storage: provider.Reactor = undefined;
     // With no slots no Transfer can start, so a zero-capacity Host runs no
     // transport (h2 requires a positive stream capacity).
-    const endpoint_with_slots = if (slots.len == 0) null else host.provider_endpoint;
-    const reactor: ?*provider.Reactor = if (endpoint_with_slots) |endpoint| reactor: {
+    const reactor: ?*provider.Reactor = if (slots.len != 0 and host.providers.any()) reactor: {
+        var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
+        for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
+            if (served) |value| endpoint.* = value.endpoint;
+        }
         reactor_storage.init(host.allocator, host.io, .{
-            .endpoint = endpoint,
-            .ca_file = host.provider_ca_file,
+            .endpoints = endpoints,
+            .ca_file = host.providers.ca_file,
             .capacity = slots.len,
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
             .observation = .{
-                // The one served endpoint is the Codex route.
-                .names = codecs.manifest(protocol.Provider.codex.codec()).observe,
-                .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+                .names = codecs.manifest(observed_codec).observe,
+                .turn_state = if (host.providers.chatgpt() != null) host.turn_states.sink() else null,
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
@@ -587,7 +607,7 @@ const NativeTurn = struct {
     }
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
-        return self.host.provider_endpoint != null;
+        return self.host.providers.any();
     }
 
     pub fn freeSlots(self: *const NativeTurn) usize {
@@ -1148,23 +1168,27 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     };
     // The Execution launches straight into its custody record's entry.
     const work = &host.bash_work[token.index];
+    var refused: bash.ArgumentSizes = .{};
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
         .work = work,
+        .refused = &refused,
     }, struct {
         fn handoff(context: anytype) !void {
             try context.host.withEffectLaunch(context, launch);
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else if (err == error.BashArgumentsTooLarge) {
+            settleArgumentsTooLarge(host, token, action_binding, refused);
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
@@ -1311,6 +1335,12 @@ fn retainBashPreparedCleanup(
     });
 }
 
+/// Rare, so its message buffer stays off the dispatch frame.
+noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
+    var message: [bash.arguments_message_bytes]u8 = undefined;
+    settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
+}
+
 fn settleActionFailure(
     host: *Host,
     token: execution.CustodyToken,
@@ -1389,7 +1419,7 @@ fn beginAdmittedAttempt(
         host.io,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
-        if (host.authentication != null) .managed else .endpoint,
+        host.providers.routes(),
         &host.history_memos,
         host.hooks.preparationFaults(),
         &retained_scratch,
@@ -1440,7 +1470,8 @@ fn advanceModelPreparation(
         .prepared => |request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
+            const route = protocol.routeOf(host.providers.routes(), request.provider);
+            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = route == .chatgpt_device } })) {
                 .authenticate => {
                     moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
@@ -1601,18 +1632,28 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, replay.value) catch |err| {
+        const served = host.providers.get(request.provider).?;
+        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
             return;
         };
-    }
+    } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
+        .key_file => |key| headers.initKey(served.endpoint, providers.endpoint(request.provider), host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
+            request.deinit(host.io, host.scratch_budget.?);
+            fenceDispatch(host, "provider preparation", err);
+            finishCustodyNow(host, slot);
+            return;
+        },
+        .none, .chatgpt_device => {},
+    };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
+        .presented_key = if (host.providers.get(request.provider)) |served| served.credential == .key_file else false,
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
@@ -1722,7 +1763,7 @@ fn completeTransfer(
     if (answered_response) |*response| {
         retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
-            .code = decision.fail.codeText(&code_buffer),
+            .code = active.failureCode(decision.fail, &code_buffer),
             .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
@@ -1744,7 +1785,7 @@ fn completeTransfer(
         },
         .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            const code = failure.codeText(&code_buffer);
+            const code = active.failureCode(failure, &code_buffer);
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -1803,6 +1844,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     openai_model.set(active.transfer.observedModel()) catch unreachable;
     var x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
     x_openai_model.set(active.transfer.observedAlternateModel()) catch unreachable;
+    const codec = active.transfer.codec();
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
@@ -1864,11 +1906,10 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, event_data, operation, .{
+    metadata.fail_writes = host.hooks.fails(.response_metadata);
+    output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, &workspace.item_check, .{
-        .metadata = host.hooks.fails(.response_metadata),
     }, &workspace.provider_failure, &workspace.interpretation);
     const accepted = switch (workspace.interpretation) {
         .accepted => |*value| value,
@@ -1904,7 +1945,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(err, &detail);
             retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
@@ -2203,6 +2244,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .length = 4,
             .charged = 4,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };
@@ -2312,7 +2354,7 @@ test "HTTP error capture retires before execution custody" {
         // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoint = "http://127.0.0.1:1/responses",
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
@@ -2325,6 +2367,7 @@ test "HTTP error capture retires before execution custody" {
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         }, binding, .{}, &retained);
@@ -2512,7 +2555,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    var launched = try prepared.launch(&bash.empty_environment);
+    var refused: bash.ArgumentSizes = .{};
+    var launched = try prepared.launch(bash.default_facts, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
@@ -2824,7 +2868,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            const configured = storage.configure(&command, true, .{});
+            const configured = storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -2839,7 +2883,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3045,7 +3089,7 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, true, .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3060,7 +3104,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3070,7 +3114,7 @@ test "preparing slots belong to their live preparations" {
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
     try storage.openHistoricalView(binding_a, &preparation.view);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3259,7 +3303,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     );
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        metadata.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
@@ -3267,7 +3311,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     stdout.close(std.testing.io);
     stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
-    try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
+    try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     metadata.deinit();
@@ -3284,7 +3328,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer limited.deinit();
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        limited.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        limited.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
@@ -3317,7 +3361,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             std.testing.io,
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
-            .endpoint,
+            protocol.routesAll(.endpoint),
             null,
             .{},
             &retained,
@@ -3366,7 +3410,7 @@ test "an encode failure settles unanswered and releases request scratch" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, true, .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3381,7 +3425,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
 
     var records: [1]execution.CustodyRecord = @splat(.{});
@@ -3402,7 +3446,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         std.testing.io,
         root,
         .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
-        .endpoint,
+        protocol.routesAll(.endpoint),
         null,
         // The codec declines at request_end: every earlier item has already
         // written request scratch.
@@ -3457,6 +3501,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .provider = .codex,
             .codec = .@"openai-responses/1",
             .headers = .{ .count = 0 },
         };

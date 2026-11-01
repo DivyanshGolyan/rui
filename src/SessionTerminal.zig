@@ -491,10 +491,10 @@ test "a notification waits for the next frame, only while focus is away and the 
     try std.testing.expectEqualStrings("", terminal.takeNotification());
     // Turned off, then on again, applies to the next notification; a newer
     // one replaces one still waiting.
-    _ = try preferences.update(home, .{ .notifications = false }, .missing);
+    _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
     terminal.notify("k7m2qx", .approval, 0);
     try std.testing.expectEqualStrings("", terminal.takeNotification());
-    _ = try preferences.update(home, .{ .notifications = true }, .missing);
+    _ = try preferences.update(home, .{ .notifications = true }, &preferences.Readinesses.initFill(.missing));
     terminal.notify("k7m2qx", .finished, 0);
     terminal.notify("k7m2qx", .approval, 1);
     try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx needs approval, and 1 more\x07", terminal.takeNotification());

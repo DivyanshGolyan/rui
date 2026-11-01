@@ -129,7 +129,7 @@ def run(model, external_credential=None):
 
         def start():
             process, ready = start_ready_process(
-                [caller.RUI, "host", "serve", "--store", store, "--active-capacity", "2", "--codex", "--test-phase-trace"],
+                [caller.RUI, "host", "serve", "--store", store, "--active-capacity", "2", "--provider", "codex", "--test-phase-trace"],
                 required_fields={"execution": "enabled"}, timeout=20,
             )
             records, thread = observations(process)
