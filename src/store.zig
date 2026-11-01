@@ -810,13 +810,14 @@ pub const HistoricalView = struct {
     /// without error.
     pub fn openContent(self: *HistoricalView, reference: HistoricalContent, out: *HistoricalReader) !void {
         std.debug.assert(reference.belongsTo(self));
-        // A part's reader reads the whole message text at its range; the
-        // view, not this reader, checks the text's digest.
-        const length = if (reference.text_start != null) self.output_parts.?.text.?.length else reference.length;
-        const identity: ContentReference = .{ .length = length, .digest = reference.digest };
+        // A part's reader reads the message text row only within its range,
+        // and the view, not this reader, checks the text's digest.
+        const first = reference.text_start orelse 0;
+        const identity: ContentReference = .{ .length = first + reference.length, .digest = reference.digest };
         const location: ContentLocation = .{ .store = self.store, .reference = identity, .content_id = reference.content_id };
         out.* = .{ .view = self, .reference = reference };
         out.reader.open(location);
+        out.reader.first = first;
         out.reader.verified = reference.verified or reference.text_start != null;
         self.readers += 1;
     }
@@ -1242,6 +1243,9 @@ pub const ContentReader = struct {
     hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
     verified_position: u64 = 0,
     verified: bool = false,
+    /// Where its reads begin: a message part's reader reads only its range,
+    /// so read-ahead is sized to that range, not the whole row.
+    first: u64 = 0,
 
     /// Builds the reader where it lives. Needs no Store access.
     pub fn open(self: *ContentReader, location: ContentLocation) void {
@@ -1252,7 +1256,7 @@ pub const ContentReader = struct {
     // keeps the original bounded read path, not a canonical/Host fault. Small
     // values read straight into the caller's window.
     fn prepareRead(self: *ContentReader) void {
-        if (self.prefetch == null and self.reference.length > 1024 * 1024) {
+        if (self.prefetch == null and self.reference.length - self.first > 1024 * 1024) {
             // Raw: a read fills the window before any byte of it is used;
             // alloc would first write 0xAA over all 128 KB in ReleaseSafe.
             if (self.allocator.rawAlloc(content_prefetch_bytes, .of(u8), @returnAddress())) |bytes|
@@ -1651,7 +1655,7 @@ pub const Store = struct {
     // errors and yielded historical scans. Logical readers cannot pin the WAL.
     read_blob: ContentBlob = .{},
     // Source-level proof only: no counters/storage in the production Store.
-    testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
+    testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0), blob: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
     /// Expected outcomes of locked entry points. A canonical read or save
     /// fault fences the Host (ARCHITECTURE.md, "Commit boundaries and crash
@@ -7631,6 +7635,7 @@ pub const Store = struct {
             blob.content_id = content_id;
         }
         if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
+        if (@import("builtin").is_test) _ = self.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
     }
 
     fn rollbackAfterError(self: *Store, faults: Faults) !void {
@@ -17357,6 +17362,54 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     while (try cursor.next(&view)) |entry| {
         if (entry.kind != .provider_output) continue;
         try std.testing.expectEqualStrings("message{\"id\":\"m\"}|content.output_text=one |content.output_text=|content.output_text=tw\u{f6}", try renderTestingEntry(&view, entry, &bytes));
+        break;
+    } else return error.MissingMessage;
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a large message's parts read only their own ranges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "large-parts-config");
+    // Many small parts before one large one: each small part's reader must
+    // not read ahead into the rest of the text.
+    const large = try std.testing.allocator.alloc(u8, 1024 * 1024 + 4096);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'a');
+    var answer: [65]TestingAnswerPart = undefined;
+    for (answer[0..64]) |*part| part.* = .{ .encoded = "x", .decoded = "x" };
+    answer[64] = .{ .encoded = large, .decoded = large };
+    try answerTestTurn(&storage, &tmp, session.slice(), "large-parts", &answer);
+    try submitTestMessage(&storage, &tmp, "large-parts-next", "large-parts-next", session.slice(), "next");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(next, &view);
+    defer view.close();
+    var cursor: TestingHistoryCursor = .{};
+    while (try cursor.next(&view)) |entry| {
+        if (entry.kind != .provider_output) continue;
+        _ = try view.openOutput(entry.position);
+        const before = storage.testing_content_work.blob.load(.monotonic);
+        var window: [4096]u8 = undefined;
+        var text_bytes: u64 = 0;
+        while (try view.nextOutputPart()) |part| {
+            const text = part.text orelse continue;
+            var reader: HistoricalReader = undefined;
+            try view.openContent(text, &reader);
+            defer reader.close();
+            var offset: u64 = 0;
+            while (true) {
+                const count = try reader.read(offset, &window);
+                if (count == 0) break;
+                offset += count;
+            }
+            text_bytes += offset;
+        }
+        try std.testing.expectEqual(@as(u64, 64 + large.len), text_bytes);
+        try std.testing.expectEqual(text_bytes, storage.testing_content_work.blob.load(.monotonic) - before);
         break;
     } else return error.MissingMessage;
     try std.testing.expect(!storage.isFenced());
