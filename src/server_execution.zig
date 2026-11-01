@@ -7,6 +7,7 @@ const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
 const named_scratch = @import("named_scratch.zig");
+const output_decode = @import("output_decode.zig");
 const output_format = @import("output_format.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
@@ -368,7 +369,9 @@ const Workspace = struct {
     interpretation: model_adapter.OutputInterpretation,
     /// What the provider said of a failure, from its HTTP error body or
     /// error event, live from interpretation to settlement.
-    provider_failure: model_adapter.Output.ProviderFailure,
+    provider_failure: output_decode.ProviderFailure,
+    /// An HTTP error body's classification, live while it is classified.
+    decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
 };
 
@@ -1704,7 +1707,7 @@ fn completeTransfer(
                 // borrows it; this owner still disposes it before settlement.
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
-                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
+                error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
                 if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             }
         },
@@ -2201,6 +2204,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             .length = 4,
             .charged = 4,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         };
         var slot = ExecutionSlot{ .model_authenticating = .{
@@ -2322,6 +2326,7 @@ test "HTTP error capture retires before execution custody" {
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
@@ -2336,7 +2341,8 @@ test "HTTP error capture retires before execution custody" {
             // A short sealed read is a real classifier error, not malformed
             // JSON's negative-overflow result.
             response.length += 1;
-            try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
+            const unreadable = model_adapter.interpretErrorResponse(&workspace.value.decode, slot.provider.transfer.codec(), io, response.file, response.length, 400, &workspace.value.provider_failure);
+            try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, unreadable);
         }
         completeTransfer(&host, workspace.value, &slot, .{
             .transfer = &slot.provider.transfer,
@@ -3461,6 +3467,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
+            .codec = .@"openai-responses/1",
             .headers = .{},
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };

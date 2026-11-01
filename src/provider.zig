@@ -30,6 +30,9 @@ pub const PreparedRequest = struct {
     length: u64,
     charged: u64,
     structured_output: bool,
+    /// The codec the Session pinned, which also classifies the answer's
+    /// error body.
+    codec: protocol.Codec,
     /// The codec's headers, which `Transfer.start` sends ahead of the
     /// Host's own and copies, so the Transfer does not keep them.
     headers: RequestHeaders,
@@ -593,6 +596,7 @@ pub const Transfer = struct {
         file: std.Io.File,
         charged: u64,
         structured_output: bool,
+        codec: protocol.Codec,
     };
 
     /// Opens the response capture, then prepares the stream with
@@ -628,7 +632,7 @@ pub const Transfer = struct {
         self.* = .{
             .stream = .idle,
             .reactor = reactor,
-            .request = .{ .file = request.file, .charged = request.charged, .structured_output = request.structured_output },
+            .request = .{ .file = request.file, .charged = request.charged, .structured_output = request.structured_output, .codec = request.codec },
             .response = response,
             .headers = .{ .turn_state = options.turn_state },
             .credential = options.credential,
@@ -730,6 +734,10 @@ pub const Transfer = struct {
 
     pub fn hasStructuredOutput(self: *const Transfer) bool {
         return self.request.structured_output;
+    }
+
+    pub fn codec(self: *const Transfer) protocol.Codec {
+        return self.request.codec;
     }
 };
 
