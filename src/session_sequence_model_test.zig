@@ -145,13 +145,14 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             try ops.settleReader(self.front);
         }
 
-        /// The draft's bytes and caret, then what the next frame's input row
-        /// shows: the draft with its caret, or the choice with none.
+        /// The draft's bytes and caret, then what the input row shows: the
+        /// draft with its caret, or the choice with none. As the run loop
+        /// does, a frame is drawn only when something changed.
         fn checkText(self: *Self, draft: *const Text, choosing: ?[]const u8) !void {
             const actual = self.front.input.composition();
             try std.testing.expectEqualStrings(draft.slice(), actual.bytes);
             try std.testing.expectEqual(draft.cursor, actual.cursor);
-            try ops.draw(self.front);
+            if (self.front.dirty or self.screen.stale()) try ops.draw(self.front);
             const window = self.screen.vx.window();
             if (choosing) |row| {
                 try std.testing.expect(!self.screen.vx.screen.cursor_vis);
@@ -232,8 +233,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         const unread = seed == 5;
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
-        // The offer: a delivered frame showed the choice and input then
-        // drained empty, with no key since. Every input spends it.
+        // The offer: the latest frame showed the choice, was delivered, and
+        // input then drained empty, with nothing since. Every input spends
+        // it and every other change retires it.
         var fresh = false;
         // The input row is the draft: a line was being written when the
         // Action arrived, or a key was typed beside it, until Esc, Ctrl-G,
@@ -317,7 +319,6 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     }
                 },
                 .pause => {
-                    // A page is no key: it hides the choice and spends nothing.
                     try ops.showInspection(front);
                     visible = false;
                 },
@@ -337,13 +338,15 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             }
             // Typing beside the Action moves the input row to the draft.
             if (choosing and !held and (event == .unicode or event == .paste)) typing = true;
-            // Every input spends the offer, at the choice or in the draft;
-            // the draft never submits beside a pending Action.
-            if (event != .pause and event != .latest and event != .receipt) fresh = false;
+            // Every input spends the offer, at the choice or in the draft,
+            // and a page or a return to the latest view retires it: only a
+            // delivered frame after the last change, then empty input,
+            // offers again. The draft never submits beside a pending Action.
+            if (event != .receipt) fresh = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
-            try std.testing.expectEqual(fresh, fixture.screen.offer != null);
+            try std.testing.expectEqual(fresh, fixture.screen.offered() != null);
             if (fixture.screen.consent) |pending| try std.testing.expectEqual(picked, pending.highlight);
             const now_choosing = alive and visible and seed != 2 and !typing;
             const now_shown: ?[]const u8 = if (!now_choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
@@ -656,14 +659,14 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
             // requires a post-write empty-input observation.
             try ops.draw(fixture.front);
             try std.testing.expect(fixture.screen.actionRead());
-            try std.testing.expect(fixture.screen.offer == null);
+            try std.testing.expect(fixture.screen.offered() == null);
             // Reading completed after that frame; the decision prompt is the
             // next one, and only its delivery can make the offer.
-            try std.testing.expect(fixture.screen.shownDecision() == null);
+            try std.testing.expect(!fixture.screen.awaitsOffer());
             try ops.draw(fixture.front);
-            try std.testing.expect(fixture.screen.offer == null);
+            try std.testing.expect(fixture.screen.offered() == null);
             try std.testing.expect(fixture.screen.promptCompleted(try ops.step(fixture.front, 0), false, false));
-            try std.testing.expect(fixture.screen.offer != null);
+            try std.testing.expect(fixture.screen.offered() != null);
             continue;
         }
         const before = fixture.screen.action_seen;
@@ -680,6 +683,6 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);
         try std.testing.expect(!fixture.screen.actionRead());
-        try std.testing.expect(fixture.screen.offer == null);
+        try std.testing.expect(fixture.screen.offered() == null);
     }
 }

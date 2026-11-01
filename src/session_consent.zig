@@ -1,5 +1,6 @@
 //! What a waiting Action's input row shows, as values. When Enter may act is
-//! SessionScreen's: it confirms only the decision a delivered frame offered.
+//! SessionScreen's: it confirms only the choice of the latest frame, once
+//! that frame was delivered and offered and nothing changed since.
 const std = @import("std");
 
 pub const Service = enum { byte, empty, decoder_pending, decoder_expired, budget_exhausted };
@@ -15,6 +16,8 @@ pub const Row = enum { draft, selector };
 /// The one adopted Action awaiting its decision. Absent means none.
 pub const Pending = struct {
     action: u64,
+    /// `preview` once the Action proved larger than the view, by its size at
+    /// adoption or by any load of it; it never returns to `complete`.
     presentation: Presentation,
     /// Every Action starts at Allow once; only an arrow moves it.
     highlight: Choice = .allow_once,
@@ -35,14 +38,13 @@ pub const Projection = struct { row: Row = .draft, approval: Approval = .absent 
 
 /// What the presentation owner shows of the adopted Action, sampled at
 /// selection. `read` means delivered rows reached the end in this layout.
-pub const Shown = struct { action_page: bool, whole: bool, read: bool };
+pub const Shown = struct { action_page: bool, read: bool };
 
 /// Closed selection: callers never assemble a row and approval pair.
 pub fn project(consent: ?Pending, shown: Shown, command_blocked: bool) Projection {
     const pending = consent orelse return .{};
     if (pending.presentation == .preview) return .{ .approval = .preview };
     if (!shown.action_page or pending.row == .draft) return .{ .approval = .paused };
-    if (!shown.whole) return .{ .approval = .preview };
     if (!shown.read) return .{ .row = .selector, .approval = .reading };
     if (command_blocked) return .{ .row = .selector, .approval = .held };
     return .{ .row = .selector, .approval = .choice };
@@ -63,7 +65,7 @@ pub fn messageAllowed(consent: ?Pending, blockers: Blockers) bool {
 }
 
 test "projection selects the selector only beside a whole visible Action nobody is typing at" {
-    const Case = struct { adopted: bool = true, preview: bool = false, page: bool = true, whole: bool = true, read: bool = true, typing: bool = false, command: bool = false, expected: Projection };
+    const Case = struct { adopted: bool = true, preview: bool = false, page: bool = true, read: bool = true, typing: bool = false, command: bool = false, expected: Projection };
     for ([_]Case{
         .{ .adopted = false, .expected = .{} },
         // A hidden Action keeps the draft; Enter explains the pending decision.
@@ -77,14 +79,13 @@ test "projection selects the selector only beside a whole visible Action nobody 
         .{ .preview = true, .expected = .{ .approval = .preview } },
         .{ .preview = true, .page = false, .expected = .{ .approval = .preview } },
         .{ .preview = true, .typing = true, .expected = .{ .approval = .preview } },
-        .{ .whole = false, .read = false, .expected = .{ .approval = .preview } },
         .{ .read = false, .expected = .{ .row = .selector, .approval = .reading } },
         .{ .command = true, .expected = .{ .row = .selector, .approval = .held } },
         .{ .command = true, .read = false, .expected = .{ .row = .selector, .approval = .reading } },
         .{ .expected = .{ .row = .selector, .approval = .choice } },
     }) |case| {
         const consent: ?Pending = if (case.adopted) .{ .action = 7, .presentation = if (case.preview) .preview else .complete, .row = if (case.typing) .draft else .selector } else null;
-        const shown: Shown = .{ .action_page = case.page, .whole = case.whole, .read = case.read };
+        const shown: Shown = .{ .action_page = case.page, .read = case.read };
         try std.testing.expectEqual(case.expected, project(consent, shown, case.command));
     }
 }
