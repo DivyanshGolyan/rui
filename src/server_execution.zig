@@ -21,6 +21,8 @@ const signal_stack = @import("signal_stack.zig");
 const tools = @import("tools.zig");
 const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
+const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const pages = @import("os/pages.zig");
@@ -1153,11 +1155,11 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     }
     // The Session's client environment, copied outside the Store lock and
     // `launch_mutex`; none falls back to the Host facts.
-    const base = if (host.environments) |environments| environments.copy(prepared.session.slice(), prepared.allocator) catch {
+    const base = launchBase(host.environments, prepared.session.slice(), prepared.allocator) catch {
         settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
-    } else null;
+    };
     defer if (base) |bytes| prepared.allocator.free(bytes);
     host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
@@ -3593,4 +3595,39 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "suppressed-bash", .{}));
         }
     }
+}
+
+/// The environment a Session's Bash starts from: its client environment,
+/// owned by the caller, or null for the Host facts when the register holds
+/// none, as after a restart or once the register replaced it.
+fn launchBase(environments: ?*SessionEnvironments, session: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+    const table = environments orelse return null;
+    return table.copy(session, allocator);
+}
+
+test "a Session the register does not hold launches with the system PATH and the Host's HOME" {
+    // A restarted Host's register is empty; one that replaced the Session
+    // holds others.
+    var environments: SessionEnvironments = undefined;
+    try environments.init(std.testing.io, std.testing.allocator);
+    defer environments.deinit();
+    var offer: SessionEnvironments.Offer = try .init(std.testing.allocator, "PATH=/client/bin\x00HOME=/client\x00".len);
+    defer offer.deinit(std.testing.allocator);
+    @memcpy(offer.room(), "PATH=/client/bin\x00HOME=/client\x00");
+    environments.offer("n3w5es", .{ .origin = .person, .admission = 1 }, &offer);
+    const facts: environment.HostFacts = .{ .executable_dir = "/opt/rui/bin", .system_path = "/usr/bin:/bin", .home = "/home/host" };
+    const identity: environment.Identity = .{ .address = "k7m2qx", .store = "/store", .sender_handle = "" };
+    for ([_]?*SessionEnvironments{ null, &environments }) |table| {
+        const base = try launchBase(table, "k7m2qx", std.testing.allocator);
+        try std.testing.expectEqual(null, base);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const block = try environment.childBlock(arena.allocator(), base, facts, identity);
+        try std.testing.expectEqualStrings("PATH=/opt/rui/bin:/usr/bin:/bin", std.mem.span(block[0].?));
+        try std.testing.expectEqualStrings("HOME=/home/host", std.mem.span(block[1].?));
+    }
+    // The Session it holds starts from its client environment.
+    const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
+    defer std.testing.allocator.free(held);
+    try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
 }

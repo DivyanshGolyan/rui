@@ -8,12 +8,17 @@
 //! Store admitted, never on which intake worker ran first. Equal
 //! environments share one interned value, freed when no entry names it.
 //! The table holds at most `max_sessions` entries and `max_values` values of
-//! at most `max_value_bytes` in total, and replaces the least recently used
-//! Session; a replaced Session's Bash falls back to the system PATH, as after
-//! a restart.
+//! at most `max_value_bytes` in total. When a new value needs room, the
+//! table drops the values whose loss replaces the fewest Sessions, least
+//! recently used first, so one offer replaces only the Sessions it must;
+//! when it needs only an entry, it replaces the least recently used
+//! Session. A replaced Session's Bash falls back to the system PATH, as
+//! after a restart. Every offer and copy is linear in the table's size.
 //!
 //! One leaf mutex guards the table. The Store lock may be held while it is
-//! taken, never the reverse. No allocation or free happens under it.
+//! taken, never the reverse. No allocation or free happens under it: an
+//! `Offer` brings its value already allocated and takes away what the
+//! table released.
 const SessionEnvironments = @This();
 
 const std = @import("std");
@@ -45,21 +50,29 @@ const Entry = struct {
     }
 };
 
-/// One environment's bytes, which follow this header in one allocation.
+/// One environment's bytes, which follow this header in one allocation of
+/// `capacity` bytes; the first `len` of them are the value.
 const Interned = struct {
     refs: u32 = 0,
     len: u32,
+    capacity: u32,
+    /// The last offer or copy of any Session naming this value.
+    used: u64 = 0,
     /// Links values an offer released, for the caller to free.
     next: ?*Interned = null,
 
-    fn bytes(self: *Interned) []u8 {
+    fn room(self: *Interned) []u8 {
         const base: [*]u8 = @ptrCast(self);
-        return base[@sizeOf(Interned)..][0..self.len];
+        return base[@sizeOf(Interned)..][0..self.capacity];
+    }
+
+    fn bytes(self: *Interned) []u8 {
+        return self.room()[0..self.len];
     }
 
     fn allocation(self: *Interned) []align(@alignOf(Interned)) u8 {
         const base: [*]align(@alignOf(Interned)) u8 = @ptrCast(self);
-        return base[0 .. @sizeOf(Interned) + self.len];
+        return base[0 .. @sizeOf(Interned) + self.capacity];
     }
 };
 
@@ -84,22 +97,49 @@ pub fn deinit(self: *SessionEnvironments) void {
     self.* = undefined;
 }
 
-/// An environment ready to offer: a candidate value allocated before the
-/// mutex is taken, and the values the offer released, freed after it is
-/// dropped. `finish` frees both.
+/// An environment to offer: the one allocation that holds a Message's
+/// environment from the socket to the table, and the values an offer
+/// released. The receiver writes the environment into `room`, then
+/// `settle`s its checked length. `deinit` frees what the table did not
+/// keep and what it released; its allocator is the table's.
 pub const Offer = struct {
-    candidate: ?*Interned,
+    candidate: ?*Interned = null,
     released: ?*Interned = null,
-};
 
-pub fn prepare(self: *SessionEnvironments, value: environment.Value) error{OutOfMemory}!Offer {
-    std.debug.assert(value.len <= protocol.max_environment_bytes);
-    const bytes = try self.allocator.alignedAlloc(u8, .of(Interned), @sizeOf(Interned) + value.len);
-    const interned: *Interned = @ptrCast(bytes.ptr);
-    interned.* = .{ .len = @intCast(value.len) };
-    @memcpy(interned.bytes(), value);
-    return .{ .candidate = interned };
-}
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) error{OutOfMemory}!Offer {
+        std.debug.assert(capacity <= protocol.max_environment_bytes);
+        const bytes = try allocator.alignedAlloc(u8, .of(Interned), @sizeOf(Interned) + capacity);
+        const interned: *Interned = @ptrCast(bytes.ptr);
+        interned.* = .{ .len = @intCast(capacity), .capacity = @intCast(capacity) };
+        return .{ .candidate = interned };
+    }
+
+    /// Where the environment's bytes go.
+    pub fn room(self: *const Offer) []u8 {
+        return self.candidate.?.room();
+    }
+
+    /// Keeps the first `len` bytes of `room` as the value.
+    pub fn settle(self: *Offer, len: usize) void {
+        std.debug.assert(len <= self.candidate.?.capacity);
+        self.candidate.?.len = @intCast(len);
+    }
+
+    /// The value, while the table has not taken it.
+    pub fn value(self: *const Offer) ?environment.Value {
+        return if (self.candidate) |candidate| candidate.bytes() else null;
+    }
+
+    pub fn deinit(self: *Offer, allocator: std.mem.Allocator) void {
+        if (self.candidate) |candidate| allocator.free(candidate.allocation());
+        var next = self.released;
+        while (next) |released| {
+            next = released.next;
+            allocator.free(released.allocation());
+        }
+        self.* = .{};
+    }
+};
 
 /// Keeps `prepared`'s environment for `session` unless the Session holds a
 /// higher-ranked one.
@@ -114,26 +154,23 @@ pub fn offer(self: *SessionEnvironments, session: []const u8, rank: environment.
     // Hold an equal value before anything is released, so it survives.
     var value = self.equalValue(candidate.bytes());
     if (value) |index| self.values[index].?.refs += 1;
-    const place = if (found) |index| blk: {
+    if (found) |index| {
         self.release(self.entries[index].value, prepared);
-        break :blk index;
-    } else self.freePlace(prepared);
-    // Until it is written, `place` names no value and is never a victim.
-    self.entries[place] = std.mem.zeroes(Entry);
+        // Until it is written again, the entry names no value.
+        self.entries[index] = std.mem.zeroes(Entry);
+    }
     if (value == null) {
-        while (self.value_count == max_values or self.value_bytes + candidate.len > max_value_bytes) {
-            const victim = self.oldest().?;
-            self.release(self.entries[victim].value, prepared);
-            self.entries[victim] = std.mem.zeroes(Entry);
-        }
+        self.makeRoom(candidate.capacity, prepared);
         const index = std.mem.indexOfScalar(?*Interned, &self.values, null).?;
         candidate.refs = 1;
         self.values[index] = candidate;
         self.value_count += 1;
-        self.value_bytes += candidate.len;
+        self.value_bytes += candidate.capacity;
         prepared.candidate = null;
         value = index;
     }
+    self.values[value.?].?.used = self.uses;
+    const place = found orelse self.freePlace(prepared);
     self.entries[place] = .{
         .session = session[0..protocol.session_id_bytes].*,
         .value = @intCast(value.?),
@@ -141,17 +178,6 @@ pub fn offer(self: *SessionEnvironments, session: []const u8, rank: environment.
         .admission = rank.admission,
         .used = self.uses,
     };
-}
-
-/// Frees what the offer did not keep and what it released.
-pub fn finish(self: *SessionEnvironments, prepared: *Offer) void {
-    if (prepared.candidate) |candidate| self.allocator.free(candidate.allocation());
-    var next = prepared.released;
-    while (next) |value| {
-        next = value.next;
-        self.allocator.free(value.allocation());
-    }
-    prepared.* = .{ .candidate = null };
 }
 
 /// The Session's environment, owned by the caller through `allocator`, or
@@ -163,11 +189,13 @@ pub fn copy(self: *SessionEnvironments, session: []const u8, allocator: std.mem.
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             const index = self.find(session) orelse break :blk null;
-            const bytes = self.values[self.entries[index].value].?.bytes();
+            const value = self.values[self.entries[index].value].?;
+            const bytes = value.bytes();
             if (bytes.len != buffer.len) break :blk bytes.len;
             @memcpy(buffer, bytes);
             self.uses += 1;
             self.entries[index].used = self.uses;
+            value.used = self.uses;
             return buffer;
         };
         // Allocate outside the mutex, then look again: the value may change.
@@ -203,6 +231,37 @@ fn freePlace(self: *SessionEnvironments, prepared: *Offer) usize {
     return victim;
 }
 
+/// Drops values until one of `capacity` bytes fits: each time the value
+/// that the fewest Sessions name, the least recently used among those, and
+/// then, in one pass, every Session naming a dropped value.
+fn makeRoom(self: *SessionEnvironments, capacity: usize, prepared: *Offer) void {
+    var count = self.value_count;
+    var bytes = self.value_bytes;
+    var dropped: [max_values]bool = @splat(false);
+    var any = false;
+    while (count == max_values or bytes + capacity > max_value_bytes) {
+        var victim: ?*Interned = null;
+        var victim_index: usize = undefined;
+        for (self.values, 0..) |value, index| if (value) |held| {
+            if (dropped[index]) continue;
+            if (victim) |best| if (held.refs > best.refs or (held.refs == best.refs and held.used >= best.used)) continue;
+            victim = held;
+            victim_index = index;
+        };
+        dropped[victim_index] = true;
+        any = true;
+        count -= 1;
+        bytes -= victim.?.capacity;
+    }
+    if (!any) return;
+    for (self.entries[0..self.len]) |*entry| {
+        if (entry.unused() or !dropped[entry.value]) continue;
+        self.release(entry.value, prepared);
+        entry.* = std.mem.zeroes(Entry);
+    }
+    std.debug.assert(self.value_count == count and self.value_bytes == bytes);
+}
+
 fn oldest(self: *const SessionEnvironments) ?usize {
     var result: ?usize = null;
     for (self.entries[0..self.len], 0..) |*entry, index| {
@@ -219,7 +278,7 @@ fn release(self: *SessionEnvironments, index: u8, prepared: *Offer) void {
     if (value.refs != 0) return;
     self.values[index] = null;
     self.value_count -= 1;
-    self.value_bytes -= value.len;
+    self.value_bytes -= value.capacity;
     value.next = prepared.released;
     prepared.released = value;
 }
@@ -230,9 +289,16 @@ fn testingSession(buffer: *Session, number: usize) []const u8 {
 }
 
 fn testingOffer(table: *SessionEnvironments, session: []const u8, rank: environment.Rank, value: environment.Value) !void {
-    var prepared = try table.prepare(value);
-    defer table.finish(&prepared);
+    var prepared: Offer = try .init(table.allocator, value.len);
+    defer prepared.deinit(table.allocator);
+    @memcpy(prepared.room(), value);
     table.offer(session, rank, &prepared);
+}
+
+fn testingLive(table: *const SessionEnvironments) usize {
+    var live: usize = 0;
+    for (table.entries[0..table.len]) |*entry| live += @intFromBool(!entry.unused());
+    return live;
 }
 
 fn expectCopy(table: *SessionEnvironments, session: []const u8, expected: ?[]const u8) !void {
@@ -360,4 +426,59 @@ test "a value is freed exactly when no entry names it" {
     try testingOffer(&table, testingSession(&third, 3), .{ .origin = .peer, .admission = 1 }, "");
     try expectCopy(&table, &third, "");
     try std.testing.expectEqual(@as(usize, 2), table.value_count);
+}
+
+test "a value many Sessions share stays while one Session's value makes room" {
+    var table: SessionEnvironments = undefined;
+    try table.init(std.testing.io, std.testing.allocator);
+    defer table.deinit();
+    var name: Session = undefined;
+    // The oldest Sessions share one value; each newer one has its own, so
+    // both the entries and the values are full.
+    const shared = max_sessions - max_values + 1;
+    for (0..shared) |number| try testingOffer(&table, testingSession(&name, number), .{ .origin = .person, .admission = 1 }, "S=1\x00");
+    var value: [8]u8 = undefined;
+    for (shared..max_sessions) |number| {
+        try testingOffer(&table, testingSession(&name, number), .{ .origin = .person, .admission = 1 }, try std.fmt.bufPrint(&value, "N={d:0>4}\x00", .{number}));
+    }
+    try std.testing.expectEqual(@as(usize, max_values), table.value_count);
+    try std.testing.expectEqual(@as(usize, max_sessions), testingLive(&table));
+    // A new value drops the least recently used value one Session names, and
+    // that Session's entry makes room for the new one: one replacement.
+    try testingOffer(&table, testingSession(&name, max_sessions), .{ .origin = .person, .admission = 1 }, "NEW=1\x00");
+    try std.testing.expectEqual(@as(usize, max_values), table.value_count);
+    try std.testing.expectEqual(@as(usize, max_sessions), testingLive(&table));
+    try expectCopy(&table, testingSession(&name, shared), null);
+    try expectCopy(&table, testingSession(&name, max_sessions), "NEW=1\x00");
+    for ([_]usize{ 0, 1, shared - 1 }) |number| try expectCopy(&table, testingSession(&name, number), "S=1\x00");
+    try expectCopy(&table, testingSession(&name, shared + 1), try std.fmt.bufPrint(&value, "N={d:0>4}\x00", .{shared + 1}));
+}
+
+test "an offer drops only the values its bytes need" {
+    var table: SessionEnvironments = undefined;
+    try table.init(std.testing.io, std.testing.allocator);
+    defer table.deinit();
+    var name: Session = undefined;
+    const large = try std.testing.allocator.alloc(u8, protocol.max_environment_bytes);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    @memcpy(large[0..2], "V=");
+    large[large.len - 1] = 0;
+    const fit = max_value_bytes / large.len;
+    // Every value but the last is shared by two Sessions; the last, the most
+    // recently used, by one.
+    for (0..fit) |number| {
+        large[2] = protocol.session_alphabet[number];
+        try testingOffer(&table, testingSession(&name, 2 * number), .{ .origin = .person, .admission = 1 }, large);
+        if (number + 1 != fit) try testingOffer(&table, testingSession(&name, 2 * number + 1), .{ .origin = .person, .admission = 1 }, large);
+    }
+    try std.testing.expectEqual(fit, table.value_count);
+    large[2] = protocol.session_alphabet[fit];
+    try testingOffer(&table, testingSession(&name, 2 * fit), .{ .origin = .person, .admission = 1 }, large);
+    try std.testing.expectEqual(fit, table.value_count);
+    // Only the Session alone with its value was replaced.
+    try expectCopy(&table, testingSession(&name, 2 * (fit - 1)), null);
+    try std.testing.expectEqual(2 * fit - 1, testingLive(&table));
+    large[2] = protocol.session_alphabet[0];
+    try expectCopy(&table, testingSession(&name, 0), large);
 }

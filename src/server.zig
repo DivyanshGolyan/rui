@@ -118,10 +118,12 @@ const Intake = struct {
         retained_scratch: ?named_scratch.Owner = null,
         cleanup_retry_at: i128 = 0,
         /// A Message's client environment: the body's first
-        /// `X-Rui-Environment-Bytes` bytes, read before the request.
-        environment: []u8 = &.{},
+        /// `X-Rui-Environment-Bytes` bytes, read before the request straight
+        /// into the allocation the Session's register keeps. Admission
+        /// spends it.
+        environment: ?SessionEnvironments.Offer = null,
         environment_received: usize = 0,
-        /// The checked environment, a prefix of `environment`.
+        /// The checked environment, while `environment` holds it.
         environment_value: ?environment.Value = null,
 
         fn retireUnhanded(self: *Exchange) void {
@@ -193,9 +195,7 @@ const Intake = struct {
             self.releaseIngress();
             self.input.deinit(host.allocator);
             self.input = .empty;
-            host.allocator.free(self.environment);
-            self.environment = &.{};
-            self.environment_value = null;
+            self.releaseEnvironment();
             if (self.retained_scratch) |*retained| {
                 const now: i128 = nowNs(host);
                 if (now < self.cleanup_retry_at) return false;
@@ -272,9 +272,10 @@ const Intake = struct {
         }
 
         fn read(self: *Exchange) !void {
+            if (self.state == .body and self.environmentRemaining() != 0) return self.readEnvironment();
             var buffer: [protocol.content_window_bytes]u8 = undefined;
             const wanted = if (self.ingress) |ingress|
-                @min(buffer.len, self.environment.len - self.environment_received + ingress.options.content_length - ingress.received)
+                @min(buffer.len, self.environmentRemaining() + ingress.options.content_length - ingress.received)
             else
                 buffer.len;
             if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
@@ -360,8 +361,12 @@ const Intake = struct {
             if (self.state != .body) return;
             if (self.route != .host_info)
                 self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
-            consumed += try self.receiveEnvironment(bytes[consumed..]);
-            if (consumed == bytes.len and self.ingress.?.options.content_length != 0) return;
+            if (self.route == .message) {
+                consumed += try self.receiveEnvironment(bytes[consumed..]);
+                // The environment alone arrived: the record, never empty,
+                // is still to come.
+                if (consumed == bytes.len) return;
+            }
             if (self.route == .configure or self.route == .message) {
                 // One bounded window is borrowed by local capture work. No
                 // socket read or peer wait runs on those shared stacks.
@@ -372,7 +377,9 @@ const Intake = struct {
         }
 
         /// A Message's body starts with its client environment; every other
-        /// route carries none. Returns the request's own length.
+        /// route carries none. Returns the request's own length, which for a
+        /// Message is never zero, so its environment is always complete and
+        /// checked before its request is.
         fn reserveEnvironment(self: *Exchange) !u64 {
             const length = self.header.environment_bytes orelse {
                 if (self.route == .message) return error.EnvironmentRequired;
@@ -380,23 +387,55 @@ const Intake = struct {
             };
             if (self.route != .message) return error.InvalidEnvironment;
             if (length > protocol.max_environment_bytes) return error.EnvironmentTooLarge;
-            if (length > self.header.content_length) return error.InvalidEnvironment;
-            self.environment = try self.host.allocator.alloc(u8, @intCast(length));
-            if (length == 0) self.environment_value = "";
+            if (length >= self.header.content_length) return error.InvalidEnvironment;
+            self.environment = try .init(self.host.allocator, @intCast(length));
+            if (length == 0) try self.checkEnvironment();
             return self.header.content_length - length;
+        }
+
+        /// Reads the rest of a Message's environment straight into the
+        /// allocation the register keeps.
+        fn readEnvironment(self: *Exchange) !void {
+            if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
+            const room = self.environment.?.room()[self.environment_received..];
+            const result = std.c.read(self.fd, room.ptr, room.len);
+            if (result < 0) switch (std.posix.errno(result)) {
+                .AGAIN, .INTR => return,
+                else => return error.ReadFailed,
+            };
+            if (result == 0) return error.UnexpectedEndOfBody;
+            self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
+            self.environment_received += @intCast(result);
+            if (self.environmentRemaining() == 0) try self.checkEnvironment();
+        }
+
+        fn environmentRemaining(self: *const Exchange) usize {
+            const offer = if (self.environment) |*held| held else return 0;
+            if (offer.candidate == null) return 0;
+            return offer.room().len - self.environment_received;
         }
 
         /// Takes the environment's bytes from the front of `bytes` and checks
         /// the whole once it has arrived. Returns how many it took.
         fn receiveEnvironment(self: *Exchange, bytes: []const u8) !usize {
-            const wanted = @min(bytes.len, self.environment.len - self.environment_received);
+            const wanted = @min(bytes.len, self.environmentRemaining());
             if (wanted == 0) return 0;
-            @memcpy(self.environment[self.environment_received..][0..wanted], bytes[0..wanted]);
+            @memcpy(self.environment.?.room()[self.environment_received..][0..wanted], bytes[0..wanted]);
             self.environment_received += wanted;
-            if (self.environment_received == self.environment.len) {
-                self.environment_value = try environment.received(self.host.allocator, self.environment);
-            }
+            if (self.environmentRemaining() == 0) try self.checkEnvironment();
             return wanted;
+        }
+
+        fn checkEnvironment(self: *Exchange) !void {
+            const offer = &self.environment.?;
+            offer.settle((try environment.received(self.host.allocator, offer.room())).len);
+            self.environment_value = offer.value();
+        }
+
+        fn releaseEnvironment(self: *Exchange) void {
+            if (self.environment) |*offer| offer.deinit(self.host.allocator);
+            self.environment = null;
+            self.environment_value = null;
         }
 
         fn receive(self: *Exchange, bytes: []const u8) !State {
@@ -416,7 +455,9 @@ const Intake = struct {
             // longer borrowed, even when a peer holds acknowledgment delivery.
             defer self.releaseRequest();
             const reply = try self.ensureReply();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, self.environment_value);
+            // Admission spends the environment; nothing of it outlives this.
+            defer self.releaseEnvironment();
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1217,12 +1258,14 @@ const Header = struct {
 
 /// Admits a Message and, in the same Store transaction's lock, offers its
 /// client environment to the Session's register, so execution never starts
-/// the Turn's Bash before the environment is in place.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, client_environment: environment.Value) !store_module.MessageReply {
+/// the Turn's Bash before the environment is in place. The register keeps
+/// `offer`'s allocation or leaves it, with what it released, to be freed
+/// right after admission.
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
+    std.debug.assert(offer.value() != null);
+    defer offer.deinit(host.allocator);
     const faults = host.hooks.storeFaults(.command);
     const environments = host.environments orelse return host.store.submitMessageWithModel(command, null, faults);
-    var offer = try environments.prepare(client_environment);
-    defer environments.finish(&offer);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1235,12 +1278,12 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
             }, self.offer);
         }
     };
-    var install: Install = .{ .environments = environments, .offer = &offer };
+    var install: Install = .{ .environments = environments, .offer = offer };
     return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
 }
 
-/// `client_environment` is a Message's checked environment.
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?environment.Value) !void {
+/// `client_environment` holds a Message's checked environment.
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1281,7 +1324,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = try submitMessage(host, command, client_environment.?);
+            const result = submitMessage(host, command, client_environment.?);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -3878,7 +3921,7 @@ test "a Message's environment header and entries are checked before admission" {
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
     const request = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
-    const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", result: anyerror!?[]const u8 };
+    const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", record: bool = true, result: anyerror!?[]const u8 };
     for ([_]Case{
         .{ .header = "", .result = error.EnvironmentRequired },
         .{ .header = "X-Rui-Environment-Bytes: 65537\r\n", .result = error.EnvironmentTooLarge },
@@ -3888,6 +3931,9 @@ test "a Message's environment header and entries are checked before admission" {
         .{ .header = "X-Rui-Environment-Bytes: 3\r\n", .entries = "A=1", .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 8\r\n", .entries = "A=1\x00A=2\x00", .result = error.InvalidEnvironment },
         .{ .route = "configure", .header = "X-Rui-Environment-Bytes: 0\r\n", .result = error.InvalidEnvironment },
+        // A record is never empty, so an environment is never the whole body.
+        .{ .header = "X-Rui-Environment-Bytes: 4\r\n", .entries = "A=1\x00", .record = false, .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .record = false, .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .result = "" },
         .{ .header = "X-Rui-Environment-Bytes: 14\r\n", .entries = "A=1\x00RUI_X=2\x00C=", .result = error.InvalidEnvironment },
         .{ .header = "X-Rui-Environment-Bytes: 14\r\n", .entries = "A=1\x00RUI_X=2\x00C\x00", .result = error.InvalidEnvironment },
@@ -3898,10 +3944,11 @@ test "a Message's environment header and entries are checked before admission" {
         defer _ = std.c.close(sockets[1]);
         try setNonblocking(sockets[0]);
         var header_buffer: [256]u8 = undefined;
-        const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n{s}Content-Length: {d}\r\n\r\n", .{ case.route, case.header, case.entries.len + request.len });
+        const record: []const u8 = if (case.record) request else "";
+        const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\n{s}Content-Length: {d}\r\n\r\n", .{ case.route, case.header, case.entries.len + record.len });
         try writeAll(std.testing.io, sockets[1], header);
         try writeAll(std.testing.io, sockets[1], case.entries);
-        try writeAll(std.testing.io, sockets[1], request);
+        try writeAll(std.testing.io, sockets[1], record);
         const exchange = try std.testing.allocator.create(Intake.Exchange);
         exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
         defer std.debug.assert(exchange.destroy());
@@ -3913,6 +3960,83 @@ test "a Message's environment header and entries are checked before admission" {
             try std.testing.expectEqualStrings(request, exchange.input.items);
         } else |expected| try std.testing.expectError(expected, read);
     }
+}
+
+test "only a fresh Message changes its Session's environment; a replay or a rejection leaves the register as it was" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("config");
+    configure.configuration.workspace.state = .value;
+    try configure.configuration.workspace.value.set(root);
+    configure.configuration.provider.state = .value;
+    try configure.configuration.provider.value.set("codex");
+    configure.configuration.model.state = .value;
+    try configure.configuration.model.value.set("model-a");
+    const configured = storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session.slice();
+    var environments: SessionEnvironments = undefined;
+    try environments.init(std.testing.io, std.testing.allocator);
+    defer environments.deinit();
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    const Send = struct {
+        fn message(owner: *Host, key: []const u8, to: []const u8, entries: []const u8) !void {
+            var request_buffer: [512]u8 = undefined;
+            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nX-Rui-Environment-Bytes: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entries.len, entries.len + request.len }));
+            try writeAll(std.testing.io, sockets[1], entries);
+            try writeAll(std.testing.io, sockets[1], request);
+            const exchange = try std.testing.allocator.create(Intake.Exchange);
+            exchange.* = .{ .owner = undefined, .host = owner, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(exchange.destroy());
+            try exchange.read();
+            try std.testing.expectEqual(.ready, exchange.state);
+            exchange.state = try exchange.work();
+            try std.testing.expectEqual(.ready, exchange.state);
+            try exchange.prepare();
+            // Admission spent the environment.
+            try std.testing.expectEqual(null, exchange.environment);
+        }
+    };
+    const expectCopy = struct {
+        fn of(table: *SessionEnvironments, from: []const u8, expected: ?[]const u8) !void {
+            const copied = try table.copy(from, std.testing.allocator);
+            defer if (copied) |bytes| std.testing.allocator.free(bytes);
+            if (expected) |bytes| try std.testing.expectEqualStrings(bytes, copied.?) else try std.testing.expectEqual(null, copied);
+        }
+    }.of;
+    try Send.message(&host, "first", session, "A=1\x00");
+    try expectCopy(&environments, session, "A=1\x00");
+    const held = .{ environments.len, environments.value_count, environments.value_bytes };
+    // The same request again, from another terminal: a replay installs nothing.
+    try Send.message(&host, "first", session, "B=2\x00");
+    try expectCopy(&environments, session, "A=1\x00");
+    // A Message the Store rejects installs nothing, for its Session or another.
+    try Send.message(&host, "rejected", "zzzzzz", "C=3\x00");
+    try expectCopy(&environments, "zzzzzz", null);
+    try expectCopy(&environments, session, "A=1\x00");
+    try std.testing.expectEqual(held, .{ environments.len, environments.value_count, environments.value_bytes });
+    // A fresh Message does.
+    try Send.message(&host, "second", session, "D=4\x00");
+    try expectCopy(&environments, session, "D=4\x00");
 }
 
 test "exchange retirement retains failed ingress cleanup through retry" {
