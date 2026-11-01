@@ -1165,6 +1165,9 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else if (err == error.BashArgumentsTooLarge) {
+            var message: [bash.arguments_message_bytes]u8 = undefined;
+            settleActionFailure(host, token, action_binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, prepared.refused_arguments));
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
