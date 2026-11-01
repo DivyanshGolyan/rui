@@ -20,7 +20,7 @@ Load applicable guidance before acting; routes combine:
 
 ## Code Review Rules
 
-PR reviewers, including Codex, apply [Review](CODING_STANDARDS.md#review). Write each finding's correction **Simplify first**: the simpler structure that removes the finding's whole class, with a point patch only as the fallback.
+PR reviewers, including Codex, apply [Review](CODING_STANDARDS.md#review); its **Simplify first** rule shapes every suggested correction.
 
 ## Contract enforcement
 
