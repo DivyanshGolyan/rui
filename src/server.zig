@@ -848,8 +848,8 @@ pub fn serve(
     const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
-    var bash_environment = try bash.environment(io, allocator, home);
-    defer bash_environment.deinit();
+    const bash_facts = try bash.readHostFacts(io, allocator, home);
+    defer bash.freeHostFacts(allocator, bash_facts);
     // Zero bytes are an empty custody record and retention entry, so fresh
     // pages need no initializing pass and an unused one never becomes resident.
     const custody_records = try pages.mapZeroed(execution.CustodyRecord, active_capacity);
@@ -871,7 +871,7 @@ pub fn serve(
         .limits = limits,
         .providers = served,
         .bash_path = bash_path,
-        .bash_environment = &bash_environment,
+        .bash_facts = bash_facts,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),

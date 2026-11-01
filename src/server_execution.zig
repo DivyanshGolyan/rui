@@ -358,9 +358,6 @@ const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     /// Live Bash service and shutdown share this window.
     bash_window: [bash.copy_window_bytes]u8,
-    /// Response import's output item grammar; only the pages one item uses
-    /// become resident.
-    item_check: model_adapter.Output.OutputItemCheck,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
     /// One Bash Action's state. The slots say which part is live: a
@@ -374,8 +371,10 @@ const Workspace = struct {
     /// One transfer's response import: the decoded event data, the
     /// interpretation and the settled output, live from a completed transfer
     /// to its settlement.
-    event_data: model_adapter.Output.EventData,
-    interpretation: model_adapter.OutputInterpretation,
+    event_data: output_decode.EventData,
+    /// The codec's interpretation scratch and the Host's grammar state.
+    interpret: output_decode.Interpret,
+    interpretation: output_decode.Interpretation,
     /// What the provider said of a failure, from its HTTP error body or
     /// error event, live from interpretation to settlement.
     provider_failure: output_decode.ProviderFailure,
@@ -1169,23 +1168,27 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     };
     // The Execution launches straight into its custody record's entry.
     const work = &host.bash_work[token.index];
+    var refused: bash.ArgumentSizes = .{};
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
         .work = work,
+        .refused = &refused,
     }, struct {
         fn handoff(context: anytype) !void {
             try context.host.withEffectLaunch(context, launch);
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else if (err == error.BashArgumentsTooLarge) {
+            settleArgumentsTooLarge(host, token, action_binding, refused);
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
@@ -1330,6 +1333,12 @@ fn retainBashPreparedCleanup(
         .token = token,
         .cleanup = &work.prepared_cleanup,
     });
+}
+
+/// Rare, so its message buffer stays off the dispatch frame.
+noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
+    var message: [bash.arguments_message_bytes]u8 = undefined;
+    settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
 }
 
 fn settleActionFailure(
@@ -1835,6 +1844,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     openai_model.set(active.transfer.observedModel()) catch unreachable;
     var x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
     x_openai_model.set(active.transfer.observedAlternateModel()) catch unreachable;
+    const codec = active.transfer.codec();
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
@@ -1896,11 +1906,10 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, event_data, operation, .{
+    metadata.fail_writes = host.hooks.fails(.response_metadata);
+    output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, &workspace.item_check, .{
-        .metadata = host.hooks.fails(.response_metadata),
     }, &workspace.provider_failure, &workspace.interpretation);
     const accepted = switch (workspace.interpretation) {
         .accepted => |*value| value,
@@ -1936,7 +1945,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(err, &detail);
             retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
@@ -2546,7 +2555,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    var launched = try prepared.launch(&bash.empty_environment);
+    var refused: bash.ArgumentSizes = .{};
+    var launched = try prepared.launch(bash.default_facts, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
@@ -3293,7 +3303,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     );
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        metadata.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
@@ -3301,7 +3311,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     stdout.close(std.testing.io);
     stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
-    try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
+    try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     metadata.deinit();
@@ -3318,7 +3328,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer limited.deinit();
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        limited.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        limited.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

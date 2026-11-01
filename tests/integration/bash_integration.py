@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import signal
@@ -1125,6 +1126,7 @@ def main():
     add_exchange(responses, "cleanup", "printf cleaned")
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
+    add_exchange(responses, "arguments", "printf never")
     add_exchange(responses, "capture-read", "printf captured")
     add_exchange(responses, "capture", "printf captured")
     add_exchange(responses, "seal", "printf sealed")
@@ -1959,6 +1961,7 @@ def main():
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),
             ("spawn", "bash-spawn", "spawn_failed"),
+            ("arguments", "bash-arguments", "spawn_failed"),
             ("capture-read", "bash-capture-read", "storage_failed"),
             ("capture", "bash-capture-write", "storage_failed"),
             ("seal", "bash-seal", "storage_failed"),
@@ -1970,6 +1973,11 @@ def main():
             action = fixture.wait_for(lambda: action_for(store, session), f"{name} Bash Action")
             allow(state, store, f"{name}-allow", session, action["action"])
             fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} result")
+            if name == "arguments":
+                # The OS refused the padded environment; the result names its sizes.
+                text = result_text(store, session)
+                assert "Bash was not started: the system refused its arguments as too large." in text, text
+                assert re.search(r"the environment is \d{7,} bytes in \d+ variables", text), text
             fixture.wait_for(
                 lambda: fixture.completed_observation(store, f"{name}-message"),
                 f"{name} continuation",
@@ -2223,7 +2231,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 29 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 30 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

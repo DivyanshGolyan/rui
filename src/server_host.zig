@@ -2,6 +2,7 @@ const std = @import("std");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
+const environment = @import("environment.zig");
 const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -90,6 +91,7 @@ pub const Hooks = struct {
         bash_preparation,
         bash_preparation_after_captures,
         bash_spawn,
+        bash_arguments,
         bash_service,
         bash_capture_read,
         bash_capture_write,
@@ -220,6 +222,7 @@ pub const Hooks = struct {
             .preparation = self.fails(.bash_preparation),
             .preparation_after_captures = self.fails(.bash_preparation_after_captures),
             .spawn = self.fails(.bash_spawn),
+            .arguments = self.fails(.bash_arguments),
             .service = self.fails(.bash_service),
             .capture_read = self.fails(.bash_capture_read),
             .capture_write = self.fails(.bash_capture_write),
@@ -274,7 +277,7 @@ pub const Host = struct {
     /// every slot change and nothing else.
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
-    bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
+    bash_facts: environment.HostFacts = bash.default_facts,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in
