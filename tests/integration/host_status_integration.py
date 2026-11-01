@@ -43,7 +43,7 @@ def cli_status(home, *args):
     result = subprocess.run([RUI, "host", "status", *map(str, args)],
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     value = json.loads(result.stdout)
-    assert value["version"] == "2" and value["type"] == "host_status", result
+    assert value["version"] == "3" and value["type"] == "host_status", result
     failed = value["status"] in ("incompatible", "access_failure")
     assert (result.returncode != 0) == failed, result
     if value["status"] != "ready":

@@ -218,7 +218,7 @@ def main():
             assert current.returncode == 0, current.stderr
             # Every page streams into exactly one JSON value.
             current_list = json.loads(current.stdout)
-            assert current_list["version"] == "2" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
+            assert current_list["version"] == "3" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
             assert [row["reference"] for row in current_list["sessions"]] == [
                 names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later]
             all_workspaces = subprocess.run([binary, "session", "list", "--store", store, "--all"],
