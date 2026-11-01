@@ -10,6 +10,7 @@ const Provider = protocol.Provider;
 pub fn endpoint(provider: Provider) []const u8 {
     return switch (provider) {
         .codex => model_adapter.managed_endpoint,
+        .openai => "https://api.openai.com/v1/responses",
     };
 }
 
@@ -18,11 +19,15 @@ pub const Credential = union(enum) {
     /// A development endpoint, which takes no credential.
     none,
     chatgpt_device: model_adapter.Authentication,
+    /// An API key, borrowed for the Host's life. `fixture` admits a loopback
+    /// endpoint in place of the provider's own.
+    key_file: struct { key: []const u8, fixture: bool = false },
 
     pub fn route(self: Credential) protocol.Route {
         return switch (self) {
             .none => .endpoint,
             .chatgpt_device => .chatgpt_device,
+            .key_file => .key_file,
         };
     }
 };

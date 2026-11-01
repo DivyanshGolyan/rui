@@ -4,9 +4,8 @@
 //! table at compile time, so this module stays a functional core.
 const std = @import("std");
 const product_defaults = @import("product_defaults.zig");
+const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
-
-pub const provider_label = "codex";
 
 /// Codex identifier syntax admits 1 to this many bytes.
 pub const max_model_bytes = 256;
@@ -116,16 +115,26 @@ pub fn validModelSyntax(model: []const u8) bool {
     return true;
 }
 
+const provider_count = @typeInfo(protocol.Provider).@"enum".field_names.len;
+
+/// Every built-in provider, in declaration order. They share one catalog.
 /// Selection of a Session binding or saved pin admits any exact ID with valid
 /// syntax, including IDs this release does not list.
-pub fn capability(readiness: provider_selection.Readiness) provider_selection.Capability {
-    return .{ .name = provider_label, .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness };
+pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
+    return withPolicy(readiness, validModelSyntax);
 }
 
 /// Selection as `rui defaults inspect` predicts it for the next new Session,
 /// which the CLI admits only with a release-supported model.
-pub fn supportedCapability(readiness: provider_selection.Readiness) provider_selection.Capability {
-    return .{ .name = provider_label, .recommended_model = product_defaults.recommended_model, .admits_model = supportsModel, .readiness = readiness };
+pub fn supportedCapabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
+    return withPolicy(readiness, supportsModel);
+}
+
+fn withPolicy(readiness: *const provider_selection.Readinesses, admits: *const fn ([]const u8) bool) [provider_count]provider_selection.Capability {
+    var out: [provider_count]provider_selection.Capability = undefined;
+    for (&out, std.enums.values(protocol.Provider)) |*entry, provider|
+        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = admits, .readiness = readiness.get(provider) };
+    return out;
 }
 
 test "supported model compaction defaults and exact identifier boundary" {
@@ -174,10 +183,22 @@ test "reasoning effort uses exact catalog defaults and model support without exp
 }
 
 test "selection syntax and release support stay distinct" {
-    const syntax = capability(.configured);
-    const supported = supportedCapability(.configured);
-    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&.{syntax}, null, "family=variant", null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&.{supported}, null, "family=variant", null, null));
-    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&.{supported}, null, null, null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&.{supported}, null, null, "codex", "stale-pin"));
+    var readiness: provider_selection.Readinesses = .initFill(.missing);
+    readiness.set(.codex, .configured);
+    const syntax = capabilities(&readiness);
+    const supported = supportedCapabilities(&readiness);
+    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&syntax, null, "family=variant", null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, "family=variant", null, null));
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&supported, null, null, null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, null, "codex", "stale-pin"));
+}
+
+test "every built-in provider is selectable by its label, and two ready ones ask for a choice" {
+    var readiness: provider_selection.Readinesses = .initFill(.configured);
+    const both = capabilities(&readiness);
+    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
+    readiness.set(.codex, .missing);
+    const one = capabilities(&readiness);
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
 }

@@ -47,6 +47,13 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
     };
 }
 
+/// `attributes` with typed input left unshown, for a secret read as a line.
+pub fn hidingInput(attributes: Attributes) Attributes {
+    var quiet = attributes;
+    quiet.c_lflag &= ~@as(termios.tcflag_t, termios.ECHO);
+    return quiet;
+}
+
 pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.TermiosSetError!void {
     while (true) switch (std.posix.errno(termios.tcsetattr(0, @intCast(@backingInt(action)), &attributes))) {
         .SUCCESS => return,

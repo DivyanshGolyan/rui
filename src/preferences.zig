@@ -76,20 +76,23 @@ pub fn load(home: []const u8) !Values {
     return values;
 }
 
+pub const Readinesses = provider_selection.Readinesses;
+
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
-pub fn update(home: []const u8, edit: Edit, readiness: provider_selection.Readiness) !Values {
+pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Values {
     return (try save(home, edit, readiness, false)).?;
 }
 
 /// Under the same preference lock as setup, keep an existing provider choice.
 /// Null means no change was published; credentials are owned separately.
-pub fn fillProviderAfterLogin(home: []const u8) !bool {
-    return (try save(home, .{ .provider = .{ .set = "codex" } }, .configured, true)) != null;
+pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !bool {
+    const readiness: Readinesses = .initFill(.configured);
+    return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, true)) != null;
 }
 
 /// Apply explicit choices to the locked snapshot, never resolved recommendations.
-fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Values {
+fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     var values = saved;
     if (edit.store == .set) {
         const paths = try platform.resolveClientPaths(io, edit.store.set);
@@ -103,8 +106,7 @@ fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Va
         .keep => {},
         .clear => values.model = .{},
         .set => |model| {
-            const supported = model_capability.capability(readiness);
-            const choice = provider_selection.resolve(&.{supported}, null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
+            const choice = provider_selection.resolve(&model_capability.capabilities(readiness), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
                 error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
                 error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
             };
@@ -116,7 +118,7 @@ fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Va
     return values;
 }
 
-fn save(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool) !?Values {
+fn save(home: []const u8, edit: Edit, readiness: *const Readinesses, only_if_unset: bool) !?Values {
     return saveWithSync(home, edit, readiness, only_if_unset, NativeDirectorySync{});
 }
 
@@ -126,10 +128,10 @@ const NativeDirectorySync = struct {
     }
 };
 
-fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool, directory_sync: anytype) !?Values {
+fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, only_if_unset: bool, directory_sync: anytype) !?Values {
     try validateDirectoryPath(home);
     if (edit.provider == .set) {
-        if (!std.mem.eql(u8, edit.provider.set, "codex")) return error.UnsupportedPreferenceProvider;
+        if (std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
     }
     if (edit.model == .set) {
         if (!model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
@@ -259,6 +261,13 @@ fn validateOwner(handle: anytype) !void {
     if (stat.st_uid != c.geteuid()) return error.UnownedPreferences;
 }
 
+/// Codex in `state` and every other provider missing.
+fn codexOnly(state: provider_selection.Readiness) Readinesses {
+    var readiness: Readinesses = .initFill(.missing);
+    readiness.set(.codex, state);
+    return readiness;
+}
+
 test "native directory sync forwards descriptor failures" {
     const native: NativeDirectorySync = .{};
     // A pipe is a live descriptor that cannot be synced on either supported
@@ -305,14 +314,14 @@ test "directory sync failures preserve complete preference publication" {
         var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const len = try tmp.dir.realPath(io, &path);
         const home = path[0..len];
-        _ = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "deliberate-pin" } }, .missing);
+        _ = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "deliberate-pin" } }, &codexOnly(.missing));
         var fault: Cut = .{ .at = cut, .expected = undefined };
         for ([_][]const u8{ ".", ".config", ".config/rui" }, 0..) |name, index| {
             const dir = try tmp.dir.openDir(io, name, .{});
             defer dir.close(io);
             try std.testing.expectEqual(@as(c_int, 0), c.fstat(dir.handle, &fault.expected[index]));
         }
-        const result = saveWithSync(home, .{ .model = .{ .set = "new-pin" } }, .missing, false, &fault);
+        const result = saveWithSync(home, .{ .model = .{ .set = "new-pin" } }, &codexOnly(.missing), false, &fault);
         if (cut == 0) {
             _ = try result;
         } else try std.testing.expectError(error.PreferenceDirectorySyncFailed, result);
@@ -335,7 +344,7 @@ test "login fills only a missing provider under the preference lock" {
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &home_buffer);
     const home = home_buffer[0..len];
-    try std.testing.expect(try fillProviderAfterLogin(home));
+    try std.testing.expect(try fillProviderAfterLogin(home, .codex));
     const first = try load(home);
     try std.testing.expectEqualStrings("codex", first.provider.slice());
     try std.testing.expectEqualStrings("", first.model.slice());
@@ -348,7 +357,7 @@ test "login fills only a missing provider under the preference lock" {
     try file.writeStreamingAll(io, "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n");
     file.close(io);
     try config.rename("preferences.tmp", config, "preferences", io);
-    try std.testing.expect(!try fillProviderAfterLogin(home));
+    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
     const saved = try load(home);
     try std.testing.expect(saved.provider.eql("legacy") and saved.model.eql("legacy-model"));
 }
@@ -359,25 +368,25 @@ test "preference edits distinguish model keep set and clear without publishing r
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &home_buffer);
     const home = home_buffer[0..len];
-    const pinned = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, .missing);
+    const pinned = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, &codexOnly(.missing));
     try std.testing.expect(pinned.provider.eql("codex") and pinned.model.eql("gpt-6-luna"));
-    const kept = try update(home, .{}, .credential_error);
+    const kept = try update(home, .{}, &codexOnly(.credential_error));
     try std.testing.expect(kept.provider.eql("codex") and kept.model.eql("gpt-6-luna"));
-    const cleared = try update(home, .{ .model = .clear }, .configured);
+    const cleared = try update(home, .{ .model = .clear }, &codexOnly(.configured));
     try std.testing.expect(cleared.provider.eql("codex") and cleared.model.len == 0);
     try std.testing.expect((try load(home)).model.len == 0);
-    try std.testing.expect(!try fillProviderAfterLogin(home));
+    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).model.len == 0);
-    const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, .refresh_required);
+    const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, &codexOnly(.refresh_required));
     try std.testing.expect(reset.model.eql("gpt-6-luna"));
     // Syntax accepts unlisted exact IDs; catalog membership is a separate
     // concern. Invalid edits must leave the complete previous pin unchanged.
     for ([_][]const u8{ "family=variant", &@as([256]u8, @splat('x')) }) |valid| {
-        const result = try update(home, .{ .model = .{ .set = valid } }, .missing);
+        const result = try update(home, .{ .model = .{ .set = valid } }, &codexOnly(.missing));
         try std.testing.expectEqualStrings(valid, result.model.slice());
         try std.testing.expectEqualStrings(valid, (try load(home)).model.slice());
         for ([_][]const u8{ "", "bad model", "bad\nmodel", "\x7f", "\xc3\xa9", &@as([257]u8, @splat('x')) }) |invalid| {
-            try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = invalid } }, .configured));
+            try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = invalid } }, &codexOnly(.configured)));
             try std.testing.expectEqualStrings(valid, (try load(home)).model.slice());
         }
     }
@@ -389,7 +398,7 @@ test "preference edits persist explicit choices rather than recommendations" {
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &home_buffer);
     const home = home_buffer[0..len];
-    _ = try fillProviderAfterLogin(home);
+    _ = try fillProviderAfterLogin(home, .codex);
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     const cases = .{
@@ -407,7 +416,7 @@ test "preference edits persist explicit choices rather than recommendations" {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try file.writeStreamingAll(io, "version=1\nstore=\nprovider=" ++ case[0] ++ "\nmodel=" ++ case[1] ++ "\n");
         file.close(io);
-        const result = try update(home, case[2], .configured);
+        const result = try update(home, case[2], &codexOnly(.configured));
         try std.testing.expectEqualStrings(case[3], result.provider.slice());
         try std.testing.expectEqualStrings(case[4], result.model.slice());
         const reloaded = try load(home);
@@ -428,16 +437,16 @@ test "preference edits preserve unused deleted Store but validate supplied repla
     var replacement_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const old = try std.fmt.bufPrint(&old_buffer, "{s}/old", .{home});
     const replacement = try std.fmt.bufPrint(&replacement_buffer, "{s}/replacement", .{home});
-    const before = try update(home, .{ .store = .{ .set = old }, .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, .missing);
+    const before = try update(home, .{ .store = .{ .set = old }, .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, &codexOnly(.missing));
     try tmp.dir.deleteDir(io, "old");
     try std.testing.expectEqualStrings(old, (try load(home)).store.slice());
-    const cleared = try update(home, .{ .model = .clear }, .configured);
+    const cleared = try update(home, .{ .model = .clear }, &codexOnly(.configured));
     try std.testing.expect(cleared.store.eql(before.store.slice()) and cleared.model.len == 0);
-    const independent = try update(home, .{ .model = .{ .set = "explicit-model" } }, .missing);
+    const independent = try update(home, .{ .model = .{ .set = "explicit-model" } }, &codexOnly(.missing));
     try std.testing.expect(independent.store.eql(old) and independent.model.eql("explicit-model"));
-    try std.testing.expectError(error.FileNotFound, update(home, .{ .store = .{ .set = old }, .model = .clear }, .configured));
+    try std.testing.expectError(error.FileNotFound, update(home, .{ .store = .{ .set = old }, .model = .clear }, &codexOnly(.configured)));
     try std.testing.expect((try load(home)).model.eql("explicit-model"));
-    const repaired = try update(home, .{ .store = .{ .set = replacement }, .model = .clear }, .missing);
+    const repaired = try update(home, .{ .store = .{ .set = replacement }, .model = .clear }, &codexOnly(.missing));
     try std.testing.expect(repaired.store.eql(replacement) and repaired.provider.eql("codex") and repaired.model.len == 0);
     try std.testing.expect((try load(home)).store.eql(replacement));
 }
@@ -450,7 +459,7 @@ test "preference publication creates owner usable private modes despite umask" {
     const home = home_buffer[0..len];
     const previous = c.umask(0o777);
     defer _ = c.umask(previous);
-    _ = try update(home, .{ .provider = .{ .set = "codex" } }, .missing);
+    _ = try update(home, .{ .provider = .{ .set = "codex" } }, &codexOnly(.missing));
     var config = try tmp.dir.openDir(io, ".config", .{ .iterate = true });
     defer config.close(io);
     var private = try config.openDir(io, "rui", .{ .iterate = true });
@@ -464,11 +473,11 @@ test "preference publication creates owner usable private modes despite umask" {
     }
     // Do not silently repair an existing parent's mode or an unsafe private owner.
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(config.handle, 0o750));
-    _ = try update(home, .{ .model = .{ .set = "explicit-pin" } }, .missing);
+    _ = try update(home, .{ .model = .{ .set = "explicit-pin" } }, &codexOnly(.missing));
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o750), (try config.stat(io)).permissions.toMode() & 0o777);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(private.handle, 0o755));
     defer _ = std.c.fchmod(private.handle, 0o700);
-    try std.testing.expectError(error.InsecurePreferenceDirectory, update(home, .{ .model = .clear }, .configured));
+    try std.testing.expectError(error.InsecurePreferenceDirectory, update(home, .{ .model = .clear }, &codexOnly(.configured)));
 }
 
 test "preference publication is independent of an unused oversized HOME Store fallback" {
@@ -484,9 +493,9 @@ test "preference publication is independent of an unused oversized HOME Store fa
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(error.PreferencePathTooLong, defaultStore(home, &path_buffer));
     _ = try directoryPath(home, &path_buffer);
-    try std.testing.expect(try fillProviderAfterLogin(home));
+    try std.testing.expect(try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).provider.eql("codex"));
-    _ = try update(home, .{ .model = .{ .set = "family=variant" } }, .missing);
+    _ = try update(home, .{ .model = .{ .set = "family=variant" } }, &codexOnly(.missing));
     try std.testing.expect((try load(home)).model.eql("family=variant"));
 }
 
@@ -508,8 +517,8 @@ test "preference login fill and setup serialize without losing an explicit pin" 
         }
         fn work(self: *@This()) !void {
             if (self.login) {
-                _ = try fillProviderAfterLogin(self.home);
-            } else _ = try update(self.home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "deliberate-pin" } }, .missing);
+                _ = try fillProviderAfterLogin(self.home, .codex);
+            } else _ = try update(self.home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "deliberate-pin" } }, &codexOnly(.missing));
         }
     };
     var login: Worker = .{ .home = home, .login = true };
@@ -525,4 +534,18 @@ test "preference login fill and setup serialize without losing an explicit pin" 
     if (setup.failure) |err| return err;
     const saved = try load(home);
     try std.testing.expect(saved.provider.eql("codex") and saved.model.eql("deliberate-pin"));
+}
+
+test "any built-in provider can be saved, and a model alone needs one ready provider" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    const both: Readinesses = .initFill(.configured);
+    try std.testing.expectError(error.UnsupportedPreferenceProvider, update(home, .{ .provider = .{ .set = "claude" } }, &both));
+    try std.testing.expectError(error.PreferenceProviderRequired, update(home, .{ .model = .{ .set = "gpt-6-luna" } }, &both));
+    const saved = try update(home, .{ .provider = .{ .set = "openai" }, .model = .{ .set = "gpt-6-luna" } }, &both);
+    try std.testing.expect(saved.provider.eql("openai") and saved.model.eql("gpt-6-luna"));
+    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
+    try std.testing.expect((try load(home)).provider.eql("openai"));
 }

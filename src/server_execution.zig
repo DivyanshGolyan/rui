@@ -12,6 +12,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const process = @import("os/process.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -1620,7 +1621,15 @@ fn launchPreparedRequest(
             finishCustodyNow(host, slot);
             return;
         };
-    }
+    } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
+        .key_file => |key| headers.initKey(served.endpoint, providers.endpoint(request.provider), host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
+            request.deinit(host.io, host.scratch_budget.?);
+            fenceDispatch(host, "provider preparation", err);
+            finishCustodyNow(host, slot);
+            return;
+        },
+        .none, .chatgpt_device => {},
+    };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
@@ -2326,7 +2335,7 @@ test "HTTP error capture retires before execution custody" {
         // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses" }),
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,

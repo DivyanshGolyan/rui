@@ -126,7 +126,7 @@ RULES = (
      ("transport-h2-integration", "codex-h2-integration"),
      ("transport-h2-integration", "codex-h2-integration"),
      "Shared H2 fixture, managed imports and companion caller regression"),
-    (("src/codex*", "tests/integration/codex*"),
+    (("src/codex*", "src/api_key.zig", "src/providers.zig", "tests/integration/codex*"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      ("test", "codex-integration", "codex-credential-integration", "codex-h2-integration"),
      "Credential mutation and synthetic managed transport"),

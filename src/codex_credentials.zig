@@ -130,6 +130,50 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scr
     return true;
 }
 
+/// The owner-only file at absolute `path`, whose parent must be a private
+/// directory reached without symlinks, read into `buffer`; null when it does
+/// not exist. The caller wipes the returned bytes.
+pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
+    var owner = Owner.open(path) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer owner.close();
+    return owner.readBytes(buffer) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
+    };
+}
+
+/// Whether an owner-only file is at `path`, without reading its bytes.
+pub fn privatePresent(path: []const u8) !bool {
+    var owner = Owner.open(path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer owner.close();
+    const handle = std.posix.openat(owner.parent.handle, owner.finalName(), .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    try validatePrivateFile(file);
+    return true;
+}
+
+/// Replaces the owner-only file at `path` with `bytes`, durably and atomically.
+pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {
+    var owner = try Owner.open(path);
+    defer owner.close();
+    return owner.publishBytes(bytes, null);
+}
+
 const Owner = struct {
     parent: std.Io.Dir,
     name: [std.Io.Dir.max_name_bytes]u8,
@@ -192,6 +236,14 @@ const Owner = struct {
     }
 
     fn readRecordInto(self: *Owner, destination: *Record, buffer: *[max_file_bytes + 1]u8) !void {
+        const bytes = try self.readBytes(buffer);
+        defer std.crypto.secureZero(u8, bytes);
+        try policy.parseInto(bytes, destination);
+    }
+
+    /// The whole file, which must be shorter than `buffer`. The caller wipes
+    /// the bytes it returns; on error nothing read stays in `buffer`.
+    fn readBytes(self: *Owner, buffer: []u8) ![]u8 {
         // Reject a private FIFO after opening it without waiting for a writer.
         const file: std.Io.File = .{ .handle = try std.posix.openat(self.parent.handle, self.finalName(), .{
             .ACCMODE = .RDONLY,
@@ -202,13 +254,14 @@ const Owner = struct {
         defer file.close(io);
         try validatePrivateFile(file);
         const stat = try file.stat(io);
-        if (stat.size > max_file_bytes) return error.CredentialFileTooLarge;
+        if (stat.size >= buffer.len) return error.CredentialFileTooLarge;
         // The read writes at most this prefix; the rest stays untouched.
         const bytes = buffer[0..@intCast(stat.size + 1)];
-        defer std.crypto.secureZero(u8, bytes);
+        errdefer std.crypto.secureZero(u8, bytes);
         const count = try file.readPositionalAll(io, bytes, 0);
         if (count != stat.size) return error.CredentialFileChanged;
-        try policy.parseInto(bytes[0..count], destination);
+        std.crypto.secureZero(u8, bytes[count..]);
+        return bytes[0..count];
     }
 
     fn publish(self: *Owner, record: *const Record, buffer: *[max_file_bytes + 1]u8) !void {
@@ -218,6 +271,16 @@ const Owner = struct {
     const PublishFault = enum { write, file_sync, rename, directory_sync };
 
     fn publishWithFault(self: *Owner, record: *const Record, fault: ?PublishFault, buffer: *[max_file_bytes + 1]u8) !void {
+        const bytes = buffer[0..max_file_bytes];
+        const encoded = policy.encode(record, bytes) catch |err| {
+            std.crypto.secureZero(u8, bytes);
+            return err;
+        };
+        defer std.crypto.secureZero(u8, bytes[0..encoded.len]);
+        return self.publishBytes(encoded, fault);
+    }
+
+    fn publishBytes(self: *Owner, encoded: []const u8, fault: ?PublishFault) !void {
         if (self.parent.openFile(io, self.finalName(), .{
             .allow_directory = false,
             .follow_symlinks = false,
@@ -254,12 +317,6 @@ const Owner = struct {
             if (file_open) file.close(io);
             if (!published) self.parent.deleteFile(io, temp_name) catch {};
         }
-        const bytes = buffer[0..max_file_bytes];
-        const encoded = policy.encode(record, bytes) catch |err| {
-            std.crypto.secureZero(u8, bytes);
-            return err;
-        };
-        defer std.crypto.secureZero(u8, bytes[0..encoded.len]);
         if (fault == .write) {
             try file.writeStreamingAll(io, encoded[0..@min(4, encoded.len)]);
             return error.InjectedCredentialWriteFailure;

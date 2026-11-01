@@ -895,11 +895,12 @@ pub fn serve(
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
     if (served.any()) {
-        for (served.table.values) |entry| if (entry) |value| {
+        for (served.table.values, std.enums.values(protocol.Provider)) |entry, label| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
             switch (value.credential) {
                 .none => {},
                 .chatgpt_device => |selected| try model_adapter.validateAuthenticationEndpoint(value.endpoint, served.ca_file, selected),
+                .key_file => |key| try model_adapter.validateKeyEndpoint(value.endpoint, providers.endpoint(label), served.ca_file, key.fixture),
             }
         };
         try provider.checkLibraries();
@@ -1925,7 +1926,7 @@ fn renderHostInfo(
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex, routes.openai });
 }
 
 /// Nothing changed since the token: it comes back, with no rows.

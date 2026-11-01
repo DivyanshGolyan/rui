@@ -13,6 +13,7 @@ const h2 = @import("h2");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
+const api_key = @import("api_key.zig");
 pub const Output = @import("provider_output.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -415,6 +416,14 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
         return error.InvalidCodexFixtureEndpoint;
 }
 
+/// An API key goes only to its provider's own endpoint, or for a fixture to
+/// a loopback one.
+pub fn validateKeyEndpoint(endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
+    if (fixture) {
+        if (!fixtureEndpoint(endpoint, ca_file)) return error.InvalidKeyFixtureEndpoint;
+    } else if (!std.mem.eql(u8, endpoint, own_endpoint)) return error.KeyEndpointMismatch;
+}
+
 /// The fields the credential path writes after the codec's headers:
 /// the credential, user-agent, FedRAMP and the Turn's turn state, each named
 /// in `provider.host_request_fields` so no codec header can name it.
@@ -462,6 +471,21 @@ pub const Headers = struct {
             self.entries[self.length] = .{ .name = "x-codex-turn-state", .value = turn_state };
             self.length += 1;
         }
+    }
+
+    /// An API key's fields: the key and user-agent. The key goes only to
+    /// `own_endpoint`, its provider's own, or for a fixture to a loopback one.
+    pub fn initKey(self: *Headers, endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider.Credentials) !void {
+        try validateKeyEndpoint(endpoint, own_endpoint, ca_file, fixture);
+        if (!api_key.valid(key)) return error.InvalidCredentialHeader;
+        const shared = try shared_credentials.share(key, "");
+        self.credentials = shared_credentials;
+        self.credential = shared;
+        self.entries[0..2].* = .{
+            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
+            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
+        };
+        self.length = 2;
     }
 
     pub fn fields(self: *const Headers) []const h2.Field {
@@ -698,6 +722,34 @@ test "Codex turn state owner changes invalidate paused Turns and stale completio
             try std.testing.expectEqualStrings("fresh-a", states.replay(1, account).value);
         }
     }
+}
+
+test "an API key goes only to its own endpoint or a loopback fixture, with no account" {
+    var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
+    const own = "https://api.openai.com/v1/responses";
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try headers.initKey(own, own, null, "sk-test", false, &credentials);
+        const entries = headers.fields();
+        try std.testing.expectEqual(@as(usize, 2), entries.len);
+        try std.testing.expectEqualStrings("authorization", entries[0].name);
+        try std.testing.expectEqualStrings("Bearer sk-test", entries[0].value);
+        try std.testing.expect(entries[0].sensitive);
+        try std.testing.expectEqualStrings("user-agent", entries[1].name);
+        for (entries) |entry| try std.testing.expect(provider.hostField(entry.name));
+    }
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try headers.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", true, &credentials);
+    }
+    var refused: Headers = .{};
+    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey(managed_endpoint, own, null, "sk-test", false, &credentials));
+    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", false, &credentials));
+    try std.testing.expectError(error.InvalidKeyFixtureEndpoint, refused.initKey(own, own, null, "sk-test", true, &credentials));
+    try std.testing.expectError(error.InvalidCredentialHeader, refused.initKey(own, own, null, "sk test", false, &credentials));
+    try std.testing.expectEqual(@as(?*provider.SharedCredential, null), credentials.head);
 }
 
 test "Codex headers carry turn state only when the Turn has one" {

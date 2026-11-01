@@ -20,6 +20,10 @@ pub const tools = "bash";
 /// Permission mode for a fresh Session.
 pub const permission_mode = "bypass";
 
+/// Provider for a fresh peer-created Session when no explicit or saved
+/// provider applies. Bare `rui` asks instead when several are ready.
+pub const provider = "codex";
+
 /// Model for a fresh Session when no explicit or saved model applies. It needs
 /// a row in `model_capability.models`, which checks this at compile time.
 pub const recommended_model = "gpt-6.1-sol";
@@ -38,6 +42,7 @@ test "approved product defaults" {
     try std.testing.expectEqual(@as(usize, 100), intake_capacity);
     try std.testing.expectEqualStrings("bash", tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
+    try std.testing.expectEqualStrings("codex", provider);
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
