@@ -37,10 +37,11 @@ An acknowledgment means Rui accepted the shutdown request. Cleanup can still be 
 
 ```sh
 rui host serve --store PATH --provider codex
+rui host serve --store PATH --provider codex --provider openai
 rui host serve --store PATH --active-capacity 8 --provider codex
 ```
 
-Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential. Sessions of a provider the Host does not serve wait until a Host that serves it starts. Without `--provider` or a development endpoint, `host serve` makes no model requests. The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
+Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential: `codex` is ChatGPT sign-in (`rui auth login codex`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin). A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, stop and restart a running Host to add it. An auto-started Host serves `openai` whenever a key is saved. Sessions of a provider the Host does not serve wait until a Host that serves it starts. Without `--provider` or a development endpoint, `host serve` makes no model requests. The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_name = @import("provider_name.zig");
 
 pub const Readiness = enum {
     configured,
@@ -11,6 +12,9 @@ pub const Readiness = enum {
         return self == .configured or self == .renewal_due;
     }
 };
+
+/// Each built-in provider's local credential state.
+pub const Readinesses = std.enums.EnumArray(provider_name.Provider, Readiness);
 
 pub const Capability = struct {
     name: []const u8,
@@ -83,7 +87,7 @@ test "prospective selection does not fall back from a stale or unavailable prefe
 }
 
 test "Codex selection accepts identifiers without claiming model qualification" {
-    const capability = @import("model_capability.zig").capability(.configured);
+    const capability = @import("model_capability.zig").capabilities(&Readinesses.initFill(.configured))[0];
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
     const maximum = @as([256]u8, @splat('x'));
     try std.testing.expectEqualStrings(&maximum, (try resolve(&.{capability}, null, &maximum, null, null)).selected.model);
@@ -92,7 +96,7 @@ test "Codex selection accepts identifiers without claiming model qualification" 
 }
 
 test "renewal due selects a sole provider and resolves only absent model pins" {
-    var capability = @import("model_capability.zig").capability(.renewal_due);
+    var capability = @import("model_capability.zig").capabilities(&Readinesses.initFill(.renewal_due))[0];
     capability.recommended_model = "future-recommendation";
     const inherited = try resolve(&.{capability}, null, null, null, null);
     try std.testing.expect(inherited == .selected);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
+const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
@@ -28,16 +29,7 @@ pub fn validLabel(bytes: []const u8) bool {
     comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
     return ToolPresentation.validDescription(bytes);
 }
-pub const Provider = enum {
-    codex,
-
-    /// The request and output grammar a new Session of this provider pins.
-    pub fn codec(self: Provider) Codec {
-        return switch (self) {
-            .codex => .@"openai-responses/1",
-        };
-    }
-};
+pub const Provider = provider_name.Provider;
 /// How a Host serves a provider: not at all, at a development endpoint
 /// that takes no credential, or at its own endpoint with its credential.
 pub const Route = enum { unserved, endpoint, chatgpt_device, key_file };
@@ -64,9 +56,7 @@ pub fn servesModel(routes: Routes) bool {
     return false;
 }
 
-/// A provider grammar and its version, as a Session pins it. A version's
-/// requests never change shape, so a pinned Session's prompt cache holds.
-pub const Codec = enum { @"openai-responses/1" };
+pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.
@@ -2610,9 +2600,10 @@ pub const max_control_response_bytes = @max(
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, and each provider's
 /// Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\"}}}" };
+pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
 comptime {
-    if (!std.mem.eql(u8, @typeInfo(Provider).@"enum".field_names[0], "codex") or @typeInfo(Provider).@"enum".field_names.len != 1)
+    const names = @typeInfo(Provider).@"enum".field_names;
+    if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);

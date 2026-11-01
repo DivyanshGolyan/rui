@@ -2,6 +2,7 @@ const std = @import("std");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -12,6 +13,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const process = @import("os/process.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -62,7 +64,15 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
+    /// The transfer presented an API key, so a 401 rejects that key.
+    presented_key: bool = false,
     transfer: provider.Transfer = undefined,
+
+    /// The code a failure saves: a rejected API key names its remedy.
+    fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
+        if (self.presented_key and execution.rejectsCredential(failure)) return failure_class.api_key_rejected;
+        return failure.codeText(buffer);
+    }
 };
 
 const NamedScratchSlot = struct {
@@ -1629,12 +1639,21 @@ fn launchPreparedRequest(
             finishCustodyNow(host, slot);
             return;
         };
-    }
+    } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
+        .key_file => |key| headers.initKey(served.endpoint, providers.endpoint(request.provider), host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
+            request.deinit(host.io, host.scratch_budget.?);
+            fenceDispatch(host, "provider preparation", err);
+            finishCustodyNow(host, slot);
+            return;
+        },
+        .none, .chatgpt_device => {},
+    };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
+        .presented_key = if (host.providers.get(request.provider)) |served| served.credential == .key_file else false,
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
@@ -1744,7 +1763,7 @@ fn completeTransfer(
     if (answered_response) |*response| {
         retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
-            .code = decision.fail.codeText(&code_buffer),
+            .code = active.failureCode(decision.fail, &code_buffer),
             .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
@@ -1766,7 +1785,7 @@ fn completeTransfer(
         },
         .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            const code = failure.codeText(&code_buffer);
+            const code = active.failureCode(failure, &code_buffer);
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -2335,7 +2354,7 @@ test "HTTP error capture retires before execution custody" {
         // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses" }),
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
