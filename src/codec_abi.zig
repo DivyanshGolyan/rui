@@ -15,6 +15,39 @@ pub const ObservedHeaders = struct {
     turn_state: []const u8 = "",
 };
 
+pub const max_carry_bytes = 16;
+
+/// A codec's encoder state at a history-item boundary, opaque to the Host.
+/// A request that reuses an earlier request's history span resumes from
+/// the carry that span ended in, so the bytes after it match a rebuild.
+pub const Carry = struct {
+    len: u8 = 0,
+    bytes: [max_carry_bytes]u8 = @splat(0),
+
+    pub fn of(state: []const u8) Carry {
+        std.debug.assert(state.len <= max_carry_bytes);
+        var carry: Carry = .{ .len = @intCast(state.len) };
+        @memcpy(carry.bytes[0..state.len], state);
+        return carry;
+    }
+
+    pub fn slice(self: *const Carry) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    pub fn eql(self: *const Carry, other: *const Carry) bool {
+        return std.mem.eql(u8, self.slice(), other.slice());
+    }
+};
+
+/// A tool as the model is told about it; each codec writes its own envelope.
+pub const ToolDefinition = struct {
+    name: []const u8,
+    description: []const u8,
+    /// A JSON Schema object, as JSON text.
+    parameters_json: []const u8,
+};
+
 /// What a codec declares about itself, read without running it.
 pub const Manifest = struct {
     observe: ObservedHeaders,

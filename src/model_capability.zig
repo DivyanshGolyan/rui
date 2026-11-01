@@ -28,10 +28,6 @@ pub const Model = struct {
     /// Whether the catalog advertises `max`. Every row advertises low through
     /// xhigh, and none advertises `none`.
     max_effort: bool,
-    /// The effective request policy. The catalog advertises parallel support
-    /// for every row, but Codex client.rs disables it for Responses-lite
-    /// models. This is not a claim that Rui uses the lite route.
-    parallel_tool_calls: bool,
     /// Tokens; the automatic compaction trigger is a percentage of it.
     context_window: u64,
 };
@@ -40,16 +36,16 @@ pub const Model = struct {
 /// qualification. IDs are the visible models in OpenAI Codex's pinned catalog:
 /// https://github.com/openai/codex/blob/8531184b49bcb160175a84e140b659a83a426df7/codex-rs/models-manager/models.json
 /// The other columns are exact values from Codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97
-/// models-manager/models.json and client.rs, not backend effective effort or entitlement.
+/// models-manager/models.json, not backend effective effort or entitlement.
 pub const models = [_]Model{
-    .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-terra", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-luna", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.5", .default_effort = .medium, .max_effort = false, .parallel_tool_calls = true, .context_window = 272000 },
+    .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-terra", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.5", .default_effort = .medium, .max_effort = false, .context_window = 272000 },
 };
 
 comptime {
@@ -83,11 +79,6 @@ pub const ids_without_max_effort = blk: {
     }
     break :blk text;
 };
-
-/// Unknown models send `false`.
-pub fn parallelToolCalls(model: []const u8) bool {
-    return if (find(model)) |row| row.parallel_tool_calls else false;
-}
 
 /// Unknown bindings have no inferred default.
 pub fn defaultReasoningEffort(model: []const u8) ?ReasoningEffort {
@@ -149,25 +140,23 @@ test "supported model compaction defaults and exact identifier boundary" {
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
         try std.testing.expectEqual(@as(?u64, null), compactionPolicy(other, null, null).compaction_trigger);
         try std.testing.expect(!supportsModel(other));
-        try std.testing.expect(!parallelToolCalls(other));
     }
     try std.testing.expectEqual(@as(?u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }
 
 test "reasoning effort uses exact catalog defaults and model support without expanding grammar" {
-    for ([_]struct { model: []const u8, default: ReasoningEffort, max: bool, parallel: bool }{
-        .{ .model = "gpt-6-luna", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-6.1-sol", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-6-sol", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-6-astra", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-sol", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-terra", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-luna", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-5.5", .default = .medium, .max = false, .parallel = true },
+    for ([_]struct { model: []const u8, default: ReasoningEffort, max: bool }{
+        .{ .model = "gpt-6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-6.1-sol", .default = .low, .max = true },
+        .{ .model = "gpt-6-sol", .default = .medium, .max = true },
+        .{ .model = "gpt-6-astra", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-sol", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-terra", .default = .medium, .max = true },
+        .{ .model = "gpt-5.6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-5.5", .default = .medium, .max = false },
     }, models) |case, row| {
         try std.testing.expectEqualStrings(case.model, row.id);
         try std.testing.expect(supportsModel(case.model));
-        try std.testing.expectEqual(case.parallel, parallelToolCalls(case.model));
         try std.testing.expectEqual(@as(?ReasoningEffort, case.default), defaultReasoningEffort(case.model));
         for ([_]ReasoningEffort{ .low, .medium, .high, .xhigh }) |effort|
             try std.testing.expect(supportsReasoningEffort(case.model, effort));

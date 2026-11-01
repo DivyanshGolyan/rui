@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const codec_abi = @import("codec_abi.zig");
 
 /// Bash receives the command as one `-c` argument. Linux rejects an
 /// argument of 128 KiB including its NUL (MAX_ARG_STRLEN with 4 KiB pages),
@@ -9,13 +10,15 @@ pub const bash_max_command_bytes: usize = 120 * 1024;
 /// Reuse the command ceiling for optional decoded stdin in charged scratch.
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
-pub const bash_definition_json =
-    "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.\",\"strict\":true," ++
-    "\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
-    std.fmt.comptimePrint("\"stdin\":{{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
-    "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
-    "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
-    "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
+pub const bash_definition: codec_abi.ToolDefinition = .{
+    .name = "bash",
+    .description = "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.",
+    .parameters_json = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
+        std.fmt.comptimePrint("\"stdin\":{{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
+        "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
+        "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
+        "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}",
+};
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
