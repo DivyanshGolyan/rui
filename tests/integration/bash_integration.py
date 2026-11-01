@@ -2071,7 +2071,7 @@ def main():
             "service failure continuation",
         )
         # The shell creates the file for >> before printf writes, so the failure
-        # shutdown can leave it empty. A second run would leave "xx".
+        # shutdown can leave it empty. The single attempt row rules out a rerun.
         if service_marker.exists():
             assert service_marker.read_text() in ("", "x")
 
