@@ -145,28 +145,6 @@ pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
     };
 }
 
-/// Whether an owner-only file is at `path`, without reading its bytes.
-pub fn privatePresent(path: []const u8) !bool {
-    var owner = Owner.open(path) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    defer owner.close();
-    const handle = std.posix.openat(owner.parent.handle, owner.finalName(), .{
-        .ACCMODE = .RDONLY,
-        .NONBLOCK = true,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = true } };
-    defer file.close(io);
-    try validatePrivateFile(file);
-    return true;
-}
-
 /// Replaces the owner-only file at `path` with `bytes`, durably and atomically.
 /// The exclusive lock keeps a concurrent publisher off the one temporary file.
 pub fn publishPrivate(path: []const u8, bytes: []const u8) !void {

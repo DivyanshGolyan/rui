@@ -297,7 +297,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
         .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
         .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable or not owner-only; save it again with `rui auth login openai`.\n",
+        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `rui auth login openai`.\n",
     });
     const supported = model_capability.supportedCapabilities(&readiness);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&supported, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
@@ -673,25 +673,34 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     // cancellation cannot be reported as if installation were rolled back.
     if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
     try codex_credentials.install(path, record, null, &room.work.credentials);
-    const home = init.environ_map.get("HOME") orelse "";
-    // The preference attempt must run even if the terminal receipt cannot be
-    // written. Installation and future defaults have independent outcomes.
     // A guided login is the person's choice of Codex; the explicit command
     // only fills an unset default.
-    const default_outcome = preferences.saveProviderAfterLogin(home, .codex, !interactive);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Signed in to Codex.\n");
-    const added = default_outcome catch |err| {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex may not be saved as the default for new Sessions (");
-        try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
-        return std.Io.File.stdout().writeStreamingAll(init.io, "). Check with: rui defaults inspect\n");
-    };
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (added)
-        "Rui: New Sessions will use Codex.\n"
-    else
-        "Rui: Your default provider for new Sessions is unchanged.\n");
+    if (!try finishLogin(init, .codex, "Rui: Signed in to Codex.\n", !interactive)) return;
     // Guided login continues into a conversation; only the explicit command
     // leaves the user at a shell.
     if (!interactive) try std.Io.File.stdout().writeStreamingAll(init.io, "Start a conversation with: rui\n");
+}
+
+/// After any provider's credential is installed: attempt the default first,
+/// so a receipt that cannot be written never skips it, then report both.
+/// Installation and future defaults have independent outcomes. Returns
+/// whether the default's outcome was reported as settled.
+fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8, only_if_unset: bool) !bool {
+    const default_outcome = preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", provider, only_if_unset);
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(init.io, receipt);
+    const name = providerPresentation(provider).name;
+    const added = default_outcome catch |err| {
+        var buffer: [256]u8 = undefined;
+        try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ name, @errorName(err) }));
+        return false;
+    };
+    var buffer: [64]u8 = undefined;
+    try stdout.writeStreamingAll(init.io, if (added)
+        try std.fmt.bufPrint(&buffer, "Rui: New Sessions will use {s}.\n", .{name})
+    else
+        "Rui: Your default provider for new Sessions is unchanged.\n");
+    return true;
 }
 
 // OpenAI shows a disabled device-code setting only after sign-in and MFA, so
@@ -784,13 +793,7 @@ fn saveApiKey(init: std.process.Init, update: DefaultUpdate) !void {
         if (err == error.InvalidApiKey) stderr.diagnostic("rui: that is not an API key: expected one line of visible characters, at most {d} bytes. Nothing was saved.\n", .{api_key.max_key_bytes});
         return err;
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: OpenAI API key saved. A Host started from now on serves openai; stop and restart a running Host to add it.\n");
-    const home = init.environ_map.get("HOME") orelse return;
-    const added = preferences.saveProviderAfterLogin(home, .openai, update == .fill) catch |err| {
-        stderr.diagnostic("rui: OpenAI may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{@errorName(err)});
-        return;
-    };
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (added) "Rui: New Sessions will use OpenAI.\n" else "Rui: Your default provider for new Sessions is unchanged.\n");
+    _ = try finishLogin(init, .openai, "Rui: OpenAI API key saved. A Host started from now on serves openai; stop and restart a running Host to add it.\n", update == .fill);
 }
 
 fn loginInterrupted() bool {

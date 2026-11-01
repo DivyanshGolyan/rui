@@ -164,7 +164,19 @@ def key_entry_journey(binary):
     assert b"sk-" not in output.split(b"(it is not shown): ", 1)[1], output
     assert after == before
     assert key.read_text() == "sk-good\n" and key.stat().st_mode & 0o777 == 0o600
-    print("openai key entry passed: hidden input, Ctrl+C restores the terminal and saves nothing, Backspace edits, Enter saves")
+    # A receipt that cannot be written never skips the default: the key and
+    # the provider preference are both saved.
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-key-receipt-"))
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
+    with open("/dev/full", "w") as full:
+        piped = subprocess.run([binary, "auth", "login", "openai"], input=b"sk-receipt\n", stdout=full,
+                               stderr=subprocess.PIPE, env={**env, "HOME": str(home)}, timeout=10)
+    assert piped.returncode != 0, piped
+    assert (home / ".config" / "rui" / "openai.key").read_text() == "sk-receipt\n"
+    assert "provider=openai" in (home / ".config" / "rui" / "preferences").read_text()
+    print("openai key entry passed: hidden input, Ctrl+C restores the terminal and saves nothing, Backspace edits, Enter saves, a failed receipt still saves the default")
 
 
 if __name__ == "__main__":

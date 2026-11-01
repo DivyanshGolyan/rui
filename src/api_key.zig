@@ -55,9 +55,12 @@ pub fn read(file: []const u8, key: *Key) !?void {
     key.len = trimmed.len;
 }
 
-/// Whether a key file is saved, checked without reading the key.
+/// Whether `file` holds a usable key, by the same reading a Host does at
+/// startup; the key read to check it is wiped.
 pub fn present(file: []const u8) !bool {
-    return codex_credentials.privatePresent(file);
+    var key: Key = .{ .len = 0 };
+    defer key.wipe();
+    return try read(file, &key) != null;
 }
 
 /// Replaces the key at `file`; its directory must already be private.
@@ -104,6 +107,10 @@ test "an installed key reads back, an absent one is null, and an open file is re
     try std.testing.expect(try read(file, &key) != null);
     try std.testing.expectEqualStrings("sk-test-1", key.slice());
     try std.testing.expectError(error.InvalidApiKey, install(file, "two words"));
+    // Readiness reads the key as a Host would: a private file holding no key is not one.
+    try private.writeFile(io, .{ .sub_path = "openai.key", .data = "two words\n" });
+    try std.testing.expectError(error.InvalidApiKey, present(file));
+    try install(file, "sk-test-1");
     try private.setFilePermissions(io, "openai.key", .fromMode(0o644), .{});
     try std.testing.expectError(error.InsecureCredentialFile, read(file, &key));
     try std.testing.expectError(error.InsecureCredentialFile, present(file));

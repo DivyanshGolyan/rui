@@ -696,6 +696,23 @@ def main():
         finally:
             forced_crash_cleanup(sized_store)
 
+        # A saved OpenAI key file that holds no key is not ready: the Host
+        # starts and serves Codex instead of failing on the optional provider.
+        key_dir = root / "openai-private"
+        key_dir.mkdir(mode=0o700)
+        key_file = key_dir / "openai.key"
+        key_file.write_text("two words\n")
+        key_file.chmod(0o600)
+        invalid_store = root / "openai-invalid-key"
+        invalid_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file)}
+        try:
+            started = run_start(invalid_store, invalid_env)
+            assert started.returncode == 0, started.stderr
+            providers = status(invalid_store, invalid_env)["capabilities"]["providers"]
+            assert providers == {"codex": "chatgpt_device", "openai": "unserved"}, providers
+        finally:
+            forced_crash_cleanup(invalid_store)
+
         # Concurrent spelling aliases may launch candidates, but exactly one
         # default-capacity owner becomes ready and all callers converge on it.
         store = root / "detached-store"
