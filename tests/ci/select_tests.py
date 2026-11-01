@@ -104,7 +104,7 @@ RULES = (
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
-    (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig", "src/history_memo.zig",
+    (("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/model_adapter.zig", "src/history_memo.zig",
       "src/model_capability.zig", "src/failed_responses.zig"),
      ("test", "dispatch-integration", "transport-h2-integration"),
      ("test", "dispatch-integration", "transport-h2-integration"), "Model admission and transport"),

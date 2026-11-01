@@ -125,8 +125,9 @@ pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
 }
 
 /// The codec's verdict on one event's data, `data`, naming bytes by range
-/// of it.
-pub fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
+/// of it. Never inlined, like `nextMember`: the codec's frames stay apart
+/// from the shell's, which hold the Host's rules across items.
+pub noinline fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
     switch (stream.*) {
         inline else => |*state, tag| {
             if (std.meta.activeTag(scratch.*) != tag) scratch.* = @unionInit(InterpretScratch, @tagName(tag), undefined);
@@ -137,7 +138,7 @@ pub fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const
 
 /// The next step of a walk over an event `interpretEvent` accepted, from
 /// a cursor its answer gave.
-pub fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
+pub noinline fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
     return switch (codec) {
         inline else => |tag| module(tag).nextMember(data, cursor),
     };
