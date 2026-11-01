@@ -2070,8 +2070,10 @@ def main():
             lambda: fixture.completed_observation(store, "service-message"),
             "service failure continuation",
         )
+        # The shell creates the file for >> before printf writes, so the failure
+        # shutdown can leave it empty. The single attempt row rules out a rerun.
         if service_marker.exists():
-            assert service_marker.read_text() == "x"
+            assert service_marker.read_text() in ("", "x")
 
         fixture.stop_host(host)
         host = None

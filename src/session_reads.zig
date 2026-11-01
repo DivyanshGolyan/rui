@@ -258,7 +258,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.files.scratch, &output, job.colour);
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour);
         job.result.compact_tools = false;
         job.result.action = action;
     }

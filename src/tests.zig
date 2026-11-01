@@ -9,6 +9,7 @@ test {
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");
+    _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
