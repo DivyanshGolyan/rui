@@ -44,20 +44,21 @@ pub fn Mapped(comptime T: type) type {
     };
 }
 
-/// The first `length` bytes of `file`, mapped read-only and shared: its
-/// pages are the file's clean page cache, so reading them leaves
-/// Private_Dirty unchanged. A file shorter than `length` is
-/// `error.ShortSealedRead`, since a mapped byte past its end would fault.
-/// Borrowed until `unmapReadOnly`.
-pub fn mapReadOnly(io: std.Io, file: std.Io.File, length: u64) ![]const u8 {
-    if (try file.length(io) < length) return error.ShortSealedRead;
+/// The first `length` bytes of `file`, mapped read-only and shared: the
+/// pages are the file's page cache, so no second copy is made. Pages written
+/// but not yet written back show as Private_Dirty while mapped, and clean
+/// once written back. A file shorter than `length` is `error.FileShorter`,
+/// since a mapped byte past its end would fault. Borrowed until
+/// `unmapReadOnly`.
+pub fn mapReadOnly(io: std.Io, file: std.Io.File, length: u64) ![]align(std.heap.page_size_min) const u8 {
     if (length == 0) return &.{};
+    if (try file.length(io) < length) return error.FileShorter;
     const count = std.math.cast(usize, length) orelse return error.FileTooBig;
     return std.posix.mmap(null, count, .{ .READ = true }, .{ .TYPE = .SHARED }, file.handle, 0);
 }
 
-pub fn unmapReadOnly(bytes: []const u8) void {
-    if (bytes.len != 0) std.posix.munmap(@alignCast(bytes));
+pub fn unmapReadOnly(bytes: []align(std.heap.page_size_min) const u8) void {
+    if (bytes.len != 0) std.posix.munmap(bytes);
 }
 
 test "a mapped value starts zero and its pages return at unmap" {
@@ -82,5 +83,5 @@ test "a file maps read-only as its bytes, and an empty length maps nothing" {
     const empty = try mapReadOnly(std.testing.io, file, 0);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
     unmapReadOnly(empty);
-    try std.testing.expectError(error.ShortSealedRead, mapReadOnly(std.testing.io, file, 11));
+    try std.testing.expectError(error.FileShorter, mapReadOnly(std.testing.io, file, 11));
 }

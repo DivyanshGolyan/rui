@@ -16,6 +16,9 @@ const transport_policy = @import("transport_policy.zig");
 /// one response at a time.
 pub const Decode = struct {
     classify: codecs.ClassifyScratch,
+    found: codec_abi.ErrorBody,
+    code: ReportPart,
+    message: ReportPart,
 };
 
 /// One read window over a file, shared by every reader of that file. A
@@ -129,22 +132,30 @@ comptime {
 /// report, for every answer. Only a 4xx or 5xx body is read. A codec can
 /// narrow the status rule only by a code the Host knows: quota at HTTP 429,
 /// then context overflow, then a refusal at any status. A failed read is
-/// `.unreadable`. Never inlined: the report's two parts stay in this rare
-/// frame.
+/// `.unreadable`. Never inlined: the codec's classifier, which inlines here,
+/// stays out of the engine's frames.
 pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
     failure.clear();
     if (status < 400 or status >= 600) return .ordinary;
-    const bytes = pages.mapReadOnly(io, body, length) catch |err| return .{ .unreadable = err };
+    // The capture is unlinked and its only writer closed at seal, so no Rui
+    // code can truncate it after the length check.
+    const bytes = pages.mapReadOnly(io, body, length) catch |err| return .{ .unreadable = switch (err) {
+        error.FileShorter => error.ShortSealedRead,
+        else => err,
+    } };
     defer pages.unmapReadOnly(bytes);
-    const found = codecs.classify(codec, &decode.classify, bytes);
-    var code: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
-    var message: ReportPart = .{ .text = .{ .len = 0 }, .shortened = false };
-    if (found.report.code) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, &code);
-    if (found.report.message) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, &message);
-    writeReport(&failure.report, &code, &message);
-    failure.refusal = if (found.refusal) |refusal| .ofProviderCode(refusal.slice()) else null;
-    if (status == 429) if (found.quota) |quota| if (transport_policy.Quota.ofProviderCode(quota.code.slice())) |known| {
-        return .{ .quota = .{ .code = known, .resets_at = quota.resets_at } };
+    const found = &decode.found;
+    codecs.classify(codec, &decode.classify, bytes, found);
+    for ([_]*ReportPart{ &decode.code, &decode.message }, [_]?codec_abi.ReportRange{ found.report.code, found.report.message }) |part, report| {
+        part.text.len = 0;
+        part.shortened = false;
+        if (report) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, part);
+    }
+    writeReport(&failure.report, &decode.code, &decode.message);
+    const code = if (found.code) |*code| code.slice() else null;
+    failure.refusal = if (code) |text| .ofProviderCode(text) else null;
+    if (status == 429) if (code) |text| if (transport_policy.Quota.ofProviderCode(text)) |known| {
+        return .{ .quota = .{ .code = known, .resets_at = found.resets_at } };
     };
     if (found.context_overflow) return .context_overflow;
     return if (failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
@@ -356,7 +367,7 @@ test "a large error body classifies as its small twin does" {
     try body.appendSlice(std.testing.allocator, "{\"error\":{\"message\":\"Out.\",\"padding\":[");
     for (0..64 * 1024) |index| try body.print(std.testing.allocator, "{s}\"pad\\u0041{d}\"", .{ if (index == 0) "" else ",", index % 10 });
     try body.appendSlice(std.testing.allocator, "],\"resets_at\":1800000123,\"code\":\"usage_limit_reached\"},\"more\":{\"code\":\"cyber_policy\"}}");
-    try std.testing.expect(body.items.len > 64 * protocol.content_window_bytes);
+    try std.testing.expect(body.items.len > 850_000);
     var large: Classified = undefined;
     try classifyForTesting(&tmp, pinned, body.items, body.items.len, 429, &large);
     try std.testing.expectEqual(expected.response, large.response);

@@ -1,4 +1,4 @@
-//! A JSON reader a codec feeds one window at a time. It checks a document
+//! A JSON reader a codec runs over a whole document. It checks the document
 //! against RFC 8259 byte by byte, holding only its open containers and the
 //! token it is in, so a body of any size reads in the same few hundred
 //! bytes. A handler hears where each key and value begins and ends; a
@@ -20,7 +20,7 @@ pub const Range = struct { start: u64, length: u64 };
 
 pub const Error = error{InvalidJson};
 
-/// Calls, on a handler `h` passed to `feed`:
+/// Calls, on a handler `h` passed to `read`:
 ///   h.key(reader, depth): a key of the object whose members are at `depth`;
 ///   h.begin(reader, kind, depth), h.end(reader, kind, depth): a value at
 ///   `depth` begins or ends.
@@ -81,9 +81,20 @@ pub const Reader = struct {
         done,
     };
 
+    /// Reads `bytes` as one whole document, telling `handler` what it finds.
+    /// A document that is invalid or ends early is `error.InvalidJson`.
+    pub fn read(self: *Reader, bytes: []const u8, handler: anytype) Error!void {
+        self.init();
+        for (bytes) |byte| {
+            try self.step(byte, handler);
+            self.offset += 1;
+        }
+        if (self.state != .done) return error.InvalidJson;
+    }
+
     /// The state before a document's first byte. The decoded text and the
     /// UTF-8 sequence are written before they are read, so they are left.
-    pub fn init(self: *Reader) void {
+    fn init(self: *Reader) void {
         self.* = .{
             .offset = 0,
             .state = .document,
@@ -100,18 +111,6 @@ pub const Reader = struct {
             .literal = 0,
             .integer = null,
         };
-    }
-
-    pub fn feed(self: *Reader, bytes: []const u8, handler: anytype) Error!void {
-        for (bytes) |byte| {
-            try self.step(byte, handler);
-            self.offset += 1;
-        }
-    }
-
-    /// Whether the bytes fed so far are one whole document.
-    pub fn complete(self: *const Reader) bool {
-        return self.state == .done;
     }
 
     /// The decoded string, when no longer than `max_text_bytes`.
@@ -385,8 +384,7 @@ fn space(byte: u8) bool {
     };
 }
 
-/// Records what a reader reports, for comparing one way of feeding a
-/// document with another.
+/// Records what a reader reports.
 const Recorder = struct {
     buffer: [4096]u8 = undefined,
     length: usize = 0,
@@ -423,16 +421,10 @@ const Recorder = struct {
     }
 };
 
-fn readForTesting(document: []const u8, window: usize, recorder: *Recorder) bool {
+fn readForTesting(document: []const u8, recorder: *Recorder) bool {
     var reader: Reader = undefined;
-    reader.init();
-    var offset: usize = 0;
-    while (offset < document.len) {
-        const end = @min(document.len, offset + window);
-        reader.feed(document[offset..end], recorder) catch return false;
-        offset = end;
-    }
-    return reader.complete();
+    reader.read(document, recorder) catch return false;
+    return true;
 }
 
 fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
@@ -441,7 +433,7 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     return out;
 }
 
-test "the reader accepts exactly the objects std.json accepts, however the document is cut" {
+test "the reader accepts exactly the objects std.json accepts" {
     const documents = [_][]const u8{
         "{}",                                      " \t\r\n{ } \n",                   "{\"a\":1}",
         "{\"a\":[1,-2,3.5e+2,0,true,false,null]}", "{\"a\":{\"b\":{\"c\":[[],{}]}}}", "{\"a\\u0062\":\"\\ud83d\\ude00\\n\\/\"}",
@@ -486,23 +478,17 @@ test "the reader accepts exactly the numbers std.json accepts" {
     }
 }
 
-/// The reader accepts `document` exactly when std.json does, and reports the
-/// same events however the document is cut.
+/// The reader accepts `document` exactly when std.json does.
 fn expectReadAsStd(document: []const u8) !void {
     const expected = document.len != 0 and std.mem.trimStart(u8, document, " \t\r\n")[0] == '{' and
         try std.json.validate(std.testing.allocator, document);
-    var whole: Recorder = .{};
-    try std.testing.expectEqual(expected, readForTesting(document, document.len + 1, &whole));
-    for ([_]usize{ 1, 2, 3, 7 }) |window| {
-        var cut: Recorder = .{};
-        try std.testing.expectEqual(expected, readForTesting(document, window, &cut));
-        try std.testing.expectEqualStrings(whole.events(), cut.events());
-    }
+    var recorder: Recorder = .{};
+    try std.testing.expectEqual(expected, readForTesting(document, &recorder));
 }
 
 test "the reader reports keys and values with their depths, ranges and decoded starts" {
     var recorder: Recorder = .{};
-    try std.testing.expect(readForTesting("{\"co\\u0064e\":\"x\\n\",\"n\":[7,1.5,-1],\"t\":true}", 5, &recorder));
+    try std.testing.expect(readForTesting("{\"co\\u0064e\":\"x\\n\",\"n\":[7,1.5,-1],\"t\":true}", &recorder));
     try std.testing.expectEqualStrings(
         "O0 k1[2,9]code S1 s1[14,3]x\n k1[20,1]n A1 N2 n2=7 N2 n2=null N2 n2=null a1 k1[35,1]t L1 l1 o0 ",
         recorder.events(),
@@ -510,7 +496,7 @@ test "the reader reports keys and values with their depths, ranges and decoded s
     // A string past the kept start keeps its range; its text is unknown.
     const long = comptime "{\"" ++ repeat("k", max_text_bytes + 1) ++ "\":\"" ++ repeat("v", max_text_bytes) ++ "\"}";
     recorder.length = 0;
-    try std.testing.expect(readForTesting(long, 3, &recorder));
+    try std.testing.expect(readForTesting(long, &recorder));
     try std.testing.expectEqualStrings(
         "O0 k1[2,65]null S1 s1[70,64]" ++ comptime repeat("v", max_text_bytes) ++ " o0 ",
         recorder.events(),
@@ -528,6 +514,6 @@ test "a value nests at most max_depth deep" {
         for (0..arrays) |_| try writer.writeByte(']');
         try writer.writeByte('}');
         var recorder: Recorder = .{};
-        try std.testing.expectEqual(arrays + 1 <= max_depth, readForTesting(writer.buffered(), 4096, &recorder));
+        try std.testing.expectEqual(arrays + 1 <= max_depth, readForTesting(writer.buffered(), &recorder));
     }
 }
