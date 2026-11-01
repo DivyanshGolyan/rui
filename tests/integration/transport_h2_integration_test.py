@@ -594,8 +594,10 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                 raise primary
 
         with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
+            # Resolved as the fixture resolves it: Darwin's temp root is a link.
             root = pathlib.Path(parent) / "root"
             root.mkdir()
+            root = root.resolve()
             retained = []
             removed = []
             for owner, name, value in (
