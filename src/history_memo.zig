@@ -23,6 +23,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
+const codec_abi = @import("codec_abi.zig");
 
 /// Default ceiling on memo file bytes. They are not charged to the request
 /// scratch budget, whose idle use and request-to-response reuse are part of
@@ -63,8 +64,8 @@ pub const Memo = struct {
     history_position: u64,
     /// The producing view's final tool-group scan cursor.
     tool_group_cursor: u64,
-    /// Whether the span emitted any entry (the next one needs a comma).
-    input_comma: bool,
+    /// The codec's encoder state where the span ends.
+    carry: codec_abi.Carry,
     /// Exact span length; the file must have exactly this length.
     length: u64,
     /// `Hasher` digest of the span's bytes, set by `Table.commit`.
@@ -83,7 +84,7 @@ pub const Memo = struct {
             self.admission_position == other.admission_position and
             self.history_position == other.history_position and
             self.tool_group_cursor == other.tool_group_cursor and
-            self.input_comma == other.input_comma and
+            self.carry.eql(&other.carry) and
             self.length == other.length and
             self.digest == other.digest;
     }
@@ -372,7 +373,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
         .admission_position = admission_position,
         .history_position = admission_position - 1,
         .tool_group_cursor = 0,
-        .input_comma = length != 0,
+        .carry = codec_abi.Carry.of("test"),
         .length = length,
         .digest = 0,
     };

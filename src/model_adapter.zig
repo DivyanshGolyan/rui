@@ -10,7 +10,7 @@ const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const h2 = @import("h2");
-const model_capability = @import("model_capability.zig");
+const responses = @import("codecs/responses.zig");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -997,7 +997,7 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
         .settings => {
             pieces.add(.{ .syntax = "{\"model\":\"" });
             pieces.add(.{ .escaped = settings.model.slice() });
-            pieces.add(.{ .syntax = if (model_capability.parallelToolCalls(settings.model.slice())) codexEnvelope(true) else codexEnvelope(false) });
+            pieces.add(.{ .syntax = if (responses.parallelToolCalls(settings.model.slice())) codexEnvelope(true) else codexEnvelope(false) });
             if (settings.reasoning_effort) |effort| pieces.add(.{ .syntax = switch (effort) {
                 inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
             } });
@@ -1110,7 +1110,7 @@ fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettin
         },
         .tools => {
             pieces.add(.{ .syntax = "],\"tools\":[" });
-            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .syntax = tools.bash_definition_json });
+            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .syntax = comptime responses.toolJson(tools.bash_definition) });
             pieces.add(.{ .syntax = "]" });
         },
         .text_format => if (settings.output_schema) |schema| {
@@ -1529,7 +1529,7 @@ pub const Preparation = struct {
         self.closeMemoFile();
         const memo = &self.state.span.?.copy.?.memo;
         self.state.history_position = memo.history_position;
-        self.state.input_comma = memo.input_comma;
+        self.state.input_comma = responses.inputComma(&memo.carry);
         self.view.resumeToolGroups(memo.tool_group_cursor);
     }
 
@@ -1561,7 +1561,7 @@ pub const Preparation = struct {
             .admission_position = self.view.admissionPosition(),
             .history_position = self.state.history_position,
             .tool_group_cursor = self.view.toolGroupCursor(),
-            .input_comma = self.state.input_comma,
+            .carry = responses.carry(self.state.input_comma),
             .length = self.writer.offset - span.start,
             .digest = undefined,
         };
