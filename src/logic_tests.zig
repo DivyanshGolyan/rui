@@ -10,7 +10,6 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
-    .{ "ChoiceLine.zig", @import("ChoiceLine.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
     .{ "codecs/json.zig", @import("codecs/json.zig") },

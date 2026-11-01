@@ -47,7 +47,7 @@ To update, run the `curl` command again. Updates keep your saved work, sign-in a
 
 3. Type a request at the `›` prompt, such as `Investigate the failing test`.
 
-By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command, and you type `a` to allow it or `d` to deny it.
+By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command above an Allow once / Deny choice: ← and → pick one, and Enter confirms it.
 
 To leave, type `/exit` or press Ctrl+C. Work continues in the background. Run `rui` again to see every conversation and press Enter on one to return to it.
 
