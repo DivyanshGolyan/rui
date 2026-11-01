@@ -23,7 +23,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
-const codec_abi = @import("codec_abi.zig");
+const codecs = @import("codecs.zig");
 
 /// Default ceiling on memo file bytes. They are not charged to the request
 /// scratch budget, whose idle use and request-to-response reuse are part of
@@ -65,7 +65,7 @@ pub const Memo = struct {
     /// The producing view's final tool-group scan cursor.
     tool_group_cursor: u64,
     /// The codec's encoder state where the span ends.
-    carry: codec_abi.Carry,
+    carry: codecs.Carry,
     /// Exact span length; the file must have exactly this length.
     length: u64,
     /// `Hasher` digest of the span's bytes, set by `Table.commit`.
@@ -84,7 +84,7 @@ pub const Memo = struct {
             self.admission_position == other.admission_position and
             self.history_position == other.history_position and
             self.tool_group_cursor == other.tool_group_cursor and
-            self.carry.eql(&other.carry) and
+            std.meta.eql(self.carry, other.carry) and
             self.length == other.length and
             self.digest == other.digest;
     }
@@ -373,7 +373,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
         .admission_position = admission_position,
         .history_position = admission_position - 1,
         .tool_group_cursor = 0,
-        .carry = codec_abi.Carry.of("test"),
+        .carry = codecs.initialCarry(.@"openai-responses/1"),
         .length = length,
         .digest = 0,
     };

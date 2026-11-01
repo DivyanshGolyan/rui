@@ -14,6 +14,7 @@ const protocol = @import("protocol.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
 const codec_abi = @import("codec_abi.zig");
+const codecs = @import("codecs.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
@@ -35,7 +36,7 @@ pub const PreparedRequest = struct {
     codec: protocol.Codec,
     /// The codec's headers, which `Transfer.start` sends ahead of the
     /// Host's own and copies, so the Transfer does not keep them.
-    headers: RequestHeaders,
+    headers: codec_abi.Headers,
 
     pub fn deinit(self: *PreparedRequest, io: std.Io, budget: ScratchBudget) void {
         self.file.close(io);
@@ -47,59 +48,18 @@ pub const PreparedRequest = struct {
 /// The field every Transfer sends first, ahead of the codec's headers.
 const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
 
-/// The request fields the Host writes itself, which no codec header may
-/// name: `content_type` and model_adapter.Headers' credential, user-agent,
-/// FedRAMP and turn-state fields.
+/// The request fields the Host writes itself, which no codec header names:
+/// `content_type` and model_adapter.Headers' credential, user-agent, FedRAMP
+/// and turn-state fields.
 pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
 
-/// A codec's request headers, in the order it asked for them, in storage
-/// the prepared request owns.
-pub const RequestHeaders = struct {
-    count: u8 = 0,
-    /// Where each header's name and value end in `bytes`; each name begins
-    /// where the previous value ends.
-    ends: [codec_abi.max_request_headers]struct { name: u8, value: u8 } = undefined,
-    bytes: [codec_abi.max_request_header_bytes]u8 = undefined,
-
-    /// Keep `header` if the Host can send it: a lowercase token naming no
-    /// field the Host or h2 writes itself and no header already kept, a
-    /// header-safe value, and room left under both bounds. Anything else is
-    /// the codec's fault.
-    pub fn add(self: *RequestHeaders, header: codec_abi.Header) error{CodecBadOp}!void {
-        if (self.count == codec_abi.max_request_headers) return error.CodecBadOp;
-        if (!codec_abi.lowercaseToken(header.name) or !codec_abi.headerValue(header.value)) return error.CodecBadOp;
-        for (host_request_fields ++ h2.owned_fields) |owned| {
-            if (std.mem.eql(u8, header.name, owned)) return error.CodecBadOp;
-        }
-        for (0..self.count) |index| {
-            if (std.mem.eql(u8, header.name, self.field(index).name)) return error.CodecBadOp;
-        }
-        const start = self.used();
-        if (self.bytes.len - start < header.name.len + header.value.len) return error.CodecBadOp;
-        const name_end = start + header.name.len;
-        @memcpy(self.bytes[start..name_end], header.name);
-        @memcpy(self.bytes[name_end..][0..header.value.len], header.value);
-        self.ends[self.count] = .{ .name = @intCast(name_end), .value = @intCast(name_end + header.value.len) };
-        self.count += 1;
+/// Whether the Host or h2 writes a field of this name itself.
+pub fn hostField(name: []const u8) bool {
+    for (host_request_fields ++ h2.owned_fields) |owned| {
+        if (std.mem.eql(u8, name, owned)) return true;
     }
-
-    comptime {
-        std.debug.assert(codec_abi.max_request_header_bytes <= std.math.maxInt(u8));
-    }
-
-    /// The `index`th header as an h2 field, copied by h2 when it prepares
-    /// the stream.
-    pub fn field(self: *const RequestHeaders, index: usize) h2.Field {
-        std.debug.assert(index < self.count);
-        const start = if (index == 0) 0 else self.ends[index - 1].value;
-        const end = self.ends[index];
-        return .{ .name = self.bytes[start..end.name], .value = self.bytes[end.name..end.value] };
-    }
-
-    fn used(self: *const RequestHeaders) usize {
-        return if (self.count == 0) 0 else self.ends[self.count - 1].value;
-    }
-};
+    return false;
+}
 
 pub const max_turn_state_bytes = 4096;
 
@@ -618,7 +578,8 @@ pub const Transfer = struct {
         if (count > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
         fields[0] = content_type;
-        for (fields[1..][0..request.headers.count], 0..) |*field, index| field.* = request.headers.field(index);
+        for (fields[1..][0..request.headers.count], request.headers.names[0..request.headers.count], 0..) |*field, name, index|
+            field.* = .{ .name = codecs.headerName(request.codec, name), .value = request.headers.value(index) };
         @memcpy(fields[1 + request.headers.count ..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
             reactor.io,
@@ -840,54 +801,15 @@ test "a Transfer that fails to start releases its credential use" {
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
     var request: PreparedRequest = undefined;
-    request.headers = .{};
-    try request.headers.add(.{ .name = "x-codec", .value = "" });
+    request.codec = .@"openai-responses/1";
+    const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 };
+    codecs.requestHeaders(request.codec, &settings, &request.headers);
     const too_many: [h2.max_fields - 1]h2.Field = @splat(.{ .name = "x-field", .value = "" });
     try std.testing.expectError(error.TooManyProviderHeaders, transfer.start(&reactor, &request, undefined, .{
         .fields = &too_many,
         .credential = try reactor.credentials.share("token", "account"),
     }, &retained));
     try std.testing.expectEqual(@as(?*SharedCredential, null), reactor.credentials.head);
-}
-
-test "codec headers are bounded, header-safe, distinct, and never a field the Host writes" {
-    var headers: RequestHeaders = .{};
-    for (0..codec_abi.max_request_headers) |index| {
-        var name = "x-header-0".*;
-        name[name.len - 1] += @intCast(index);
-        try headers.add(.{ .name = &name, .value = "v" });
-    }
-    // A ninth header, however small.
-    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x", .value = "" }));
-    try std.testing.expectEqualStrings("x-header-7", headers.field(7).name);
-    try std.testing.expectEqualStrings("v", headers.field(7).value);
-    try std.testing.expect(!headers.field(0).borrowed and !headers.field(0).sensitive);
-    // A name already kept, whatever its value.
-    headers = .{};
-    try headers.add(.{ .name = "x-a", .value = "1" });
-    try headers.add(.{ .name = "x-b", .value = "1" });
-    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x-b", .value = "2" }));
-    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x-a", .value = "1" }));
-    try std.testing.expectEqual(@as(u8, 2), headers.count);
-    // Names and values share 192 bytes: exactly full, then one byte over.
-    const value: [codec_abi.max_request_header_bytes - 2]u8 = @splat('v');
-    headers = .{};
-    try headers.add(.{ .name = "x", .value = &value });
-    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "yz", .value = "" }));
-    try headers.add(.{ .name = "y", .value = "" });
-    try std.testing.expectEqual(@as(u8, 2), headers.count);
-    headers = .{};
-    const over: [codec_abi.max_request_header_bytes]u8 = @splat('v');
-    try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x", .value = &over }));
-    // The Host's own fields, h2's, and anything not a lowercase token or a
-    // header-safe value.
-    for (host_request_fields ++ h2.owned_fields) |name|
-        try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = name, .value = "v" }));
-    for ([_][]const u8{ "", "Accept", ":path", "a b", "a\r\n" }) |name|
-        try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = name, .value = "v" }));
-    for ([_][]const u8{ "a\r\nb", "a\x00", " rui", "rui ", "a\tb", "\xc3\xa9" }) |bad|
-        try std.testing.expectError(error.CodecBadOp, headers.add(.{ .name = "x", .value = bad }));
-    try std.testing.expectEqual(@as(u8, 0), headers.count);
 }
 
 test "scratch reservation is bounded and releases exact charge" {

@@ -395,7 +395,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
-        error.CodecFailed, error.CodecBadOp => "provider_codec_failed",
+        error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
         error.InjectedRequestWriteFailure => "request_write_failed",
@@ -724,9 +724,8 @@ test "Codex headers carry turn state only when the Turn has one" {
                 if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
-                // No codec header may name it.
-                var codec_header: provider.RequestHeaders = .{};
-                try std.testing.expectError(error.CodecBadOp, codec_header.add(.{ .name = entry.name, .value = "v" }));
+                // No codec header names it.
+                try std.testing.expect(provider.hostField(entry.name));
             }
             // The credential is the Reactor's one copy, which h2 borrows;
             // only the per-request values are copied into each stream.
@@ -749,6 +748,29 @@ test "Codex headers carry turn state only when the Turn has one" {
     }
 }
 
+test "the Responses headers are lowercase tokens, header-safe, within bounds and name no Host or h2 field" {
+    const affinities = [_][16]u8{ @splat(0x00), @splat(0xff), .{ 0x00, 0x01, 0x7f, 0x80, 0xab, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x90, 0xa0, 0xf0 } };
+    // One Headers for every sample: each call writes over the last.
+    var headers: codec_abi.Headers = .{ .count = 0 };
+    for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| for (affinities) |affinity| {
+        const settings: codec_abi.Settings = .{ .effort = effort, .session_affinity = affinity, .model_length = 0 };
+        codecs.requestHeaders(.@"openai-responses/1", &settings, &headers);
+        try std.testing.expectEqual(@as(u8, 3), headers.count);
+        try std.testing.expect(headers.count <= codec_abi.max_request_headers);
+        var value_bytes: usize = 0;
+        for (0..headers.count) |index| {
+            const name = codecs.headerName(.@"openai-responses/1", headers.names[index]);
+            const value = headers.value(index);
+            value_bytes += value.len;
+            try std.testing.expect(codec_abi.lowercaseToken(name));
+            try std.testing.expect(codec_abi.headerValue(value));
+            try std.testing.expect(!provider.hostField(name));
+            for (headers.names[0..index]) |earlier| try std.testing.expect(earlier != headers.names[index]);
+        }
+        try std.testing.expect(value_bytes <= codec_abi.max_request_header_bytes);
+    };
+}
+
 /// Where a prepared request is sent. The managed Codex route accepts no
 /// structured output, so preparing a Session with an output schema for it fails.
 pub const Route = enum { endpoint, managed };
@@ -766,8 +788,9 @@ pub const PreparationFaults = struct {
     /// span bytes, in place of that read. Earlier chunks already reached the
     /// request, so the rewind must remove a partial span.
     memo_read_failure_after: ?u64 = null,
-    /// Encode with this codec in place of the Session's pinned one.
-    codec: ?*const codecs.Encoder = null,
+    /// Give the codec, in place of this item, an opaque block that carries
+    /// text, which the Store never holds and the Responses codec declines.
+    codec_declines: ?codec_abi.ItemKind = null,
 };
 
 const RequestWriter = struct {
@@ -962,13 +985,18 @@ pub const Preparation = struct {
     reader: store.HistoricalReader = undefined,
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
-    /// The Session's codec, begun at the settings stage.
-    job: codecs.EncodeJob = undefined,
-    /// Built in place: the codec's headers as the settings item's ops run
-    /// (emptied when the job begins, judged as they are kept), the rest when
-    /// the request seals.
+    /// The Session's codec state, begun at the settings stage.
+    encoder: codecs.Encoder = undefined,
+    /// The codec's state at the last history-element boundary: the initial
+    /// carry, then each element's own, or a history memo's.
+    carry: codecs.Carry = undefined,
+    /// The current item and the pieces the codec wrote for it.
+    item: codec_abi.ItemHeader = undefined,
+    pieces: codec_abi.Pieces = undefined,
+    /// Built in place: the codec's headers at the settings stage, the rest
+    /// when the request seals.
     request: PreparedRequest = undefined,
-    /// The current item's handles; `job.header.handles` says which exist.
+    /// The current item's handles; `item.handles` says which exist.
     handles: [codec_abi.max_handles]Handle = undefined,
     /// The open output item's provider bag, written at its close.
     output_bag: ?store.HistoricalContent = undefined,
@@ -989,10 +1017,10 @@ pub const Preparation = struct {
         active: bool = false,
         /// Where the next item comes from.
         stage: Stage = .settings,
-        /// Whether the job may still give ops of the current item.
-        item_open: bool = false,
-        /// The content op being written, by segment.
-        content: ?ContentOp = null,
+        /// The current item's next piece, until its pieces are written.
+        piece: ?u8 = null,
+        /// The content piece being written, by segment.
+        content: ?ContentPiece = null,
         emission: Emission = .none,
         /// The next tool the tools stage considers.
         next_tool: u8 = 0,
@@ -1007,7 +1035,7 @@ pub const Preparation = struct {
         memo_write: ?history_memo.Write = null,
     };
 
-    const ContentOp = struct {
+    const ContentPiece = struct {
         handle: u8,
         escape: codec_abi.Escape,
         segment: u8 = 0,
@@ -1073,7 +1101,7 @@ pub const Preparation = struct {
     const Next = enum {
         /// No item yet: the stage moved on or waits for allowance.
         pending,
-        /// The job's header holds the next item.
+        /// `item` holds the next item.
         item,
         end,
     };
@@ -1152,8 +1180,8 @@ pub const Preparation = struct {
     }
 
     /// Write the request one item at a time: take the next item from the
-    /// view, have the Session's codec encode it, and run its ops under the
-    /// allowance before the next item.
+    /// view, have the Session's codec encode it, and write its pieces under
+    /// the allowance before the next item.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.state.active and byte_allowance != 0 and item_allowance != 0);
         var bytes_left = byte_allowance;
@@ -1171,7 +1199,7 @@ pub const Preparation = struct {
                 continue;
             }
             items_left -= 1;
-            if (self.nextOp() catch |err| return .{ .failed = err }) continue;
+            if (self.nextPiece() catch |err| return .{ .failed = err }) continue;
             // The sealed request is the source of the prefix check and the
             // memo, read once under the allowance; a failure loses only the
             // memo.
@@ -1192,18 +1220,15 @@ pub const Preparation = struct {
             }
             switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
                 .pending => {},
-                .item => {
-                    self.job.step() catch |err| return .{ .failed = err };
-                    self.state.item_open = true;
-                },
+                .item => self.encodeItem() catch |err| return .{ .failed = err },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
         }
         return self.flushAndYield();
     }
 
-    /// Move to the request's next item, read from the view into the job's
-    /// header and `handles`.
+    /// Move to the request's next item, read from the view into `item` and
+    /// `handles`.
     /// History decisions live here: which output a compaction base covers,
     /// where the history memo resumes, and whether a compaction trigger ends
     /// the input.
@@ -1213,8 +1238,10 @@ pub const Preparation = struct {
                 try self.view.settings(&self.settings);
                 if (self.state.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
-                try self.job.begin(self.state.faults.codec orelse codecs.encoder(self.settings.provider.codec()));
-                self.request.headers.count = 0;
+                const codec = self.settings.provider.codec();
+                self.carry = codecs.initialCarry(codec);
+                self.encoder = codecs.resumeFrom(self.carry);
+                codecs.requestHeaders(codec, self.loadSettingsItem(), &self.request.headers);
                 self.state.stage = .history_validation;
             },
             .history_validation => {
@@ -1222,7 +1249,8 @@ pub const Preparation = struct {
                 // The selected base must be readable before any request byte.
                 _ = try self.view.coverage();
                 self.state.stage = .instructions;
-                return self.loadSettingsHeader();
+                // The settings item, loaded at the settings stage.
+                return .item;
             },
             .instructions => {
                 self.state.stage = .history_start;
@@ -1365,20 +1393,20 @@ pub const Preparation = struct {
         return .pending;
     }
 
-    /// Load `item` into the job's header, with the handles whose bits are
-    /// set in `handles`.
+    /// Load `item` into `self.item`, with the handles whose bits are set in
+    /// `handles`.
     fn loadItemHeader(self: *Preparation, item: codec_abi.Item, handles: u8) Next {
-        self.job.header.item = item;
-        self.job.header.handles = handles;
+        self.item.item = item;
+        self.item.handles = handles;
         return .item;
     }
 
-    /// Load the settings item into the job's header in place. Its handle 0
-    /// is the header's own copy of the model, so the codec reads and writes
-    /// the same bytes.
-    fn loadSettingsHeader(self: *Preparation) Next {
+    /// Load the settings item into `self.item` in place. Its handle 0 is the
+    /// item's own copy of the model, so the codec reads and writes the same
+    /// bytes.
+    fn loadSettingsItem(self: *Preparation) *const codec_abi.Settings {
         const model = self.settings.model.slice();
-        const header = &self.job.header;
+        const header = &self.item;
         header.handles = 0b1;
         header.item = .{ .settings = .{
             .effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null,
@@ -1388,7 +1416,22 @@ pub const Preparation = struct {
         const settings = &header.item.settings;
         @memcpy(settings.model[0..model.len], model);
         self.handles[0] = .{ .text = settings.modelName() };
-        return .item;
+        return settings;
+    }
+
+    /// Encode `item`. Before a history element and history_end the codec
+    /// resumes from the last carry, so nothing else crosses a boundary and
+    /// a memo copy continues exactly as a rebuild does. Nothing is sent
+    /// before the request seals, so a codec declining the request discards
+    /// only request scratch.
+    fn encodeItem(self: *Preparation) error{CodecDeclined}!void {
+        const kind: codec_abi.ItemKind = self.item.item;
+        if (kind.resumes()) self.encoder = codecs.resumeFrom(self.carry);
+        if (self.state.faults.codec_declines == kind)
+            self.item = .{ .item = .{ .output_part = .{ .array = .summary, .kind = .opaque_block } }, .handles = 0b1 };
+        codecs.encodeItem(&self.encoder, &self.item, &self.pieces) catch return error.CodecDeclined;
+        if (kind.endsElement()) self.carry = codecs.carryOf(&self.encoder);
+        self.state.piece = 0;
     }
 
     /// Never inlined: it runs once per request, and its memo and key copies
@@ -1453,7 +1496,7 @@ pub const Preparation = struct {
         self.closeMemoFile();
         const memo = &self.state.span.?.copy.?.memo;
         self.state.history_position = memo.history_position;
-        self.job.resumeFrom(&memo.carry);
+        self.carry = memo.carry;
         self.view.resumeToolGroups(memo.tool_group_cursor);
     }
 
@@ -1485,7 +1528,7 @@ pub const Preparation = struct {
             .admission_position = self.view.admissionPosition(),
             .history_position = self.state.history_position,
             .tool_group_cursor = self.view.toolGroupCursor(),
-            .carry = self.job.carry,
+            .carry = self.carry,
             .length = self.writer.offset - span.start,
             .digest = undefined,
         };
@@ -1507,9 +1550,9 @@ pub const Preparation = struct {
         return self.state.last_advance;
     }
 
-    /// Start writing the next stretch of the current item's ops. Returns
-    /// false once they are all written.
-    fn nextOp(self: *Preparation) !bool {
+    /// Start writing the next stretch of the current item's pieces.
+    /// Returns false once they are all written.
+    fn nextPiece(self: *Preparation) !bool {
         while (true) {
             if (self.state.content) |*content| {
                 if (self.handleSegment(content.handle, content.segment)) |segment| {
@@ -1519,20 +1562,21 @@ pub const Preparation = struct {
                 }
                 self.state.content = null;
             }
-            if (!self.state.item_open) return false;
-            const op = try self.job.next() orelse {
-                self.state.item_open = false;
+            const index = self.state.piece orelse return false;
+            if (index == self.pieces.len) {
+                self.state.piece = null;
                 return false;
-            };
-            switch (op) {
+            }
+            self.state.piece = index + 1;
+            switch (self.pieces.items[index]) {
                 .literal => |bytes| {
                     self.state.emission = .{ .fixed = .{ .bytes = bytes } };
                     return true;
                 },
-                .content => |content| self.state.content = .{ .handle = content.handle, .escape = content.escape },
-                .header => |header| try self.request.headers.add(header),
-                // The job keeps the item's carry.
-                .carry => unreachable,
+                .content => |content| {
+                    std.debug.assert(self.item.has(content.handle));
+                    self.state.content = .{ .handle = content.handle, .escape = content.escape };
+                },
             }
         }
     }
@@ -2143,10 +2187,9 @@ test "a prepared request carries the Responses codec's headers with its Session'
     // and before the credential path's fields.
     const expected = [_][2][]const u8{ .{ "accept", "text/event-stream" }, .{ "session-id", &session_id }, .{ "originator", "rui" } };
     try std.testing.expectEqual(@as(u8, expected.len), request.headers.count);
-    for (expected, 0..) |pair, index| {
-        const field = request.headers.field(index);
-        try std.testing.expectEqualStrings(pair[0], field.name);
-        try std.testing.expectEqualStrings(pair[1], field.value);
+    for (expected, request.headers.names[0..request.headers.count], 0..) |pair, name, index| {
+        try std.testing.expectEqualStrings(pair[0], codecs.headerName(request.codec, name));
+        try std.testing.expectEqualStrings(pair[1], request.headers.value(index));
     }
 }
 
@@ -3586,7 +3629,7 @@ test "request preparation cancellation yields inside history discovery" {
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.state.stage == .history and !preparation.state.item_open and preparation.writer.offset == before) {
+        if (preparation.state.stage == .history and preparation.state.piece == null and preparation.writer.offset == before) {
             pending_turns += 1;
             if (pending_turns == 5) break;
         }
@@ -3986,129 +4029,6 @@ test "request N+1 begins with request N's history span" {
     }
 }
 
-const CodecFault = enum { carry_after_history_end, absent_handle, early_done, failure };
-
-/// The pinned Responses encoder with one fault added.
-fn FaultyCodec(comptime fault: CodecFault) type {
-    return struct {
-        const pinned = codecs.encoder(.@"openai-responses/1");
-        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
-
-        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
-            const status = pinned.step(state, header, ops);
-            switch (fault) {
-                .carry_after_history_end => if (header.item == .tools_start) ops.carry(&.{1}) catch unreachable,
-                .absent_handle => if (header.item == .instructions) ops.content(1, .json_string_v1) catch unreachable,
-                .early_done => if (header.item == .text_format) return .done,
-                .failure => if (header.item == .history_end) return .failed,
-            }
-            return status;
-        }
-    };
-}
-
-test "a codec that emits a carry after history_end, names an absent handle, or finishes before request_end fails provider_codec_failed and sends nothing" {
-    var setup: PreparationTestSetup = undefined;
-    try setup.init();
-    defer setup.close();
-    const session = try configureMemoSessionForTesting(&setup);
-    try setup.submit("codec-fault", "codec-fault", session.slice(), "start");
-    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
-    const binding = try admitted.permit.consume();
-    inline for (comptime std.enums.values(CodecFault)) |fault| {
-        const expected = if (fault == .failure) error.CodecFailed else error.CodecBadOp;
-        try expectCodecFailure(&setup, binding, &FaultyCodec(fault).encoder, expected);
-    }
-    // The same Session encodes through its pinned codec.
-    const request = try prepareMemoForTesting(&setup, binding, null, .{});
-    std.testing.allocator.free(request.bytes);
-}
-
-/// Prepare with `encoder` and require it to fail with `expected`, which is
-/// provider_codec_failed, before any request exists to send.
-fn expectCodecFailure(setup: *PreparationTestSetup, binding: store.AttemptBinding, encoder: *const codecs.Encoder, expected: anyerror) !void {
-    var used: std.atomic.Value(u64) = .init(0);
-    var retained: ?named_scratch.Owner = null;
-    var preparation: Preparation = undefined;
-    try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = encoder }, &retained);
-    defer if (preparation.state.active) preparation.cancel();
-    // No request is prepared, so nothing can be sent.
-    try std.testing.expectError(expected, drainLivePreparation(&preparation, 16, 2, 1 << 16));
-    try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(expected));
-    preparation.cancel();
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(retained == null);
-}
-
-const HeaderFault = struct {
-    item: codec_abi.ItemKind = .settings,
-    name: []const u8 = "x-codec",
-    value: []const u8 = "v",
-    count: u8 = 1,
-};
-
-/// The pinned Responses encoder asking for `fault.count` headers of one
-/// value, named `fault.name`, then `fault.name` with "-1", "-2", ...: in
-/// place of the settings item's ops, or after another item's.
-fn HeaderCodec(comptime fault: HeaderFault) type {
-    return struct {
-        const pinned = codecs.encoder(.@"openai-responses/1");
-        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
-
-        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
-            const status = pinned.step(state, header, ops);
-            if (header.item != fault.item) return status;
-            if (fault.item == .settings) ops.length = 0;
-            for (0..fault.count) |index| {
-                var buffer: [64]u8 = undefined;
-                const name = if (index == 0) fault.name else std.fmt.bufPrint(&buffer, "{s}-{d}", .{ fault.name, index }) catch unreachable;
-                ops.header(name, fault.value) catch unreachable;
-            }
-            return status;
-        }
-    };
-}
-
-test "a codec header naming a credential field fails provider_codec_failed" {
-    var setup: PreparationTestSetup = undefined;
-    try setup.init();
-    defer setup.close();
-    const session = try configureMemoSessionForTesting(&setup);
-    try setup.submit("codec-header", "codec-header", session.slice(), "start");
-    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
-    const binding = try admitted.permit.consume();
-    // The credential's fields and every other field the Host writes itself.
-    inline for (provider.host_request_fields) |name|
-        try expectCodecFailure(&setup, binding, &HeaderCodec(.{ .name = name, .value = "Bearer codec" }).encoder, error.CodecBadOp);
-    // A header outside settings, a ninth, two whose names and values pass
-    // 192 bytes, a name that is not a lowercase token, a value that is not
-    // header-safe.
-    inline for ([_]HeaderFault{
-        .{ .item = .instructions },
-        .{ .count = codec_abi.max_request_headers + 1 },
-        .{ .name = "x-a", .value = &@as([95]u8, @splat('v')), .count = 2 },
-        .{ .name = "Accept" },
-        .{ .name = "x codec" },
-        .{ .value = "a\r\nx-injected: b" },
-        .{ .value = "a\x00" },
-        .{ .value = " rui" },
-    }) |fault| try expectCodecFailure(&setup, binding, &HeaderCodec(fault).encoder, error.CodecBadOp);
-    // Eight are within the bound.
-    var used: std.atomic.Value(u64) = .init(0);
-    var retained: ?named_scratch.Owner = null;
-    var preparation: Preparation = undefined;
-    try setup.storage.openHistoricalView(binding, &preparation.view);
-    try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = &HeaderCodec(.{ .count = codec_abi.max_request_headers }).encoder }, &retained);
-    defer if (preparation.state.active) preparation.cancel();
-    const eight = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
-    try std.testing.expectEqual(@as(u8, codec_abi.max_request_headers), eight.headers.count);
-    eight.deinit(std.testing.io, preparation.writer.budget);
-    // The same Session encodes through its pinned codec.
-    const request = try prepareMemoForTesting(&setup, binding, null, .{});
-    std.testing.allocator.free(request.bytes);
-}
-
 test "a full rebuild must begin with the Session's prefix seal" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
@@ -4205,6 +4125,34 @@ test "a full rebuild must begin with the Session's prefix seal" {
     const hit = try prepareMemoForTesting(&setup, binding, &memos, .{});
     defer std.testing.allocator.free(hit.bytes);
     try std.testing.expectEqual(@as(usize, @intCast(length)), hit.copied);
+}
+
+test "a codec that declines fails provider_codec_failed before any request exists and leaves no scratch" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("codec-declines", "codec-declines", session.slice(), "start");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    // The first item, a history element and the last item.
+    for ([_]codec_abi.ItemKind{ .settings, .message, .request_end }) |kind| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec_declines = kind }, &retained);
+        defer if (preparation.state.active) preparation.cancel();
+        // No request is prepared, so nothing can be sent.
+        try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, 16, 2, 1 << 16));
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+    try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(error.CodecDeclined));
+    // The same Session encodes through its pinned codec.
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    std.testing.allocator.free(request.bytes);
 }
 
 test "a history memo that does not match the frozen request is rebuilt in full" {

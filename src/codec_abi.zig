@@ -15,46 +15,22 @@ pub const ObservedHeaders = struct {
     turn_state: []const u8 = "",
 };
 
-pub const max_carry_bytes = 16;
-
-/// A codec's encoder state at a history-item boundary, opaque to the Host.
-/// A request that reuses an earlier request's history span resumes from
-/// the carry that span ended in, so the bytes after it match a rebuild.
-pub const Carry = struct {
-    len: u8 = 0,
-    bytes: [max_carry_bytes]u8 = @splat(0),
-
-    pub fn of(state: []const u8) Carry {
-        std.debug.assert(state.len <= max_carry_bytes);
-        var carry: Carry = .{ .len = @intCast(state.len) };
-        @memcpy(carry.bytes[0..state.len], state);
-        return carry;
-    }
-
-    pub fn slice(self: *const Carry) []const u8 {
-        return self.bytes[0..self.len];
-    }
-
-    pub fn eql(self: *const Carry, other: *const Carry) bool {
-        return std.mem.eql(u8, self.slice(), other.slice());
-    }
-};
-
 // ---------------------------------------------------------------- encode
 //
 // The Host walks a request's neutral items in order and gives the codec one
-// `ItemHeader` at a time. The codec answers each with ops in `Ops`, which the
-// Host runs in place before it asks for the next item. Rui's bulk text never
-// enters the codec: an item names its content by handle, and a `content` op
-// streams a handle into the request under a pinned escape.
+// `ItemHeader` at a time. The codec answers each with `Pieces`, which the
+// Host writes in place before it asks for the next item. Rui's bulk text
+// never enters the codec: an item names its content by handle, and a
+// `content` piece streams a handle into the request under a pinned escape.
 //
 // Append-only: the bytes of the history items, from the first history item
 // to `history_end`, are the span a later request of the Session begins with.
-// The codec's state at each history-element boundary is exactly its carry:
-// the Host reloads the state from the last carry before every element and
-// before `history_end`, whether that carry came from the previous element or
-// from a history memo, so a memo copy and a rebuild continue identically.
-// Anything that depends on being last comes after `history_end`.
+// The codec's state at each history-element boundary is exactly its carry,
+// a value of the codec's own type: the Host resumes the codec from the last
+// carry before every element and before `history_end`, whether that carry
+// came from the previous element or from a history memo, so a memo copy and
+// a rebuild continue identically. Anything that depends on being last comes
+// after `history_end`.
 
 /// The neutral items of a request, in the order the Host yields them:
 /// settings, instructions, the history items, history_end,
@@ -62,8 +38,7 @@ pub const Carry = struct {
 /// enabled tool, text_format, request_end.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
-    /// which the codec writes by a content op so the Host escapes it. The
-    /// only item whose ops may include request headers.
+    /// which the codec writes by a content piece so the Host escapes it.
     settings,
     /// Handle 0: Rui's instruction text, Workspace, Session and baseline.
     instructions,
@@ -89,7 +64,7 @@ pub const ItemKind = enum(u8) {
     text_format,
     request_end,
 
-    /// The items the Host reloads the codec's state from its carry before.
+    /// The items the Host resumes the codec from its carry before.
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
             .message, .output_open, .tool_result, .history_end => true,
@@ -97,7 +72,8 @@ pub const ItemKind = enum(u8) {
         };
     }
 
-    /// The items that end a history element, whose last op is the carry.
+    /// The items that end a history element, after which the Host keeps
+    /// the codec's carry.
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
             .message, .output_close, .tool_result => true,
@@ -138,7 +114,8 @@ pub const Item = union(ItemKind) {
 pub const max_handles = 3;
 pub const max_model_bytes = 256;
 
-/// Frozen request settings, carried by the settings item only.
+/// Frozen request settings, carried by the settings item and read by a
+/// codec's request headers.
 pub const Settings = struct {
     /// Null when the binding has no effort; the codec then sends none.
     effort: ?Effort,
@@ -175,88 +152,115 @@ pub const Escape = enum(u8) {
     json_string_v1 = 1,
 };
 
-pub const OpTag = enum(u8) {
-    /// u16 little-endian length, then that many (at least one) bytes,
-    /// copied into the request.
-    literal = 1,
-    /// u8 handle, u8 escape: the whole handle, escaped.
-    content = 2,
-    /// u8 length (at most max_carry_bytes), then the bytes: the codec's
-    /// state after this history element.
-    carry = 3,
-    /// u8 name length (at least 1), u16 little-endian value length, the
-    /// name, the value: one request header (settings only).
-    header = 4,
-};
-
-pub const Op = union(OpTag) {
+/// One stretch of an item's encoding.
+pub const Piece = union(enum) {
+    /// The codec's constant bytes, at least one.
     literal: []const u8,
+    /// One of the item's handles, whole, escaped.
     content: struct { handle: u8, escape: Escape },
-    carry: Carry,
-    header: Header,
 };
 
-/// A request header a codec asks for. The Host sends it ahead of its own
-/// fields when the name is a lowercase token that no Host field uses and
-/// the value is header-safe (`headerValue`), up to `max_request_headers`
-/// headers of `max_request_header_bytes` names and values in all.
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
+/// The most pieces one item takes, across every codec this contract
+/// serves.
+pub const max_pieces = 8;
+
+/// The pieces a codec writes for one item, in order.
+pub const Pieces = struct {
+    len: u8,
+    items: [max_pieces]Piece = undefined,
+
+    pub fn literal(self: *Pieces, bytes: []const u8) void {
+        std.debug.assert(bytes.len != 0);
+        self.push(.{ .literal = bytes });
+    }
+
+    pub fn content(self: *Pieces, handle: u8, escape: Escape) void {
+        self.push(.{ .content = .{ .handle = handle, .escape = escape } });
+    }
+
+    fn push(self: *Pieces, piece: Piece) void {
+        std.debug.assert(self.len < max_pieces);
+        self.items[self.len] = piece;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const Pieces) []const Piece {
+        return self.items[0..self.len];
+    }
 };
 
 pub const max_request_headers = 8;
-/// Names and values together. The settings item's ops hold its headers and
-/// its body literals in `Ops.capacity` bytes, so a larger bound could never
-/// be reached; the prepared request stores this many bytes.
+/// The values together; the prepared request stores this many bytes.
 pub const max_request_header_bytes = 192;
 
+/// A codec's request headers, in the order it gives them, which the Host
+/// sends ahead of its own fields. Each name is a tag of the codec's own
+/// `RequestHeader` enum, whose tag names are lowercase tokens, and each
+/// value is header-safe (`headerValue`); none names a field the Host or h2
+/// writes itself.
+pub const Headers = struct {
+    count: u8,
+    /// Each header's `RequestHeader` tag, as its integer.
+    names: [max_request_headers]u8 = undefined,
+    /// Where each value ends in `bytes`; each begins where the previous
+    /// one ends.
+    ends: [max_request_headers]u8 = undefined,
+    bytes: [max_request_header_bytes]u8 = undefined,
+
+    comptime {
+        std.debug.assert(max_request_header_bytes <= std.math.maxInt(u8));
+    }
+
+    pub fn add(self: *Headers, name: anytype, text: []const u8) void {
+        comptime std.debug.assert(@typeInfo(@TypeOf(name)) == .@"enum");
+        std.debug.assert(self.count < max_request_headers);
+        const start = self.valueBytes();
+        std.debug.assert(text.len <= max_request_header_bytes - start);
+        @memcpy(self.bytes[start..][0..text.len], text);
+        self.names[self.count] = @backingInt(name);
+        self.ends[self.count] = @intCast(start + text.len);
+        self.count += 1;
+    }
+
+    pub fn value(self: *const Headers, index: usize) []const u8 {
+        std.debug.assert(index < self.count);
+        return self.bytes[if (index == 0) 0 else self.ends[index - 1]..self.ends[index]];
+    }
+
+    /// The bytes the values take together.
+    pub fn valueBytes(self: *const Headers) usize {
+        return if (self.count == 0) 0 else self.ends[self.count - 1];
+    }
+};
+
+// -------------------------------------------------------------- classify
+//
+// The Host classifies an HTTP error response by feeding the codec the sealed
+// body in order, one window at a time, from its first byte to its last. It
+// never feeds a byte twice, and the codec cannot ask it to: a codec keeps
+// what it needs of earlier windows in its own state, and names text by range.
+// The codec answers each window with findings in `Ops`. A finding can only
+// narrow the failure the Host's status rules give, and every narrowing
+// settles the Attempt as a failure no retry can fix, so a codec can never
+// make a failure retryable. The Host keeps every status rule, decides which
+// narrowing applies, and maps each code through its own closed sets, so a
+// code it does not know narrows nothing.
+
 pub const Status = enum(u8) {
-    /// The item is encoded, or the window read; its ops are ready.
+    /// The window is read; its findings are ready.
     next = 0,
-    /// The request is complete (request_end only), or the body classified.
+    /// The body is classified.
     done = 1,
-    /// The codec cannot encode this request or classify this body.
+    /// The codec cannot classify this body.
     failed = 2,
 };
 
-/// The ops a codec writes for one item, or the findings for one window.
+/// The findings a codec writes for one window.
 pub const Ops = struct {
     pub const capacity = 256;
 
     length: u16 = 0,
     bytes: [capacity]u8 = undefined,
-
-    pub fn literal(self: *Ops, bytes: []const u8) error{OpsOverflow}!void {
-        std.debug.assert(bytes.len != 0);
-        const head = try self.reserve(3 + bytes.len);
-        head[0] = @backingInt(OpTag.literal);
-        std.mem.writeInt(u16, head[1..3], @intCast(bytes.len), .little);
-        @memcpy(head[3..], bytes);
-    }
-
-    pub fn content(self: *Ops, handle: u8, escape: Escape) error{OpsOverflow}!void {
-        const head = try self.reserve(3);
-        head[0..3].* = .{ @backingInt(OpTag.content), handle, @backingInt(escape) };
-    }
-
-    pub fn carry(self: *Ops, state: []const u8) error{OpsOverflow}!void {
-        std.debug.assert(state.len <= max_carry_bytes);
-        const head = try self.reserve(2 + state.len);
-        head[0] = @backingInt(OpTag.carry);
-        head[1] = @intCast(state.len);
-        @memcpy(head[2..], state);
-    }
-
-    pub fn header(self: *Ops, name: []const u8, value: []const u8) error{OpsOverflow}!void {
-        std.debug.assert(name.len != 0 and name.len <= std.math.maxInt(u8));
-        const head = try self.reserve(4 + name.len + value.len);
-        head[0] = @backingInt(OpTag.header);
-        head[1] = @intCast(name.len);
-        std.mem.writeInt(u16, head[2..4], @intCast(value.len), .little);
-        @memcpy(head[4..][0..name.len], name);
-        @memcpy(head[4 + name.len ..], value);
-    }
 
     pub fn finding(self: *Ops, value: Finding) error{OpsOverflow}!void {
         switch (value) {
@@ -289,79 +293,11 @@ pub const Ops = struct {
         return self.bytes[self.length..][0..count];
     }
 
-    /// Reads the ops from `offset`, which is 0 or an offset `Reader.next`
-    /// returned.
-    pub fn reader(self: *const Ops, offset: u16) Reader {
-        return .{ .bytes = self.bytes[0..self.length], .offset = offset };
-    }
-
     /// Reads these ops as findings, from the first op.
     pub fn findings(self: *const Ops) FindingReader {
         return .{ .bytes = self.bytes[0..self.length] };
     }
 };
-
-/// Decodes ops; anything malformed is `error.CodecBadOp`.
-pub const Reader = struct {
-    bytes: []const u8,
-    offset: u16,
-
-    pub fn next(self: *Reader) error{CodecBadOp}!?Op {
-        const rest = self.bytes[self.offset..];
-        if (rest.len == 0) return null;
-        const tag = std.enums.fromInt(OpTag, rest[0]) orelse return error.CodecBadOp;
-        // Lengths are widened to usize before any sum, so no op can wrap
-        // the arithmetic that bounds it.
-        switch (tag) {
-            .literal => {
-                if (rest.len < 3) return error.CodecBadOp;
-                const count: usize = std.mem.readInt(u16, rest[1..3], .little);
-                if (count == 0 or rest.len - 3 < count) return error.CodecBadOp;
-                self.advance(3 + count);
-                return .{ .literal = rest[3..][0..count] };
-            },
-            .content => {
-                if (rest.len < 3) return error.CodecBadOp;
-                const escape = std.enums.fromInt(Escape, rest[2]) orelse return error.CodecBadOp;
-                self.advance(3);
-                return .{ .content = .{ .handle = rest[1], .escape = escape } };
-            },
-            .carry => {
-                if (rest.len < 2) return error.CodecBadOp;
-                const length: usize = rest[1];
-                if (length > max_carry_bytes or rest.len - 2 < length) return error.CodecBadOp;
-                self.advance(2 + length);
-                return .{ .carry = .of(rest[2..][0..length]) };
-            },
-            .header => {
-                if (rest.len < 4 or rest[1] == 0) return error.CodecBadOp;
-                const name_length: usize = rest[1];
-                const value_length: usize = std.mem.readInt(u16, rest[2..4], .little);
-                if (rest.len - 4 < name_length + value_length) return error.CodecBadOp;
-                self.advance(4 + name_length + value_length);
-                return .{ .header = .{ .name = rest[4..][0..name_length], .value = rest[4 + name_length ..][0..value_length] } };
-            },
-        }
-    }
-
-    /// `count` is at most the bytes left, so the offset stays within them.
-    fn advance(self: *Reader, count: usize) void {
-        self.offset = @intCast(self.offset + count);
-    }
-};
-
-// -------------------------------------------------------------- classify
-//
-// The Host classifies an HTTP error response by feeding the codec the sealed
-// body in order, one window at a time, from its first byte to its last. It
-// never feeds a byte twice, and the codec cannot ask it to: a codec keeps
-// what it needs of earlier windows in its own state, and names text by range.
-// The codec answers each window with findings in `Ops`. A finding can only
-// narrow the failure the Host's status rules give, and every narrowing
-// settles the Attempt as a failure no retry can fix, so a codec can never
-// make a failure retryable. The Host keeps every status rule, decides which
-// narrowing applies, and maps each code through its own closed sets, so a
-// code it does not know narrows nothing.
 
 /// One window of the body. Windows are contiguous: the first starts at
 /// offset 0 and each starts where the one before ended.
@@ -378,8 +314,6 @@ pub const max_code_bytes = 64;
 /// The two parts of a report, `code: message`.
 pub const ReportField = enum(u8) { code = 0, message = 1 };
 
-/// The tags continue `OpTag`'s numbering, so neither job's reader accepts
-/// the other's ops.
 pub const FindingTag = enum(u8) {
     /// No payload: the request exceeds the model's context.
     context_overflow = 5,
