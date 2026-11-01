@@ -109,6 +109,47 @@ pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const 
     }
 }
 
+/// A pinned codec's response stream state between events, which its
+/// caller stores.
+pub const Stream = PerCodec("Stream");
+
+/// A pinned codec's interpreter scratch, which its caller lends for each
+/// `interpretEvent`.
+pub const InterpretScratch = PerCodec("InterpretScratch");
+
+/// The state before a response's first event.
+pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
+    return switch (codec) {
+        inline else => |tag| @unionInit(Stream, @tagName(tag), module(tag).begin(operation)),
+    };
+}
+
+/// The codec's verdict on one event's data, `data`, naming bytes by range
+/// of it.
+pub fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
+    switch (stream.*) {
+        inline else => |*state, tag| {
+            if (std.meta.activeTag(scratch.*) != tag) scratch.* = @unionInit(InterpretScratch, @tagName(tag), undefined);
+            return module(tag).interpretEvent(state, &@field(scratch.*, @tagName(tag)), data);
+        },
+    }
+}
+
+/// The next step of a walk over an event `interpretEvent` accepted, from
+/// a cursor its answer gave.
+pub fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *codec_abi.Cursor) ?codec_abi.Member {
+    return switch (codec) {
+        inline else => |tag| module(tag).nextMember(data, cursor),
+    };
+}
+
+/// The stream ended between events: its verdict, if it fails.
+pub fn finish(stream: *const Stream) ?codec_abi.Reason {
+    return switch (stream.*) {
+        inline else => |*state, tag| module(tag).finish(state),
+    };
+}
+
 const TestItem = struct {
     item: codec_abi.Item,
     handles: []const ?[]const u8 = &.{},

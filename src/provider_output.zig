@@ -4,107 +4,19 @@ const protocol = @import("protocol.zig");
 const output_format = @import("output_format.zig");
 const transport_policy = @import("transport_policy.zig");
 const output_decode = @import("output_decode.zig");
-
-pub const max_evidence_bytes = 256;
+const codec_abi = @import("codec_abi.zig");
 
 pub const Faults = struct {
     metadata: bool = false,
 };
 
-pub const Evidence = struct {
-    response_id: protocol.Bounded(max_evidence_bytes) = .{},
-    served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
-};
-
-pub const Rejection = struct {
-    stage: enum { stream, event, item, response } = .stream,
-    byte_offset: u64 = 0,
-    output_index: ?u64 = null,
-
-    // Only local error names and structural coordinates. Never copy provider
-    // strings, IDs, text, arguments or private continuation into this detail.
-    pub fn format(self: Rejection, err: anyerror, buffer: *[512]u8) []const u8 {
-        return std.fmt.bufPrint(
-            buffer,
-            "{{\"reason\":\"{s}\",\"stage\":\"{s}\",\"byte_offset\":\"{d}\",\"output_index\":{?d}}}",
-            .{ @errorName(err), @tagName(self.stage), self.byte_offset, self.output_index },
-        ) catch unreachable;
-    }
-};
-
-pub const Validated = struct {
-    /// Borrowed decoded SSE bytes, valid until EventData.deinit().
-    source: std.Io.File,
-    source_length: u64,
-    item_count: u64,
-    call_count: u64,
-    answer_item_ordinal: ?u64,
-    answer_length: u64,
-    answer_digest: [32]u8,
-    evidence: Evidence,
-};
+pub const max_evidence_bytes = output_decode.max_evidence_bytes;
+pub const Evidence = output_decode.Evidence;
+pub const Rejection = output_decode.Rejection;
+pub const Validated = output_decode.Validated;
+pub const EventData = output_decode.EventData;
 
 const Range = struct { start: u64, length: u64 };
-
-/// One validation workspace, not one buffer per event or live transport.
-/// Keep raw capture immutable for diagnostics; metadata addresses these bytes.
-pub const EventData = struct {
-    /// Owns the file and keeps the newest bytes written, so the event they
-    /// complete parses from memory.
-    window: Window,
-    budget: protocol.ScratchBudget,
-    length: u64 = 0,
-    charged: u64 = 0,
-
-    /// Fills `self` with an empty unlinked scratch file. On error `self`
-    /// owns nothing and `retained` holds any name left to reclaim.
-    pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
-        retained.* = null;
-        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
-        defer scratch.close(io);
-        const file = try scratch.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        if (fail_unlink) {
-            retained.* = .init(io, file, null, name, budget, 0, .injected_failure);
-            return error.InjectedEventDataUnlinkFailure;
-        }
-        scratch.deleteFile(io, name) catch |err| {
-            retained.* = .init(io, file, null, name, budget, 0, .native);
-            return err;
-        };
-        self.* = .{ .window = .{ .io = io, .file = file }, .budget = budget };
-    }
-
-    fn append(self: *EventData, bytes: []const u8) !void {
-        if (!self.budget.allocate(bytes.len)) return error.EventDataScratchExhausted;
-        // A partial write remains charged until disposal, just like capture.
-        self.charged += bytes.len;
-        self.window.file.writeStreamingAll(self.window.io, bytes) catch return error.EventDataWriteFailed;
-        self.window.remember(self.length, bytes);
-        self.length += bytes.len;
-    }
-
-    fn copy(self: *EventData, source: *Window, range: Range) !void {
-        // Appending moves this window, so it cannot also be the source.
-        std.debug.assert(source != &self.window);
-        var offset = range.start;
-        const end = try std.math.add(u64, range.start, range.length);
-        while (offset < end) {
-            const bytes = try source.bytesAt(offset, end);
-            try self.append(bytes);
-            offset += bytes.len;
-        }
-    }
-
-    fn seal(self: *EventData) !void {
-        const length = self.window.file.length(self.window.io) catch return error.EventDataSealFailed;
-        if (length != self.length) return error.EventDataSealFailed;
-    }
-
-    pub fn deinit(self: *EventData) void {
-        self.window.file.close(self.window.io);
-        self.budget.release(self.charged);
-    }
-};
 
 const Window = output_decode.Window;
 
@@ -240,13 +152,7 @@ const ParsedString = struct {
     non_whitespace: bool,
 };
 
-fn isWhitespace(scalar: u21) bool {
-    // Unicode White_Space, matching the provider client's empty-answer test.
-    return switch (scalar) {
-        0x09...0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
-        else => false,
-    };
-}
+const isWhitespace = output_decode.isWhitespace;
 
 /// Length of the leading bytes that need no escape, UTF-8 or end check.
 fn plainStringLength(bytes: []const u8) usize {
@@ -682,7 +588,7 @@ const ItemValidation = struct {
     /// A message's text: its text parts back to back.
     text_length: u64 = 0,
     text_digest: [32]u8 = @splat(0),
-    phase: enum { unphased, commentary, final_answer } = .unphased,
+    phase: codec_abi.Phase = .unphased,
     /// The phase Rui's form holds: only an exact `commentary` or
     /// `final_answer` literal.
     neutral_phase: output_format.NeutralPhase = .unphased,
@@ -1722,6 +1628,9 @@ test "the item grammar rejects unsupported meaning and preserves open fields" {
         defer source.file.close(std.testing.io);
         const verdict = try judgeFile(std.testing.io, source.file, case.item.len, case.operation);
         try std.testing.expectEqual(case.supported, verdict == .compatible);
+        // Validation, and the interpreter beside it, judges it alike.
+        const imported = if (importTestingItem(&tmp, case.item, case.operation)) |_| true else |_| false;
+        try std.testing.expectEqual(case.supported, imported);
     }
 }
 
@@ -1750,6 +1659,7 @@ test "the item grammar refuses consumed duplicates and syntax" {
         const verdict = judgeFile(std.testing.io, source.file, case.item.len, case.operation) catch |err| {
             try std.testing.expectEqual(error.SyntaxError, err);
             try std.testing.expectEqual(case.failure, err);
+            if (importTestingItem(&tmp, case.item, case.operation)) |_| return error.TestExpectedError else |_| {}
             continue;
         };
         // A consumed duplicate fails the item; an earlier broken rule may
@@ -1884,11 +1794,27 @@ test "the item grammar streams opaque windows and preserves syntax failures" {
     for (0..3) |_| try file.writeStreamingAll(std.testing.io, &window);
     try file.writeStreamingAll(std.testing.io, suffix);
     try expectCompatible(try judgeFile(std.testing.io, file, prefix.len + 3 * window.len + suffix.len, .assistant_response));
+    const item = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, &window, &window, &window, suffix });
+    defer std.testing.allocator.free(item);
+    try importTestingItem(&tmp, item, .assistant_response);
 
     const invalid = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}";
     const source = try testingObject(&tmp, invalid);
     defer source.file.close(std.testing.io);
     try std.testing.expectError(error.InvalidJsonUtf8, judgeFile(std.testing.io, source.file, invalid.len, .assistant_response));
+    try std.testing.expectError(error.InvalidJsonUtf8, importTestingItem(&tmp, invalid, .assistant_response));
+}
+
+test "every item of the grammar tables is interpreted beside its validation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const before = Oracle.accepted + Oracle.rejected;
+    var items: u64 = 0;
+    inline for (.{ replay_cases, replay_failure_cases, agreement_cases }) |cases| for (cases) |case| {
+        importTestingItem(&tmp, case.item, case.operation) catch {};
+        items += 1;
+    };
+    try std.testing.expectEqual(before + items, Oracle.accepted + Oracle.rejected);
 }
 
 test "replay compatibility cursor bounds actual sequential reads including open fields" {
@@ -2166,29 +2092,7 @@ fn validateCompleted(
     }
 }
 
-const AnswerSelection = struct {
-    ordinal: ?u64 = null,
-    length: u64 = 0,
-    digest: [32]u8,
-    phased: bool = false,
-    finals: u64 = 0,
-
-    fn accept(self: *AnswerSelection, validation: ItemValidation, ordinal: u64) void {
-        if (validation.phase != .unphased) self.phased = true;
-        if (validation.phase == .final_answer) self.finals += 1;
-        if (validation.phase == .final_answer or (!self.phased and validation.phase == .unphased)) {
-            self.ordinal = ordinal;
-            self.length = if (validation.non_whitespace) validation.text_length else 0;
-            self.digest = if (validation.non_whitespace) validation.text_digest else protocol.contentDigest("");
-        } else if (self.phased and self.finals == 0) {
-            // Mixed phased/unphased text is visible, but only an explicit
-            // final can terminate a phased response without Tool Calls.
-            self.ordinal = null;
-            self.length = 0;
-            self.digest = protocol.contentDigest("");
-        }
-    }
-};
+const AnswerSelection = output_decode.AnswerSelection;
 
 /// Tests' item grammar storage, off their stacks like the Host's. Tests run
 /// one at a time and each use finishes before the next starts.
@@ -2316,7 +2220,7 @@ fn processEvent(response: *Response, window: *Window, event: Range, raw_start: u
                 response.compaction_count += 1;
                 if (response.compaction_count > 1) return error.UnsupportedProviderOutput;
             },
-            .message => response.answer.accept(validation, index),
+            .message => response.answer.accept(&.{ .ordinal = index, .phase = validation.phase, .length = validation.text_length, .digest = validation.text_digest, .non_whitespace = validation.non_whitespace }),
             .function_call => response.call_count += 1,
             .reasoning => {},
         }
@@ -2367,6 +2271,167 @@ fn contentDigestRange(window: *Window, range: Range) ![32]u8 {
 }
 
 pub fn validate(
+    io: std.Io,
+    source_file: std.Io.File,
+    source_length: u64,
+    metadata: *output_format.OutputMetadataWriter,
+    event_data: *EventData,
+    operation: output_format.ModelOperationKind,
+    rejection: *Rejection,
+    /// What a provider error event said, when validation fails on one.
+    provider_failure: *ProviderFailure,
+    /// The item grammar's storage, larger than most frames. A caller keeps
+    /// it off the stack: a frame that holds it makes all of its pages
+    /// resident, while one item touches only a few.
+    item_check: *OutputItemCheck,
+    faults: Faults,
+) !Validated {
+    if (comptime @import("builtin").is_test) {
+        const before: Oracle.Before = .of(metadata, event_data, faults);
+        const result: anyerror!Validated = validateStream(io, source_file, source_length, metadata, event_data, operation, rejection, provider_failure, item_check, faults);
+        Oracle.check(&before, io, source_file, source_length, metadata, event_data, operation, &result, rejection, provider_failure);
+        return result;
+    } else return validateStream(io, source_file, source_length, metadata, event_data, operation, rejection, provider_failure, item_check, faults);
+}
+
+/// In tests, every stream validated here is interpreted again through the
+/// codec's value contract, and both must agree: the same acceptance, event
+/// data and metadata, or the same rejection detail, which names the error
+/// and its coordinates, with the same provider report.
+const Oracle = struct {
+    // Tests validate one at a time on the test thread: no unit test runs a
+    // Host's execution thread, so one interpretation's storage serves all.
+    var storage: output_decode.Interpret = undefined;
+    var events: EventData = undefined;
+    /// The streams compared, by today's verdict on them.
+    var accepted: u64 = 0;
+    var rejected: u64 = 0;
+
+    /// The budgets and faults validation began with.
+    const Before = struct {
+        metadata_used: u64,
+        event_used: u64,
+        shared: bool,
+        fail_writes: bool,
+        metadata_records: u64,
+        event_length: u64,
+
+        fn of(metadata: *const output_format.OutputMetadataWriter, event_data: *const EventData, faults: Faults) Before {
+            return .{
+                .metadata_used = metadata.budget.used.load(.acquire),
+                .event_used = event_data.budget.used.load(.acquire),
+                .shared = metadata.budget.used == event_data.budget.used,
+                .fail_writes = metadata.fail_writes or faults.metadata,
+                .metadata_records = metadata.records,
+                .event_length = event_data.length,
+            };
+        }
+    };
+
+    fn check(
+        before: *const Before,
+        io: std.Io,
+        source_file: std.Io.File,
+        source_length: u64,
+        metadata: *output_format.OutputMetadataWriter,
+        event_data: *EventData,
+        operation: output_format.ModelOperationKind,
+        today: *const anyerror!Validated,
+        today_rejection: *const Rejection,
+        today_failure: *const ProviderFailure,
+    ) void {
+        // Only a fresh validation's offsets compare.
+        if (before.metadata_records != 0 or before.event_length != 0) return;
+        if (today.*) |_| {
+            accepted += 1;
+        } else |_| rejected += 1;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        compare(before, &tmp, io, source_file, source_length, metadata, event_data, operation, today, today_rejection, today_failure) catch |err|
+            std.debug.panic("interpret oracle: {t}", .{err});
+    }
+
+    fn compare(
+        before: *const Before,
+        tmp: *std.testing.TmpDir,
+        io: std.Io,
+        source_file: std.Io.File,
+        source_length: u64,
+        metadata: *output_format.OutputMetadataWriter,
+        event_data: *EventData,
+        operation: output_format.ModelOperationKind,
+        today: *const anyerror!Validated,
+        today_rejection: *const Rejection,
+        today_failure: *const ProviderFailure,
+    ) !void {
+        // Budgets are copied, without reclamation.
+        var metadata_used: std.atomic.Value(u64) = .init(before.metadata_used);
+        var event_used: std.atomic.Value(u64) = .init(before.event_used);
+        const event_file = try tmp.dir.createFile(io, "oracle-events", .{ .read = true, .truncate = true });
+        defer event_file.close(io);
+        events.window.io = io;
+        events.window.file = event_file;
+        events.window.start = 0;
+        events.window.length = 0;
+        events.budget = .{ .used = if (before.shared) &metadata_used else &event_used, .limit = event_data.budget.limit };
+        events.length = 0;
+        events.charged = 0;
+        const metadata_file = try tmp.dir.createFile(io, "oracle-metadata", .{ .read = true, .truncate = true });
+        defer metadata_file.close(io);
+        var writer: output_format.OutputMetadataWriter = .{ .io = io, .file = metadata_file, .budget = .{ .used = &metadata_used, .limit = metadata.budget.limit }, .fail_writes = before.fail_writes };
+        var rejection: Rejection = .{};
+        var failure: ProviderFailure = undefined;
+        var interpreted: Validated = undefined;
+        const result = output_decode.interpret(&storage, .@"openai-responses/1", io, source_file, source_length, &writer, &events, operation, &rejection, &failure, &interpreted);
+        if (today.*) |*expected| {
+            result catch |err| return disagree("today accepts; interpret rejects with {t} at {any}", .{ err, rejection });
+            inline for (.{ "source_length", "item_count", "call_count", "answer_item_ordinal", "answer_length" }) |name| {
+                if (@field(expected, name) != @field(interpreted, name)) return disagree(name ++ ": today {any}, interpreted {any}", .{ @field(expected, name), @field(interpreted, name) });
+            }
+            if (!std.mem.eql(u8, &expected.answer_digest, &interpreted.answer_digest)) return disagree("answer digests differ", .{});
+            if (!expected.evidence.response_id.eql(interpreted.evidence.response_id.slice()) or
+                !expected.evidence.served_model.eql(interpreted.evidence.served_model.slice())) return disagree("evidence differs", .{});
+            try sameFile("event data", io, event_data.window.file, event_file);
+            try sameFile("metadata", io, metadata.file, metadata_file);
+        } else |today_error| {
+            const err = if (result) |_| return disagree("today rejects with {t} at {any}; interpret accepts", .{ today_error, today_rejection.* }) else |err| err;
+            // The saved detail names the error and its coordinates, and the
+            // error decides the saved code and kind.
+            var today_buffer: [512]u8 = undefined;
+            var interpreted_buffer: [512]u8 = undefined;
+            const today_detail = today_rejection.format(today_error, &today_buffer);
+            const interpreted_detail = rejection.format(err, &interpreted_buffer);
+            if (!std.mem.eql(u8, today_detail, interpreted_detail)) return disagree("today rejects with {s}, interpret with {s}", .{ today_detail, interpreted_detail });
+            if (today_failure.refusal != failure.refusal or !std.mem.eql(u8, today_failure.report.slice(), failure.report.slice()))
+                return disagree("{t}: provider failures differ: today {?t} \"{s}\", interpreted {?t} \"{s}\"", .{ err, today_failure.refusal, today_failure.report.slice(), failure.refusal, failure.report.slice() });
+        }
+    }
+
+    fn disagree(comptime format: []const u8, arguments: anytype) error{OracleDisagreement} {
+        std.debug.print("interpret oracle: " ++ format ++ "\n", arguments);
+        return error.OracleDisagreement;
+    }
+
+    fn sameFile(comptime what: []const u8, io: std.Io, expected: std.Io.File, actual: std.Io.File) !void {
+        const length = try expected.length(io);
+        if (length != try actual.length(io)) return disagree(what ++ " lengths differ: today {d}, interpreted {d}", .{ length, try actual.length(io) });
+        var left: [4096]u8 = undefined;
+        var right: [4096]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < length) {
+            const count: usize = @intCast(@min(left.len, length - offset));
+            _ = try expected.readPositionalAll(io, left[0..count], offset);
+            _ = try actual.readPositionalAll(io, right[0..count], offset);
+            if (!std.mem.eql(u8, left[0..count], right[0..count])) {
+                const index = std.mem.indexOfDiff(u8, left[0..count], right[0..count]).?;
+                return disagree(what ++ " differs at byte {d}", .{offset + index});
+            }
+            offset += count;
+        }
+    }
+};
+
+fn validateStream(
     io: std.Io,
     source_file: std.Io.File,
     source_length: u64,
@@ -2436,8 +2501,8 @@ pub fn validate(
             if (data == null) {
                 data = .{ .start = event_data.length, .length = 0 };
                 raw_start = line.start + skip;
-            } else try event_data.append("\n");
-            try event_data.copy(&capture, .{ .start = line.start + skip, .length = line.length - skip });
+            } else try event_data.appendRemembered("\n");
+            try event_data.copy(&capture, line.start + skip, line.length - skip);
             data.?.length = event_data.length - data.?.start;
         }
         // Comments and every other field, including colonless fields, carry
@@ -2495,7 +2560,7 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !Window {
     return .{ .io = std.testing.io, .file = file };
 }
 
-const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: output_format.OutputMetadataRecord };
+const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: output_format.OutputMetadataRecord, first_part: ?output_format.OutputMetadataRecord };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
     return validateTestingOperation(tmp, bytes, metadata_limit, .assistant_response);
@@ -2533,10 +2598,14 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, testingProviderFailure(), testingItemCheck(), .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
-    const first_item = (try reader.nextItem()).?;
+    var first_part: ?output_format.OutputMetadataRecord = null;
+    const first_item = while (try reader.next()) |record| {
+        if (record.tag == .item) break record;
+        if (record.tag == .part and first_part == null) first_part = record;
+    } else unreachable;
     metadata.deinit();
     source.close(std.testing.io);
-    return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item };
+    return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item, .first_part = first_part };
 }
 
 fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
@@ -2789,6 +2858,60 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         budget.release(raw.len);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
+}
+
+test "an event's data is charged whole before its metadata from a shared budget" {
+    // A message the grammar writes records for, then a field it ignores
+    // that spans several write windows: the event's data fits the shared
+    // budget, its metadata does not.
+    const padding: [3 * protocol.content_window_bytes]u8 = @splat('p');
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"padding\":\"" ++ padding ++ "\"}";
+    const raw = "data: " ++ done ++ "\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try tmp.dir.createFile(std.testing.io, "raw", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, raw);
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = protocol.ScratchBudget{ .used = &used, .limit = done.len + output_format.output_metadata_record_bytes };
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root, "metadata", budget, false, &retained);
+    defer metadata.deinit();
+    var data: EventData = undefined;
+    try data.init(std.testing.io, root, "data", budget, false, &retained);
+    defer data.deinit();
+    var rejection: Rejection = .{};
+    try std.testing.expectError(error.MetadataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, testingProviderFailure(), testingItemCheck(), .{}));
+    try std.testing.expectEqual(@as(u64, done.len), data.length);
+    try std.testing.expectEqual(.item, rejection.stage);
+}
+
+test "a 4 MiB reasoning item interprets as provider_output does" {
+    const summary = 4 * 1024 * 1024;
+    const head = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"";
+    const tail = "\"}],\"encrypted_content\":\"opaque\"}";
+    const message = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}";
+    const item = try std.testing.allocator.alloc(u8, head.len + summary + tail.len);
+    defer std.testing.allocator.free(item);
+    @memcpy(item[0..head.len], head);
+    @memset(item[head.len..][0..summary], 'x');
+    @memcpy(item[head.len + summary ..], tail);
+    var stream: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stream.deinit();
+    try stream.writer.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n", .{item});
+    try stream.writer.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{s}}}\n\n", .{message});
+    try stream.writer.print("data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[{s},{s}]}}}}\n\n", .{ item, message });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted_before = Oracle.accepted;
+    const accepted = try validateTestingSse(&tmp, stream.written(), 64 * 1024);
+    try std.testing.expectEqual(accepted_before + 1, Oracle.accepted);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, "done".len), accepted.output.answer_length);
+    try std.testing.expectEqual(@as(u64, item.len), accepted.first_item.length);
+    try std.testing.expectEqual(@as(u64, summary), accepted.first_part.?.decoded_length);
 }
 
 test "synthetic gpt-6-luna shaped commentary interleaves calls and selects final answer" {
@@ -3492,9 +3615,9 @@ test "a decoded event is parsed from the bytes just written, never read back" {
     const capture_file = capture.file;
     capture.file = unreadable;
     // A nearly full window starts again at the event, so the event stays whole.
-    try data.append(&@as([protocol.content_window_bytes - 8]u8, @splat(' ')));
+    try data.appendRemembered(&@as([protocol.content_window_bytes - 8]u8, @splat(' ')));
     const start = data.length;
-    try data.copy(&capture, .{ .start = "data: ".len, .length = event.len });
+    try data.copy(&capture, "data: ".len, event.len);
     capture.file = capture_file;
 
     const data_file = data.window.file;
@@ -3512,9 +3635,9 @@ test "a decoded event is parsed from the bytes just written, never read back" {
     try std.testing.expectEqualStrings(event, &written);
     // An event larger than the window is read back from the file instead.
     const large_start = data.length;
-    try data.append("{\"delta\":\"");
-    try data.append(&@as([2 * protocol.content_window_bytes]u8, @splat('x')));
-    try data.append("\"}");
+    try data.appendRemembered("{\"delta\":\"");
+    try data.appendRemembered(&@as([2 * protocol.content_window_bytes]u8, @splat('x')));
+    try data.appendRemembered("\"}");
     const large = try readFields(&data.window, .{ .start = large_start, .length = data.length - large_start }, &.{"delta"});
     try std.testing.expectEqual(2 * protocol.content_window_bytes + 2, (try large.required("delta")).length);
 }
@@ -3648,4 +3771,44 @@ fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
         try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
         try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
     }
+}
+
+/// The codec's JSON reader and validation's own parser name the same error
+/// for `document`.
+fn expectSyntaxAgrees(tmp: *std.testing.TmpDir, document: []const u8) !void {
+    const json = @import("codecs/json.zig");
+    var window = try testingObject(tmp, document);
+    defer window.file.close(std.testing.io);
+    const expected: ?anyerror = if (readFields(&window, .{ .start = 0, .length = document.len }, &.{"type"})) |_| null else |err| err;
+    const Ignored = struct {
+        pub fn key(_: *@This(), _: *const json.Reader, _: u8) void {}
+        pub fn begin(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+        pub fn end(_: *@This(), _: *const json.Reader, _: json.Kind, _: u8) void {}
+    };
+    var ignored: Ignored = .{};
+    var reader: json.Reader = undefined;
+    const actual: ?anyerror = if (reader.read(document, &ignored)) |_| null else |err| err;
+    if (expected != actual) {
+        std.debug.print("\"{s}\": validation {?t}, reader {?t}\n", .{ document, expected, actual });
+        return error.TestUnexpectedError;
+    }
+}
+
+test "the codec's JSON reader names each syntax error as validation does" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sample = "{\"type\":\"x\", \"a\":[1,-2.5e+3,0,true,null,{\"b\":\"\\u00e9\\n\xc3\xa9\\ud83d\\ude00\"}],\"c\":{}}";
+    // Every prefix, and every byte replaced by each byte the grammar
+    // treats apart.
+    for (0..sample.len + 1) |cut| try expectSyntaxAgrees(&tmp, sample[0..cut]);
+    const alphabet = "{}[]:,\"\\ 0-.eE+tfnux\x01\x7f\xc3\xe2\xf0\xff";
+    var document: [sample.len]u8 = undefined;
+    for (0..sample.len) |index| for (alphabet) |byte| {
+        document = sample.*;
+        document[index] = byte;
+        try expectSyntaxAgrees(&tmp, &document);
+    };
+    const open = "{\"a\":" ++ @as([protocol.max_json_depth]u8, @splat('['));
+    const close: [protocol.max_json_depth]u8 = @splat(']');
+    for ([_][]const u8{ open ++ "1" ++ close ++ "}", open ++ " ", open[0 .. open.len - 1] ++ " ", open ++ "]" }) |deep| try expectSyntaxAgrees(&tmp, deep);
 }

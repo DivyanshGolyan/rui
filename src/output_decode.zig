@@ -3,10 +3,15 @@
 //! turns what it names into the error response the execution owner decides
 //! on. The shell keeps every status rule, maps provider codes through
 //! `transport_policy`'s closed sets, and bounds the report itself.
+//! `interpret` frames a response stream's events and gives each event's
+//! data whole to the codec's interpreter, then decodes, hashes and records
+//! what it names and keeps every rule across items.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const json = @import("codecs/json.zig");
+const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
 const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
@@ -253,6 +258,563 @@ const RangeSource = struct {
         return byte;
     }
 };
+
+// ------------------------------------------------------------- interpret
+
+pub const max_evidence_bytes = 256;
+
+pub const Evidence = struct {
+    response_id: protocol.Bounded(max_evidence_bytes) = .{},
+    served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+};
+
+pub const Rejection = struct {
+    stage: codec_abi.Stage = .stream,
+    byte_offset: u64 = 0,
+    output_index: ?u64 = null,
+
+    // Only local error names and structural coordinates. Never copy provider
+    // strings, IDs, text, arguments or private continuation into this detail.
+    pub fn format(self: Rejection, err: anyerror, buffer: *[512]u8) []const u8 {
+        return std.fmt.bufPrint(
+            buffer,
+            "{{\"reason\":\"{s}\",\"stage\":\"{s}\",\"byte_offset\":\"{d}\",\"output_index\":{?d}}}",
+            .{ @errorName(err), @tagName(self.stage), self.byte_offset, self.output_index },
+        ) catch unreachable;
+    }
+};
+
+pub const Validated = struct {
+    /// Borrowed decoded SSE bytes, valid until EventData.deinit().
+    source: std.Io.File,
+    source_length: u64,
+    item_count: u64,
+    call_count: u64,
+    answer_item_ordinal: ?u64,
+    answer_length: u64,
+    answer_digest: [32]u8,
+    evidence: Evidence,
+};
+
+/// One validation workspace, not one buffer per event or live transport.
+/// Keep raw capture immutable for diagnostics; metadata addresses these bytes.
+pub const EventData = struct {
+    /// Owns the file and keeps the newest bytes written, so the event they
+    /// complete parses from memory.
+    window: Window,
+    budget: protocol.ScratchBudget,
+    length: u64 = 0,
+    charged: u64 = 0,
+
+    /// Fills `self` with an empty unlinked scratch file. On error `self`
+    /// owns nothing and `retained` holds any name left to reclaim.
+    pub fn init(self: *EventData, io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !void {
+        retained.* = null;
+        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
+        defer scratch.close(io);
+        const file = try scratch.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        if (fail_unlink) {
+            retained.* = .init(io, file, null, name, budget, 0, .injected_failure);
+            return error.InjectedEventDataUnlinkFailure;
+        }
+        scratch.deleteFile(io, name) catch |err| {
+            retained.* = .init(io, file, null, name, budget, 0, .native);
+            return err;
+        };
+        self.* = .{ .window = .{ .io = io, .file = file }, .budget = budget };
+    }
+
+    /// Writes `bytes` without keeping them in the window, for a reader
+    /// that reads them through a map.
+    pub fn append(self: *EventData, bytes: []const u8) !void {
+        if (!self.budget.allocate(bytes.len)) return error.EventDataScratchExhausted;
+        // A partial write remains charged until disposal, just like capture.
+        self.charged += bytes.len;
+        self.window.file.writeStreamingAll(self.window.io, bytes) catch return error.EventDataWriteFailed;
+        self.length += bytes.len;
+    }
+
+    /// Writes `bytes` and keeps them in the window, so the event they
+    /// complete parses from memory.
+    pub fn appendRemembered(self: *EventData, bytes: []const u8) !void {
+        const position = self.length;
+        try self.append(bytes);
+        self.window.remember(position, bytes);
+    }
+
+    pub fn copy(self: *EventData, source: *Window, start: u64, length: u64) !void {
+        // Appending moves this window, so it cannot also be the source.
+        std.debug.assert(source != &self.window);
+        var offset = start;
+        const end = try std.math.add(u64, start, length);
+        while (offset < end) {
+            const bytes = try source.bytesAt(offset, end);
+            try self.appendRemembered(bytes);
+            offset += bytes.len;
+        }
+    }
+
+    pub fn seal(self: *EventData) !void {
+        const length = self.window.file.length(self.window.io) catch return error.EventDataSealFailed;
+        if (length != self.length) return error.EventDataSealFailed;
+    }
+
+    pub fn deinit(self: *EventData) void {
+        self.window.file.close(self.window.io);
+        self.budget.release(self.charged);
+    }
+};
+
+pub fn isWhitespace(scalar: u21) bool {
+    // Unicode White_Space, matching the provider client's empty-answer test.
+    return switch (scalar) {
+        0x09...0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+        else => false,
+    };
+}
+
+/// Which message is the response's answer, as its messages are accepted.
+pub const AnswerSelection = struct {
+    ordinal: ?u64 = null,
+    length: u64 = 0,
+    digest: [32]u8,
+    phased: bool = false,
+    finals: u64 = 0,
+
+    /// An accepted message, as answer selection reads it.
+    pub const Message = struct {
+        ordinal: u64,
+        phase: codec_abi.Phase,
+        /// Its text's decoded length and digest.
+        length: u64,
+        digest: [32]u8,
+        non_whitespace: bool,
+    };
+
+    pub fn accept(self: *AnswerSelection, message: *const Message) void {
+        const phase = message.phase;
+        if (phase != .unphased) self.phased = true;
+        if (phase == .final_answer) self.finals += 1;
+        if (phase == .final_answer or (!self.phased and phase == .unphased)) {
+            self.ordinal = message.ordinal;
+            self.length = if (message.non_whitespace) message.length else 0;
+            self.digest = if (message.non_whitespace) message.digest else protocol.contentDigest("");
+        } else if (self.phased and self.finals == 0) {
+            // Mixed phased/unphased text is visible, but only an explicit
+            // final can terminate a phased response without Tool Calls.
+            self.ordinal = null;
+            self.length = 0;
+            self.digest = protocol.contentDigest("");
+        }
+    }
+};
+
+/// One response's interpretation, in its caller's storage: the codec's
+/// scratch and what the Host keeps of the stream.
+pub const Interpret = struct {
+    scratch: codecs.InterpretScratch,
+    grammar: Grammar,
+};
+
+/// The most event data one response's map reaches: the Host's scratch
+/// ceiling (`server_host.scratch_limit_bytes`), which no request budget
+/// exceeds. Mapping it reserves address space only.
+pub const max_event_data_bytes: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Interpret the sealed SSE capture, the first `source_length` bytes of
+/// `source_file`, with `codec`. The Host frames the events: each event's
+/// data is written whole to `event_data`, then given to the codec as a
+/// slice of the event data's read-only map, so that, as provider_output has
+/// always judged, an event's data is charged to the scratch budget before
+/// anything its judgement writes. The codec judges the grammar and names
+/// ranges; the Host decodes and hashes them, writes `metadata` from them,
+/// and keeps every rule that compares items with each other, the answer
+/// selection and the completion gate. A failure leaves `rejection` at its
+/// coordinates and `provider_failure` with what a provider error event
+/// said.
+pub fn interpret(
+    storage: *Interpret,
+    codec: protocol.Codec,
+    io: std.Io,
+    source_file: std.Io.File,
+    source_length: u64,
+    metadata: *output_format.OutputMetadataWriter,
+    event_data: *EventData,
+    operation: output_format.ModelOperationKind,
+    rejection: *Rejection,
+    provider_failure: *ProviderFailure,
+    validated: *Validated,
+) !void {
+    provider_failure.clear();
+    rejection.* = .{};
+    const capture = pages.mapReadOnly(io, source_file, source_length) catch |err| return switch (err) {
+        error.FileShorter => error.ShortSealedRead,
+        else => err,
+    };
+    defer pages.unmapReadOnly(capture);
+    // A write to the event data shows through a map made before it.
+    const events = try pages.mapReadOnlyAhead(event_data.window.file, @min(event_data.budget.limit, max_event_data_bytes));
+    defer pages.unmapReadOnly(events);
+    const grammar = &storage.grammar;
+    grammar.begin(codec, metadata, operation, rejection, provider_failure);
+    var stream = codecs.begin(codec, switch (operation) {
+        .assistant_response => .assistant_response,
+        .compaction => .compaction,
+    });
+    var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
+    // Where the open event's data begins in `event_data`, and its first
+    // byte in the capture.
+    var data: ?u64 = null;
+    var raw_start: u64 = 0;
+    while (position < capture.len) {
+        rejection.* = .{ .byte_offset = position };
+        // SSE has three line endings.
+        const line_start = position;
+        const line_end = std.mem.indexOfAnyPos(u8, capture, position, "\r\n") orelse capture.len;
+        position = line_end;
+        if (position < capture.len) {
+            position += 1;
+            if (capture[line_end] == '\r' and position < capture.len and capture[position] == '\n') position += 1;
+        }
+        const line = capture[line_start..line_end];
+        if (line.len == 0) {
+            if (data) |start| {
+                if (event_data.length == start) return error.EmptySseData;
+                if (event_data.length > events.len) return error.EventDataScratchExhausted;
+                try grammar.event(&stream, &storage.scratch, events[@intCast(start)..@intCast(event_data.length)], start, raw_start);
+                data = null;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, line, "data") or std.mem.startsWith(u8, line, "data:")) {
+            var skip: usize = @min(line.len, "data:".len);
+            if (line.len > skip and line[skip] == ' ') skip += 1;
+            if (data == null) {
+                data = event_data.length;
+                raw_start = line_start + skip;
+            } else try event_data.append("\n");
+            if (line.len > skip) try event_data.append(line[skip..]);
+        }
+        // Comments and every other field, including colonless fields, carry
+        // no provider output authority. Field names are case-sensitive.
+    }
+    if (data != null) return error.IncompleteSseEvent;
+    if (codecs.finish(&stream)) |reason| return reasonError(reason);
+    try event_data.seal();
+    validated.* = .{
+        .source = event_data.window.file,
+        .source_length = event_data.length,
+        .item_count = grammar.item_count,
+        .call_count = grammar.call_count,
+        .answer_item_ordinal = grammar.answer.ordinal,
+        .answer_length = grammar.answer.length,
+        .answer_digest = grammar.answer.digest,
+        .evidence = grammar.evidence,
+    };
+}
+
+const Sha256 = std.crypto.hash.sha2.Sha256;
+
+/// One provider bag: its members' raw bytes joined by commas, `m1,m2,...`,
+/// hashed as they are added.
+const Bag = struct {
+    scope: output_format.BagScope,
+    hash: Sha256,
+    length: u64,
+    members: u64,
+
+    fn reset(self: *Bag, scope: output_format.BagScope) void {
+        self.* = .{ .scope = scope, .hash = protocol.contentHasher(), .length = 0, .members = 0 };
+    }
+
+    fn add(self: *Bag, metadata: *output_format.OutputMetadataWriter, data: []const u8, base: u64, member: codec_abi.Range, ordinal: u64, kind: output_format.OutputItemKind) !void {
+        if (self.members != 0) {
+            self.hash.update(",");
+            self.length += 1;
+        }
+        self.hash.update(bytesOf(data, member));
+        self.length = try std.math.add(u64, self.length, member.length);
+        self.members += 1;
+        try metadata.append(.{ .tag = .member, .kind = kind, .ordinal = ordinal, .start = base + member.start, .length = member.length, .scope = self.scope });
+    }
+
+    /// Records the trailer, even for an empty bag: every item and part has
+    /// one, so a missing bag is damage rather than an absence.
+    fn close(self: *Bag, metadata: *output_format.OutputMetadataWriter, ordinal: u64, kind: output_format.OutputItemKind) !void {
+        try metadata.append(.{ .tag = .extras, .kind = kind, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = self.length, .content_digest = self.hash.finalResult(), .scope = self.scope });
+    }
+};
+
+fn bytesOf(data: []const u8, range: codec_abi.Range) []const u8 {
+    return data[@intCast(range.start)..][0..@intCast(range.length)];
+}
+
+fn digestOf(data: []const u8, range: codec_abi.Range) [32]u8 {
+    var hash = protocol.contentHasher();
+    hash.update(bytesOf(data, range));
+    return hash.finalResult();
+}
+
+/// A JSON string's contents the codec named, decoded: its length, digest
+/// and whether it holds anything but whitespace.
+const Decoded = struct {
+    length: u64,
+    digest: [32]u8,
+    non_whitespace: bool,
+
+    /// Decode the contents `range` of `data`, its bytes also hashed into
+    /// `also` and kept in `kept` when given.
+    fn of(data: []const u8, range: codec_abi.Range, also: ?*Sha256, kept: ?*protocol.Bounded(max_evidence_bytes)) Decoded {
+        var sink: Sink = .{ .hash = protocol.contentHasher(), .also = also, .kept = kept, .length = 0, .non_whitespace = false };
+        if (kept) |bounded| bounded.len = 0;
+        var decoder: json.StringDecoder = undefined;
+        decoder.reset();
+        // The codec's reader judged these bytes as this decoder does.
+        decoder.pushSlice(bytesOf(data, range), &sink) catch unreachable;
+        std.debug.assert(!decoder.pending());
+        return .{ .length = sink.length, .digest = sink.hash.finalResult(), .non_whitespace = sink.non_whitespace };
+    }
+
+    const Sink = struct {
+        hash: Sha256,
+        also: ?*Sha256,
+        kept: ?*protocol.Bounded(max_evidence_bytes),
+        length: u64,
+        non_whitespace: bool,
+
+        /// One decoded scalar, or a run of plain ASCII.
+        pub fn append(self: *Sink, bytes: []const u8, scalar: ?u21) void {
+            self.hash.update(bytes);
+            if (self.also) |hash| hash.update(bytes);
+            self.length += bytes.len;
+            if (!self.non_whitespace) {
+                if (scalar) |value| {
+                    self.non_whitespace = !isWhitespace(value);
+                } else for (bytes) |byte| if (!isWhitespace(byte)) {
+                    self.non_whitespace = true;
+                    break;
+                };
+            }
+            if (self.kept) |bounded| {
+                // The codec bounds an identity to the evidence's size.
+                @memcpy(bounded.bytes[bounded.len..][0..bytes.len], bytes);
+                bounded.len += bytes.len;
+            }
+        }
+    };
+};
+
+/// What the Host keeps of the stream between the codec's answers.
+const Grammar = struct {
+    codec: protocol.Codec,
+    metadata: *output_format.OutputMetadataWriter,
+    operation: output_format.ModelOperationKind,
+    rejection: *Rejection,
+    provider_failure: *ProviderFailure,
+    item_count: u64,
+    call_count: u64,
+    compaction_count: u64,
+    answer: AnswerSelection,
+    evidence: Evidence,
+    /// The announced item, until its done event.
+    added: ?struct { kind: output_format.OutputItemKind, id_digest: [32]u8 },
+    /// Where the current event's data begins in the event data.
+    base: u64,
+    /// A provider report's two parts.
+    code: ReportPart,
+    message: ReportPart,
+
+    fn begin(self: *Grammar, codec: protocol.Codec, metadata: *output_format.OutputMetadataWriter, operation: output_format.ModelOperationKind, rejection: *Rejection, provider_failure: *ProviderFailure) void {
+        self.codec = codec;
+        self.metadata = metadata;
+        self.operation = operation;
+        self.rejection = rejection;
+        self.provider_failure = provider_failure;
+        self.item_count = 0;
+        self.call_count = 0;
+        self.compaction_count = 0;
+        self.answer = .{ .digest = protocol.contentDigest("") };
+        self.evidence.response_id.len = 0;
+        self.evidence.served_model.len = 0;
+        self.added = null;
+        self.base = 0;
+    }
+
+    /// The codec's answer to one event's data, `data`, which begins at
+    /// `base` in the event data and whose first byte is at `raw_start` in
+    /// the capture.
+    fn event(self: *Grammar, stream: *codecs.Stream, scratch: *codecs.InterpretScratch, data: []const u8, base: u64, raw_start: u64) !void {
+        self.base = base;
+        const answer = codecs.interpretEvent(stream, scratch, data);
+        if (answer.at.stage != .stream) self.rejection.* = .{ .stage = answer.at.stage, .byte_offset = raw_start, .output_index = answer.at.output_index };
+        switch (answer.what) {
+            .other, .done_marker => {},
+            .added => |added| self.added = .{ .kind = outputKind(added.kind), .id_digest = Decoded.of(data, added.id, null, null).digest },
+            .item => |*item| try self.closeItem(data, item),
+            .completed => |*completed| try self.complete(data, completed),
+            .failed => |*failed| return self.fail(data, failed),
+        }
+    }
+
+    /// The codec accepted an item: its parts and bags, then the Host's own
+    /// rules on it, in the order acceptance has always applied them, and
+    /// then its record.
+    fn closeItem(self: *Grammar, data: []const u8, item: *const codec_abi.OutputItem) !void {
+        const metadata = self.metadata;
+        const kind = outputKind(item.kind);
+        const ordinal = self.item_count;
+        var bag: Bag = undefined;
+        bag.reset(.item);
+        var part_bag: Bag = undefined;
+        var in_part = false;
+        // A message's text: its text parts back to back.
+        var text_hash = protocol.contentHasher();
+        var text_length: u64 = 0;
+        var non_whitespace = false;
+        var cursor = item.members;
+        while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
+            .bag => |range| try (if (in_part) &part_bag else &bag).add(metadata, data, self.base, range, ordinal, kind),
+            .part => |part| {
+                const text = Decoded.of(data, part.text, if (kind == .message) &text_hash else null, null);
+                if (kind == .message) {
+                    text_length = try std.math.add(u64, text_length, text.length);
+                    non_whitespace = non_whitespace or text.non_whitespace;
+                }
+                try metadata.append(.{
+                    .tag = .part,
+                    .kind = kind,
+                    .ordinal = ordinal,
+                    .start = self.base + part.text.start,
+                    .length = part.text.length,
+                    .decoded_length = text.length,
+                    .content_digest = text.digest,
+                    .part_kind = @fromBackingInt(@backingInt(part.kind)),
+                    .part_array = @fromBackingInt(@backingInt(part.array)),
+                });
+                part_bag.reset(.part);
+                in_part = true;
+            },
+            .part_end => {
+                try part_bag.close(metadata, ordinal, kind);
+                in_part = false;
+            },
+            .terminal, .terminal_failed => unreachable,
+        };
+        try bag.close(metadata, ordinal, kind);
+        const text_digest = text_hash.finalResult();
+        switch (kind) {
+            .function_call => for ([_]output_format.OutputRecordTag{ .name, .call_id, .arguments }, item.call) |tag, range| {
+                const field = Decoded.of(data, range, null, null);
+                try metadata.append(.{ .tag = tag, .kind = .function_call, .ordinal = ordinal, .start = self.base + range.start, .length = range.length, .decoded_length = field.length, .content_digest = field.digest });
+            },
+            .message => try metadata.append(.{ .tag = .text, .kind = .message, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = text_length, .content_digest = text_digest }),
+            .reasoning, .compaction => {},
+        }
+        const id_digest = Decoded.of(data, item.id, null, null).digest;
+        if (self.added) |added| if (added.kind != kind or !std.mem.eql(u8, &added.id_digest, &id_digest)) return error.ContradictoryProviderOutput;
+        self.added = null;
+        switch (kind) {
+            .compaction => {
+                self.compaction_count += 1;
+                if (self.compaction_count > 1) return error.UnsupportedProviderOutput;
+            },
+            .message => self.answer.accept(&.{ .ordinal = ordinal, .phase = item.answer_phase, .length = text_length, .digest = text_digest, .non_whitespace = non_whitespace }),
+            .function_call => self.call_count += 1,
+            .reasoning => {},
+        }
+        try metadata.append(.{
+            .tag = .item,
+            .kind = kind,
+            .ordinal = ordinal,
+            .start = self.base + item.whole.start,
+            .length = item.whole.length,
+            .id_digest = id_digest,
+            .content_digest = digestOf(data, item.whole),
+            .omit_reasoning_text = item.omit_reasoning_text,
+            .phase = @fromBackingInt(@backingInt(item.phase)),
+        });
+        self.item_count += 1;
+    }
+
+    /// The completed response: the Host's gate, then the codec's check of
+    /// the response, then the output list against the streamed items, then
+    /// usage.
+    fn complete(self: *Grammar, data: []const u8, completed: *const codec_abi.Completed) !void {
+        // Each unmet completion requirement keeps its own reason so a saved
+        // rejection says which one failed; all share the malformed code.
+        if (self.item_count == 0) return error.MissingProviderOutputItems;
+        if (self.answer.finals > 1) return error.MultipleFinalAnswers;
+        if (self.operation == .assistant_response and self.answer.ordinal == null and self.call_count == 0) return error.MissingAssistantAnswer;
+        if (self.operation == .compaction and self.compaction_count != 1) return error.MissingCompactionItem;
+        if (completed.check) |reason| return reasonError(reason);
+        _ = Decoded.of(data, completed.response_id, null, &self.evidence.response_id);
+        if (completed.served_model) |model| _ = Decoded.of(data, model, null, &self.evidence.served_model);
+        const metadata = self.metadata;
+        var reader = try output_format.OutputMetadataReader.init(metadata.io, metadata.file, self.item_count);
+        var cursor = completed.output;
+        var index: u64 = 0;
+        while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
+            // One item of the output list must be the streamed item at its
+            // index, byte for byte.
+            .terminal => |terminal| {
+                const id_digest = Decoded.of(data, terminal.id, null, null).digest;
+                const content_digest = digestOf(data, terminal.whole);
+                const record = try reader.nextItem() orelse return error.ContradictoryProviderOutput;
+                if (record.ordinal != index or record.kind != outputKind(terminal.kind) or
+                    !std.mem.eql(u8, &record.id_digest, &id_digest) or
+                    !std.mem.eql(u8, &record.content_digest, &content_digest)) return error.ContradictoryProviderOutput;
+                index += 1;
+            },
+            .terminal_failed => |reason| return reasonError(reason),
+            .bag, .part, .part_end => unreachable,
+        };
+        // The managed stream can omit the repeated items from
+        // response.completed. Any nonempty terminal list must still match
+        // every streamed done item.
+        if (index != 0 and (index != self.item_count or try reader.nextItem() != null)) return error.ContradictoryProviderOutput;
+        switch (completed.usage) {
+            .absent => {},
+            .failed => |reason| return reasonError(reason),
+            .report => |report| try metadata.append(.{
+                .tag = .usage,
+                .start = self.base + report.whole.start,
+                .length = report.whole.length,
+                .content_digest = digestOf(data, report.whole),
+                .usage = if (report.counts) |usage| .{ .uncached = usage.uncached, .cache_read = usage.cache_read, .cache_write = usage.cache_write, .output = usage.output } else null,
+            }),
+        }
+        try metadata.sealForRead();
+    }
+
+    /// The codec's verdict on the event, with the provider's report when it
+    /// gave one. A reported failure is permanent when its code is a refusal
+    /// the Host knows.
+    fn fail(self: *Grammar, data: []const u8, failed: *const codec_abi.Failed) anyerror {
+        if (failed.report.code != null or failed.report.message != null) {
+            for ([_]*ReportPart{ &self.code, &self.message }, [_]?codec_abi.ReportRange{ failed.report.code, failed.report.message }) |part, report| {
+                part.text.len = 0;
+                part.shortened = false;
+                if (report) |range| readPart(data[@intCast(range.start)..][0..@intCast(range.length)], range.escape, part);
+            }
+            writeReport(&self.provider_failure.report, &self.code, &self.message);
+        }
+        if (failed.reason != .reported_provider_failure) return reasonError(failed.reason);
+        self.provider_failure.refusal = if (failed.refusal) |*code| .ofProviderCode(code.slice()) else null;
+        return if (self.provider_failure.refusal != null) error.PermanentProviderFailure else error.TemporaryProviderFailure;
+    }
+
+    fn outputKind(kind: codec_abi.OutputKind) output_format.OutputItemKind {
+        return @fromBackingInt(@backingInt(kind));
+    }
+};
+
+/// The error a reason names.
+fn reasonError(reason: codec_abi.Reason) anyerror {
+    @setEvalBranchQuota(100_000);
+    return switch (reason) {
+        inline else => |known| @field(anyerror, codec_abi.reasonName(known)),
+    };
+}
 
 const pinned: protocol.Codec = .@"openai-responses/1";
 
