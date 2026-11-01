@@ -395,7 +395,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
-        error.CodecFailed => "provider_codec_failed",
+        error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
         error.InjectedRequestWriteFailure => "request_write_failed",
@@ -725,7 +725,7 @@ test "Codex headers carry turn state only when the Turn has one" {
                 if (std.mem.eql(u8, entry.name, "authorization"))
                     try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
                 // No codec header names it.
-                try std.testing.expect(hostField(entry.name));
+                try std.testing.expect(provider.hostField(entry.name));
             }
             // The credential is the Reactor's one copy, which h2 borrows;
             // only the per-request values are copied into each stream.
@@ -748,14 +748,6 @@ test "Codex headers carry turn state only when the Turn has one" {
     }
 }
 
-/// Whether the Host or h2 writes a field of this name itself.
-fn hostField(name: []const u8) bool {
-    for (provider.host_request_fields ++ h2.owned_fields) |owned| {
-        if (std.mem.eql(u8, name, owned)) return true;
-    }
-    return false;
-}
-
 test "the Responses headers are lowercase tokens, header-safe, within bounds and name no Host or h2 field" {
     const affinities = [_][16]u8{ @splat(0x00), @splat(0xff), .{ 0x00, 0x01, 0x7f, 0x80, 0xab, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x90, 0xa0, 0xf0 } };
     // One Headers for every sample: each call writes over the last.
@@ -764,13 +756,18 @@ test "the Responses headers are lowercase tokens, header-safe, within bounds and
         const settings: codec_abi.Settings = .{ .effort = effort, .session_affinity = affinity, .model_length = 0 };
         codecs.requestHeaders(.@"openai-responses/1", &settings, &headers);
         try std.testing.expectEqual(@as(u8, 3), headers.count);
+        try std.testing.expect(headers.count <= codec_abi.max_request_headers);
+        var value_bytes: usize = 0;
         for (0..headers.count) |index| {
-            const header = headers.at(index);
-            try std.testing.expect(codec_abi.lowercaseToken(header.name));
-            try std.testing.expect(codec_abi.headerValue(header.value));
-            try std.testing.expect(!hostField(header.name));
-            for (0..index) |earlier| try std.testing.expect(!std.mem.eql(u8, headers.at(earlier).name, header.name));
+            const name = codecs.headerName(.@"openai-responses/1", headers.names[index]);
+            const value = headers.value(index);
+            value_bytes += value.len;
+            try std.testing.expect(codec_abi.lowercaseToken(name));
+            try std.testing.expect(codec_abi.headerValue(value));
+            try std.testing.expect(!provider.hostField(name));
+            for (headers.names[0..index]) |earlier| try std.testing.expect(earlier != headers.names[index]);
         }
+        try std.testing.expect(value_bytes <= codec_abi.max_request_header_bytes);
     };
 }
 
@@ -791,8 +788,9 @@ pub const PreparationFaults = struct {
     /// span bytes, in place of that read. Earlier chunks already reached the
     /// request, so the rewind must remove a partial span.
     memo_read_failure_after: ?u64 = null,
-    /// Answer this item as the codec declining the request.
-    codec_unsupported: ?codec_abi.ItemKind = null,
+    /// Give the codec, in place of this item, an opaque block that carries
+    /// text, which the Store never holds and the Responses codec declines.
+    codec_declines: ?codec_abi.ItemKind = null,
 };
 
 const RequestWriter = struct {
@@ -995,7 +993,7 @@ pub const Preparation = struct {
     /// The current item and the pieces the codec wrote for it.
     item: codec_abi.ItemHeader = undefined,
     pieces: codec_abi.Pieces = undefined,
-    /// Built in place: the codec's headers with the settings item, the rest
+    /// Built in place: the codec's headers at the settings stage, the rest
     /// when the request seals.
     request: PreparedRequest = undefined,
     /// The current item's handles; `item.handles` says which exist.
@@ -1240,8 +1238,10 @@ pub const Preparation = struct {
                 try self.view.settings(&self.settings);
                 if (self.state.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
-                self.carry = .initial(self.settings.provider.codec());
-                self.encoder = .resumeFrom(self.carry);
+                const codec = self.settings.provider.codec();
+                self.carry = codecs.initialCarry(codec);
+                self.encoder = codecs.resumeFrom(self.carry);
+                codecs.requestHeaders(codec, self.loadSettingsItem(), &self.request.headers);
                 self.state.stage = .history_validation;
             },
             .history_validation => {
@@ -1249,7 +1249,8 @@ pub const Preparation = struct {
                 // The selected base must be readable before any request byte.
                 _ = try self.view.coverage();
                 self.state.stage = .instructions;
-                return self.loadSettingsHeader();
+                // The settings item, loaded at the settings stage.
+                return .item;
             },
             .instructions => {
                 self.state.stage = .history_start;
@@ -1400,10 +1401,10 @@ pub const Preparation = struct {
         return .item;
     }
 
-    /// Load the settings item into `self.item` in place, and write the
-    /// codec's request headers from it. Its handle 0 is the item's own copy
-    /// of the model, so the codec reads and writes the same bytes.
-    fn loadSettingsHeader(self: *Preparation) Next {
+    /// Load the settings item into `self.item` in place. Its handle 0 is the
+    /// item's own copy of the model, so the codec reads and writes the same
+    /// bytes.
+    fn loadSettingsItem(self: *Preparation) *const codec_abi.Settings {
         const model = self.settings.model.slice();
         const header = &self.item;
         header.handles = 0b1;
@@ -1415,8 +1416,7 @@ pub const Preparation = struct {
         const settings = &header.item.settings;
         @memcpy(settings.model[0..model.len], model);
         self.handles[0] = .{ .text = settings.modelName() };
-        codecs.requestHeaders(self.settings.provider.codec(), settings, &self.request.headers);
-        return .item;
+        return settings;
     }
 
     /// Encode `item`. Before a history element and history_end the codec
@@ -1424,12 +1424,13 @@ pub const Preparation = struct {
     /// a memo copy continues exactly as a rebuild does. Nothing is sent
     /// before the request seals, so a codec declining the request discards
     /// only request scratch.
-    fn encodeItem(self: *Preparation) error{CodecFailed}!void {
+    fn encodeItem(self: *Preparation) error{CodecDeclined}!void {
         const kind: codec_abi.ItemKind = self.item.item;
-        if (kind.resumes()) self.encoder = .resumeFrom(self.carry);
-        if (self.state.faults.codec_unsupported == kind) return error.CodecFailed;
-        self.encoder.encodeItem(&self.item, &self.pieces) catch return error.CodecFailed;
-        if (kind.endsElement()) self.carry = self.encoder.carryOf();
+        if (kind.resumes()) self.encoder = codecs.resumeFrom(self.carry);
+        if (self.state.faults.codec_declines == kind)
+            self.item = .{ .item = .{ .output_part = .{ .array = .summary, .kind = .opaque_block } }, .handles = 0b1 };
+        codecs.encodeItem(&self.encoder, &self.item, &self.pieces) catch return error.CodecDeclined;
+        if (kind.endsElement()) self.carry = codecs.carryOf(&self.encoder);
         self.state.piece = 0;
     }
 
@@ -2186,10 +2187,9 @@ test "a prepared request carries the Responses codec's headers with its Session'
     // and before the credential path's fields.
     const expected = [_][2][]const u8{ .{ "accept", "text/event-stream" }, .{ "session-id", &session_id }, .{ "originator", "rui" } };
     try std.testing.expectEqual(@as(u8, expected.len), request.headers.count);
-    for (expected, 0..) |pair, index| {
-        const field = request.headers.at(index);
-        try std.testing.expectEqualStrings(pair[0], field.name);
-        try std.testing.expectEqualStrings(pair[1], field.value);
+    for (expected, request.headers.names[0..request.headers.count], 0..) |pair, name, index| {
+        try std.testing.expectEqualStrings(pair[0], codecs.headerName(request.codec, name));
+        try std.testing.expectEqualStrings(pair[1], request.headers.value(index));
     }
 }
 
@@ -4125,6 +4125,34 @@ test "a full rebuild must begin with the Session's prefix seal" {
     const hit = try prepareMemoForTesting(&setup, binding, &memos, .{});
     defer std.testing.allocator.free(hit.bytes);
     try std.testing.expectEqual(@as(usize, @intCast(length)), hit.copied);
+}
+
+test "a codec that declines fails provider_codec_failed before any request exists and leaves no scratch" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("codec-declines", "codec-declines", session.slice(), "start");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    // The first item, a history element and the last item.
+    for ([_]codec_abi.ItemKind{ .settings, .message, .request_end }) |kind| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec_declines = kind }, &retained);
+        defer if (preparation.state.active) preparation.cancel();
+        // No request is prepared, so nothing can be sent.
+        try std.testing.expectError(error.CodecDeclined, drainLivePreparation(&preparation, 16, 2, 1 << 16));
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+    try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(error.CodecDeclined));
+    // The same Session encodes through its pinned codec.
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    std.testing.allocator.free(request.bytes);
 }
 
 test "a history memo that does not match the frozen request is rebuilt in full" {

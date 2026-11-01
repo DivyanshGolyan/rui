@@ -3406,7 +3406,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         null,
         // The codec declines at request_end: every earlier item has already
         // written request scratch.
-        .{ .codec_unsupported = .request_end },
+        .{ .codec_declines = .request_end },
         &retained,
     );
     defer if (preparation.state.active) preparation.cancel();

@@ -12,6 +12,9 @@ const cores = .{
     .{ "change_ring.zig", @import("change_ring.zig") },
     .{ "ChoiceLine.zig", @import("ChoiceLine.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
+    .{ "codec_abi.zig", @import("codec_abi.zig") },
+    .{ "codecs/json.zig", @import("codecs/json.zig") },
+    .{ "codecs/responses.zig", @import("codecs/responses.zig") },
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
@@ -60,19 +63,34 @@ test {
 }
 
 test "functional cores stay within the core boundary" {
-    const names = comptime blk: {
-        var list: [cores.len][]const u8 = undefined;
-        for (cores, 0..) |core, index| list[index] = core[0];
-        break :blk list;
-    };
     inline for (cores) |core| {
         // The checked source is the imported one.
-        try std.testing.expectEqualStrings(core[0], @typeName(core[1]) ++ ".zig");
+        const path = comptime blk: {
+            var name = @typeName(core[1]).*;
+            std.mem.replaceScalar(u8, &name, '.', '/');
+            const slashed = name;
+            break :blk &slashed ++ ".zig";
+        };
+        try std.testing.expectEqualStrings(core[0], path);
+        const names = comptime importNames(core[0]);
         if (core_boundary.check(@embedFile(core[0]), &names)) |violation| {
             std.debug.print("{s}:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ core[0], violation.line, violation.text });
             return error.CoreBoundaryViolation;
         }
     }
+}
+
+/// Every core as `importer`, a core one directory deep at most, spells its
+/// import.
+fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
+    @setEvalBranchQuota(10_000);
+    const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
+    var names: [cores.len][]const u8 = undefined;
+    for (cores, &names) |core, *name| name.* = if (std.mem.startsWith(u8, core[0], directory))
+        core[0][directory.len..]
+    else
+        "../" ++ core[0];
+    return names;
 }
 
 test "the HTTP/2 client's proxy logic stays within the core boundary" {

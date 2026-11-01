@@ -388,7 +388,12 @@ fn space(byte: u8) bool {
 /// Records what a reader reports, for comparing one way of feeding a
 /// document with another.
 const Recorder = struct {
-    events: std.ArrayList(u8) = .empty,
+    buffer: [4096]u8 = undefined,
+    length: usize = 0,
+
+    fn events(self: *const Recorder) []const u8 {
+        return self.buffer[0..self.length];
+    }
 
     fn key(self: *Recorder, reader: *const Reader, depth: u8) void {
         self.print("k{d}", .{depth});
@@ -414,7 +419,7 @@ const Recorder = struct {
     }
 
     fn print(self: *Recorder, comptime format: []const u8, args: anytype) void {
-        self.events.print(std.testing.allocator, format, args) catch @panic("out of test memory");
+        self.length += (std.fmt.bufPrint(self.buffer[self.length..], format, args) catch @panic("recorder full")).len;
     }
 };
 
@@ -487,31 +492,28 @@ fn expectReadAsStd(document: []const u8) !void {
     const expected = document.len != 0 and std.mem.trimStart(u8, document, " \t\r\n")[0] == '{' and
         try std.json.validate(std.testing.allocator, document);
     var whole: Recorder = .{};
-    defer whole.events.deinit(std.testing.allocator);
     try std.testing.expectEqual(expected, readForTesting(document, document.len + 1, &whole));
     for ([_]usize{ 1, 2, 3, 7 }) |window| {
         var cut: Recorder = .{};
-        defer cut.events.deinit(std.testing.allocator);
         try std.testing.expectEqual(expected, readForTesting(document, window, &cut));
-        try std.testing.expectEqualStrings(whole.events.items, cut.events.items);
+        try std.testing.expectEqualStrings(whole.events(), cut.events());
     }
 }
 
 test "the reader reports keys and values with their depths, ranges and decoded starts" {
     var recorder: Recorder = .{};
-    defer recorder.events.deinit(std.testing.allocator);
     try std.testing.expect(readForTesting("{\"co\\u0064e\":\"x\\n\",\"n\":[7,1.5,-1],\"t\":true}", 5, &recorder));
     try std.testing.expectEqualStrings(
         "O0 k1[2,9]code S1 s1[14,3]x\n k1[20,1]n A1 N2 n2=7 N2 n2=null N2 n2=null a1 k1[35,1]t L1 l1 o0 ",
-        recorder.events.items,
+        recorder.events(),
     );
     // A string past the kept start keeps its range; its text is unknown.
     const long = comptime "{\"" ++ repeat("k", max_text_bytes + 1) ++ "\":\"" ++ repeat("v", max_text_bytes) ++ "\"}";
-    recorder.events.clearRetainingCapacity();
+    recorder.length = 0;
     try std.testing.expect(readForTesting(long, 3, &recorder));
     try std.testing.expectEqualStrings(
         "O0 k1[2,65]null S1 s1[70,64]" ++ comptime repeat("v", max_text_bytes) ++ " o0 ",
-        recorder.events.items,
+        recorder.events(),
     );
 }
 
@@ -526,7 +528,6 @@ test "a value nests at most max_depth deep" {
         for (0..arrays) |_| try writer.writeByte(']');
         try writer.writeByte('}');
         var recorder: Recorder = .{};
-        defer recorder.events.deinit(std.testing.allocator);
         try std.testing.expectEqual(arrays + 1 <= max_depth, readForTesting(writer.buffered(), 4096, &recorder));
     }
 }

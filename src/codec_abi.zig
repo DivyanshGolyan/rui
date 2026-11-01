@@ -160,8 +160,8 @@ pub const Piece = union(enum) {
     content: struct { handle: u8, escape: Escape },
 };
 
-/// The most pieces one item takes: a Responses function call's open and a
-/// tool each take this many.
+/// The most pieces one item takes, across every codec this contract
+/// serves.
 pub const max_pieces = 8;
 
 /// The pieces a codec writes for one item, in order.
@@ -189,22 +189,19 @@ pub const Pieces = struct {
     }
 };
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
 pub const max_request_headers = 8;
 /// The values together; the prepared request stores this many bytes.
 pub const max_request_header_bytes = 192;
 
 /// A codec's request headers, in the order it gives them, which the Host
-/// sends ahead of its own fields. Each name is a lowercase token from the
-/// codec's constant data and each value is header-safe (`headerValue`);
-/// none names a field the Host or h2 writes itself.
+/// sends ahead of its own fields. Each name is a tag of the codec's own
+/// `RequestHeader` enum, whose tag names are lowercase tokens, and each
+/// value is header-safe (`headerValue`); none names a field the Host or h2
+/// writes itself.
 pub const Headers = struct {
     count: u8,
-    names: [max_request_headers][]const u8 = undefined,
+    /// Each header's `RequestHeader` tag, as its integer.
+    names: [max_request_headers]u8 = undefined,
     /// Where each value ends in `bytes`; each begins where the previous
     /// one ends.
     ends: [max_request_headers]u8 = undefined,
@@ -214,22 +211,25 @@ pub const Headers = struct {
         std.debug.assert(max_request_header_bytes <= std.math.maxInt(u8));
     }
 
-    pub fn add(self: *Headers, name: []const u8, value: []const u8) void {
+    pub fn add(self: *Headers, name: anytype, text: []const u8) void {
+        comptime std.debug.assert(@typeInfo(@TypeOf(name)) == .@"enum");
         std.debug.assert(self.count < max_request_headers);
-        const start = self.valueStart(self.count);
-        @memcpy(self.bytes[start..][0..value.len], value);
-        self.names[self.count] = name;
-        self.ends[self.count] = @intCast(start + value.len);
+        const start = self.valueBytes();
+        std.debug.assert(text.len <= max_request_header_bytes - start);
+        @memcpy(self.bytes[start..][0..text.len], text);
+        self.names[self.count] = @backingInt(name);
+        self.ends[self.count] = @intCast(start + text.len);
         self.count += 1;
     }
 
-    pub fn at(self: *const Headers, index: usize) Header {
+    pub fn value(self: *const Headers, index: usize) []const u8 {
         std.debug.assert(index < self.count);
-        return .{ .name = self.names[index], .value = self.bytes[self.valueStart(index)..self.ends[index]] };
+        return self.bytes[if (index == 0) 0 else self.ends[index - 1]..self.ends[index]];
     }
 
-    fn valueStart(self: *const Headers, index: usize) usize {
-        return if (index == 0) 0 else self.ends[index - 1];
+    /// The bytes the values take together.
+    pub fn valueBytes(self: *const Headers) usize {
+        return if (self.count == 0) 0 else self.ends[self.count - 1];
     }
 };
 

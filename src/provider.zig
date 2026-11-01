@@ -14,6 +14,7 @@ const protocol = @import("protocol.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
 const codec_abi = @import("codec_abi.zig");
+const codecs = @import("codecs.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
@@ -51,6 +52,14 @@ const content_type: h2.Field = .{ .name = "content-type", .value = "application/
 /// `content_type` and model_adapter.Headers' credential, user-agent, FedRAMP
 /// and turn-state fields.
 pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
+
+/// Whether the Host or h2 writes a field of this name itself.
+pub fn hostField(name: []const u8) bool {
+    for (host_request_fields ++ h2.owned_fields) |owned| {
+        if (std.mem.eql(u8, name, owned)) return true;
+    }
+    return false;
+}
 
 pub const max_turn_state_bytes = 4096;
 
@@ -569,10 +578,8 @@ pub const Transfer = struct {
         if (count > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
         fields[0] = content_type;
-        for (fields[1..][0..request.headers.count], 0..) |*field, index| {
-            const header = request.headers.at(index);
-            field.* = .{ .name = header.name, .value = header.value };
-        }
+        for (fields[1..][0..request.headers.count], request.headers.names[0..request.headers.count], 0..) |*field, name, index|
+            field.* = .{ .name = codecs.headerName(request.codec, name), .value = request.headers.value(index) };
         @memcpy(fields[1 + request.headers.count ..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
             reactor.io,
@@ -794,8 +801,9 @@ test "a Transfer that fails to start releases its credential use" {
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
     var request: PreparedRequest = undefined;
-    request.headers = .{ .count = 0 };
-    request.headers.add("x-codec", "");
+    request.codec = .@"openai-responses/1";
+    const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 };
+    codecs.requestHeaders(request.codec, &settings, &request.headers);
     const too_many: [h2.max_fields - 1]h2.Field = @splat(.{ .name = "x-field", .value = "" });
     try std.testing.expectError(error.TooManyProviderHeaders, transfer.start(&reactor, &request, undefined, .{
         .fields = &too_many,
