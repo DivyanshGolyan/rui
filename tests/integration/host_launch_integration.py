@@ -528,7 +528,7 @@ def startup_limits(root, env):
         before = time.monotonic()
         failed = run_start(store, env)
         assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-        assert "wire metadata" in failed.stderr and "wire 2" in failed.stderr, failed.stderr
+        assert "wire metadata" in failed.stderr and "wire 3" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original

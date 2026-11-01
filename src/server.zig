@@ -1025,7 +1025,7 @@ noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version
     try path_text.feed(&output, store_path);
     try path_text.finish(&output);
     try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
-        found_schema_version, store_module.schema_version, store_module.wire_version,
+        found_schema_version, store_module.schema_version, protocol.wire_version,
     });
     const text = output.buffered();
     _ = rui_write_readiness(2, text.ptr, text.len);
