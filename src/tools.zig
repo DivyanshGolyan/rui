@@ -20,6 +20,12 @@ pub const bash_definition: codec_abi.ToolDefinition = .{
         "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}",
 };
 
+pub fn definition(tool: Tool) *const codec_abi.ToolDefinition {
+    return switch (tool) {
+        .bash => &bash_definition,
+    };
+}
+
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},

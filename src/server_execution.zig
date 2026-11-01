@@ -1,5 +1,6 @@
 const std = @import("std");
 const bash = @import("bash.zig");
+const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
@@ -3330,6 +3331,97 @@ test "Host fences dispose admitted preparation without touching canonical state"
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     }
+}
+
+test "an encode failure settles unanswered and releases request scratch" {
+    // The pinned codec, failing at request_end: every earlier item has
+    // already written request scratch.
+    const Failing = struct {
+        const pinned = codecs.encoder(.@"openai-responses/1");
+        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
+
+        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
+            const status = pinned.step(state, header, ops);
+            return if (header.item == .request_end) .failed else status;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+    defer directory.close(std.testing.io);
+    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("encode-failure-config");
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    const configured = storage.configure(&command, true, .{});
+    try std.testing.expect(configured == .accepted);
+    const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "hello");
+    try file.sync(std.testing.io);
+    var message: protocol.MessageCommand = .{};
+    try message.key.set("encode-failure-key");
+    message.session = configured.accepted.session;
+    message.text = .{
+        .state = .value,
+        .file = file,
+        .length = 5,
+        .digest = protocol.contentDigest("hello"),
+    };
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+
+    var records: [1]execution.CustodyRecord = @splat(.{});
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = &storage,
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const token = host.custody.reserve().?;
+    const binding = try host.custody.attach(token, &admitted.permit);
+    var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
+    var preparation: model_adapter.Preparation = undefined;
+    var retained: ?named_scratch.Owner = null;
+    try storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(
+        std.testing.io,
+        root,
+        .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
+        .endpoint,
+        null,
+        .{ .codec = &Failing.encoder },
+        &retained,
+    );
+    defer if (preparation.state.active) preparation.cancel();
+    var advances: usize = 0;
+    while (slots[0] != .free) : (advances += 1) {
+        try std.testing.expect(advances < 4096);
+        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, 64, 4));
+    }
+    try std.testing.expect(advances > 1);
+    try std.testing.expect(!preparation.state.active and !preparation.view.active);
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    const observed = try storage.observeCommand("encode-failure-key");
+    const failed = observed.message.?.queue.?.state.failed;
+    try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
+    try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
 }
 
 test "Host fences dispose a sealed request before native transfer construction" {
