@@ -24,42 +24,180 @@ pub fn parallelToolCalls(model: []const u8) bool {
     return false;
 }
 
-/// The encoder's only state between input items is whether one was
-/// written, since the next then takes a comma.
-pub fn carry(input_comma: bool) codec_abi.Carry {
-    return codec_abi.Carry.of(&.{@intFromBool(input_comma)});
-}
+const ItemHeader = codec_abi.ItemHeader;
+const Ops = codec_abi.Ops;
+const Status = codec_abi.Status;
 
-pub fn inputComma(state: *const codec_abi.Carry) bool {
-    std.debug.assert(state.len == 1 and state.bytes[0] <= 1);
-    return state.bytes[0] == 1;
-}
+/// The request encoder. Between history elements its whole state is
+/// whether one was written, since the next input item then takes a comma;
+/// that is its carry. The rest lives only within one output item or the
+/// tools array.
+pub const Encoder = struct {
+    input_comma: bool = false,
+    /// The open output item's replay rule and the part array it has open.
+    omit_reasoning_text: bool = false,
+    array: codec_abi.PartArray = .none,
+    tool_comma: bool = false,
 
-/// A tool's Responses `function` entry, built at compile time.
-pub fn toolJson(comptime tool: codec_abi.ToolDefinition) []const u8 {
-    return comptime "{\"type\":\"function\",\"name\":\"" ++ jsonString(tool.name) ++
-        "\",\"description\":\"" ++ jsonString(tool.description) ++
-        "\",\"strict\":true,\"parameters\":" ++ tool.parameters_json ++ "}";
-}
+    pub const Error = error{ BadCarry, UnsupportedItem, OpsOverflow };
 
-/// The JSON string body of `text`, escaped as std.json writes it: quote,
-/// backslash and C0 controls, everything else (UTF-8 included) verbatim.
-fn jsonString(comptime text: []const u8) []const u8 {
-    comptime {
-        var out: []const u8 = "";
-        for (text) |byte| out = out ++ switch (byte) {
-            '"' => "\\\"",
-            '\\' => "\\\\",
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            0x08 => "\\b",
-            0x0c => "\\f",
-            0...0x07, 0x0b, 0x0e...0x1f => std.fmt.comptimePrint("\\u{x:0>4}", .{byte}),
-            else => &[_]u8{byte},
-        };
-        return out;
+    /// An empty carry is the state before the first input item.
+    pub fn load(carry: *const codec_abi.Carry) error{BadCarry}!Encoder {
+        const state = carry.slice();
+        if (state.len == 0) return .{};
+        if (state.len != 1 or state[0] > 1) return error.BadCarry;
+        return .{ .input_comma = state[0] == 1 };
     }
+
+    pub fn encodeItem(self: *Encoder, header: *const ItemHeader, ops: *Ops) Error!Status {
+        switch (header.item) {
+            .settings => {
+                try ops.literal("{\"model\":\"");
+                try ops.content(0, .json_string_v1);
+                try ops.literal(if (parallelToolCalls(header.settings.modelName())) envelope(true) else envelope(false));
+                if (header.settings.effort) |effort| try ops.literal(switch (effort) {
+                    inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
+                });
+            },
+            .instructions => {
+                try ops.literal(",\"instructions\":\"");
+                try ops.content(0, .json_string_v1);
+                try ops.literal("\",\"input\":[");
+            },
+            .message => |author| {
+                try self.separateInput(ops);
+                try ops.literal(switch (author) {
+                    .user => "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"",
+                    .instruction => "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"",
+                });
+                // A peer Message's sender is its own leading part, separate
+                // from the text the peer wrote.
+                if (header.has(1)) {
+                    try ops.content(1, .json_string_v1);
+                    try ops.literal("\"},{\"type\":\"input_text\",\"text\":\"");
+                }
+                try ops.content(0, .json_string_v1);
+                try ops.literal("\"}]}");
+                try self.writeCarry(ops);
+            },
+            // An output item is rebuilt from Rui's form and its provider
+            // bags, written canonically: the model receives what it sent.
+            .output_open => |output| {
+                try self.separateInput(ops);
+                self.omit_reasoning_text = output.omit_reasoning_text;
+                self.array = .none;
+                switch (output.kind) {
+                    .reasoning => try ops.literal("{\"type\":\"reasoning\""),
+                    .compaction => try ops.literal("{\"type\":\"compaction\""),
+                    .message => try ops.literal(switch (output.phase) {
+                        .unphased => "{\"type\":\"message\",\"role\":\"assistant\"",
+                        .commentary => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\"",
+                        .final_answer => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\"",
+                    }),
+                    .function_call => {
+                        try ops.literal("{\"type\":\"function_call\",\"name\":\"");
+                        try ops.content(0, .json_string_v1);
+                        try ops.literal("\",\"call_id\":\"");
+                        try ops.content(1, .json_string_v1);
+                        try ops.literal("\",\"arguments\":\"");
+                        try ops.content(2, .json_string_v1);
+                        try ops.literal("\"");
+                    },
+                }
+            },
+            .output_part => |part| {
+                // Private reasoning text is never replay input.
+                if (self.omit_reasoning_text and part.array == .content) return .next;
+                if (self.array == part.array) {
+                    try ops.literal(",");
+                } else {
+                    if (self.array != .none) try ops.literal("]");
+                    try ops.literal(if (part.array == .content) ",\"content\":[" else ",\"summary\":[");
+                    self.array = part.array;
+                }
+                if (header.has(0)) {
+                    try ops.literal(switch (part.kind) {
+                        .output_text => "{\"type\":\"output_text\",\"text\":\"",
+                        .refusal => "{\"type\":\"refusal\",\"refusal\":\"",
+                        .summary_text => "{\"type\":\"summary_text\",\"text\":\"",
+                        .reasoning_text => "{\"type\":\"reasoning_text\",\"text\":\"",
+                        .opaque_block => return error.UnsupportedItem,
+                    });
+                    try ops.content(0, .json_string_v1);
+                    if (header.has(1)) {
+                        try ops.literal("\",");
+                        try ops.content(1, .verbatim);
+                        try ops.literal("}");
+                    } else try ops.literal("\"}");
+                } else {
+                    try ops.literal("{");
+                    try ops.content(1, .verbatim);
+                    try ops.literal("}");
+                }
+            },
+            .output_close => {
+                if (self.array != .none) try ops.literal("]");
+                if (header.has(0)) {
+                    try ops.literal(",");
+                    try ops.content(0, .verbatim);
+                }
+                try ops.literal("}");
+                try self.writeCarry(ops);
+            },
+            .tool_result => {
+                try self.separateInput(ops);
+                try ops.literal("{\"type\":\"function_call_output\",\"call_id\":\"");
+                try ops.content(0, .json_string_v1);
+                try ops.literal("\",\"output\":\"");
+                try ops.content(1, .json_string_v1);
+                try ops.literal("\"}");
+                try self.writeCarry(ops);
+            },
+            .history_end => {},
+            .compaction_trigger => {
+                try self.separateInput(ops);
+                try ops.literal("{\"type\":\"compaction_trigger\"}");
+            },
+            .tools_start => try ops.literal("],\"tools\":["),
+            .tool => {
+                if (self.tool_comma) try ops.literal(",");
+                self.tool_comma = true;
+                try ops.literal("{\"type\":\"function\",\"name\":\"");
+                try ops.content(0, .json_string_v1);
+                try ops.literal("\",\"description\":\"");
+                try ops.content(1, .json_string_v1);
+                try ops.literal("\",\"strict\":true,\"parameters\":");
+                try ops.content(2, .verbatim);
+                try ops.literal("}");
+            },
+            // The tools array closes here, after its last tool.
+            .text_format => if (header.has(0)) {
+                try ops.literal("],\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":");
+                try ops.content(0, .verbatim);
+                try ops.literal("}}");
+            } else try ops.literal("],\"text\":{\"verbosity\":\"low\"}"),
+            .request_end => {
+                try ops.literal("}");
+                return .done;
+            },
+        }
+        return .next;
+    }
+
+    /// An input item after another takes a comma.
+    fn separateInput(self: *Encoder, ops: *Ops) error{OpsOverflow}!void {
+        if (self.input_comma) try ops.literal(",");
+        self.input_comma = true;
+    }
+
+    fn writeCarry(self: *const Encoder, ops: *Ops) error{OpsOverflow}!void {
+        try ops.carry(&.{@intFromBool(self.input_comma)});
+    }
+};
+
+fn envelope(comptime parallel_tool_calls: bool) []const u8 {
+    return "\",\"parallel_tool_calls\":" ++ (if (parallel_tool_calls) "true" else "false") ++
+        ",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
 }
 
 test "only the pinned table's models send parallel tool calls" {
@@ -70,17 +208,20 @@ test "only the pinned table's models send parallel tool calls" {
 
 test "a carry holds exactly the comma state the span ended in" {
     for ([_]bool{ false, true }) |input_comma| {
-        const state = carry(input_comma);
-        try std.testing.expectEqual(input_comma, inputComma(&state));
-        try std.testing.expect(state.eql(&carry(input_comma)));
-        try std.testing.expect(!state.eql(&carry(!input_comma)));
+        const loaded = try Encoder.load(&codec_abi.Carry.of(&.{@intFromBool(input_comma)}));
+        try std.testing.expectEqual(Encoder{ .input_comma = input_comma }, loaded);
+        // Every element ends with the carry of the state after it.
+        var encoder = loaded;
+        var header: ItemHeader = undefined;
+        header.item = .tool_result;
+        header.handles = 0b11;
+        var ops: Ops = .{};
+        try std.testing.expectEqual(Status.next, try encoder.encodeItem(&header, &ops));
+        try std.testing.expect(std.mem.endsWith(u8, ops.bytes[0..ops.length], &.{ @backingInt(codec_abi.OpTag.carry), 1, 1 }));
+        const first: []const u8 = if (input_comma) &.{ 1, 1, 0, ',' } else &.{ 1, 42, 0 };
+        try std.testing.expect(std.mem.startsWith(u8, ops.bytes[0..ops.length], first));
     }
-}
-
-test "a tool entry escapes its name and description as JSON strings" {
-    const json = toolJson(.{ .name = "t", .description = "say \"hi\"\\\n\x01é", .parameters_json = "{}" });
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("say \"hi\"\\\n\x01é", parsed.value.object.get("description").?.string);
-    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", json);
+    try std.testing.expectEqual(Encoder{}, try Encoder.load(&.{}));
+    for ([_][]const u8{ &.{2}, &.{ 0, 0 } }) |state|
+        try std.testing.expectError(error.BadCarry, Encoder.load(&codec_abi.Carry.of(state)));
 }

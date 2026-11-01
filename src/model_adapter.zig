@@ -10,7 +10,8 @@ const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const h2 = @import("h2");
-const responses = @import("codecs/responses.zig");
+const codec_abi = @import("codec_abi.zig");
+const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
@@ -394,6 +395,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
+        error.CodecFailed, error.CodecBadOp => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
         error.InjectedRequestWriteFailure => "request_write_failed",
@@ -759,6 +761,8 @@ pub const PreparationFaults = struct {
     /// span bytes, in place of that read. Earlier chunks already reached the
     /// request, so the rewind must remove a partial span.
     memo_read_failure_after: ?u64 = null,
+    /// Encode with this codec in place of the Session's pinned one.
+    codec: ?*const codecs.Encoder = null,
 };
 
 const RequestWriter = struct {
@@ -906,219 +910,35 @@ const peer_parts = blk: {
     break :blk result;
 };
 
-/// One element of a model request, read from the Operation's historical
-/// view in request order. Each item is a value; the provider's writer alone
-/// turns it into wire bytes.
-const RequestItem = union(enum) {
-    /// Model, tool-call policy and reasoning effort.
-    settings,
+/// What one of an item's handles names: Rui's own bytes, Store content, or
+/// text the shell composes from Rui's wording.
+const Handle = union(enum) {
+    text: []const u8,
+    content: store.HistoricalContent,
     /// Rui's runtime context, the Workspace, the Session's own address and
     /// the saved baseline instructions.
     instructions,
-    /// The history span an earlier request of this Session encoded.
-    history_memo,
-    /// A User Message or an instruction update.
-    message: store.HistoricalEntry,
-    /// One accepted output item in Rui's own form: its opening, each part,
-    /// and its close, which writes the item's provider bag.
-    output_open: store.HistoricalOutput,
-    output_part: store.HistoricalPart,
-    output_close,
-    tool_result: store.HistoricalToolResult,
-    compaction_trigger,
-    tools,
-    /// Verbosity and the optional output schema.
-    text_format,
+    /// Rui's wording of the current Message's peer sender.
+    sender,
 };
 
-/// A stretch of wire bytes, named by how its source reaches the request.
-const Piece = union(enum) {
-    /// Literal JSON syntax, copied.
-    syntax: []const u8,
-    /// Bytes escaped into the enclosing JSON string.
-    escaped: []const u8,
-    /// A JSON string literal inside the enclosing string, escaped twice.
-    /// Its enclosing quotes belong to the caller.
-    nested: []const u8,
-    /// Canonical text escaped into the enclosing JSON string.
-    escaped_content: store.HistoricalContent,
-    /// Canonical JSON, copied.
-    verbatim_content: store.HistoricalContent,
-    history_memo,
+/// One stretch of a handle's text. A quoted stretch is the contents of a
+/// JSON string literal within that text, so it takes one more escape than
+/// the text around it.
+const Segment = struct {
+    source: union(enum) { bytes: []const u8, content: store.HistoricalContent },
+    quoted: bool = false,
 };
 
-/// What the writer of one output item carries between its items: the item
-/// itself and the part array it has open.
-const OutputWriting = struct {
-    output: store.HistoricalOutput = undefined,
-    array: output_format.PartArray = .none,
-};
-
-/// One item's pieces, written in order.
-const Pieces = struct {
-    list: [8]Piece = undefined,
-    length: u8 = 0,
-    next_index: u8 = 0,
-
-    fn add(self: *Pieces, piece: Piece) void {
-        std.debug.assert(self.length < self.list.len);
-        self.list[self.length] = piece;
-        self.length += 1;
-    }
-
-    fn next(self: *Pieces) ?Piece {
-        if (self.done()) return null;
-        defer self.next_index += 1;
-        return self.list[self.next_index];
-    }
-
-    fn done(self: *const Pieces) bool {
-        return self.next_index == self.length;
-    }
-};
-
-fn codexEnvelope(comptime parallel_tool_calls: bool) []const u8 {
-    return "\",\"parallel_tool_calls\":" ++ (if (parallel_tool_calls) "true" else "false") ++
-        ",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+/// The contract's copy of one of Rui's enums, which shares its names.
+fn contractValue(comptime T: type, value: anytype) T {
+    return switch (value) {
+        inline else => |tag| @field(T, @tagName(tag)),
+    };
 }
 
-/// An input item after another takes a comma.
-fn separateInput(pieces: *Pieces, input_comma: *bool) void {
-    if (input_comma.*) pieces.add(.{ .syntax = "," });
-    input_comma.* = true;
-}
-
-/// Fill `pieces` with the Codex Responses encoding of one item. Its pieces
-/// borrow from `item`, `settings` and `output`. `input_comma` and `output`
-/// are the only syntax state carried between items.
-fn codexPieces(item: *const RequestItem, settings: *const store.HistoricalSettings, input_comma: *bool, output: *OutputWriting, pieces: *Pieces) void {
-    pieces.* = .{};
-    switch (item.*) {
-        .settings => {
-            pieces.add(.{ .syntax = "{\"model\":\"" });
-            pieces.add(.{ .escaped = settings.model.slice() });
-            pieces.add(.{ .syntax = if (responses.parallelToolCalls(settings.model.slice())) codexEnvelope(true) else codexEnvelope(false) });
-            if (settings.reasoning_effort) |effort| pieces.add(.{ .syntax = switch (effort) {
-                inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
-            } });
-        },
-        .instructions => {
-            pieces.add(.{ .syntax = ",\"instructions\":\"" });
-            pieces.add(.{ .escaped = context_parts[0] });
-            pieces.add(.{ .nested = settings.workspace.slice() });
-            // The originating Operation's ID, rebuilt on every Attempt.
-            pieces.add(.{ .escaped = context_parts[1] });
-            pieces.add(.{ .nested = settings.session.slice() });
-            pieces.add(.{ .escaped = context_parts[2] });
-            pieces.add(.{ .escaped_content = settings.baseline_instructions });
-            pieces.add(.{ .syntax = "\",\"input\":[" });
-        },
-        // A memo is the span's first bytes and records its own comma state.
-        .history_memo => pieces.add(.history_memo),
-        .message => |*entry| {
-            separateInput(pieces, input_comma);
-            pieces.add(.{ .syntax = if (entry.kind == .user)
-                "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
-            else
-                "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"" });
-            // A peer Message's sender is its own leading part, separate from
-            // the text the peer wrote. The Host recorded that sender; the
-            // adapter renders the saved fact, never text a peer wrote.
-            if (entry.sender) |*sender| {
-                pieces.add(.{ .escaped = peer_parts[0] });
-                pieces.add(.{ .nested = sender.slice() });
-                pieces.add(.{ .escaped = peer_parts[1] });
-                pieces.add(.{ .syntax = "\"},{\"type\":\"input_text\",\"text\":\"" });
-            }
-            pieces.add(.{ .escaped_content = entry.content.? });
-            pieces.add(.{ .syntax = "\"}]}" });
-        },
-        // An output item is rebuilt from Rui's form and its provider bags,
-        // written canonically: the model receives what it sent.
-        .output_open => |*head| {
-            separateInput(pieces, input_comma);
-            output.* = .{ .output = head.* };
-            switch (head.kind) {
-                .reasoning => pieces.add(.{ .syntax = "{\"type\":\"reasoning\"" }),
-                .compaction => pieces.add(.{ .syntax = "{\"type\":\"compaction\"" }),
-                .message => pieces.add(.{ .syntax = switch (head.phase) {
-                    .unphased => "{\"type\":\"message\",\"role\":\"assistant\"",
-                    .commentary => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\"",
-                    .final_answer => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\"",
-                } }),
-                .function_call => {
-                    const call = &(head.call orelse unreachable);
-                    pieces.add(.{ .syntax = "{\"type\":\"function_call\",\"name\":\"" });
-                    pieces.add(.{ .escaped_content = call[0] });
-                    pieces.add(.{ .syntax = "\",\"call_id\":\"" });
-                    pieces.add(.{ .escaped_content = call[1] });
-                    pieces.add(.{ .syntax = "\",\"arguments\":\"" });
-                    pieces.add(.{ .escaped_content = call[2] });
-                    pieces.add(.{ .syntax = "\"" });
-                },
-            }
-        },
-        .output_part => |*part| {
-            // Private reasoning text is never replay input.
-            if (output.output.omit_reasoning_text and part.array == .content) return;
-            if (output.array == part.array) {
-                pieces.add(.{ .syntax = "," });
-            } else {
-                if (output.array != .none) pieces.add(.{ .syntax = "]" });
-                pieces.add(.{ .syntax = if (part.array == .content) ",\"content\":[" else ",\"summary\":[" });
-                output.array = part.array;
-            }
-            if (part.text) |text| {
-                pieces.add(.{ .syntax = switch (part.kind) {
-                    .output_text => "{\"type\":\"output_text\",\"text\":\"",
-                    .refusal => "{\"type\":\"refusal\",\"refusal\":\"",
-                    .summary_text => "{\"type\":\"summary_text\",\"text\":\"",
-                    .reasoning_text => "{\"type\":\"reasoning_text\",\"text\":\"",
-                    .opaque_block => unreachable,
-                } });
-                pieces.add(.{ .escaped_content = text });
-                if (part.bag) |bag| {
-                    pieces.add(.{ .syntax = "\"," });
-                    pieces.add(.{ .verbatim_content = bag });
-                    pieces.add(.{ .syntax = "}" });
-                } else pieces.add(.{ .syntax = "\"}" });
-            } else {
-                pieces.add(.{ .syntax = "{" });
-                pieces.add(.{ .verbatim_content = part.bag.? });
-                pieces.add(.{ .syntax = "}" });
-            }
-        },
-        .output_close => {
-            if (output.array != .none) pieces.add(.{ .syntax = "]" });
-            if (output.output.bag) |bag| {
-                pieces.add(.{ .syntax = "," });
-                pieces.add(.{ .verbatim_content = bag });
-            }
-            pieces.add(.{ .syntax = "}" });
-        },
-        .tool_result => |result| {
-            separateInput(pieces, input_comma);
-            pieces.add(.{ .syntax = "{\"type\":\"function_call_output\",\"call_id\":\"" });
-            pieces.add(.{ .escaped_content = result.call_id });
-            pieces.add(.{ .syntax = "\",\"output\":\"" });
-            pieces.add(.{ .escaped_content = result.output });
-            pieces.add(.{ .syntax = "\"}" });
-        },
-        .compaction_trigger => {
-            separateInput(pieces, input_comma);
-            pieces.add(.{ .syntax = "{\"type\":\"compaction_trigger\"}" });
-        },
-        .tools => {
-            pieces.add(.{ .syntax = "],\"tools\":[" });
-            if (settings.tools_mask & tools.toolBit(.bash) != 0) pieces.add(.{ .syntax = comptime responses.toolJson(tools.bash_definition) });
-            pieces.add(.{ .syntax = "]" });
-        },
-        .text_format => if (settings.output_schema) |schema| {
-            pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":" });
-            pieces.add(.{ .verbatim_content = schema });
-            pieces.add(.{ .syntax = "}}}" });
-        } else pieces.add(.{ .syntax = ",\"text\":{\"verbosity\":\"low\"}}" }),
-    }
+comptime {
+    std.debug.assert(codec_abi.max_model_bytes == protocol.max_model_bytes);
 }
 
 pub const Preparation = struct {
@@ -1135,6 +955,14 @@ pub const Preparation = struct {
     reader: store.HistoricalReader = undefined,
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
+    /// The Session's codec, begun at the settings stage.
+    job: codecs.Job = undefined,
+    /// The current item's handles; `job.header.handles` says which exist.
+    handles: [codec_abi.max_handles]Handle = undefined,
+    /// The open output item's provider bag, written at its close.
+    output_bag: ?store.HistoricalContent = undefined,
+    /// The current Message's peer sender.
+    sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
     state: State,
 
     /// What one preparation starts from, reset by `init` in one assignment.
@@ -1150,12 +978,14 @@ pub const Preparation = struct {
         active: bool = false,
         /// Where the next item comes from.
         stage: Stage = .settings,
-        /// The item being written; its pieces borrow from it.
-        item: RequestItem = .settings,
-        pieces: Pieces = .{},
+        /// The next of the current item's ops to start; null once none is
+        /// left.
+        op_offset: ?u16 = null,
+        /// The content op being written, by segment.
+        content: ?ContentOp = null,
         emission: Emission = .none,
-        input_comma: bool = false,
-        output: OutputWriting = .{},
+        /// The next tool the tools stage considers.
+        next_tool: u8 = 0,
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -1165,6 +995,12 @@ pub const Preparation = struct {
         prefix_check: ?PrefixCheck = null,
         /// The sealed span being kept as the Session's memo.
         memo_write: ?history_memo.Write = null,
+    };
+
+    const ContentOp = struct {
+        handle: u8,
+        escape: codec_abi.Escape,
+        segment: u8 = 0,
     };
 
     const MemoSpan = struct {
@@ -1216,7 +1052,9 @@ pub const Preparation = struct {
         covered_tool_results,
         compaction_trigger,
         tools,
+        tool,
         text_format,
+        request_end,
         end,
         history_store,
         complete,
@@ -1225,7 +1063,7 @@ pub const Preparation = struct {
     const Next = enum {
         /// No item yet: the stage moved on or waits for allowance.
         pending,
-        /// `item` holds the next item.
+        /// The job's header holds the next item.
         item,
         end,
     };
@@ -1304,8 +1142,8 @@ pub const Preparation = struct {
     }
 
     /// Write the request one item at a time: take the next item from the
-    /// view, turn it into pieces with the provider's writer, and stream each
-    /// piece under the allowance.
+    /// view, have the Session's codec encode it, and run its ops under the
+    /// allowance before the next item.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.state.active and byte_allowance != 0 and item_allowance != 0);
         var bytes_left = byte_allowance;
@@ -1323,10 +1161,7 @@ pub const Preparation = struct {
                 continue;
             }
             items_left -= 1;
-            if (self.state.pieces.next()) |piece| {
-                self.startPiece(piece) catch |err| return .{ .failed = err };
-                continue;
-            }
+            if (self.nextOp() catch |err| return .{ .failed = err }) continue;
             // The sealed request is the source of the prefix check and the
             // memo, read once under the allowance; a failure loses only the
             // memo.
@@ -1347,8 +1182,9 @@ pub const Preparation = struct {
             }
             switch (self.nextItem(&bytes_left, &items_left) catch |err| return .{ .failed = err }) {
                 .pending => {},
-                .item => switch (self.settings.provider) {
-                    .codex => codexPieces(&self.state.item, &self.settings, &self.state.input_comma, &self.state.output, &self.state.pieces),
+                .item => {
+                    self.job.step() catch |err| return .{ .failed = err };
+                    self.state.op_offset = if (self.job.ops.length == 0) null else 0;
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1356,7 +1192,8 @@ pub const Preparation = struct {
         return self.flushAndYield();
     }
 
-    /// Move to the request's next item, read from the view into `item`.
+    /// Move to the request's next item, read from the view into the job's
+    /// header and `handles`.
     /// History decisions live here: which output a compaction base covers,
     /// where the history memo resumes, and whether a compaction trigger ends
     /// the input.
@@ -1366,6 +1203,7 @@ pub const Preparation = struct {
                 try self.view.settings(&self.settings);
                 if (self.state.route == .managed and self.settings.output_schema != null)
                     return error.UnsupportedCodexConfiguration;
+                try self.job.begin(self.state.faults.codec orelse codecs.encoder(self.settings.provider.codec()));
                 self.state.stage = .history_validation;
             },
             .history_validation => {
@@ -1373,13 +1211,18 @@ pub const Preparation = struct {
                 // The selected base must be readable before any request byte.
                 _ = try self.view.coverage();
                 self.state.stage = .instructions;
-                self.state.item = .settings;
-                return .item;
+                const model = self.settings.model.slice();
+                const settings = &self.job.header.settings;
+                settings.effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null;
+                settings.model_length = @intCast(model.len);
+                @memcpy(settings.model[0..model.len], model);
+                self.handles[0] = .{ .text = model };
+                return self.present(.settings, 0b1);
             },
             .instructions => {
                 self.state.stage = .history_start;
-                self.state.item = .instructions;
-                return .item;
+                self.handles[0] = .instructions;
+                return self.present(.instructions, 0b1);
             },
             // The history span starts here. A memo of this Session's
             // previous span that this view contains replaces encoding that
@@ -1395,7 +1238,7 @@ pub const Preparation = struct {
                     .ready => |entry| entry orelse {
                         try self.endSpan();
                         self.state.stage = .compaction_trigger;
-                        return .pending;
+                        return self.present(.history_end, 0);
                     },
                 };
                 self.state.history_position = entry.position;
@@ -1405,8 +1248,19 @@ pub const Preparation = struct {
                 const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
                     .user, .instruction => {
-                        self.state.item = .{ .message = entry.* };
-                        return .item;
+                        var handles: u8 = 0;
+                        if (entry.content) |content| {
+                            self.handles[0] = .{ .content = content };
+                            handles |= 0b01;
+                        }
+                        // A peer Message's sender is the Host's recorded
+                        // fact, never text a peer wrote.
+                        if (entry.sender) |sender| {
+                            self.sender = sender;
+                            self.handles[1] = .sender;
+                            handles |= 0b10;
+                        }
+                        return self.present(.{ .message = if (entry.kind == .user) .user else .instruction }, handles);
                     },
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     .provider_output => {
@@ -1419,53 +1273,99 @@ pub const Preparation = struct {
                         // Unusable output stays private; no partial request
                         // can seal.
                         if (self.state.continuation_unavailable) return .pending;
-                        self.state.item = .{ .output_open = try self.view.openOutput(entry.position) };
+                        const output = try self.view.openOutput(entry.position);
+                        self.output_bag = output.bag;
+                        var handles: u8 = 0;
+                        if (output.call) |call| {
+                            for (call, 0..) |content, index| self.handles[index] = .{ .content = content };
+                            handles = 0b111;
+                        }
                         self.state.stage = .output_parts;
-                        return .item;
+                        return self.present(.{ .output_open = .{
+                            .kind = contractValue(codec_abi.OutputKind, output.kind),
+                            .phase = contractValue(codec_abi.Phase, output.phase),
+                            .omit_reasoning_text = output.omit_reasoning_text,
+                        } }, handles);
                     },
                 }
             },
             .output_parts => {
                 if (try self.view.nextOutputPart()) |part| {
-                    self.state.item = .{ .output_part = part };
-                } else {
-                    self.state.item = .output_close;
-                    self.state.stage = .history;
+                    var handles: u8 = 0;
+                    if (part.text) |text| {
+                        self.handles[0] = .{ .content = text };
+                        handles |= 0b01;
+                    }
+                    if (part.bag) |bag| {
+                        self.handles[1] = .{ .content = bag };
+                        handles |= 0b10;
+                    }
+                    return self.present(.{ .output_part = .{
+                        .array = contractValue(codec_abi.PartArray, part.array),
+                        .kind = contractValue(codec_abi.PartKind, part.kind),
+                    } }, handles);
                 }
-                return .item;
+                self.state.stage = .history;
+                const bag = self.output_bag orelse return self.present(.output_close, 0);
+                self.handles[0] = .{ .content = bag };
+                return self.present(.output_close, 0b1);
             },
             .tool_results => {
                 const result = try self.view.nextToolResult() orelse {
                     self.state.stage = .history;
                     return .pending;
                 };
-                self.state.item = .{ .tool_result = result };
-                return .item;
+                self.handles[0] = .{ .content = result.call_id };
+                self.handles[1] = .{ .content = result.output };
+                return self.present(.tool_result, 0b11);
             },
             .covered_tool_results => {
                 if (try self.view.nextToolResult() == null) self.state.stage = .history;
             },
             .compaction_trigger => {
                 self.state.stage = .tools;
-                if (self.settings.operation == .compaction) {
-                    self.state.item = .compaction_trigger;
-                    return .item;
-                }
+                if (self.settings.operation == .compaction) return self.present(.compaction_trigger, 0);
             },
             .tools => {
+                self.state.stage = .tool;
+                return self.present(.tools_start, 0);
+            },
+            .tool => {
+                const all = comptime std.enums.values(tools.Tool);
+                while (self.state.next_tool < all.len) {
+                    const tool = all[self.state.next_tool];
+                    self.state.next_tool += 1;
+                    if (self.settings.tools_mask & tools.toolBit(tool) == 0) continue;
+                    const definition = tools.definition(tool);
+                    self.handles[0] = .{ .text = definition.name };
+                    self.handles[1] = .{ .text = definition.description };
+                    self.handles[2] = .{ .text = definition.parameters_json };
+                    return self.present(.tool, 0b111);
+                }
                 self.state.stage = .text_format;
-                self.state.item = .tools;
-                return .item;
             },
             .text_format => {
+                self.state.stage = .request_end;
+                const schema = self.settings.output_schema orelse return self.present(.text_format, 0);
+                self.handles[0] = .{ .content = schema };
+                return self.present(.text_format, 0b1);
+            },
+            .request_end => {
                 self.state.stage = .end;
-                self.state.item = .text_format;
-                return .item;
+                return self.present(.request_end, 0);
             },
             .end => return .end,
             .history_store, .complete => unreachable,
         }
         return .pending;
+    }
+
+    /// Hand `item` to the codec next, with the handles whose bits are set
+    /// in `handles`.
+    fn present(self: *Preparation, item: codec_abi.Item, handles: u8) Next {
+        self.job.header.item = item;
+        self.job.header.handles = handles;
+        return .item;
     }
 
     /// Never inlined: it runs once per request, and its memo and key copies
@@ -1478,9 +1378,10 @@ pub const Preparation = struct {
         if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
         try self.writer.flush();
         const file = memos.open(self.writer.io, &memo) orelse return .pending;
+        // A memo is the span's first bytes and records the codec's carry.
         self.state.span.?.copy = .{ .memo = memo, .file = file, .charged = self.writer.charged };
-        self.state.item = .history_memo;
-        return .item;
+        self.state.emission = .{ .history_memo = {} };
+        return .pending;
     }
 
     fn memoKey(self: *Preparation) !history_memo.Key {
@@ -1529,7 +1430,7 @@ pub const Preparation = struct {
         self.closeMemoFile();
         const memo = &self.state.span.?.copy.?.memo;
         self.state.history_position = memo.history_position;
-        self.state.input_comma = responses.inputComma(&memo.carry);
+        self.job.resumeFrom(&memo.carry);
         self.view.resumeToolGroups(memo.tool_group_cursor);
     }
 
@@ -1561,7 +1462,7 @@ pub const Preparation = struct {
             .admission_position = self.view.admissionPosition(),
             .history_position = self.state.history_position,
             .tool_group_cursor = self.view.toolGroupCursor(),
-            .carry = responses.carry(self.state.input_comma),
+            .carry = self.job.carry,
             .length = self.writer.offset - span.start,
             .digest = undefined,
         };
@@ -1583,20 +1484,74 @@ pub const Preparation = struct {
         return self.state.last_advance;
     }
 
-    fn startPiece(self: *Preparation, piece: Piece) !void {
-        switch (piece) {
-            .syntax => |bytes| self.state.emission = .{ .fixed = .{ .bytes = bytes } },
-            .escaped => |bytes| self.state.emission = .{ .json = .{ .bytes = bytes } },
-            .nested => |bytes| self.state.emission = .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
-            .escaped_content => |content| {
-                try self.view.openContent(content, &self.reader);
-                self.state.emission = .{ .json = .{} };
+    /// Start writing the next stretch of the current item's ops. Returns
+    /// false once they are all written.
+    fn nextOp(self: *Preparation) !bool {
+        while (true) {
+            if (self.state.content) |*content| {
+                if (self.segment(content.handle, content.segment)) |next| {
+                    content.segment += 1;
+                    try self.startSegment(next, content.escape);
+                    return true;
+                }
+                self.state.content = null;
+            }
+            const offset = self.state.op_offset orelse return false;
+            var reader = self.job.ops.reader(offset);
+            const op = (try reader.next()).?;
+            self.state.op_offset = if (reader.offset == self.job.ops.length) null else reader.offset;
+            switch (op) {
+                .literal => |bytes| {
+                    self.state.emission = .{ .fixed = .{ .bytes = bytes } };
+                    return true;
+                },
+                .content => |content| self.state.content = .{ .handle = content.handle, .escape = content.escape },
+                // The job keeps the item's carry.
+                .carry => unreachable,
+            }
+        }
+    }
+
+    /// The `index`th stretch of a handle's text, or null past its end.
+    fn segment(self: *const Preparation, handle: u8, index: u8) ?Segment {
+        return switch (self.handles[handle]) {
+            .text => |bytes| if (index == 0) .{ .source = .{ .bytes = bytes } } else null,
+            .content => |content| if (index == 0) .{ .source = .{ .content = content } } else null,
+            .instructions => switch (index) {
+                0 => .{ .source = .{ .bytes = context_parts[0] } },
+                1 => .{ .source = .{ .bytes = self.settings.workspace.slice() }, .quoted = true },
+                2 => .{ .source = .{ .bytes = context_parts[1] } },
+                // The originating Operation's ID, rebuilt on every Attempt.
+                3 => .{ .source = .{ .bytes = self.settings.session.slice() }, .quoted = true },
+                4 => .{ .source = .{ .bytes = context_parts[2] } },
+                5 => .{ .source = .{ .content = self.settings.baseline_instructions } },
+                else => null,
             },
-            .verbatim_content => |content| {
-                try self.view.openContent(content, &self.reader);
-                self.state.emission = .{ .raw = .{} };
+            .sender => switch (index) {
+                0 => .{ .source = .{ .bytes = peer_parts[0] } },
+                1 => .{ .source = .{ .bytes = self.sender.slice() }, .quoted = true },
+                2 => .{ .source = .{ .bytes = peer_parts[1] } },
+                else => null,
             },
-            .history_memo => self.state.emission = .{ .history_memo = {} },
+        };
+    }
+
+    fn startSegment(self: *Preparation, part: Segment, escape: codec_abi.Escape) !void {
+        const escapes = @as(u2, @intFromBool(part.quoted)) + @intFromBool(escape == .json_string_v1);
+        switch (part.source) {
+            .bytes => |bytes| {
+                if (bytes.len == 0) return;
+                self.state.emission = switch (escapes) {
+                    0 => .{ .fixed = .{ .bytes = bytes } },
+                    1 => .{ .json = .{ .bytes = bytes } },
+                    else => .{ .json = .{ .bytes = bytes, .cursor = .{ .nested_string = true } } },
+                };
+            },
+            .content => |content| {
+                std.debug.assert(!part.quoted);
+                try self.view.openContent(content, &self.reader);
+                self.state.emission = if (escapes == 0) .{ .raw = .{} } else .{ .json = .{} };
+            },
         }
     }
 
@@ -3580,7 +3535,7 @@ test "request preparation cancellation yields inside history discovery" {
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.state.stage == .history and preparation.state.pieces.done() and preparation.writer.offset == before) {
+        if (preparation.state.stage == .history and preparation.state.op_offset == null and preparation.writer.offset == before) {
             pending_turns += 1;
             if (pending_turns == 10) break;
         }
@@ -3943,6 +3898,91 @@ test "a history memo hit writes exactly the bytes of a full rebuild" {
         try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         try std.testing.expect(heldMemoLength(&memos, session.slice()) > covered);
     }
+}
+
+test "request N+1 begins with request N's history span" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    // Every request is a full rebuild, as after a Host restart; its memo
+    // table only reports where the span ends.
+    var previous: ?[]u8 = null;
+    defer if (previous) |bytes| std.testing.allocator.free(bytes);
+    var round: u64 = 0;
+    while (round <= 6) : (round += 1) {
+        if (round != 0) binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
+        var entries: [2]history_memo.Table.Entry = @splat(.{});
+        var table: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+        defer table.deinit(std.testing.io);
+        const request = try prepareMemoForTesting(&setup, binding, &table, .{});
+        defer std.testing.allocator.free(request.bytes);
+        try std.testing.expectEqual(@as(usize, 0), request.copied);
+        const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
+        const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
+        // The span ends where the history does: what depends on being
+        // last follows it.
+        try std.testing.expectStringStartsWith(request.bytes[start + span.len ..], "],\"tools\":[");
+        if (previous) |earlier| {
+            try std.testing.expect(span.len > earlier.len);
+            try std.testing.expectStringStartsWith(span, earlier);
+            std.testing.allocator.free(earlier);
+            previous = null;
+        }
+        previous = try std.testing.allocator.dupe(u8, span);
+    }
+}
+
+const CodecFault = enum { carry_after_history_end, absent_handle, early_done, failure };
+
+/// The pinned Responses encoder with one fault added.
+fn FaultyCodec(comptime fault: CodecFault) type {
+    return struct {
+        const pinned = codecs.encoder(.@"openai-responses/1");
+        const encoder: codecs.Encoder = .{ .load = pinned.load, .step = step };
+
+        fn step(state: *codecs.State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
+            const status = pinned.step(state, header, ops);
+            switch (fault) {
+                .carry_after_history_end => if (header.item == .tools_start) ops.carry(&.{1}) catch unreachable,
+                .absent_handle => if (header.item == .instructions) ops.content(1, .json_string_v1) catch unreachable,
+                .early_done => if (header.item == .text_format) return .done,
+                .failure => if (header.item == .history_end) return .failed,
+            }
+            return status;
+        }
+    };
+}
+
+test "a codec that emits a carry after history_end, names an absent handle, or finishes before request_end fails provider_codec_failed and sends nothing" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("codec-fault", "codec-fault", session.slice(), "start");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    inline for (comptime std.enums.values(CodecFault)) |fault| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try setup.storage.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .endpoint, null, .{ .codec = &FaultyCodec(fault).encoder }, &retained);
+        defer if (preparation.state.active) preparation.cancel();
+        const expected = if (fault == .failure) error.CodecFailed else error.CodecBadOp;
+        // No request is prepared, so nothing can be sent.
+        try std.testing.expectError(expected, drainLivePreparation(&preparation, 16, 2, 1 << 16));
+        try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(expected));
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+    // The same Session encodes through its pinned codec.
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    std.testing.allocator.free(request.bytes);
 }
 
 test "a full rebuild must begin with the Session's prefix seal" {
