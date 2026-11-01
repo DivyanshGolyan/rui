@@ -2391,6 +2391,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         transcript = read_terminal(master, json.loads(arguments)["cmd"])
         header = drawn_style(master, f"? {description}")
         assert header is not None and header.fg in ATTENTION_COLOUR, (header, current_screen(master))
+        # The Action arrived beside the line being written, which keeps the
+        # input row, so its Enter could not approve; Ctrl-G shows the choice.
+        assert "Allow once" not in current_screen(master), current_screen(master)
+        os.write(master, b"\x07")
         transcript += action_ready(ready_read, master)
         transcript += await_screen(master, CHOICE)
         assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
@@ -4057,7 +4061,11 @@ def renderer_cases():
             with terminal(consent_session, ready_write) as tty:
                 tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
                 release.set()
-                opened = shown = tty.wait("Action continues · PgDn")
+                opened = tty.wait("Action continues · PgDn")
+                # The Action arrived beside the pasted draft, which keeps the
+                # input row until Ctrl-G returns to the Action's own row.
+                assert "Allow once" not in opened and "PgDn reads the rest" not in opened, opened
+                shown = tty.send("\x07", "PgDn reads the rest")
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 # An unread Action offers no choice: its input row says to read
@@ -4102,8 +4110,9 @@ def renderer_cases():
                 # whose meaning was lost: it fails closed the same way rather
                 # than being skipped so that the Enter after it decides.
                 for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u", "\x1b[+27;1;13~"):
-                    # Each refusal leaves the same screen, so no new frame
-                    # need appear; readiness after the keys proves they ran.
+                    # Another notice first, so each refusal draws its own.
+                    tty.send("\x12", "! Action needs a decision; nothing to retry.")
+                    tty.ready(ready_read)
                     os.write(tty.master, (recover + "\n").encode())
                     tty.ready(ready_read)
                     assert "! Not ready; nothing authorized." in tty.capture.completed, tty.capture.completed

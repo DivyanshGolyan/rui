@@ -81,8 +81,8 @@ pub const DraftPieces = struct {
 /// continuation rows start under the text after them, up to half the width.
 /// A user line never hangs left of its body column: position alone must
 /// distinguish user text where the terminal shows no attributes. `quoted`:
-/// the marker begins an Action's command (`$`) or a later line of it or its
-/// stdin (`│`).
+/// the marker begins an Action's description (`?`), its command (`$`) or a
+/// later line of it or its stdin (`│`).
 fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
@@ -92,7 +92,7 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
-            quoted = std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
+            quoted = std.mem.eql(u8, glyph, "?") or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -153,9 +153,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         dirty: bool = true,
         /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
         sidenotes: bool = false,
-        /// An Action: each wrapped row of its command or stdin starts with
-        /// `┆`, so no row of that text can pass for a field, nor a wrapped
-        /// row for a new `│` line.
+        /// An Action: each wrapped row of its description, command or stdin
+        /// starts with `┆`, so no row of that text can pass for a field, nor
+        /// a wrapped row for a new `│` line.
         quotes: bool = false,
 
         pub fn append(self: *Self, input: []const u8) !void {
@@ -590,10 +590,10 @@ const TestScreen = struct {
     }
 };
 
-test "an Action's wrapped command and stdin rows carry a wrap mark, so none passes for a field or a new line" {
+test "an Action's wrapped description, command and stdin rows carry a wrap mark, so none passes for a field or a new line" {
     const pad: [30]u8 = @splat(' ');
-    const text = "? Probe\n  $ echo a" ++ pad ++ "Time limit: 1 min\n  │ x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
-    const command = std.mem.indexOf(u8, text, "  $").?;
+    const text = "? Probe" ++ pad ++ "$ rm -rf x\n  $ echo a" ++ pad ++ "Time limit: 1 min\n  │ x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
+    const command = std.mem.indexOf(u8, text, "\n  $").? + 1;
     for ([_]bool{ false, true }) |quotes| {
         errdefer std.debug.print("quotes={}\n", .{quotes});
         var view: Sized(256, false) = .{ .quotes = quotes };
@@ -612,6 +612,8 @@ test "an Action's wrapped command and stdin rows carry a wrap mark, so none pass
                 try std.testing.expect(std.mem.startsWith(u8, row, if (quotes) "  ┆ " else "    "));
             }
             try std.testing.expectEqual(@as(usize, 2), spoofs);
+            // The description's wrapped row cannot pass for the command.
+            if (from.offset == 0) try std.testing.expectEqualStrings(if (quotes) "┆ $ rm -rf x" else "  $ rm -rf x", test_screen.row(1, &storage));
             // The field itself carries no mark.
             var field = false;
             for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");

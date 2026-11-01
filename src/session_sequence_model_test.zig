@@ -212,26 +212,35 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
     const Event = enum { unicode, left, enter, pause, latest, receipt, right, paste };
     const events = std.enums.values(Event);
     // Exhaustive base-eight, length-three words. Complete, preview and
-    // no-Action seeds exercise both input rows.
-    for (0..6) |seed| for (0..512) |sequence| {
+    // no-Action seeds exercise both input rows. The first six runs adopt
+    // beside a line being written, which keeps the input row; the rest
+    // adopt beside an empty draft, so the Action arrives at its choice.
+    for (0..12) |run_index| for (0..512) |sequence| {
+        const seed = run_index % 6;
+        const written = run_index < 6;
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
         const front = fixture.front;
         var draft: Text = .{};
-        draft.insert("ZX");
-        draft.left();
-        try fixture.bytes("ZX\x1b[D");
+        if (written) {
+            draft.insert("ZX");
+            draft.left();
+            try fixture.bytes("ZX\x1b[D");
+        }
         const blocked = seed == 3 or seed == 4;
         const unread = seed == 5;
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
+        // The offer: a delivered frame showed the choice and input then
+        // drained empty, with no key since. Every input spends it.
         var fresh = false;
-        // A key typed beside the Action moved the input row to the draft
-        // until Esc, End or Ctrl-End returns to the choice.
-        var typing = false;
-        // The highlighted option: Allow once until an arrow moves it while
-        // input is fresh. Every input spends freshness.
+        // The input row is the draft: a line was being written when the
+        // Action arrived, or a key was typed beside it, until Esc, Ctrl-G,
+        // Ctrl-End or End on an empty draft returns to the choice.
+        var typing = alive and written;
+        // The highlighted option: Allow once until an arrow moves it on an
+        // offer.
         var picked: Consent.Choice = .allow_once;
         // Input goes to the row the latest frame drew. The first frame of an
         // Action precedes its read receipt, so it draws the unread row; any
@@ -248,9 +257,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 const line = "UNREAD ACTION ROW\n";
                 for (0..100) |row| try fixture.action.writePositionalAll(std.testing.io, line, row * line.len);
             }
-            try fixture.screen.adopt(std.testing.io, fixture.action, 913);
+            try fixture.screen.adopt(std.testing.io, fixture.action, 913, !written);
             // Seed 2 is an Action too large to approve here: export-only.
-            if (seed == 2) fixture.screen.consent.presentation = .preview;
+            if (seed == 2) fixture.screen.consent.?.presentation = .preview;
             try ops.draw(front);
         }
         var index = sequence;
@@ -258,7 +267,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             const event = events[index % events.len];
             index /= events.len;
             errdefer {
-                std.debug.print("TD1 focus seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
+                std.debug.print("TD1 focus seed={d} written={} sequence={d} prefix={d}\n", .{ seed, written, sequence, prefix + 1 });
                 printPrefix(Event, sequence, prefix + 1);
             }
             const choosing = alive and visible and seed != 2 and !typing;
@@ -308,9 +317,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     }
                 },
                 .pause => {
+                    // A page is no key: it hides the choice and spends nothing.
                     try ops.showInspection(front);
                     visible = false;
-                    fresh = false;
                 },
                 .latest => {
                     try ops.navigation(front, .latest);
@@ -328,14 +337,14 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             }
             // Typing beside the Action moves the input row to the draft.
             if (choosing and !held and (event == .unicode or event == .paste)) typing = true;
-            // Every input spends freshness, at the choice or in the draft;
+            // Every input spends the offer, at the choice or in the draft;
             // the draft never submits beside a pending Action.
             if (event != .pause and event != .latest and event != .receipt) fresh = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
-            try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
-            try std.testing.expectEqual(picked, fixture.screen.consent.selected);
+            try std.testing.expectEqual(fresh, fixture.screen.offer != null);
+            if (fixture.screen.consent) |pending| try std.testing.expectEqual(picked, pending.highlight);
             const now_choosing = alive and visible and seed != 2 and !typing;
             const now_shown: ?[]const u8 = if (!now_choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
             try fixture.checkText(&draft, now_shown);
@@ -641,20 +650,20 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
-        try fixture.screen.adopt(std.testing.io, fixture.action, 913);
+        try fixture.screen.adopt(std.testing.io, fixture.action, 913, true);
         if (mode == 2) {
             // Success is distinct from both failed invocations and still
             // requires a post-write empty-input observation.
             try ops.draw(fixture.front);
             try std.testing.expect(fixture.screen.actionRead());
-            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offer == null);
             // Reading completed after that frame; the decision prompt is the
-            // next one, and only its delivery can open freshness.
-            try std.testing.expect(!fixture.screen.decisionPromptDelivered());
+            // next one, and only its delivery can make the offer.
+            try std.testing.expect(fixture.screen.shownDecision() == null);
             try ops.draw(fixture.front);
-            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offer == null);
             try std.testing.expect(fixture.screen.promptCompleted(try ops.step(fixture.front, 0), false, false));
-            try std.testing.expect(fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offer != null);
             continue;
         }
         const before = fixture.screen.action_seen;
@@ -671,6 +680,6 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);
         try std.testing.expect(!fixture.screen.actionRead());
-        try std.testing.expect(!fixture.screen.consent.acceptsInput());
+        try std.testing.expect(fixture.screen.offer == null);
     }
 }
