@@ -47,18 +47,38 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
     };
 }
 
-/// One line from the terminal with nothing shown, for a secret. Enter ends
-/// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
-/// null. Ctrl+C arrives as a byte, not a signal, so the terminal's own
-/// settings are always restored before this returns.
-pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+/// Puts the terminal in prompt mode: bytes arrive one at a time, unechoed,
+/// with no line editing, flow control or signals (Ctrl+C is a byte). Returns
+/// the attributes `leavePromptMode` restores.
+fn enterPromptMode() !Attributes {
     const original = try getAttributes();
     var mode = original;
     mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
+    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
     mode.c_cc[termios.VMIN] = 1;
     mode.c_cc[termios.VTIME] = 0;
     try setAttributes(.FLUSH, mode);
-    defer setAttributes(.FLUSH, original) catch {};
+    return original;
+}
+
+/// Discards the prompt's queued input and restores `original` exactly.
+/// NOW would also leave Darwin's PENDIN set when re-entering canonical mode.
+fn leavePromptMode(original: Attributes) error{TerminalRestoreFailed}!void {
+    setAttributes(.FLUSH, original) catch return error.TerminalRestoreFailed;
+}
+
+/// One line from the terminal with nothing shown, for a secret. Enter ends
+/// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
+/// null. As with `readLine`, no line is returned unless the terminal's own
+/// settings were restored. The caller zeroes `buffer`.
+pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    const original = try enterPromptMode();
+    const result = secretLine(io, buffer, prompt);
+    try leavePromptMode(original);
+    return result;
+}
+
+fn secretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     // Prompt only once echo is off, so a key typed the moment the prompt
     // shows is never echoed.
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
@@ -113,13 +133,7 @@ fn validScalar(point: u21, multiline: bool) bool {
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
 pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
-    const original = try getAttributes();
-    var mode = original;
-    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
-    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
-    mode.c_cc[termios.VMIN] = 1;
-    mode.c_cc[termios.VTIME] = 0;
-    try setAttributes(.FLUSH, mode);
+    const original = try enterPromptMode();
 
     // Always attempt both effects, even when rendering or input fails. Do
     // not return an accepted line if either cleanup step is unconfirmed.
@@ -134,10 +148,7 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
             else => break :blk error.TerminalCleanupFailed,
         };
     };
-    // Discard this prompt's queued input before restoring exact attributes.
-    // NOW also leaves Darwin's PENDIN set when re-entering canonical mode.
-    const restored = setAttributes(.FLUSH, original);
-    restored catch return error.TerminalRestoreFailed;
+    try leavePromptMode(original);
     disabled catch return error.TerminalCleanupFailed;
     return try result;
 }

@@ -15,6 +15,8 @@ pub const Class = enum {
     model,
     /// Only a new login resolves it.
     sign_in,
+    /// The provider rejected the API key; only a new key resolves it.
+    api_key,
     /// The conversation no longer fits, even after compaction.
     overflow,
     /// The provider answered with a permanent HTTP error: the same request
@@ -28,6 +30,10 @@ pub const Class = enum {
     other,
 };
 
+/// A Host saves this, not `provider_http_401`, when a provider rejects the
+/// API key it presented: the remedy is a new key, not a sign-in.
+pub const api_key_rejected = "provider_api_key_rejected";
+
 pub fn of(code: []const u8) Class {
     if (transport_policy.Refusal.ofFailureCode(code)) |refusal| return switch (refusal) {
         .usage_not_included => .plan,
@@ -39,6 +45,7 @@ pub fn of(code: []const u8) Class {
         },
     };
     if (codex_credential_policy.requiresLogin(code)) return .sign_in;
+    if (std.mem.eql(u8, code, api_key_rejected)) return .api_key;
     // Temporary statuses save `provider_temporary_http_`, so this prefix
     // names only permanent ones.
     if (std.mem.startsWith(u8, code, "provider_http_")) return .refused;
@@ -71,6 +78,7 @@ test "saved failure codes name what the person can do" {
         .{ "provider_model_not_found", Class.model },
         .{ "provider_http_401", Class.sign_in },
         .{ "provider_refresh_token_expired", Class.sign_in },
+        .{ api_key_rejected, Class.api_key },
         .{ "provider_http_400", Class.refused },
         .{ "provider_temporary_http_503", Class.other },
         .{ "provider_tls_verification_failed", Class.unreachable_provider },

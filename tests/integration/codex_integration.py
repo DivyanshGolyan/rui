@@ -717,7 +717,7 @@ def openai_journey():
             lambda: (value := fixture.observe(store, "rejected")).get("result", {}).get("code") and value,
             "API key rejection",
         )
-        assert failure["result"]["code"] == "provider_http_401", failure
+        assert failure["result"]["code"] == "provider_api_key_rejected", failure
         # A resend would come before the Operation settles, so none came.
         assert len(endpoint.requests) == 3, "a rejected API key was resent"
         assert key_file.read_text() == OPENAI_KEY + "\n"

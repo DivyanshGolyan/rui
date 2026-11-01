@@ -1298,7 +1298,7 @@ fn lastVisible(state: *const State, at: usize) usize {
 /// Sign-in, quota or rate-limit trouble that stops every Session reaching
 /// the model, from rows alone: rows survive Host restarts, so no Host memory
 /// is needed.
-pub const Trouble = enum { sign_in, quota, rate_limit };
+pub const Trouble = enum { sign_in, api_key, quota, rate_limit };
 pub const Band = struct {
     trouble: Trouble,
     /// Rows retrying a rate limit.
@@ -1323,12 +1323,17 @@ const BandRule = struct {
 /// In priority order.
 const band_rules = [_]BandRule{
     .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
+    .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
     .{ .trouble = .quota, .kind = .failed, .matches = quotaCode, .until_reset = true },
     .{ .trouble = .rate_limit, .kind = .retrying, .matches = failure_class.rateLimited },
 };
 
 fn signInCode(code: []const u8) bool {
     return failure_class.of(code) == .sign_in;
+}
+
+fn apiKeyCode(code: []const u8) bool {
+    return failure_class.of(code) == .api_key;
 }
 
 fn quotaCode(code: []const u8) bool {
@@ -2034,6 +2039,7 @@ fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory
     var buffer: [8]u8 = undefined;
     return bandLine(painter, switch (trouble.trouble) {
         .sign_in => "Sign-in expired. Run rui auth login codex.",
+        .api_key => "OpenAI API key rejected. Run rui auth login openai, then rui host stop.",
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
@@ -3650,6 +3656,9 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
     try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
+    // A rejected API key: its own remedy, not a sign-in.
+    try std.testing.expectEqual(Band{ .trouble = .api_key }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
+    try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     // Quota: shown with its reset time until that time passes.
     try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200 }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_usage_limit_reached", test_now_s + 1200) }, null)).?);
     try std.testing.expectEqual(Band{ .trouble = .quota }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_insufficient_quota", null) }, null)).?);

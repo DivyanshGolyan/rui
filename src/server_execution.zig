@@ -2,6 +2,7 @@ const std = @import("std");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -63,7 +64,15 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
+    /// The transfer presented an API key, so a 401 rejects that key.
+    presented_key: bool = false,
     transfer: provider.Transfer = undefined,
+
+    /// The code a failure saves: a rejected API key names its remedy.
+    fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
+        if (self.presented_key and execution.rejectsCredential(failure)) return failure_class.api_key_rejected;
+        return failure.codeText(buffer);
+    }
 };
 
 const NamedScratchSlot = struct {
@@ -1635,6 +1644,7 @@ fn launchPreparedRequest(
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
+        .presented_key = if (host.providers.get(request.provider)) |served| served.credential == .key_file else false,
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
@@ -1744,7 +1754,7 @@ fn completeTransfer(
     if (answered_response) |*response| {
         retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
-            .code = decision.fail.codeText(&code_buffer),
+            .code = active.failureCode(decision.fail, &code_buffer),
             .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
@@ -1766,7 +1776,7 @@ fn completeTransfer(
         },
         .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            const code = failure.codeText(&code_buffer);
+            const code = active.failureCode(failure, &code_buffer);
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
