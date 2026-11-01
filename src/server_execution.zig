@@ -1159,23 +1159,27 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     };
     // The Execution launches straight into its custody record's entry.
     const work = &host.bash_work[token.index];
+    var refused: bash.ArgumentSizes = .{};
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
         .work = work,
+        .refused = &refused,
     }, struct {
         fn handoff(context: anytype) !void {
             try context.host.withEffectLaunch(context, launch);
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else if (err == error.BashArgumentsTooLarge) {
+            settleArgumentsTooLarge(host, token, action_binding, refused);
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
@@ -1320,6 +1324,12 @@ fn retainBashPreparedCleanup(
         .token = token,
         .cleanup = &work.prepared_cleanup,
     });
+}
+
+/// Rare, so its message buffer stays off the dispatch frame.
+noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
+    var message: [bash.arguments_message_bytes]u8 = undefined;
+    settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
 }
 
 fn settleActionFailure(
@@ -2527,7 +2537,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    var launched = try prepared.launch(&bash.empty_environment);
+    var refused: bash.ArgumentSizes = .{};
+    var launched = try prepared.launch(&bash.empty_environment, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };

@@ -69,6 +69,24 @@ fn searchPrefix(buffer: []u8, directory: ?[]const u8) usize {
     return value.len + 1;
 }
 
+const fault_padding_bytes = 4 << 20;
+
+pub const ArgumentSizes = struct { command: usize = 0, environment: usize = 0, variables: usize = 0 };
+
+/// Bytes of a "NAME=VALUE" block as exec counts them, each with its NUL.
+fn blockBytes(block: []const ?[*:0]const u8) usize {
+    var total: usize = 0;
+    for (block) |entry| total += std.mem.len(entry.?) + 1;
+    return total;
+}
+
+pub const arguments_message_bytes = 320;
+
+/// The saved result when the OS refuses Bash's arguments (E2BIG).
+pub fn argumentsTooLargeMessage(buffer: *[arguments_message_bytes]u8, sizes: ArgumentSizes) []const u8 {
+    return std.fmt.bufPrint(buffer, "Bash was not started: the system refused its arguments as too large. The command is {d} bytes; the environment is {d} bytes in {d} variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{ sizes.command, sizes.environment, sizes.variables }) catch unreachable;
+}
+
 const BashObservation = extern struct {
     kind: c_int,
     value: c_int,
@@ -104,6 +122,8 @@ pub const Faults = struct {
     preparation: bool = false,
     preparation_after_captures: bool = false,
     spawn: bool = false,
+    /// Pads the child environment until the OS refuses it with E2BIG.
+    arguments: bool = false,
     service: bool = false,
     capture_read: bool = false,
     capture_write: bool = false,
@@ -287,12 +307,19 @@ pub const Prepared = struct {
     /// `$0` is `bash`, so diagnostics read `bash: line N:`. The native spawn
     /// resets the child's signal mask and dispositions and opens its own
     /// /dev/null stdin unless an unlinked read-only input was supplied.
-    pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map) !Execution {
+    /// On error.BashArgumentsTooLarge, `refused` holds what the OS refused.
+    pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map, refused: *ArgumentSizes) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         var child_environment = toolEnvironment(arena, shared_environment, self.store_selector, self.session.slice(), self.sender_handle.slice()) catch return error.BashSpawnFailed;
+        if (self.faults.arguments) {
+            // Real E2BIG: over Linux's 128 KiB per-string limit and macOS's 1 MiB ARG_MAX.
+            const padding = arena.alloc(u8, fault_padding_bytes) catch return error.BashSpawnFailed;
+            @memset(padding, 'x');
+            child_environment.put("RUI_FAULT_PADDING", padding) catch return error.BashSpawnFailed;
+        }
         const environment_block = child_environment.createPosixBlock(arena, .{ .zig_progress_fd = -1 }) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
         const cwd = arena.dupeSentinel(u8, self.workspace.slice(), 0) catch return error.BashSpawnFailed;
@@ -301,7 +328,14 @@ pub const Prepared = struct {
         var stdout_fd: c_int = undefined;
         var stderr_fd: c_int = undefined;
         const started = std.Io.Clock.Timestamp.now(self.scratch.io, .awake);
-        if (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd, if (self.stdin_capture) |input| input.readonly.?.handle else -1) != 0) return error.BashSpawnFailed;
+        switch (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd, if (self.stdin_capture) |input| input.readonly.?.handle else -1)) {
+            0 => {},
+            @backingInt(std.posix.E.@"2BIG") => {
+                refused.* = .{ .command = self.command.?.len, .environment = blockBytes(environment_block.slice), .variables = environment_block.slice.len };
+                return error.BashArgumentsTooLarge;
+            },
+            else => return error.BashSpawnFailed,
+        }
         if (self.stdin_capture) |*input| {
             input.readonly.?.close(self.scratch.io);
             input.readonly = null;
@@ -1444,7 +1478,8 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     defer prepared.cleanup() catch {};
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
-    var execution = try prepared.launch(&empty_environment);
+    var refused: ArgumentSizes = .{};
+    var execution = try prepared.launch(&empty_environment, &refused);
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
@@ -1536,6 +1571,45 @@ test "launched Bash leads its own session, so no terminal can reach its prompts"
         std.debug.print("expected own-session and no-terminal; got:\n{s}\n", .{text});
         return error.TestUnexpectedResult;
     }
+}
+
+test "an argument list the OS refuses reports the command and environment sizes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = .{ .used = &used, .limit = 1 << 20 } };
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(root);
+    var prepared = Prepared{
+        .scratch = scratch,
+        .allocator = std.testing.allocator,
+        .session = .{},
+        .store_selector = "/s",
+        .workspace = workspace,
+        .bash_path = "/bin/bash",
+        .timeout_ms = 10_000,
+        .faults = .{ .arguments = true },
+        .command = try std.testing.allocator.dupeSentinel(u8, "true", 0),
+        .stdout_capture = null,
+        .stderr_capture = null,
+    };
+    defer prepared.cleanup() catch {};
+    try prepared.session.set("k7m2qx");
+    prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
+    prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
+    var refused: ArgumentSizes = .{};
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(&empty_environment, &refused));
+    // RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
+    const environment_bytes = "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
+    try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 3 }, refused);
+    var message: [arguments_message_bytes]u8 = undefined;
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "Bash was not started: the system refused its arguments as too large. The command is 4 bytes; the environment is {d} bytes in 3 variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{environment_bytes});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, argumentsTooLargeMessage(&message, refused));
+    const widest: ArgumentSizes = .{ .command = std.math.maxInt(usize), .environment = std.math.maxInt(usize), .variables = std.math.maxInt(usize) };
+    try std.testing.expect(argumentsTooLargeMessage(&message, widest).len <= arguments_message_bytes);
 }
 
 test "an owned file closes its descriptor before reporting removal failure" {
