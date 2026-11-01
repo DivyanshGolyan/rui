@@ -668,6 +668,14 @@ fn driveActive(self: *Self) !void {
                 job.message_target = request.target;
                 try self.launch(job, reads.fullMessage);
             };
+            // An Action's choice holds the input: no press waits for it.
+            if (self.terminal.screen.inputRow() == .selector) {
+                self.input.dropPresses();
+            } else if (self.reader.thread == null and !self.reading.opening) if (self.input.nextStep()) |recall| {
+                const job = self.freeze(.recall);
+                job.recall = recall;
+                try self.launch(job, reads.recall);
+            };
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
                 self.notice = "Loading earlier messages…";
                 try self.launch(self.freeze(.history), reads.history);
@@ -867,6 +875,12 @@ const ConversationAction = enum {
     page_down,
     scroll_up,
     scroll_down,
+    /// On an empty or recalled draft, the Message sent before the one it
+    /// shows.
+    older,
+    /// On a recalled draft, the Message sent after it, or past the newest
+    /// an empty draft.
+    newer,
     /// The latest view, which is the pending Action if there is one.
     latest,
     /// Out of a Message page, else to the latest view. It never leaves the
@@ -890,7 +904,9 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_g = .close,
     .ctrl_c = .detach,
     .ctrl_d = .detach,
+    .ctrl_n = .newer,
     .ctrl_o = .expand,
+    .ctrl_p = .older,
     .ctrl_r = .recover,
     .ctrl_x = null,
     .up = .scroll_up,
@@ -907,14 +923,9 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
 fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
-        .page_up, .page_down, .scroll_up, .scroll_down => {
-            const down = action == .page_down or action == .scroll_down;
-            if (screen.view == .live) {
-                if (down) return; // Live output already shows the latest rows.
-                try self.beginTranscript();
-            }
-            self.transcript.older_failed = false; // A new scroll may retry a failed load.
-            if (screen.browse(down, action == .page_up or action == .page_down)) try screen.latest();
+        .page_up, .page_down, .scroll_up, .scroll_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
+        .older, .newer => if (self.input.press(action == .older) == .typed) {
+            self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
         .latest, .back, .close => {
             // Leaving also abandons a Message page not yet shown, and returns
@@ -952,6 +963,32 @@ fn perform(self: *Self, action: ConversationAction) !void {
         } else try self.submission.requestRecovery(null),
     }
     self.dirty = true;
+}
+
+fn scroll(self: *Self, down: bool, page: bool) !void {
+    const screen = self.terminal.screen;
+    if (screen.view == .live) {
+        if (down) return; // Live output already shows the latest rows.
+        try self.beginTranscript();
+    }
+    self.transcript.older_failed = false; // A new scroll may retry a failed load.
+    if (screen.browse(down, page)) try screen.latest();
+}
+
+/// Lands a read recall step on the draft it began from.
+fn showRecalled(self: *Self) !void {
+    const passed = self.job.result.recall_passed;
+    switch (self.input.land(self.job.recall.?, self.job.result.recalled)) {
+        .stale => {},
+        .oldest => self.notice = if (passed) "No earlier message the draft can hold." else "No earlier message.",
+        .emptied => if (passed) {
+            self.notice = "Passed over a sent message the draft cannot hold.";
+        },
+        .show => |found| {
+            try self.input.fill(self.init.io, self.files.scratch, found);
+            if (passed) self.notice = "Passed over a sent message the draft cannot hold.";
+        },
+    }
 }
 
 /// The latest view with nothing to dismiss: no Action, sub-view or command.
@@ -1076,9 +1113,12 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
         // While an Action waits there is no original to retry.
-        .action => |action| if (action == .recover) {
-            self.notice = "! Action needs a decision; nothing to retry.";
-        } else try self.perform(action),
+        .action => |action| switch (action) {
+            .recover => self.notice = "! Action needs a decision; nothing to retry.",
+            // The draft is not the choice's; its sent Messages wait.
+            .older, .newer => {},
+            else => try self.perform(action),
+        },
         .left => try self.choose(.{ .pick = .allow_once }, offer),
         .right => try self.choose(.{ .pick = .deny }, offer),
         .enter => try self.choose(.enter, offer),
@@ -1185,6 +1225,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A pending inspection supersedes a silent read it cancelled.
     const mode: departure.Mode = if (self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
@@ -1223,6 +1264,8 @@ fn settleReader(self: *Self) !void {
         if (request.generation == self.expansion.generation and request.sent == self.admission.sent and screen.view == request.view and
             (request.view == .live or request.transcript == self.transcript.id))
             try screen.showMessage(self.init.io, self.files.inspection);
+    } else if (end == .complete and self.reading.phase == .recall) {
+        try self.showRecalled();
     } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
         try self.showStaged();
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
@@ -1358,6 +1401,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     const summary = switch (pending.phase) {
         .details => "! Details unavailable; draft retained.",
         .inspection => "! Inspection unavailable; draft retained.",
+        .recall => "! Sent message unavailable; draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
     };
     try out.writeAll(summary);
@@ -1439,6 +1483,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.notice = switch (self.reading.phase) {
                 .details => "! Details unavailable; draft retained.",
                 .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
+                .recall => "! Sent message unavailable; draft retained.",
                 .inspection => "! Inspection unavailable; draft retained.",
                 else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
@@ -1450,6 +1495,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
         self.notice = null; // Clears "Loading earlier messages…" or "Opening message…".
+    } else if (self.reading.phase == .recall) {
+        // showRecalled selected the notice.
     } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
         // showInspection selected the notice.
     } else {

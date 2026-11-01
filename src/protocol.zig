@@ -156,6 +156,7 @@ pub const Kind = enum {
     proposal_field,
     activity_page,
     activity_content,
+    person_message,
 };
 
 pub const ConfigureCommand = struct {
@@ -667,6 +668,41 @@ pub const ActivityItem = struct {
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
 
+/// The Message with no Session sender nearest `position` at `end`: before
+/// it backward, after it forward. Position zero starts either traversal.
+pub const ReadPersonMessage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: ?u64 = null,
+    position: u64 = 0,
+    direction: @FieldType(ActivityPage, "direction") = .backward,
+
+    pub fn validate(self: ReadPersonMessage) !void {
+        try (ActivityPage{ .end = self.end, .position = self.position, .direction = self.direction }).validate();
+    }
+};
+pub const PersonMessage = struct {
+    end: u64,
+    message: ?Found = null,
+
+    /// The Message's Activity position and its content.
+    pub const Found = struct {
+        position: u64,
+        content: ActivityItem.Content,
+        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+        pub fn writeJson(self: Found, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.position, self.content });
+        }
+    };
+    /// Holes: end, the Message or null.
+    pub const reply_shape = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"person_message\",\"end\":\"", Hole.decimal, "\",\"message\":", Hole{ .optional_json = Found }, "}" };
+    pub const max_json_bytes = shapeBytes(reply_shape);
+    pub fn writeJson(self: *const PersonMessage, out: *std.Io.Writer) !void {
+        try writeShape(out, reply_shape, .{ self.end, self.message });
+    }
+};
+
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
     entries: [3]Entry = undefined,
@@ -921,12 +957,13 @@ pub const Request = union(Kind) {
     proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
+    person_message: ReadPersonMessage,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .person_message => {},
         }
     }
 
@@ -1261,6 +1298,8 @@ const Parser = struct {
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
+        else if (kind_text.eql("person_message"))
+            .person_message
         else
             return error.UnknownCommand;
 
@@ -1344,6 +1383,10 @@ const Parser = struct {
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content);
+            },
+            .person_message => {
+                out.* = .{ .person_message = .{ .store = store } };
+                try self.parsePersonMessage(&out.person_message);
             },
         }
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
@@ -1690,6 +1733,26 @@ const Parser = struct {
         if (try self.consumeIf('n')) {
             for ("ull") |byte| try self.expectByte(byte);
         } else out.ordinal = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("direction");
+        var direction: Bounded(8) = .{};
+        try self.readSmallString(&direction);
+        out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+        try out.validate();
+    }
+
+    fn parsePersonMessage(self: *Parser, out: *ReadPersonMessage) !void {
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&out.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        if (try self.consumeIf('n')) {
+            for ("ull") |byte| try self.expectByte(byte);
+        } else out.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("position");
+        out.position = try self.readCanonicalU64();
         try self.expectByte(',');
         try self.expectKey("direction");
         var direction: Bounded(8) = .{};
@@ -2279,6 +2342,8 @@ pub const proposal_field_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, end, position, direction.
+pub const person_message_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"person_message\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
 /// metadata has a shape. The variable parts are written between these.
 pub const configure_request = struct {
@@ -2319,6 +2384,7 @@ pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
 pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+pub const max_person_message_request_bytes = shapeBytes(person_message_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
@@ -2326,7 +2392,7 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
     proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,
+    activity_content_request,    person_message_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2360,6 +2426,7 @@ pub const max_proposal_page_response_bytes = blk: {
 };
 
 pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
+pub const max_person_message_response_bytes = PersonMessage.max_json_bytes;
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
