@@ -27,8 +27,6 @@ pub fn parallelToolCalls(model: []const u8) bool {
 
 const ItemHeader = codec_abi.ItemHeader;
 const Pieces = codec_abi.Pieces;
-const Ops = codec_abi.Ops;
-const Status = codec_abi.Status;
 
 /// The encoder's state between history elements: whether one was written,
 /// since the next input item then takes a comma.
@@ -199,9 +197,21 @@ pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Heade
 /// `resets_at`), its `type` standing in for a missing code in the report,
 /// and its `message`, else a bare `detail`; a body without `error` reports
 /// only its own `message` or `detail`. Only a whole valid body and members
-/// that appear once count. The reader holds the state for any body size,
-/// and the report is named by range, so nothing of the body is buffered.
-pub const Classifier = struct {
+/// that appear once count.
+pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
+    out.context_overflow = false;
+    out.code = null;
+    out.resets_at = null;
+    out.report = .{ .code = null, .message = null };
+    scratch.init();
+    // A body that is not one whole JSON document establishes nothing.
+    scratch.reader.read(body, scratch) catch return;
+    scratch.find(out);
+}
+
+/// The classifier's working state over one body, which `classify` writes
+/// before it reads.
+pub const ClassifyScratch = struct {
     reader: json.Reader = undefined,
     /// The named member being read, of the body and of its error object;
     /// null for any other.
@@ -238,9 +248,7 @@ pub const Classifier = struct {
         }
     };
 
-    pub const Error = error{OpsOverflow};
-
-    pub fn init(self: *Classifier) void {
+    fn init(self: *ClassifyScratch) void {
         self.* = .{
             .outer = null,
             .inner = null,
@@ -250,38 +258,31 @@ pub const Classifier = struct {
             .code_length = 0,
             .resets_at = null,
         };
-        self.reader.init();
     }
 
-    pub fn classify(self: *Classifier, fed: *const codec_abi.Fed, ops: *Ops) Error!Status {
-        // A body that is not JSON establishes nothing.
-        self.reader.feed(fed.bytes, self) catch return .done;
-        if (!fed.end) return .next;
-        if (self.reader.complete()) try self.find(ops);
-        return .done;
-    }
-
-    fn find(self: *Classifier, ops: *Ops) Error!void {
+    fn find(self: *const ClassifyScratch, found: *codec_abi.ErrorBody) void {
         const failure = self.envelope.get(.@"error");
-        if (failure.count == 0) return report(ops, .message, message(&self.envelope));
+        if (failure.count == 0) {
+            found.report.message = report(message(&self.envelope));
+            return;
+        }
         if (failure.count > 1 or !self.error_object) return;
         const code = self.failure.get(.code);
         if (code.count == 1 and self.code_length != 0) {
             const text = self.code[0..self.code_length];
             if (std.mem.eql(u8, text, "context_length_exceeded")) {
-                try ops.finding(.context_overflow);
+                found.context_overflow = true;
             } else {
-                const resets_at = if (self.failure.get(.resets_at).count == 1) self.resets_at else null;
-                try ops.finding(.{ .quota = .{ .code = text, .resets_at = resets_at } });
-                try ops.finding(.{ .refusal = text });
+                found.code = .of(text);
+                if (self.failure.get(.resets_at).count == 1) found.resets_at = self.resets_at;
             }
         }
         // An error object's type stands in for a code that is absent, empty
         // or not a string.
         const named = code.count == 1 and code.is_string and code.range.length != 0;
         const kind = self.failure.get(.type);
-        try report(ops, .code, if (named) code.range else if (kind.count == 1) kind.string() else null);
-        try report(ops, .message, message(&self.failure));
+        found.report.code = report(if (named) code.range else if (kind.count == 1) kind.string() else null);
+        found.report.message = report(message(&self.failure));
     }
 
     /// `message`, else `detail`; a message that is not a string is left out.
@@ -292,12 +293,12 @@ pub const Classifier = struct {
         return if (detail.count == 1) detail.string() else null;
     }
 
-    fn report(ops: *Ops, field: codec_abi.ReportField, range: ?json.Range) Error!void {
-        const value = range orelse return;
-        try ops.finding(.{ .report = .{ .field = field, .escape = .json_string_v1, .start = value.start, .length = value.length } });
+    fn report(range: ?json.Range) ?codec_abi.ReportRange {
+        const value = range orelse return null;
+        return .{ .escape = .json_string_v1, .start = value.start, .length = value.length };
     }
 
-    pub fn key(self: *Classifier, reader: *const json.Reader, depth: u8) void {
+    pub fn key(self: *ClassifyScratch, reader: *const json.Reader, depth: u8) void {
         const name = reader.text() orelse "";
         switch (depth) {
             1 => self.outer = std.meta.stringToEnum(Outer, name),
@@ -308,7 +309,7 @@ pub const Classifier = struct {
         }
     }
 
-    pub fn begin(self: *Classifier, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
+    pub fn begin(self: *ClassifyScratch, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
         _ = reader;
         switch (depth) {
             1 => if (self.outer) |outer| {
@@ -324,7 +325,7 @@ pub const Classifier = struct {
         }
     }
 
-    pub fn end(self: *Classifier, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
+    pub fn end(self: *ClassifyScratch, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
         switch (depth) {
             1 => if (kind == .string) if (self.outer) |outer| {
                 self.envelope.getPtr(outer).set(reader.string());
@@ -347,7 +348,7 @@ pub const Classifier = struct {
     }
 
     /// Whether the reader is among the members of the body's error object.
-    fn inError(self: *const Classifier) bool {
+    fn inError(self: *const ClassifyScratch) bool {
         return self.outer == .@"error" and self.error_object;
     }
 
@@ -447,4 +448,44 @@ test "the request headers ask for the stream, the Session's id and Rui as origin
         try std.testing.expectEqual(want[0], @as(RequestHeader, @fromBackingInt(@intCast(headers.names[index]))));
         try std.testing.expectEqualStrings(want[1], headers.value(index));
     }
+}
+
+test "classify answers the same with 0xAA or leftover scratch" {
+    const bodies = [_][]const u8{
+        "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1800000123,\"message\":\"Out.\"}}",
+        "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Too long.\"}}",
+        "{\"error\":{\"type\":\"invalid_request_error\",\"code\":null,\"detail\":\"d\"}}",
+        "{\"detail\":\"Unsupported model\"}",
+        "{\"error\":{\"code\":\"cyber_policy\",\"x\":1.2.3}}",
+        "{\"error\":{\"code\":\"" ++ @as([80]u8, @splat('c')) ++ "\"}}",
+        "",
+    };
+    const same = struct {
+        fn body(expected: *const codec_abi.ErrorBody, actual: *const codec_abi.ErrorBody) !void {
+            try std.testing.expectEqual(expected.context_overflow, actual.context_overflow);
+            try std.testing.expectEqual(expected.code == null, actual.code == null);
+            if (expected.code) |*code| try std.testing.expectEqualStrings(code.slice(), actual.code.?.slice());
+            try std.testing.expectEqual(expected.resets_at, actual.resets_at);
+            try std.testing.expectEqual(expected.report.code, actual.report.code);
+            try std.testing.expectEqual(expected.report.message, actual.report.message);
+        }
+    };
+    var scratch: ClassifyScratch = undefined;
+    var fresh: codec_abi.ErrorBody = undefined;
+    var again: codec_abi.ErrorBody = undefined;
+    for (bodies) |body| {
+        @memset(std.mem.asBytes(&scratch), 0xAA);
+        @memset(std.mem.asBytes(&fresh), 0xAA);
+        classify(&scratch, body, &fresh);
+        for (bodies) |other| {
+            classify(&scratch, other, &again);
+            classify(&scratch, body, &again);
+            try same.body(&fresh, &again);
+        }
+    }
+    @memset(std.mem.asBytes(&scratch), 0xAA);
+    classify(&scratch, bodies[0], &fresh);
+    try std.testing.expectEqualStrings("usage_limit_reached", fresh.code.?.slice());
+    try std.testing.expectEqual(@as(?u64, 1_800_000_123), fresh.resets_at);
+    try std.testing.expectEqualStrings("Out.", bodies[0][fresh.report.message.?.start..][0..fresh.report.message.?.length]);
 }
