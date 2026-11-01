@@ -31,9 +31,10 @@ alternate_scroll: bool = false,
 focused: bool = true,
 /// How notifications reach this terminal; null sends none.
 notices: ?Notices = null,
-/// The notification the next frame writes first. At most one waits; a newer
-/// one replaces it.
-notification: struct { bytes: [attention.max_bytes]u8 = undefined, len: usize = 0 } = .{},
+/// The notification the next frame writes first. News that comes while one
+/// waits joins it, so a frame's notification counts every Session's news.
+notification: ?attention.Notice = null,
+notification_bytes: [attention.max_bytes]u8 = undefined,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(screen: *Screen) !Self {
@@ -410,22 +411,25 @@ pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) 
     const notices = self.notices orelse return;
     const saved = preferences.load(notices.home) catch preferences.Values{};
     if (!saved.notifications) return;
-    var out = std.Io.Writer.fixed(&self.notification.bytes);
-    attention.write(&out, notices.signal, name, kind, more) catch unreachable;
-    self.notification.len = out.buffered().len;
+    const notice: attention.Notice = .of(name, kind, more);
+    if (self.notification) |*held| held.join(notice) else self.notification = notice;
 }
 
 /// The waiting notification, which the caller writes as the first bytes of
 /// its next frame, through that frame's write: so it never lands inside
 /// another sequence, and a full terminal pumps rather than fails. The bytes
-/// hold until the next `notify`; a frame that fails drops them.
+/// are good until the next take; a frame that fails drops them.
 pub fn takeNotification(self: *Self) []const u8 {
-    defer self.notification.len = 0;
-    return self.notification.bytes[0..self.notification.len];
+    const notice = self.notification orelse return "";
+    self.notification = null;
+    const notices = self.notices orelse return "";
+    var out = std.Io.Writer.fixed(&self.notification_bytes);
+    attention.write(&out, notices.signal, notice.name.slice(), notice.kind, notice.more) catch unreachable;
+    return out.buffered();
 }
 
 pub fn notificationWaiting(self: *const Self) bool {
-    return self.notification.len != 0;
+    return self.notification != null;
 }
 
 pub fn permanent(self: *Self, bytes: []const u8) !void {
@@ -489,13 +493,17 @@ test "a notification waits for the next frame, only while focus is away and the 
     terminal.notify("k7m2qx", .finished, 0);
     try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx finished\x07", terminal.takeNotification());
     try std.testing.expectEqualStrings("", terminal.takeNotification());
-    // Turned off, then on again, applies to the next notification; a newer
-    // one replaces one still waiting.
+    // Turned off, then on again, applies to the next notification.
     _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
     terminal.notify("k7m2qx", .approval, 0);
     try std.testing.expectEqualStrings("", terminal.takeNotification());
     _ = try preferences.update(home, .{ .notifications = true }, &preferences.Readinesses.initFill(.missing));
+    // News that comes while one waits joins it: the conversation's own and a
+    // listing's in one step name the most urgent and count the rest.
     terminal.notify("k7m2qx", .finished, 0);
-    terminal.notify("k7m2qx", .approval, 1);
-    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx needs approval, and 1 more\x07", terminal.takeNotification());
+    terminal.notify("b4n8wd", .approval, 1);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: b4n8wd needs approval, and 2 more\x07", terminal.takeNotification());
+    terminal.notify("k7m2qx", .failed, 0);
+    terminal.notify("b4n8wd", .failed, 0);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx failed, and 1 more\x07", terminal.takeNotification());
 }

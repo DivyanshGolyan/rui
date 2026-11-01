@@ -802,6 +802,10 @@ pub const SessionWork = struct {
         return .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action };
     }
 
+    pub fn core(self: SessionWork) session_work.Work {
+        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
+    }
+
     pub fn args(self: *const SessionWork) struct { WorkStateJson, ?u64, ?u64, ?u64 } {
         return .{ .{ .state = self.state }, self.turn, self.operation, self.first_action };
     }

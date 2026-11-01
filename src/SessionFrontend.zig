@@ -1533,7 +1533,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             self.shown.width = null;
         }
         // The state the conversation opened on is not news.
-        if (!self.reading.opening) news = attention.news(.{ .state = self.live.work.state, .first_action = self.live.work.first_action }, .{ .state = result.work.work.state, .first_action = result.work.work.first_action });
+        if (!self.reading.opening) news = attention.news(self.live.work.core(), result.work.work.core());
         self.live.work = result.work.work;
         self.live.view = result.live;
         self.live.cursor = result.cursor;
