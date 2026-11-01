@@ -128,7 +128,7 @@ pub fn parse(text: []const u8) Parsed {
     std.debug.assert(text.len != 0 and text[0] == '/');
     const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
     const name = std.meta.stringToEnum(Name, text[1..end]) orelse return .unknown;
-    const argument = std.mem.trim(u8, text[end..], " ");
+    const argument = trimmed(text[end..]);
     const admitted = switch (table.get(name).argument) {
         .none => argument.len == 0,
         .optional => true,
@@ -138,6 +138,17 @@ pub fn parse(text: []const u8) Parsed {
         } else false,
     };
     return if (admitted) .{ .command = .{ .name = name, .argument = argument } } else .{ .misused = name };
+}
+
+/// Drops the spaces around an argument, but keeps a final space a
+/// backslash escapes: the argument's decoder reads it as part of a word.
+fn trimmed(raw: []const u8) []const u8 {
+    const argument = std.mem.trimStart(u8, raw, " ");
+    var len = std.mem.trimEnd(u8, argument, " ").len;
+    var slashes: usize = 0;
+    while (slashes < len and argument[len - 1 - slashes] == '\\') slashes += 1;
+    if (slashes % 2 == 1 and len < argument.len) len += 1;
+    return argument[0..len];
 }
 
 /// The listed commands a command word starts, in list order.
@@ -214,6 +225,8 @@ test "a command admits exactly the arguments its shape names" {
         .{ "/result", Parsed{ .misused = .result } },
         .{ "/inspect-action", Parsed{ .command = .{ .name = .@"inspect-action", .argument = "" } } },
         .{ "/configure --label \"a b\"", Parsed{ .command = .{ .name = .configure, .argument = "--label \"a b\"" } } },
+        .{ "/configure --label lane\\  ", Parsed{ .command = .{ .name = .configure, .argument = "--label lane\\ " } } },
+        .{ "/configure --label lane\\\\  ", Parsed{ .command = .{ .name = .configure, .argument = "--label lane\\\\" } } },
         .{ "/configurex", @as(Parsed, .unknown) },
         .{ "/", @as(Parsed, .unknown) },
         .{ "//status", @as(Parsed, .unknown) },
