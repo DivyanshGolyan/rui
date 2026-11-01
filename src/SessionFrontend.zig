@@ -47,7 +47,8 @@ terminal: *Terminal,
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
 /// The overview that lent the terminal.
-lender: Lender = undefined,
+/// `run` always supplies the overview; a frame drawn without one says nothing.
+lender: Lender = quiet_overview,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
