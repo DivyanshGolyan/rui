@@ -375,6 +375,15 @@ func RunJSONInput(deadline Deadline, input io.Reader, destination any, command s
 	return nil
 }
 
+// EnvironmentHeader frames a Message with an empty client environment; other
+// routes carry none.
+func EnvironmentHeader(route string) string {
+	if route == "/v1/message" {
+		return "X-Rui-Environment-Bytes: 0\r\n"
+	}
+	return ""
+}
+
 func ExchangeUnix(deadline Deadline, socketPath string, route string, value any, destination any) error {
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -394,9 +403,10 @@ func ExchangeUnix(deadline Deadline, socketPath string, route string, value any,
 		return err
 	}
 	header := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n",
+		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\n%sConnection: close\r\n\r\n",
 		route,
 		len(body),
+		EnvironmentHeader(route),
 	)
 	if _, err := io.WriteString(connection, header); err != nil {
 		return err

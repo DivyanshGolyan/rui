@@ -80,7 +80,7 @@ pub const arguments_message_bytes = 320;
 
 /// The saved result when the OS refuses Bash's arguments (E2BIG).
 pub fn argumentsTooLargeMessage(buffer: *[arguments_message_bytes]u8, sizes: ArgumentSizes) []const u8 {
-    return std.fmt.bufPrint(buffer, "Bash was not started: the system refused its arguments as too large. The command is {d} bytes; the environment is {d} bytes in {d} variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{ sizes.command, sizes.environment, sizes.variables }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "Bash was not started: the system refused its arguments as too large. The command is {d} bytes; the environment is {d} bytes in {d} variables. Put long content in stdin or a file, or send from a shell with a smaller environment.", .{ sizes.command, sizes.environment, sizes.variables }) catch unreachable;
 }
 
 const BashObservation = extern struct {
@@ -303,14 +303,16 @@ pub const Prepared = struct {
     /// `$0` is `bash`, so diagnostics read `bash: line N:`. The native spawn
     /// resets the child's signal mask and dispositions and opens its own
     /// /dev/null stdin unless an unlinked read-only input was supplied.
+    /// The child starts from `base`, the Session's client environment, or
+    /// from `facts` alone when it has none (`environment.childBlock`).
     /// On error.BashArgumentsTooLarge, `refused` holds what the OS refused.
-    pub fn launch(self: *Prepared, facts: environment.HostFacts, refused: *ArgumentSizes) !Execution {
+    pub fn launch(self: *Prepared, facts: environment.HostFacts, base: ?environment.Value, refused: *ArgumentSizes) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice() };
-        var environment_block = environment.childBlock(arena, null, facts, identity) catch return error.BashSpawnFailed;
+        var environment_block = environment.childBlock(arena, base, facts, identity) catch return error.BashSpawnFailed;
         if (self.faults.arguments) environment_block = padArguments(arena, environment_block) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
         const cwd = arena.dupeSentinel(u8, self.workspace.slice(), 0) catch return error.BashSpawnFailed;
@@ -1470,7 +1472,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
     var refused: ArgumentSizes = .{};
-    var execution = try prepared.launch(default_facts, &refused);
+    var execution = try prepared.launch(default_facts, null, &refused);
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
@@ -1591,12 +1593,12 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, &refused));
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, &refused));
     // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
     const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
     try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);
     var message: [arguments_message_bytes]u8 = undefined;
-    const expected = try std.fmt.allocPrint(std.testing.allocator, "Bash was not started: the system refused its arguments as too large. The command is 4 bytes; the environment is {d} bytes in 4 variables. Put long content in stdin or a file, or start the Host with a smaller environment.", .{environment_bytes});
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "Bash was not started: the system refused its arguments as too large. The command is 4 bytes; the environment is {d} bytes in 4 variables. Put long content in stdin or a file, or send from a shell with a smaller environment.", .{environment_bytes});
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, argumentsTooLargeMessage(&message, refused));
     const widest: ArgumentSizes = .{ .command = std.math.maxInt(usize), .environment = std.math.maxInt(usize), .variables = std.math.maxInt(usize) };

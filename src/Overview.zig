@@ -885,7 +885,7 @@ fn startSession(self: *Self, requests: client.Requests, input: client.MessageInp
         return;
     };
     var buffer: client.ReplyBuffer = .{};
-    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
 fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
@@ -896,7 +896,7 @@ fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStop
     };
     defer captured.close(io);
     var buffer: client.ReplyBuffer = .{};
-    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
 const test_now_s: u64 = 1_800_000_000;

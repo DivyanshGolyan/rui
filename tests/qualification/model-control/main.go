@@ -373,7 +373,7 @@ func openPartial(socket string) (net.Conn, error) {
 		return nil, err
 	}
 	_ = connection.SetWriteDeadline(time.Now().Add(3 * time.Second))
-	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Rui-Wire-Version: 2\r\n\r\n{")
+	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Rui-Wire-Version: 3\r\n\r\n{")
 	if err != nil {
 		connection.Close()
 		return nil, err
@@ -823,7 +823,7 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 			}
 		}
 	}
-	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n", route, len(body))
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\n%sConnection: close\r\n\r\n", route, len(body), measurement.EnvironmentHeader(route))
 	if _, err := io.WriteString(connection, request); err != nil {
 		connection.Close()
 		return nil, err
@@ -854,7 +854,7 @@ func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string,
 		connection.Close()
 		return preparedRequest{}, err
 	}
-	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 2\r\nConnection: close\r\n\r\n", route, len(body))
+	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 3\r\n%sConnection: close\r\n\r\n", route, len(body), measurement.EnvironmentHeader(route))
 	return preparedRequest{connection: connection, request: append([]byte(header), body...)}, nil
 }
 

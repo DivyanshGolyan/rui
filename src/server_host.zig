@@ -3,6 +3,7 @@ const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -278,6 +279,9 @@ pub const Host = struct {
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
     bash_facts: environment.HostFacts = bash.default_facts,
+    /// Each Session's client environment; null in owner tests, whose Bash
+    /// then starts from the Host facts alone.
+    environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in

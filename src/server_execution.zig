@@ -1151,6 +1151,14 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     }
+    // The Session's client environment, copied outside the Store lock and
+    // `launch_mutex`; none falls back to the Host facts.
+    const base = if (host.environments) |environments| environments.copy(prepared.session.slice(), prepared.allocator) catch {
+        settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
+        discardBashResources(host, slot, prepared.takeCleanup());
+        return;
+    } else null;
+    defer if (base) |bytes| prepared.allocator.free(bytes);
     host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1162,6 +1170,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
+        .base = base,
         .work = work,
         .refused = &refused,
     }, struct {
@@ -1170,7 +1179,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.refused) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -2537,7 +2546,7 @@ test "cleanup publication follows complete execution retirement" {
         .clock = .awake,
     });
     var refused: bash.ArgumentSizes = .{};
-    var launched = try prepared.launch(bash.default_facts, &refused);
+    var launched = try prepared.launch(bash.default_facts, null, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };

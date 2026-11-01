@@ -396,7 +396,7 @@ def startup_limits(root, env):
                         header, body = bytes(response).split(b"\r\n\r\n", 1)
                         assert header.startswith(b"HTTP/1.1 503 "), response
                         assert json.loads(body) == {
-                            "version": "2", "type": "busy", "code": "ordinary_capacity_exhausted",
+                            "version": "3", "type": "busy", "code": "ordinary_capacity_exhausted",
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
@@ -431,7 +431,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "2", "type": "busy", "code": "control_capacity_exhausted",
+                                "version": "3", "type": "busy", "code": "control_capacity_exhausted",
                             }, response
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
@@ -441,7 +441,7 @@ def startup_limits(root, env):
                         borrowers.pop().close()
                     # One stalled discovery must not borrow either control
                     # place. Exercise both request-line and body stalls.
-                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nContent-Length: 2\r\n\r\n"
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 3\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
                         discovery = socket.socket(socket.AF_UNIX)
                         borrowers.append(discovery)
@@ -458,7 +458,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "2", "type": "busy", "code": "discovery_capacity_exhausted",
+                                "version": "3", "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
                             control = socket.socket(socket.AF_UNIX)

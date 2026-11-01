@@ -22,6 +22,10 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
+/// The wire version a Store records and requires. Wire 3 changed only how
+/// a Message exchange is framed, never what the Store saves, so Stores keep
+/// recording wire 2 and a same-format upgrade opens them unchanged.
+pub const wire_version = "2";
 pub const schema_version: u32 = 45;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -8759,7 +8763,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     );
     try exec(database, "PRAGMA application_id=1280591409");
     try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
-    const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','" ++ protocol.wire_version ++ "'),('store_selector',?1)");
+    const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','" ++ wire_version ++ "'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
     try expectDone(statement);
@@ -8789,7 +8793,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
         var version: protocol.Bounded(16) = .{};
         try readText(statement, 0, &version);
-        if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
+        if (!version.eql(wire_version)) return error.WrongStoreVersion;
     }
     {
         const statement = try prepare(database, "SELECT value FROM store_meta WHERE key='store_selector'");
@@ -9903,7 +9907,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
     var expected_empty: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"3\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
     var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;
