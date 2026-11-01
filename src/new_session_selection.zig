@@ -1,6 +1,7 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
 const preferences = @import("preference_values.zig");
+const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
 
@@ -32,10 +33,23 @@ pub const Snapshot = struct {
 
     /// Null requires choice/repair, not fallback. Readiness is advisory: the CLI
     /// still checks the actual Host and captures its atomic require_model guard.
-    pub fn resolve(self: *const Snapshot, readiness: provider_selection.Readiness) !?Binding {
+    pub fn resolve(self: *const Snapshot, readiness: *const provider_selection.Readinesses) !?Binding {
+        return self.resolveWith(self.intent.provider, readiness);
+    }
+
+    /// A caller that cannot ask: with no explicit or saved provider, a fresh
+    /// Session uses the product default. Credential readiness is the serving
+    /// Host's answer, so every provider counts as usable here.
+    pub fn resolveUnprompted(self: *const Snapshot) !Binding {
+        const provider = self.intent.provider orelse if (self.defaults.provider.len == 0) @as([]const u8, product_defaults.provider) else null;
+        const usable: provider_selection.Readinesses = .initFill(.configured);
+        return (try self.resolveWith(provider, &usable)).?;
+    }
+
+    fn resolveWith(self: *const Snapshot, explicit_provider: ?[]const u8, readiness: *const provider_selection.Readinesses) !?Binding {
         const selection = try provider_selection.resolve(
-            &.{model_capability.capability(readiness)},
-            self.intent.provider,
+            &model_capability.capabilities(readiness),
+            explicit_provider,
             self.intent.model,
             if (self.defaults.provider.len == 0) null else self.defaults.provider.slice(),
             if (self.defaults.model.len == 0) null else self.defaults.model.slice(),
@@ -55,6 +69,13 @@ pub const Binding = struct {
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
 };
 
+/// Codex in `state` and every other provider missing.
+fn codexOnly(state: provider_selection.Readiness) provider_selection.Readinesses {
+    var readiness: provider_selection.Readinesses = .initFill(.missing);
+    readiness.set(.codex, state);
+    return readiness;
+}
+
 test "new Session preference dependency and refreshed choices with every explicit subset" {
     for (0..8) |mask| {
         const intent: Intent = .{
@@ -73,7 +94,7 @@ test "new Session preference dependency and refreshed choices with every explici
             const destination = try snapshot.destination("/home/test", &fallback);
             try std.testing.expectEqualStrings(if (mask & 1 != 0) "/explicit" else values[0], destination.path);
             try std.testing.expectEqual(mask & 1 == 0, destination.saved);
-            const binding = (try snapshot.resolve(.configured)).?;
+            const binding = (try snapshot.resolve(&codexOnly(.configured))).?;
             try std.testing.expectEqualStrings("codex", binding.provider.slice());
             try std.testing.expectEqualStrings(if (mask & 4 != 0) "explicit-model" else values[1], binding.model.slice());
         }
@@ -94,8 +115,8 @@ test "new Session refresh owns bindings and selects shorter and longer saved des
         const before = try snapshot.destination("/home/test", &fallback);
         try std.testing.expect(before.saved);
         try std.testing.expectEqualStrings(paths[0], before.path);
-        try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(.missing));
-        const retained = (try snapshot.resolve(.configured)).?;
+        try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&codexOnly(.missing)));
+        const retained = (try snapshot.resolve(&codexOnly(.configured))).?;
 
         // External work replaces defaults; the old snapshot and binding cannot
         // borrow the load buffer, and the new selection must use the new bytes.
@@ -106,7 +127,7 @@ test "new Session refresh owns bindings and selects shorter and longer saved des
         const after = try snapshot.destination("/home/test", &fallback);
         try std.testing.expect(after.saved);
         try std.testing.expectEqualStrings(paths[1], after.path);
-        const selected = (try snapshot.resolve(.renewal_due)).?;
+        const selected = (try snapshot.resolve(&codexOnly(.renewal_due))).?;
         try snapshot.defaults.model.set("overwritten-snapshot-model");
         try std.testing.expectEqualStrings("codex", selected.provider.slice());
         try std.testing.expectEqualStrings("after", selected.model.slice());
@@ -123,26 +144,26 @@ test "new Session explicit choices bypass stale defaults without destination fal
     const saved = try snapshot.destination("/home/test", &fallback);
     try std.testing.expect(saved.saved);
     try std.testing.expectEqualStrings("/unavailable-saved-store", saved.path);
-    try std.testing.expectError(error.UnsupportedSelectionProvider, snapshot.resolve(.configured));
+    try std.testing.expectError(error.UnsupportedSelectionProvider, snapshot.resolve(&codexOnly(.configured)));
     snapshot.intent = .{ .store = "/explicit", .provider = "codex", .model = "explicit-model" };
     try std.testing.expect(!snapshot.intent.needsPreferences());
     const explicit = try snapshot.destination("/unused", &fallback);
     try std.testing.expect(!explicit.saved);
     try std.testing.expectEqualStrings("/explicit", explicit.path);
     for ([_]provider_selection.Readiness{ .missing, .refresh_required, .credential_error }) |state|
-        try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(state));
-    try std.testing.expectEqualStrings("explicit-model", (try snapshot.resolve(.renewal_due)).?.model.slice());
+        try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&codexOnly(state)));
+    try std.testing.expectEqualStrings("explicit-model", (try snapshot.resolve(&codexOnly(.renewal_due))).?.model.slice());
     snapshot.intent.model = null;
-    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(.configured)).?.model.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(&codexOnly(.configured))).?.model.slice());
     snapshot.defaults = .{};
     snapshot.intent = .{};
     const home = try snapshot.destination("/home/test", &fallback);
     try std.testing.expect(!home.saved);
     try std.testing.expectEqualStrings("/home/test/.local/share/rui/store", home.path);
-    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(.missing));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(.renewal_due)).?.model.slice());
+    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&codexOnly(.missing)));
+    try std.testing.expectEqualStrings("gpt-6.1-sol", (try snapshot.resolve(&codexOnly(.renewal_due))).?.model.slice());
     snapshot.intent.model = "bad model";
-    try std.testing.expectError(error.UnsupportedSelectionModel, snapshot.resolve(.configured));
+    try std.testing.expectError(error.UnsupportedSelectionModel, snapshot.resolve(&codexOnly(.configured)));
 
     // Destination validation belongs to native preflight, even when the same
     // invocation also has an unsupported provider/model or an invalid HOME.
@@ -151,4 +172,24 @@ test "new Session explicit choices bypass stale defaults without destination fal
     try std.testing.expectEqualStrings(&long_raw_path, (try snapshot.destination("relative-home", &fallback)).path);
     snapshot.intent.store = null;
     try std.testing.expectError(error.InvalidHome, snapshot.destination("relative-home", &fallback));
+}
+
+test "a saved provider picks among ready ones, and none saved with two ready asks" {
+    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
+    const both: provider_selection.Readinesses = .initFill(.configured);
+    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&both));
+    try snapshot.defaults.provider.set("openai");
+    try std.testing.expectEqualStrings("openai", (try snapshot.resolve(&both)).?.provider.slice());
+    var key_missing = both;
+    key_missing.set(.openai, .missing);
+    try std.testing.expectEqual(@as(?Binding, null), try snapshot.resolve(&key_missing));
+}
+
+test "a caller that cannot ask gets the saved provider, else the product default" {
+    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
+    try std.testing.expectEqualStrings(product_defaults.provider, (try snapshot.resolveUnprompted()).provider.slice());
+    try snapshot.defaults.provider.set("openai");
+    try std.testing.expectEqualStrings("openai", (try snapshot.resolveUnprompted()).provider.slice());
+    snapshot.intent.provider = "codex";
+    try std.testing.expectEqualStrings("codex", (try snapshot.resolveUnprompted()).provider.slice());
 }

@@ -10,6 +10,7 @@ const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
 const slash_commands = @import("slash_commands.zig");
+const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -21,14 +22,18 @@ const Self = @This();
 /// reads.
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
-/// What a frame encoded: its Action rows and the option its choice showed.
+/// What a reason's line under the input says, as its hint or a notice.
+pub const deny_words = "enter denies the command and sends this";
+
+/// What a frame encoded: its Action rows and the option Enter would decide.
 pub const Ticket = struct {
     frame: u64,
     scope: u64,
     /// The Action whose rows the frame showed; null when it showed none.
     action: ?u64,
-    /// The option the frame's choice showed highlighted; null when it showed
-    /// no choice.
+    /// The option the frame's choice showed highlighted, or Deny when it
+    /// showed the draft beside the Action as a reason and said Enter denies;
+    /// null otherwise.
     shown: ?ConsentPolicy.Choice,
     /// `inputs` when the frame was issued: any later input answered it.
     inputs: u64,
@@ -270,7 +275,7 @@ pub fn offered(self: *const Self) ?ConsentPolicy.Decision {
     return self.standing(self.offer);
 }
 
-/// The latest frame showed a choice, was delivered and is current, no input
+/// The latest frame offered a decision, was delivered and is current, no input
 /// followed it, and it is not yet offered: the frontend services input to
 /// see whether it may be.
 pub fn awaitsOffer(self: *const Self) bool {
@@ -304,7 +309,7 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
         self.invalidateLayout();
         return .{ .blocked = .layout };
     }
-    switch (ConsentPolicy.project(self.consent, self.shownAction(), command_blocked).approval) {
+    switch (self.liveApproval(command_blocked)) {
         .choice => {},
         .reading => return .{ .blocked = .reading },
         .held => return .{ .blocked = .command },
@@ -321,11 +326,34 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
             return .picked;
         },
         .enter => {
-            self.consent = null;
-            self.invalidateScope();
+            self.decide(shown);
             return .{ .decision = shown };
         },
     }
+}
+
+/// Enter in the draft beside an Action, with the offer `spendOffer` returned
+/// for this key: the denial the draft is sent with, when that offer is the
+/// latest frame, unchanged since, and it showed this draft as the reason.
+/// A probe: nothing changes until `decide`.
+pub fn reasonOffered(self: *const Self, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
+    const shown = self.standing(offer) orelse return null;
+    if (self.liveApproval(command_blocked) != .reason) return null;
+    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) return null;
+    const denial: ConsentPolicy.Decision = .{ .action = self.consent.?.action, .choice = .deny };
+    return if (std.meta.eql(shown, denial)) denial else null;
+}
+
+/// Consent ends with this decision, before fallible submission starts.
+pub fn decide(self: *Self, decision: ConsentPolicy.Decision) void {
+    std.debug.assert(self.consent.?.action == decision.action);
+    self.consent = null;
+    self.invalidateScope();
+}
+
+/// What the input row would show now, without selecting a frame.
+pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Approval {
+    return ConsentPolicy.project(self.consent, self.shownAction(), command_blocked).approval;
 }
 
 /// Starts browsing a copy of live text from absolute offset `front`, a
@@ -571,7 +599,9 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
 /// What a frame shows around the input: the status above the rule, and under
 /// the input a notice until the next key, else the Session line. `live` is
 /// what work under way is doing now: its running call's row carries the
-/// clock, and any other work ends the shown text.
+/// clock, and any other work ends the shown text. `queued` is the newest
+/// Message waiting behind the work and how many wait; the latest view shows
+/// it dimmed, right above the status, when the frame has a row for it.
 pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
@@ -581,6 +611,11 @@ pub const Footer = struct {
     commands: ?slash_commands.Matches = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
+    queued: ?Queued = null,
+
+    /// While its row draws, the frame shows `status` in place of the
+    /// footer's: the row confirms a send that status says `Sent` of.
+    pub const Queued = struct { waiting: queued_line.Waiting, status: []const u8 };
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
@@ -675,6 +710,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .total_calls = live.total,
         .live = footer.live != null,
         .clock_call = clock_call,
+        .queued = if (selected) null else if (footer.queued) |queued| queued.status else null,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -706,11 +742,19 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
-    // Cells borrow the rule's label and the list's overflow row until the
-    // frame is rendered.
+    // Cells borrow these rows' bytes until the frame is rendered.
+    var queued_text: [queued_line.text_capacity]u8 = undefined;
+    var queued_label: [queued_line.label_capacity]u8 = undefined;
+    if (layout.queued_height != 0) {
+        const queued = footer.queued.?.waiting;
+        const row = queued_line.row(&queued_text, &queued_label, queued.line, queued.count, size.col, self.vx.caps.unicode);
+        const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
+        _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
+        _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
+    }
     var rule_label: [64]u8 = undefined;
-    var more: [32]u8 = undefined;
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
+    var more: [32]u8 = undefined;
     if (layout.list_height != 0) self.drawCommands(window, &layout, footer.commands.?, &more);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
@@ -724,14 +768,19 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         }
     }
     const line_row = size.row - layout.line_height;
+    // Whether the line under the input says Enter denies: only then does a
+    // reason's frame offer the denial.
+    var says_deny = false;
     if (footer.notice.len != 0) {
         _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
+        says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
             approvalHint(self.selected.approval, self.actionVisible(), size.col, self.vx.caps.unicode)
         else if (footer.session) |line| line.shown.text(line.facts, size.col, self.vx.caps.unicode) else "";
         _ = window.child(.{ .y_off = line_row, .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
+        says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
     // Finish consuming every borrowed cell before output can pump input and
@@ -749,7 +798,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .frame = self.frames,
         .scope = self.scope,
         .action = if (!self.actionVisible()) null else if (self.consent) |pending| pending.action else null,
-        .shown = if (self.selected.approval == .choice) self.consent.?.highlight else null,
+        .shown = if (self.selected.approval == .reason and !says_deny) null else ConsentPolicy.offered(self.consent, self.selected.approval),
         .inputs = self.inputs,
         .first = layout.first,
         .next = layout.action_seen,
@@ -792,6 +841,7 @@ fn approvalHint(approval: ConsentPolicy.Approval, action_visible: bool, width: u
         .choice => &.{ "←→ choose · enter confirms", "←→ · enter" },
         .reading => &.{ "PgDn reads the rest · then choose", "PgDn · then choose" },
         .held => &.{ "the choice returns when it ends", "then the choice" },
+        .reason => &.{ deny_words ++ " · esc back to the choice", "enter denies and sends this · esc choice", "enter denies · esc choice" },
         .paused => if (action_visible) &.{ "Approval paused · Esc returns to the choice", "Esc · choice" } else &.{ "Approval paused · Esc returns to Action", "Esc · Action" },
         .preview => &.{ "Approval disabled · /help for exact shell commands", "Approval disabled" },
     };
@@ -841,7 +891,6 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
-/// Cells borrow the label in `buffer` until the frame is rendered.
 fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
     const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
@@ -1260,6 +1309,61 @@ test "a browsed page keeps the live line above the status" {
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
     // The page moves by the rows it shows.
     try std.testing.expectEqual(screen.height, screen.browsing_height);
+}
+
+test "a queued Message sits dimmed right above the status, in the latest view only" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const calls: View.Live = .{};
+    // The row confirms the send, so the status no longer says Sent.
+    const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("row39", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(column, 8).?.style.fg);
+    // A short terminal with a call, the live line and a multiline draft has
+    // no row for it: the status says Sent instead.
+    var running: View.Live = .{ .count = 1, .total = 1 };
+    running.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try running.entries[0].presentation.description.?.set("Run zig build");
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    var working = footer;
+    working.live = work_line.of(&test_words, &state, null, 142_000);
+    const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const draft = "one\ntwo\nthree";
+    _ = try screen.render(&out.writer, short, draft, draft.len, working, &running);
+    try std.testing.expect(!screenHas(screen, "queued", &buffer));
+    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+    try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
+    // With a one-line draft it has the row, and Sent goes.
+    _ = try screen.render(&out.writer, short, "one", 3, working, &running);
+    try std.testing.expect(screenHas(screen, "queued", &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    // A browsed page shows the conversation down to the status instead,
+    // and Sent with it.
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    try std.testing.expect(!screenHas(screen, "queued", &buffer));
+    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+}
+
+fn screenHas(screen: *Self, text: []const u8, buffer: *[256]u8) bool {
+    for (0..screen.vx.screen.height) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), buffer), text) != null) return true;
+    return false;
 }
 
 test "a description's controls read escaped alike on its call row and on the live line" {

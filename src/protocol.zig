@@ -1,9 +1,10 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
+const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "2";
+pub const wire_version = "3";
 pub const max_key_bytes = 128;
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
@@ -28,16 +29,7 @@ pub fn validLabel(bytes: []const u8) bool {
     comptime std.debug.assert(max_label_bytes == max_tool_description_bytes);
     return ToolPresentation.validDescription(bytes);
 }
-pub const Provider = enum {
-    codex,
-
-    /// The request and output grammar a new Session of this provider pins.
-    pub fn codec(self: Provider) Codec {
-        return switch (self) {
-            .codex => .@"openai-responses/1",
-        };
-    }
-};
+pub const Provider = provider_name.Provider;
 /// How a Host serves a provider: not at all, at a development endpoint
 /// that takes no credential, or at its own endpoint with its credential.
 pub const Route = enum { unserved, endpoint, chatgpt_device, key_file };
@@ -64,9 +56,7 @@ pub fn servesModel(routes: Routes) bool {
     return false;
 }
 
-/// A provider grammar and its version, as a Session pins it. A version's
-/// requests never change shape, so a pinned Session's prompt cache holds.
-pub const Codec = enum { @"openai-responses/1" };
+pub const Codec = provider_name.Codec;
 pub const ReasoningEffort = model_capability.ReasoningEffort;
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.
@@ -751,6 +741,27 @@ pub const CallActivity = struct {
     }
 };
 
+/// The Messages a person or script sent that a Session admitted and had not
+/// taken at a page's boundary: not applied, and not excluded by a stop. A
+/// stop and an input boundary both take an admission-order prefix, so they
+/// are the newest such admissions. Zero when none waits.
+pub const Queued = struct {
+    count: u64 = 0,
+    /// The oldest one's Admission position.
+    oldest_position: u64 = 0,
+    /// The newest one's admission ID and Admission position.
+    newest_admission: u64 = 0,
+    newest_position: u64 = 0,
+
+    /// Holes: count, oldest position, newest admission, newest position.
+    pub const shape = .{ "{\"count\":\"", Hole.decimal, "\",\"oldest_position\":\"", Hole.decimal, "\",\"newest_admission\":\"", Hole.decimal, "\",\"newest_position\":\"", Hole.decimal, "\"}" };
+    pub const max_json_bytes = shapeBytes(shape);
+
+    pub fn writeJson(self: *const Queued, out: *std.Io.Writer) !void {
+        try writeShape(out, shape, .{ self.count, self.oldest_position, self.newest_admission, self.newest_position });
+    }
+};
+
 pub const session_work = @import("session_work.zig");
 pub const WorkState = session_work.WorkState;
 pub const change_ring = @import("change_ring.zig");
@@ -944,12 +955,14 @@ pub const ActivityFacts = struct {
     count: usize = 0,
     more: bool = false,
     call_activity: CallActivity = .{},
+    /// At the same boundary as `call_activity`.
+    queued: Queued = .{},
     work: PageWork = .{},
 
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    /// Holes: more, call activity, queued, work.
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
@@ -958,7 +971,7 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work });
     }
 };
 
@@ -2587,9 +2600,10 @@ pub const max_control_response_bytes = @max(
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, and each provider's
 /// Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\"}}}" };
+pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
 comptime {
-    if (!std.mem.eql(u8, @typeInfo(Provider).@"enum".field_names[0], "codex") or @typeInfo(Provider).@"enum".field_names.len != 1)
+    const names = @typeInfo(Provider).@"enum".field_names;
+    if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
@@ -2984,7 +2998,7 @@ test "ingress unknown write failure keeps submitted charge until close" {
 }
 
 test "observation needs no scratch at a full budget" {
-    const json = "{\"version\":\"2\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
+    const json = "{\"version\":\"3\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
     var source: MetadataSource = .{ .input = json };
     var used = std.atomic.Value(u64).init(3);
     var retained: ?named_scratch.Owner = null;
@@ -3012,7 +3026,7 @@ test "Conversation content stream wire requires start zero and literal true" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -3040,7 +3054,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -3092,7 +3106,7 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
         var buffer: [2048]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
@@ -3143,7 +3157,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(
             &buffer,
-            "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+            "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
                 "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
                 "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
@@ -3189,7 +3203,7 @@ test "configuration tools accept only an empty catalog or Bash" {
     };
     for (cases) |case| {
         var buffer: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
             "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
@@ -3215,24 +3229,24 @@ test "configuration tools accept only an empty catalog or Bash" {
 test "Session inspection selects a closed report profile or exact failed response stream" {
     const cases = [_]struct { json: []const u8, expected: ?ReportProfile, failed_response: ?FailedResponseExport = null }{
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
             .expected = .current,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
             .expected = .full,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
             .expected = null,
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
             .expected = .current,
             .failed_response = .{ .operation = 106, .attempt = 1, .part = .body },
         },
         .{
-            .json = "{\"version\":\"2\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
+            .json = "{\"version\":\"3\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
             .expected = .current,
             .failed_response = .{ .operation = 42, .attempt = 3, .part = .metadata },
         },
@@ -3258,14 +3272,14 @@ test "Session inspection selects a closed report profile or exact failed respons
 }
 
 test "Session listing wire distinguishes all, exact workspace, continuation, since and invalid cursor" {
-    const head = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
+    const head = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
     const since = ",\"since\":\"abababababababababababababababab.42\"";
     const Case = struct { json: []const u8, workspace: ?[]const u8 = null, after: u64 = 0, ceiling: u64 = 0, since: ?u64 = null, through: ?u64 = null, failure: ?anyerror = null };
     const cases = [_]Case{
         .{ .json = head ++ "}" },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
         // A token's first page, and a changed continuation through the
         // first page's generation after the last reference it gave.
         .{ .json = head ++ since ++ "}", .since = 42 },
@@ -3273,7 +3287,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
         // A full continuation carries no token; a changed one never ends
         // before its token, and names a Session.
-        .{ .json = "{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"3\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2q\"}", .failure = error.InvalidCursor },
@@ -3306,7 +3320,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
 }
 
 test "peer wire rejects old sender strings, malformed addresses and missing handles" {
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
     const cases = [_]struct { json: []const u8, failure: anyerror }{
         .{ .json = prefix ++ "\"peer\",\"sender_handle\":null", .failure = error.InvalidJsonShape },
         .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null", .failure = error.InvalidJsonShape },
@@ -3328,7 +3342,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";
@@ -3372,7 +3386,7 @@ test "initial Message ingress retains text custody and rejects extra content bef
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const prefix = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
     const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
@@ -3429,10 +3443,10 @@ test "only a creating Message carries require_model, and it binds the digest" {
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const creating = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const creating = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
         "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const addressed = "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"3\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
         .{ .bytes = creating ++ ",\"require_model\":false}" },
@@ -3481,7 +3495,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const configure = "{\"version\":\"2\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
+    const configure = "{\"version\":\"3\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
         "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"omitted\"}," ++
         "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"}}";
