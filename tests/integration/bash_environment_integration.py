@@ -137,6 +137,12 @@ def main():
         workspace = state / "workspace"
         workspace.mkdir()
         store = state / "store"
+        # The relay's Bash runs `rui` from the rui directory leading PATH, so
+        # the binary under test must be named rui (CI builds rui-release-safe-check).
+        installed = state / "bin" / "rui"
+        installed.parent.mkdir()
+        shutil.copy2(fixture.RUI, installed)
+        fixture.RUI = installed
         endpoint = Model()
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
