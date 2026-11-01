@@ -61,7 +61,8 @@ pub const Carry = struct {
 /// compaction_trigger (compaction requests only), tools_start, one tool per
 /// enabled tool, text_format, request_end.
 pub const ItemKind = enum(u8) {
-    /// Handle 0: the model name. `ItemHeader.settings` holds the frozen settings.
+    /// The frozen settings, the model included. Handle 0: that same model,
+    /// which the codec writes by a content op so the Host escapes it.
     settings,
     /// Handle 0: Rui's instruction text, Workspace, Session and baseline.
     instructions,
@@ -113,7 +114,7 @@ pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, 
 pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
 
 pub const Item = union(ItemKind) {
-    settings,
+    settings: Settings,
     instructions,
     message: Author,
     output_open: struct {
@@ -136,12 +137,13 @@ pub const Item = union(ItemKind) {
 pub const max_handles = 3;
 pub const max_model_bytes = 256;
 
-/// Frozen request settings, written once for the settings item.
+/// Frozen request settings, carried by the settings item only.
 pub const Settings = struct {
     /// Null when the binding has no effort; the codec then sends none.
     effort: ?Effort,
     model_length: u16,
-    model: [max_model_bytes]u8,
+    /// A literal that names the other fields leaves these bytes unwritten.
+    model: [max_model_bytes]u8 = undefined,
 
     pub fn modelName(self: *const Settings) []const u8 {
         return self.model[0..self.model_length];
@@ -153,7 +155,6 @@ pub const ItemHeader = struct {
     item: Item,
     /// Bit `i` is set when handle `i` exists.
     handles: u8,
-    settings: Settings,
 
     pub fn has(self: *const ItemHeader, handle: u8) bool {
         return handle < max_handles and self.handles >> @intCast(handle) & 1 == 1;

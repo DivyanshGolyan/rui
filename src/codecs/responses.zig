@@ -51,11 +51,11 @@ pub const Encoder = struct {
 
     pub fn encodeItem(self: *Encoder, header: *const ItemHeader, ops: *Ops) Error!Status {
         switch (header.item) {
-            .settings => {
+            .settings => |*settings| {
                 try ops.literal("{\"model\":\"");
                 try ops.content(0, .json_string_v1);
-                try ops.literal(if (parallelToolCalls(header.settings.modelName())) envelope(true) else envelope(false));
-                if (header.settings.effort) |effort| try ops.literal(switch (effort) {
+                try ops.literal(if (parallelToolCalls(settings.modelName())) envelope(true) else envelope(false));
+                if (settings.effort) |effort| try ops.literal(switch (effort) {
                     inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
                 });
             },
@@ -224,4 +224,51 @@ test "a carry holds exactly the comma state the span ended in" {
     try std.testing.expectEqual(Encoder{}, try Encoder.load(&.{}));
     for ([_][]const u8{ &.{2}, &.{ 0, 0 } }) |state|
         try std.testing.expectError(error.BadCarry, Encoder.load(&codec_abi.Carry.of(state)));
+}
+
+test "the largest item the codec emits fits the ops bound" {
+    // Every item at its longest: each effort, each output kind and phase,
+    // each part after each array, every handle present, and a comma owed
+    // before it.
+    var headers: [64]ItemHeader = undefined;
+    var count: usize = 0;
+    for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
+        headers[count] = .{ .item = .{ .settings = .{ .effort = effort, .model_length = 0 } }, .handles = 0b1 };
+        count += 1;
+    }
+    for (std.enums.values(codec_abi.Author)) |author| {
+        headers[count] = .{ .item = .{ .message = author }, .handles = 0b11 };
+        count += 1;
+    }
+    for (std.enums.values(codec_abi.OutputKind)) |kind| for (std.enums.values(codec_abi.Phase)) |phase| {
+        headers[count] = .{ .item = .{ .output_open = .{ .kind = kind, .phase = phase, .omit_reasoning_text = false } }, .handles = 0b111 };
+        count += 1;
+    };
+    for ([_]codec_abi.PartArray{ .content, .summary }) |array| for (std.enums.values(codec_abi.PartKind)) |kind| {
+        if (kind == .opaque_block) continue;
+        headers[count] = .{ .item = .{ .output_part = .{ .array = array, .kind = kind } }, .handles = 0b11 };
+        count += 1;
+    };
+    for ([_]codec_abi.Item{ .instructions, .output_close, .tool_result, .history_end, .compaction_trigger, .tools_start, .tool, .text_format, .request_end }) |item| {
+        headers[count] = .{ .item = item, .handles = 0b111 };
+        count += 1;
+    }
+    for (headers[0..count]) |*header| {
+        // An open array of the other kind is closed first.
+        var encoder: Encoder = .{ .input_comma = true, .tool_comma = true, .array = .summary };
+        if (header.item == .output_part and header.item.output_part.array == .summary) encoder.array = .content;
+        var ops: Ops = .{};
+        _ = try encoder.encodeItem(header, &ops);
+    }
+    // The model is written by a content op, so its length never counts.
+    var longest: ItemHeader = .{ .item = .{ .settings = .{ .effort = .medium, .model_length = codec_abi.max_model_bytes } }, .handles = 0b1 };
+    @memset(&longest.item.settings.model, 'm');
+    var shortest = longest;
+    shortest.item.settings.model_length = 1;
+    var longest_ops: Ops = .{};
+    var shortest_ops: Ops = .{};
+    var encoder: Encoder = .{};
+    _ = try encoder.encodeItem(&longest, &longest_ops);
+    _ = try encoder.encodeItem(&shortest, &shortest_ops);
+    try std.testing.expectEqual(shortest_ops.length, longest_ops.length);
 }

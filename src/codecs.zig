@@ -48,11 +48,14 @@ pub const Encoder = struct {
 pub fn native(comptime Codec: type) Encoder {
     comptime std.debug.assert(@sizeOf(Codec) <= max_state_bytes and @alignOf(Codec) <= @alignOf(State));
     const adapter = struct {
+        // A codec's error is its own fault, which the shell answers with
+        // one code, provider_codec_failed; the contract carries no name.
         fn load(state: *State, carry: *const codec_abi.Carry) bool {
             of(state).* = Codec.load(carry) catch return false;
             return true;
         }
 
+        // As in `load`: every error is the codec's, so it is `.failed`.
         fn step(state: *State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
             return of(state).encodeItem(header, ops) catch .failed;
         }
@@ -65,8 +68,9 @@ pub fn native(comptime Codec: type) Encoder {
 }
 
 /// One request's encoding, in its caller's storage for the request's life.
-/// The caller writes `header` for each item, steps, and runs every op left
-/// in `ops` before it writes the next item.
+/// The caller writes `header` for each item, steps, and runs each op `next`
+/// gives before it asks for another; once `next` gives null it writes the
+/// next item.
 pub const Job = struct {
     encoder: *const Encoder,
     state: State,
@@ -75,14 +79,16 @@ pub const Job = struct {
     carry: codec_abi.Carry,
     header: codec_abi.ItemHeader,
     ops: codec_abi.Ops,
+    /// Where the item's next op begins.
+    offset: u16,
+    /// Whether the item's carry was read: nothing may follow it.
+    carried: bool,
 
     pub const Error = error{ CodecFailed, CodecBadOp };
 
-    /// `header.settings` is left for the caller to fill.
     pub fn begin(self: *Job, codec: *const Encoder) Error!void {
         self.encoder = codec;
         self.carry = .{ .len = 0 };
-        self.ops.length = 0;
         if (!codec.load(&self.state, &self.carry)) return error.CodecFailed;
     }
 
@@ -91,50 +97,54 @@ pub const Job = struct {
         self.carry = carry.*;
     }
 
-    /// Encode the item in `header` and check its ops before any of them
-    /// runs. Before a history element and history_end the state is reloaded
-    /// from the carry, so nothing else crosses a boundary and a memo copy
-    /// continues exactly as a rebuild does.
+    /// Encode the item in `header`. Before a history element and
+    /// history_end the state is reloaded from the carry, so nothing else
+    /// crosses a boundary and a memo copy continues exactly as a rebuild
+    /// does.
     pub fn step(self: *Job) Error!void {
         const kind: codec_abi.ItemKind = self.header.item;
         if (kind.resumes() and !self.encoder.load(&self.state, &self.carry)) return error.CodecFailed;
         self.ops.length = 0;
-        const status = self.encoder.step(&self.state, &self.header, &self.ops);
-        if (try check(&self.header, &self.ops, status)) |carry| {
-            // The carry is the item's last op: the job keeps it and leaves
-            // the ops before it to run.
-            self.carry = carry;
-            self.ops.length -= 2 + carry.len;
+        try self.open(self.encoder.step(&self.state, &self.header, &self.ops));
+    }
+
+    /// Done exactly at request_end; a failure is the codec's own.
+    fn open(self: *Job, status: codec_abi.Status) Error!void {
+        const kind: codec_abi.ItemKind = self.header.item;
+        switch (status) {
+            .failed => return error.CodecFailed,
+            .next, .done => if ((status == .done) != (kind == .request_end)) return error.CodecBadOp,
         }
+        self.offset = 0;
+        self.carried = false;
+    }
+
+    /// The item's next op, judged as it is read: well formed; content only
+    /// of the item's handles; a carry exactly once, as the last op, of each
+    /// item that ends a history element and of no other. The job keeps the
+    /// carry and never returns it. Null once the item's ops end. Nothing
+    /// is sent before request_end, so the ops that ran before a bad one
+    /// wrote only request scratch, which the failure discards.
+    pub fn next(self: *Job) Error!?codec_abi.Op {
+        const kind: codec_abi.ItemKind = self.header.item;
+        var reader = self.ops.reader(self.offset);
+        while (try reader.next()) |op| {
+            if (self.carried) return error.CodecBadOp;
+            self.offset = reader.offset;
+            switch (op) {
+                .literal => return op,
+                .content => |content| return if (self.header.has(content.handle)) op else error.CodecBadOp,
+                .carry => |state| {
+                    if (!kind.endsElement()) return error.CodecBadOp;
+                    self.carried = true;
+                    self.carry = state;
+                },
+            }
+        }
+        if (kind.endsElement() and !self.carried) return error.CodecBadOp;
+        return null;
     }
 };
-
-/// The ops of one item, judged before any runs: each well formed; content
-/// only of the item's handles; a carry exactly once, as the last op, of
-/// each item that ends a history element and of no other; and done exactly
-/// at request_end. Returns the item's carry.
-fn check(header: *const codec_abi.ItemHeader, ops: *const codec_abi.Ops, status: codec_abi.Status) Job.Error!?codec_abi.Carry {
-    const kind: codec_abi.ItemKind = header.item;
-    switch (status) {
-        .failed => return error.CodecFailed,
-        .next, .done => if ((status == .done) != (kind == .request_end)) return error.CodecBadOp,
-    }
-    var reader = ops.reader(0);
-    var carry: ?codec_abi.Carry = null;
-    while (try reader.next()) |op| {
-        if (carry != null) return error.CodecBadOp;
-        switch (op) {
-            .literal => {},
-            .content => |content| if (!header.has(content.handle)) return error.CodecBadOp,
-            .carry => |state| {
-                if (!kind.endsElement()) return error.CodecBadOp;
-                carry = state;
-            },
-        }
-    }
-    if (kind.endsElement() and carry == null) return error.CodecBadOp;
-    return carry;
-}
 
 const TestItem = struct {
     item: codec_abi.Item,
@@ -151,8 +161,7 @@ fn encodeForTesting(job: *Job, items: []const TestItem, out: *std.Io.Writer) !vo
             if (handle != null) job.header.handles |= @as(u8, 1) << @intCast(index);
         }
         try job.step();
-        var reader = job.ops.reader(0);
-        while (try reader.next()) |op| switch (op) {
+        while (try job.next()) |op| switch (op) {
             .literal => |bytes| try out.writeAll(bytes),
             .content => |content| switch (content.escape) {
                 .verbatim => try out.writeAll(item.handles[content.handle].?),
@@ -218,7 +227,7 @@ test "a job resumed from a history element's carry continues as the uninterrupte
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
 }
 
-test "codec ops are checked before any runs and a bad op fails the job" {
+test "codec ops are checked as they run and a bad op fails the job" {
     const Case = struct { item: codec_abi.Item, handles: u8 = 0, status: codec_abi.Status = .next, ops: []const u8, expected: Job.Error!?u8 };
     const carry_one = [_]u8{ 3, 1, 1 };
     const close = [_]u8{ 1, 1, 0, '}' };
@@ -254,17 +263,25 @@ test "codec ops are checked before any runs and a bad op fails the job" {
         .{ .item = .text_format, .status = .done, .ops = &.{}, .expected = error.CodecBadOp },
         .{ .item = .request_end, .ops = &close, .expected = error.CodecBadOp },
         .{ .item = .request_end, .status = .done, .ops = &close, .expected = null },
-        .{ .item = .settings, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
+        .{ .item = .{ .settings = .{ .effort = null, .model_length = 0 } }, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
     }) |case| {
-        var header: codec_abi.ItemHeader = undefined;
-        header.item = case.item;
-        header.handles = case.handles;
-        var ops: codec_abi.Ops = .{ .length = @intCast(case.ops.len) };
-        @memcpy(ops.bytes[0..case.ops.len], case.ops);
-        const result = check(&header, &ops, case.status);
+        var job: Job = undefined;
+        job.header = .{ .item = case.item, .handles = case.handles };
+        job.carry = .{ .len = 0 };
+        job.ops.length = @intCast(case.ops.len);
+        @memcpy(job.ops.bytes[0..case.ops.len], case.ops);
+        const result = drainForTesting(&job, case.status);
         if (case.expected) |expected| {
             const carry = try result;
             try std.testing.expectEqual(expected, if (carry) |value| value.slice()[0] else null);
         } else |err| try std.testing.expectError(err, result);
     }
+}
+
+/// Read every op of the item in `job` as the Host does, and return the
+/// item's carry.
+fn drainForTesting(job: *Job, status: codec_abi.Status) Job.Error!?codec_abi.Carry {
+    try job.open(status);
+    while (try job.next()) |op| std.debug.assert(op != .carry);
+    return if (job.carried) job.carry else null;
 }

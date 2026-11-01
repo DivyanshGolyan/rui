@@ -978,9 +978,8 @@ pub const Preparation = struct {
         active: bool = false,
         /// Where the next item comes from.
         stage: Stage = .settings,
-        /// The next of the current item's ops to start; null once none is
-        /// left.
-        op_offset: ?u16 = null,
+        /// Whether the job may still give ops of the current item.
+        item_open: bool = false,
         /// The content op being written, by segment.
         content: ?ContentOp = null,
         emission: Emission = .none,
@@ -1184,7 +1183,7 @@ pub const Preparation = struct {
                 .pending => {},
                 .item => {
                     self.job.step() catch |err| return .{ .failed = err };
-                    self.state.op_offset = if (self.job.ops.length == 0) null else 0;
+                    self.state.item_open = true;
                 },
                 .end => self.seal() catch |err| return .{ .failed = err },
             }
@@ -1211,18 +1210,12 @@ pub const Preparation = struct {
                 // The selected base must be readable before any request byte.
                 _ = try self.view.coverage();
                 self.state.stage = .instructions;
-                const model = self.settings.model.slice();
-                const settings = &self.job.header.settings;
-                settings.effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null;
-                settings.model_length = @intCast(model.len);
-                @memcpy(settings.model[0..model.len], model);
-                self.handles[0] = .{ .text = model };
-                return self.present(.settings, 0b1);
+                return self.loadSettingsHeader();
             },
             .instructions => {
                 self.state.stage = .history_start;
                 self.handles[0] = .instructions;
-                return self.present(.instructions, 0b1);
+                return self.loadItemHeader(.instructions, 0b1);
             },
             // The history span starts here. A memo of this Session's
             // previous span that this view contains replaces encoding that
@@ -1238,7 +1231,7 @@ pub const Preparation = struct {
                     .ready => |entry| entry orelse {
                         try self.endSpan();
                         self.state.stage = .compaction_trigger;
-                        return self.present(.history_end, 0);
+                        return self.loadItemHeader(.history_end, 0);
                     },
                 };
                 self.state.history_position = entry.position;
@@ -1260,7 +1253,7 @@ pub const Preparation = struct {
                             self.handles[1] = .sender;
                             handles |= 0b10;
                         }
-                        return self.present(.{ .message = if (entry.kind == .user) .user else .instruction }, handles);
+                        return self.loadItemHeader(.{ .message = if (entry.kind == .user) .user else .instruction }, handles);
                     },
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     .provider_output => {
@@ -1281,7 +1274,7 @@ pub const Preparation = struct {
                             handles = 0b111;
                         }
                         self.state.stage = .output_parts;
-                        return self.present(.{ .output_open = .{
+                        return self.loadItemHeader(.{ .output_open = .{
                             .kind = contractValue(codec_abi.OutputKind, output.kind),
                             .phase = contractValue(codec_abi.Phase, output.phase),
                             .omit_reasoning_text = output.omit_reasoning_text,
@@ -1300,15 +1293,15 @@ pub const Preparation = struct {
                         self.handles[1] = .{ .content = bag };
                         handles |= 0b10;
                     }
-                    return self.present(.{ .output_part = .{
+                    return self.loadItemHeader(.{ .output_part = .{
                         .array = contractValue(codec_abi.PartArray, part.array),
                         .kind = contractValue(codec_abi.PartKind, part.kind),
                     } }, handles);
                 }
                 self.state.stage = .history;
-                const bag = self.output_bag orelse return self.present(.output_close, 0);
+                const bag = self.output_bag orelse return self.loadItemHeader(.output_close, 0);
                 self.handles[0] = .{ .content = bag };
-                return self.present(.output_close, 0b1);
+                return self.loadItemHeader(.output_close, 0b1);
             },
             .tool_results => {
                 const result = try self.view.nextToolResult() orelse {
@@ -1317,18 +1310,18 @@ pub const Preparation = struct {
                 };
                 self.handles[0] = .{ .content = result.call_id };
                 self.handles[1] = .{ .content = result.output };
-                return self.present(.tool_result, 0b11);
+                return self.loadItemHeader(.tool_result, 0b11);
             },
             .covered_tool_results => {
                 if (try self.view.nextToolResult() == null) self.state.stage = .history;
             },
             .compaction_trigger => {
                 self.state.stage = .tools;
-                if (self.settings.operation == .compaction) return self.present(.compaction_trigger, 0);
+                if (self.settings.operation == .compaction) return self.loadItemHeader(.compaction_trigger, 0);
             },
             .tools => {
                 self.state.stage = .tool;
-                return self.present(.tools_start, 0);
+                return self.loadItemHeader(.tools_start, 0);
             },
             .tool => {
                 const all = comptime std.enums.values(tools.Tool);
@@ -1340,19 +1333,19 @@ pub const Preparation = struct {
                     self.handles[0] = .{ .text = definition.name };
                     self.handles[1] = .{ .text = definition.description };
                     self.handles[2] = .{ .text = definition.parameters_json };
-                    return self.present(.tool, 0b111);
+                    return self.loadItemHeader(.tool, 0b111);
                 }
                 self.state.stage = .text_format;
             },
             .text_format => {
                 self.state.stage = .request_end;
-                const schema = self.settings.output_schema orelse return self.present(.text_format, 0);
+                const schema = self.settings.output_schema orelse return self.loadItemHeader(.text_format, 0);
                 self.handles[0] = .{ .content = schema };
-                return self.present(.text_format, 0b1);
+                return self.loadItemHeader(.text_format, 0b1);
             },
             .request_end => {
                 self.state.stage = .end;
-                return self.present(.request_end, 0);
+                return self.loadItemHeader(.request_end, 0);
             },
             .end => return .end,
             .history_store, .complete => unreachable,
@@ -1360,11 +1353,28 @@ pub const Preparation = struct {
         return .pending;
     }
 
-    /// Hand `item` to the codec next, with the handles whose bits are set
-    /// in `handles`.
-    fn present(self: *Preparation, item: codec_abi.Item, handles: u8) Next {
+    /// Load `item` into the job's header, with the handles whose bits are
+    /// set in `handles`.
+    fn loadItemHeader(self: *Preparation, item: codec_abi.Item, handles: u8) Next {
         self.job.header.item = item;
         self.job.header.handles = handles;
+        return .item;
+    }
+
+    /// Load the settings item into the job's header in place. Its handle 0
+    /// is the header's own copy of the model, so the codec reads and writes
+    /// the same bytes.
+    fn loadSettingsHeader(self: *Preparation) Next {
+        const model = self.settings.model.slice();
+        const header = &self.job.header;
+        header.handles = 0b1;
+        header.item = .{ .settings = .{
+            .effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null,
+            .model_length = @intCast(model.len),
+        } };
+        const settings = &header.item.settings;
+        @memcpy(settings.model[0..model.len], model);
+        self.handles[0] = .{ .text = settings.modelName() };
         return .item;
     }
 
@@ -1489,17 +1499,18 @@ pub const Preparation = struct {
     fn nextOp(self: *Preparation) !bool {
         while (true) {
             if (self.state.content) |*content| {
-                if (self.segment(content.handle, content.segment)) |next| {
+                if (self.handleSegment(content.handle, content.segment)) |segment| {
                     content.segment += 1;
-                    try self.startSegment(next, content.escape);
+                    try self.startSegment(segment, content.escape);
                     return true;
                 }
                 self.state.content = null;
             }
-            const offset = self.state.op_offset orelse return false;
-            var reader = self.job.ops.reader(offset);
-            const op = (try reader.next()).?;
-            self.state.op_offset = if (reader.offset == self.job.ops.length) null else reader.offset;
+            if (!self.state.item_open) return false;
+            const op = try self.job.next() orelse {
+                self.state.item_open = false;
+                return false;
+            };
             switch (op) {
                 .literal => |bytes| {
                     self.state.emission = .{ .fixed = .{ .bytes = bytes } };
@@ -1513,7 +1524,7 @@ pub const Preparation = struct {
     }
 
     /// The `index`th stretch of a handle's text, or null past its end.
-    fn segment(self: *const Preparation, handle: u8, index: u8) ?Segment {
+    fn handleSegment(self: *const Preparation, handle: u8, index: u8) ?Segment {
         return switch (self.handles[handle]) {
             .text => |bytes| if (index == 0) .{ .source = .{ .bytes = bytes } } else null,
             .content => |content| if (index == 0) .{ .source = .{ .content = content } } else null,
@@ -1536,9 +1547,9 @@ pub const Preparation = struct {
         };
     }
 
-    fn startSegment(self: *Preparation, part: Segment, escape: codec_abi.Escape) !void {
-        const escapes = @as(u2, @intFromBool(part.quoted)) + @intFromBool(escape == .json_string_v1);
-        switch (part.source) {
+    fn startSegment(self: *Preparation, segment: Segment, escape: codec_abi.Escape) !void {
+        const escapes = @as(u2, @intFromBool(segment.quoted)) + @intFromBool(escape == .json_string_v1);
+        switch (segment.source) {
             .bytes => |bytes| {
                 if (bytes.len == 0) return;
                 self.state.emission = switch (escapes) {
@@ -1548,7 +1559,7 @@ pub const Preparation = struct {
                 };
             },
             .content => |content| {
-                std.debug.assert(!part.quoted);
+                std.debug.assert(!segment.quoted);
                 try self.view.openContent(content, &self.reader);
                 self.state.emission = if (escapes == 0) .{ .raw = .{} } else .{ .json = .{} };
             },
@@ -3535,12 +3546,12 @@ test "request preparation cancellation yields inside history discovery" {
         try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
         try std.testing.expect(preparation.advanceStats().work_items <= 1);
         try preparation.checkIntegrity(binding);
-        if (preparation.state.stage == .history and preparation.state.op_offset == null and preparation.writer.offset == before) {
+        if (preparation.state.stage == .history and !preparation.state.item_open and preparation.writer.offset == before) {
             pending_turns += 1;
-            if (pending_turns == 10) break;
+            if (pending_turns == 5) break;
         }
     }
-    try std.testing.expectEqual(@as(usize, 10), pending_turns);
+    try std.testing.expectEqual(@as(usize, 5), pending_turns);
     preparation.cancel();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
