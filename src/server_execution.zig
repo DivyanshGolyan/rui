@@ -1171,7 +1171,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment, context.refused) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -2538,7 +2538,7 @@ test "cleanup publication follows complete execution retirement" {
         .clock = .awake,
     });
     var refused: bash.ArgumentSizes = .{};
-    var launched = try prepared.launch(&bash.empty_environment, &refused);
+    var launched = try prepared.launch(bash.test_facts, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
