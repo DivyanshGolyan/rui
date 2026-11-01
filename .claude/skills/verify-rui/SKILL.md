@@ -107,7 +107,7 @@ Fixture policy, chosen by the latest user text:
 - `tool demonstration`: three Bash calls (`ls`, `exit 127`, stderr plus `exit 1`), then a summary.
 - `consent check`: one 32-line Bash command, which needs consent in `approve`.
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
-- `show environment`: one Bash call that prints `CLIENT_MARK`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.
+- `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.
 - `start a child`: one Bash call that starts Session `child` with `show environment` through `rui session start`.
 - `parallel bash`: two Bash commands issued together that sleep 12 s and 20 s, so two calls run side by side.
 - `slow`: the answer streams for about 10 s.

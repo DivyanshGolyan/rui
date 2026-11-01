@@ -220,7 +220,7 @@ def fixture_main(args):
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
-      * text containing "show environment": one Bash call that prints CLIENT_MARK, `command -v brew` and PATH
+      * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
@@ -311,7 +311,7 @@ def fixture_main(args):
             elif user_text and "show environment" in user_text:
                 kind = "show-environment"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
-                    "printf 'CLIENT_MARK=%s\\n' \"${CLIENT_MARK-unset}\"; command -v brew || echo 'brew: not found'; "
+                    "printf 'CLIENT_MARK=%s\\n' \"${CLIENT_MARK-unset}\"; printf 'HOST_SECRET=%s\\n' \"${HOST_SECRET-unset}\"; command -v brew || echo 'brew: not found'; "
                     "printf 'PATH=%s\\n' \"$PATH\"", "Show the environment")])
             elif user_text and "start a child" in user_text:
                 kind = "start-child"
