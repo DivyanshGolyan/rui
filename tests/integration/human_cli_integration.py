@@ -4848,6 +4848,45 @@ def renderer_cases():
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
 
+        # Ctrl-P on an empty draft brings back the Messages the person sent,
+        # newest first and never a peer's; Ctrl-N walks forward, and past
+        # the newest the draft is empty again. An edit makes it an ordinary
+        # draft. Up still scrolls throughout. Recalling sends nothing.
+        session = configure()
+        with terminal(session) as tty:
+            peer = 'printf %s RECALL-PEER | rui session send --to "$RUI_ADDRESS" > /dev/null'
+            endpoint.responses.append(fixture.sse_tool_calls("recall-peer", [("bash", "recall-peer-call", json.dumps(
+                {"cmd": peer, "description": "Send a Message to itself", "timeout_ms": None}))]))
+            tty.send("RECALL-ONE\r", answer("recall one"))
+            assert "RECALL-PEER" in endpoint.requests[-1].decode(), endpoint.requests[-1]
+            tty.send("RECALL-TWO\r", answer("recall two"))
+            # A script's Message the draft cannot hold as typed text.
+            marker = answer("recall control")
+            admit(home, "session", "send", "--store", store, "--to", session, input="RECALL-\x01-CONTROL")
+            tty.wait(marker)
+            tty.send("//RECALL-SLASH\r", answer("recall slash"))
+            submitted("/RECALL-SLASH")
+            requests = len(endpoint.requests)
+            older, newer = "\x10", "\x0e"
+            passed = "Passed over a sent message the draft cannot hold."
+            for step, (key, draft) in enumerate(((older, "//RECALL-SLASH"), ("\x1b[112;5u", "RECALL-TWO"), ("\x1b[27;5;112~", "RECALL-ONE"),
+                    (newer, "RECALL-TWO"), ("\x1b[110;5u", "//RECALL-SLASH"), (newer, ""), (older, "//RECALL-SLASH"))):
+                tty.send(key, predicate=lambda: tty.capture.draft(draft, 2 + len(draft)))
+                # Only a step over the control Message says it passed one, either way.
+                assert (passed in tty.capture.completed) == (step in (1, 4)), (step, tty.capture.completed)
+            # Up on a recalled draft scrolls, and the draft stays recalled.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[B", predicate=lambda: "Browsing" not in tty.capture.completed and tty.capture.draft("//RECALL-SLASH", 16))
+            # Presses made while a step is read add up; Ctrl-P stops at the oldest.
+            tty.send(older * 4, predicate=lambda: "No earlier message." in tty.capture.completed and tty.capture.draft("RECALL-ONE", 12))
+            tty.send("!", predicate=lambda: tty.capture.draft("RECALL-ONE!", 13))
+            tty.send(older, predicate=lambda: "Ctrl-P recalls sent messages once the draft is empty." in tty.capture.completed)
+            assert tty.capture.draft("RECALL-ONE!", 13), tty.capture.completed
+            assert len(endpoint.requests) == requests, endpoint.requests
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: Ctrl-P and Ctrl-N recall only the person's sent Messages, and an edit ends recall", flush=True)
+
         # An ESC inside a marked paste rejects the paste, and the end marker
         # right after it still ends it: the keys typed next are the draft's,
         # not more paste waiting for a fatal timeout.

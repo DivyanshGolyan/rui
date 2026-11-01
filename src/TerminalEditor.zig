@@ -19,6 +19,9 @@ allow_paste: bool = true,
 /// Why the line is withheld until Enter, which reports it. It withholds
 /// edits, never changes what a key means.
 rejected: ?keymap.Refusal = null,
+/// Counts changes to the draft's bytes or its rejection. A caret move
+/// changes neither.
+edits: u32 = 0,
 paste_start: struct { cursor: usize = 0, length: usize = 0 } = .{},
 /// This editor saw the current marked paste begin. A replacement editor
 /// receiving the rest of a paste rejects it rather than adopting it.
@@ -196,7 +199,9 @@ const line_keys: keymap.Keymap(enum { interrupt, eof }) = .init(.{
     .ctrl_c = .interrupt,
     .ctrl_d = .eof,
     .ctrl_g = null,
+    .ctrl_n = null,
     .ctrl_o = null,
+    .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = null,
     .up = null,
@@ -414,7 +419,9 @@ pub fn refuse(self: *Editor) void {
 }
 
 fn reject(self: *Editor, reason: keymap.Refusal) void {
-    if (self.rejected == null) self.rejected = reason;
+    if (self.rejected != null) return;
+    self.rejected = reason;
+    self.edits +%= 1;
 }
 
 /// Every encoding of every `Key`: the one place a key's name meets the
@@ -426,7 +433,9 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .ctrl_c = &.{.{ .code = 'c', .mods = .{ .ctrl = true } }},
     .ctrl_d = &.{.{ .code = 'd', .mods = .{ .ctrl = true } }},
     .ctrl_g = &.{.{ .code = 'g', .mods = .{ .ctrl = true } }},
+    .ctrl_n = &.{.{ .code = 'n', .mods = .{ .ctrl = true } }},
     .ctrl_o = &.{.{ .code = 'o', .mods = .{ .ctrl = true } }},
+    .ctrl_p = &.{.{ .code = 'p', .mods = .{ .ctrl = true } }},
     .ctrl_r = &.{.{ .code = 'r', .mods = .{ .ctrl = true } }},
     .ctrl_x = &.{.{ .code = 'x', .mods = .{ .ctrl = true } }},
     // Terminals in the alternate screen also deliver mouse wheel and
@@ -461,7 +470,7 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .home => if (self.length == 0) null else self.move(self.lineStart()),
         .end => if (self.length == 0) null else self.move(self.lineEnd()),
         .ctrl_d => if (self.length == 0) null else self.deleteNext(),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_o, .ctrl_r, .ctrl_x, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 
@@ -715,6 +724,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
     std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
     @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
     self.length += self.partial_length;
+    self.edits +%= 1;
     self.cursor += self.partial_length;
     self.partial_length = 0;
     if (!at_end) {
@@ -774,6 +784,7 @@ fn erase(self: *Editor, from: usize, to: usize) KeyOutcome {
     if (self.rejected != null or from == to) return .none;
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
+    self.edits +%= 1;
     // Removing a separator may join the suffix to the preceding cluster.
     // Snap to the first boundary at or after the erased range's start.
     self.cursor = if (from == 0) 0 else self.next(from - 1);
