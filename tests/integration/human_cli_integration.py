@@ -33,16 +33,6 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-# The dimmed row above the input while a Message waits to be taken.
-QUEUED_ROW = re.compile(r"^(› .*?) +(?:\d+ )?queued$")
-
-
-def shows_message(rows, text):
-    """A row shows the Message `text` whole: as its conversation row, or
-    waiting above the input."""
-    return any(untimed(row) == f"› {text}" or (match := QUEUED_ROW.match(row)) and match[1] == f"› {text}" for row in rows)
-
-
 # What work under way says: the running call's row, "• Run tests · 42s", or
 # the conversation's last line, "• Waiting · 12s",
 # "! Rate limited · retry 2 in 18s", "Stopping…".
@@ -4387,7 +4377,7 @@ def renderer_cases():
                     if untimed(row) == "› x":
                         assert len(row) == 80 and row[-5:] in times, (row, times)
                 if rows[composer].strip() == "›":
-                    assert shows_message(history, "x") or {"Sending…", "Sent"} & set(history), frame
+                    assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
@@ -4398,7 +4388,7 @@ def renderer_cases():
                 composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
                 history = rows[:composer]
                 if rows[composer].strip() == "›":
-                    assert shows_message(history, text) or {"Sending…", "Sent"} & set(history), (text, frame)
+                    assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, frame)
 
         def held_pages():
             """Once holding is set, Activity page requests reach the Host only
@@ -4861,11 +4851,15 @@ def renderer_cases():
         reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4400))
         omitted = "› ┄"
 
-        def message_once(shown, row="› " + "m" * 40):
-            # Older pages show the long Message as `› ┄`; live output showed
-            # its row, with its first characters. Either way, once.
-            assert shown.count(omitted) + shown.count(row) == 1, shown
-            return shown.index(omitted if omitted in shown else row)
+        def message_once(shown, form, row=None):
+            # The long Message shows exactly once, in the form the case
+            # expects: `› ┄` where eviction cut its live row and older pages
+            # show it, or its live row's first characters. Never both.
+            other = (row or live_row) if form == omitted else omitted
+            assert shown.count(form) == 1 and other not in shown, (form, shown)
+            return shown.index(form)
+
+        live_row = "› " + "m" * 40
 
         def after_message(shown, reply="REPLY-00000"):
             # What follows the Message: its reply live, the long reply's own
@@ -5042,12 +5036,12 @@ def renderer_cases():
             # Session by its first Message.
             return tty.capture.completed.rsplit("\n", 1)[0]
 
-        def reachable(shown, before, reply="REPLY-00000"):
+        def reachable(shown, before, row, reply="REPLY-00000", form=omitted):
             # The transcript reaches the Message exactly once, after what
             # preceded it and before its reply, or before the rows that left
             # the view.
             assert "Start of conversation" in shown, shown
-            assert shown.index(before) < message_once(shown) < after_message(shown, reply), shown
+            assert shown.index(before) < message_once(shown, form, row) < after_message(shown, reply), shown
 
         # A Message sent while a tool runs waits above the input and gains its
         # conversation row only after the tool's result shows; after
@@ -5065,7 +5059,7 @@ def renderer_cases():
             gate.touch()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "Wait for steer")
+            reachable(shown, "Wait for steer", live_row)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message steered into a running tool stays in the transcript after eviction", flush=True)
@@ -5084,7 +5078,7 @@ def renderer_cases():
             first_release.set()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "FIRST-ANSWER-DONE")
+            reachable(shown, "FIRST-ANSWER-DONE", "› " + "q" * 40)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message queued behind an answer stays in the transcript after eviction", flush=True)
@@ -5114,13 +5108,13 @@ def renderer_cases():
             # Live output showed the Message as its own row, after the answer
             # it waited behind, so the transcript reaches it there, once.
             assert "Start of conversation" in shown, shown
-            assert shown.index("DRIVER-QUESTION") < shown.index("Historical item omitted: position") < message_once(shown), shown
+            assert shown.index("DRIVER-QUESTION") < shown.index("Historical item omitted: position") < message_once(shown, live_row), shown
             tty.send("\x1b[6~", "SECOND-REPLY-DONE")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a Message whose row and reply share a page with a long answer stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row and reply share a page with a long answer evicted before them shows once, as its row", flush=True)
 
         # The same page shape with an answer that live output shortens: its
         # styling is not kept and its oversized cluster is escaped. Eviction
@@ -5151,7 +5145,9 @@ def renderer_cases():
             tty.wait("REPLY-04099", timeout=30)
             shown = traverse(tty)
             assert "Earlier rows left this view." not in shown, shown
-            reachable(shown, "STYLED-END")
+            # The Message's row is the last row before the reply, so it stays
+            # live with it.
+            reachable(shown, "STYLED-END", live_row, form=live_row)
             # The reply starts whole, once, where older pages end.
             assert shown.count("REPLY-00000") == 1 and "\nREPLY-00000 " in shown, shown
             assert shown.count("STYLED-END") == 1 and shown.count("bold11") == 1, shown
@@ -5196,8 +5192,9 @@ def renderer_cases():
         print("renderer: a boundary after text escaping shortens by more than later output stays ordered", flush=True)
 
         # A Message queued behind a long answer gains its conversation row
-        # once that answer ends, but its own answer is still held. After
-        # eviction cuts its row, older pages must still reach it.
+        # once that answer ends, but its own answer is still held: the read
+        # that holds its row shows only that row, after the answer evicted
+        # everything before it, and the transcript reaches it there, once.
         session = configure()
         first_release, second_release = threading.Event(), threading.Event()
         endpoint.responses.append((fixture.sse_answer("silent-first", "reason", "message", reply)[0], first_release))
@@ -5217,16 +5214,16 @@ def renderer_cases():
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
                 # Its row, after the omitted reply's row.
-                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < message_once(shown), shown
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < message_once(shown, live_row), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             second_release.set()
-        print("renderer: a Message whose row a silent read holds stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row a read holds alone, after a long answer, shows once as its row", flush=True)
 
         # The same, with the Message's own turn waiting on an Action: a call
-        # is outstanding while reads hold the row, and once decided its
-        # result takes a later position and shows once.
+        # is outstanding after the row, and once decided its result takes a
+        # later position and shows once.
         session = configure("ask")
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("asked-first", "reason", "message", reply)[0], first_release))
@@ -5248,7 +5245,7 @@ def renderer_cases():
                 tty.send(ALLOW.decode(), "ASKED-DONE")
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                at = message_once(shown)
+                at = message_once(shown, live_row)
                 assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < at, shown
                 assert shown.count("✓ Rowed call") == 1 and at < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
                 tty.caller.send_signal(signal.SIGINT)
@@ -5257,7 +5254,7 @@ def renderer_cases():
             first_release.set()
             os.close(ready_read)
             os.close(ready_write)
-        print("renderer: a Message whose turn waits on an Action stays reachable, and its result shows once", flush=True)
+        print("renderer: a Message whose turn waits on an Action shows once as its row, and its result shows once", flush=True)
 
         # Messages queued behind an answer that evicts everything before it,
         # and still queued while its call runs, wait above the input and no
@@ -5384,12 +5381,18 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 queue_three(tty)
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "listed-stop.json", "--key", "listed-stop")
-                tty.wait("Session stopped", timeout=30)
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                # Live, the stop shows each Message it excluded, labelled,
+                # before its own line, and the queued row is gone.
+                stopped = "! Stopped before it ran · send it again to run it"
+                assert live.count(stopped) == 3 and live.rindex(stopped) < live.index("! Session stopped."), live
+                assert live.index("› EQUAL-CONTENT") < live.index("› BIG-START") < live.index("! Session stopped."), live
+                assert not any(row.endswith("queued") for row in live.split("\n")), live
                 first_release.set()
                 tty.send("AFTER-STOP\n", predicate=lambda: "LONG-04399" in tty.capture.completed)
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                stopped = "! Stopped before it ran · send it again to run it"
                 assert shown.count(stopped) == 3 and shown.count("EQUAL-CONTENT") == 2, shown
                 assert shown.count("BIG-START") == 1 and shown.count(big_size) == 1 and shown.count("AFTER-STOP") == 1, shown
                 assert big_whole(shown), shown
@@ -5398,6 +5401,36 @@ def renderer_cases():
         finally:
             first_release.set()
         print("renderer: Messages a Stop excluded are listed once, labelled, after later output evicts them", flush=True)
+
+        # A stop that excluded more Messages than one read shows: reads show
+        # them 16 at a time, the third from the stop's own page again, and
+        # the stop's line follows the last, each Message once, oldest first.
+        session = configure()
+        first_release = threading.Event()
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
+        try:
+            with terminal(session, rows=200) as tty:
+                tty.capture.resize(80, 200)
+                requests = len(endpoint.requests)
+                tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
+                fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
+                for index in range(40):
+                    label = f"{index + 1} queued" if index else "queued"
+                    tty.send(f"MANY-STOPPED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"MANY-STOPPED-{index:02d}", label) and tty.capture.draft("", 2))
+                run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                rows = [untimed(row) for row in live.split("\n")]
+                order = [rows.index(f"› MANY-STOPPED-{index:02d}") for index in range(40)]
+                assert all(rows.count(f"› MANY-STOPPED-{index:02d}") == 1 for index in range(40)), live
+                assert order == sorted(order) and order[-1] < rows.index("! Session stopped."), live
+                assert all(rows[at - 1] == stopped for at in order) and rows.count(stopped) == 40, live
+                assert not any(row.endswith("queued") for row in rows) and "NEVER-SHOWN" not in live, live
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            first_release.set()
+        print("renderer: a stop that excluded more Messages than one read shows labels each once, before its line", flush=True)
 
         # A queued Message older than the opening's page, which holds only
         # its turn's commentary and held calls, is applied in the same read

@@ -1547,7 +1547,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // and one the opening showed queued never shows again.
                 if (!historical) {
                     if (value.sender != null) continue;
-                    _ = following.queue.take(value.admission);
+                    _ = following.queue.take(value.admission, item.position);
                     if (value.admission <= following.opened) continue;
                 }
                 compact_tools.* = false;
@@ -1637,7 +1637,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             if (shown == stop_batch) return false;
             try message(requests, store, session, item, value, .lasting(false), sink, colour);
             following.lowest.* = @min(following.lowest.* orelse item.position, item.position);
-            if (queue.take(value.admission) and queue.count != 0) queue.from = item.position + 1;
+            _ = queue.take(value.admission, item.position + 1);
             shown += 1;
         }
         cursor = page.continuation() orelse return true;

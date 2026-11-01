@@ -571,9 +571,9 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
 /// What a frame shows around the input: the status above the rule, and under
 /// the input a notice until the next key, else the Session line. `live` is
 /// what work under way is doing now: its running call's row carries the
-/// clock, and any other work ends the shown text. `queue` holds the Messages
-/// waiting behind the work; the latest view shows the newest, dimmed, right
-/// above the status.
+/// clock, and any other work ends the shown text. `queued` is the newest
+/// Message waiting behind the work and how many wait; the latest view shows
+/// it dimmed, right above the status.
 pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
@@ -581,7 +581,7 @@ pub const Footer = struct {
     notice: []const u8 = "",
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
-    queue: ?*const queued_line.Queue = null,
+    queued: ?queued_line.Waiting = null,
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
@@ -655,7 +655,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .total_calls = live.total,
         .live = footer.live != null,
         .clock_call = clock_call,
-        .queued = !selected and footer.queue != null,
+        .queued = !selected and footer.queued != null,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -691,8 +691,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var queued_text: [queued_line.text_capacity]u8 = undefined;
     var queued_label: [queued_line.label_capacity]u8 = undefined;
     if (layout.queued_height != 0) {
-        const queue = footer.queue.?;
-        const row = queued_line.row(&queued_text, &queued_label, queue.line.slice(), queue.count, size.col, self.vx.caps.unicode);
+        const queued = footer.queued.?;
+        const row = queued_line.row(&queued_text, &queued_label, queued.line, queued.count, size.col, self.vx.caps.unicode);
         const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
         _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
         _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
@@ -1263,11 +1263,7 @@ test "a queued Message sits dimmed right above the status, in the latest view on
     }
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     const calls: View.Live = .{};
-    var queue: queued_line.Queue = .{};
-    queue.admit(4, 9);
-    queue.admit(6, 11);
-    try queue.line.set("also check the history scratch cache");
-    const footer: Footer = .{ .status = "Sent", .queue = &queue };
+    const footer: Footer = .{ .status = "Sent", .queued = .{ .line = "also check the history scratch cache", .count = 2 } };
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
     var buffer: [256]u8 = undefined;
     try std.testing.expectEqualStrings("row39", rowText(screen, 6, &buffer));

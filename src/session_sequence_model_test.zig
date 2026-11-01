@@ -623,7 +623,7 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     } else return error.HistoryDidNotDrain;
     // A Message still queued shows above the input until it is taken: its
     // Admission, found by exact content identity, must be in the frontend's
-    // queue by admission ID.
+    // queue by admission ID, and the row must show it.
     for (messages, digests, &reachable) |text, digest, *found| if (!found.*) {
         found.* = try queuedAbove(front, requests, text.len, digest);
     };
@@ -645,7 +645,7 @@ fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest:
         for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
             .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
                 const queue = &front.live.queue;
-                return message.state == .queued and queue.count != 0 and queue.low <= message.admission and message.admission <= queue.high;
+                return message.state == .queued and queue.shown and queue.low <= message.admission and message.admission <= queue.high;
             },
             else => {},
         };

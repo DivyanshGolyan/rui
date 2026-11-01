@@ -228,9 +228,11 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     const budget = available - self.live_height;
     // A selected page needs a readable row so browsing can still advance.
     const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and budget > heading_height + call_rows);
-    self.queued_height = @intFromBool(input.queued and budget > heading_height + call_rows + document_reserve);
-    const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve - self.queued_height;
+    const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve;
     self.draft = draft_layout.fit(pieces, input.width - 2, input.cursor, shape, @min(draft_layout.cap(input.height), room), &self.draft_lines);
+    // A queued Message's row takes only a row the conversation's text would
+    // have: it is dropped before any draft row.
+    self.queued_height = @intFromBool(input.queued and room > self.draft.rows);
     const unreserved = input.height - self.draft.rows - self.rule_height - footer;
     // A transcript of this text shows the live line under its heading and a
     // readable row.
@@ -383,8 +385,8 @@ test "a queued Message's row sits right above the status and is the first row dr
     var frame: Self = undefined;
     var base: Self = undefined;
     const calls = [_][]const u8{ "• First", "• Second" };
-    for (2..12) |height| for ([_][]const u8{ "", "Sent" }) |status| for ([_]bool{ false, true }) |live| {
-        var input: Input = .{ .width = 24, .height = @intCast(height), .status = status, .cursor = 0, .calls = &calls, .total_calls = 3, .live = live, .selected = false, .action_visible = false, .preview_complete = true };
+    for (2..16) |height| for ([_][]const u8{ "", "Sent" }) |status| for ([_]bool{ false, true }) |live| for ([_][]const u8{ "", "one\ntwo\nthree\nfour\nfive" }) |draft| {
+        var input: Input = .{ .width = 24, .height = @intCast(height), .draft = draft, .status = status, .cursor = draft.len, .calls = &calls, .total_calls = 3, .live = live, .selected = false, .action_visible = false, .preview_complete = true };
         // It never refuses a terminal the frame without it fits.
         base.plan(&document, input) catch |err| {
             input.queued = true;
@@ -394,8 +396,10 @@ test "a queued Message's row sits right above the status and is the first row dr
         input.queued = true;
         try frame.plan(&document, input);
         // It takes a row only from the conversation's text, never from
-        // calls, their overflow row, the live line, the status or the input.
+        // calls, their overflow row, the live line, the status or the
+        // input's draft rows.
         try std.testing.expectEqual(@as(u16, @intFromBool(base.height != 0)), frame.queued_height);
+        try std.testing.expectEqual(base.draft.rows, frame.draft.rows);
         try std.testing.expectEqual(base.height - frame.queued_height, frame.height);
         try std.testing.expectEqual(base.used, frame.used);
         try std.testing.expectEqual(base.overflow_height, frame.overflow_height);

@@ -119,6 +119,10 @@ live: struct {
     // live output shows them, and the newest the opening showed queued.
     queue: queued_line.Queue = .{},
     opened: u64 = 0,
+    // The newest queued Message's first line, and the other storage, which a
+    // read fills while frames draw this one.
+    lines: [2]queued_line.Line = .{ .{ .len = 0 }, .{ .len = 0 } },
+    line: u1 = 0,
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -174,7 +178,7 @@ const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queue = self.live.queue, .opened = self.live.opened, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queue = self.live.queue, .opened = self.live.opened, .newest_line = &self.live.lines[1 - self.live.line], .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -762,7 +766,7 @@ fn drawFrame(self: *Self) !void {
     const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queue = if (self.live.queue.count != 0) &self.live.queue else null }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queued = if (self.live.queue.shown) .{ .line = self.live.lines[self.live.line].slice(), .count = self.live.queue.count } else null }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1171,8 +1175,9 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            // A page may have delivered it before this acceptance joined.
-            if (accepted.admission) |admission| self.admission.echo = if (admission > self.admission.delivered) admission else null;
+            // A page may have delivered it before this acceptance joined,
+            // and shows it once the queued row or its own row does.
+            if (accepted.admission) |admission| self.admission.echo = if (admission > self.admission.delivered or self.live.queue.hides(admission)) admission else null;
             if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         },
         .rejected => |rejected| {
@@ -1246,8 +1251,9 @@ fn showStaged(self: *Self) !void {
     const result = &self.job.result;
     self.live.messages = result.messages;
     // A taken Message leaves the queued row in the frame that shows it.
-    self.live.queue = result.queue;
-    self.live.opened = result.opened;
+    self.live.queue = self.job.queue;
+    self.live.opened = self.job.opened;
+    if (result.newest_read) self.live.line = 1 - self.live.line;
     if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
     var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd() };
     // Every cut in output order; at one offset an echo ends before a
@@ -1464,7 +1470,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
-        if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
+        // A Message the queued row does not show yet still reads Sent.
+        if (self.admission.echo) |admission| if (admission <= self.admission.delivered and !self.live.queue.hides(admission)) {
             self.admission.echo = null;
         };
         if (result.status) try self.applyStatus();
