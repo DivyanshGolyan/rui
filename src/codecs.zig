@@ -1,6 +1,7 @@
-//! The codecs this Host serves, by the codec name a Session pins, and the
-//! jobs that run a codec's request encoder, error classifier and response
-//! interpreter in storage their caller owns.
+//! The codecs this Host serves, by the codec name a Session pins. A codec's
+//! encoder is plain functions over values its caller stores, dispatched at
+//! comptime; its error classifier still runs as a job in storage its caller
+//! owns.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
@@ -21,137 +22,57 @@ comptime {
     std.debug.assert(@import("codecs/json.zig").max_depth == protocol.max_json_depth);
 }
 
-/// The request encoder of a pinned codec.
-pub fn encoder(codec: protocol.Codec) *const Encoder {
+/// A pinned codec's request encoder state, which its caller stores.
+pub const Encoder = union(protocol.Codec) {
+    @"openai-responses/1": responses.Encoder,
+
+    /// The state at a history-element boundary, which is all of it that
+    /// crosses one.
+    pub fn resumeFrom(carry: Carry) Encoder {
+        return switch (carry) {
+            inline else => |value, codec| @unionInit(Encoder, @tagName(codec), module(codec).resumeFrom(value)),
+        };
+    }
+
+    pub fn carryOf(self: *const Encoder) Carry {
+        return switch (self.*) {
+            inline else => |*state, codec| @unionInit(Carry, @tagName(codec), module(codec).carryOf(state)),
+        };
+    }
+
+    /// Write the item's pieces into `out`. `error.Unsupported` is the
+    /// codec declining a request it cannot encode.
+    pub fn encodeItem(self: *Encoder, header: *const codec_abi.ItemHeader, out: *codec_abi.Pieces) error{Unsupported}!void {
+        return switch (self.*) {
+            inline else => |*state| state.encodeItem(header, out),
+        };
+    }
+};
+
+/// A pinned codec's encoder state at a history-element boundary.
+pub const Carry = union(protocol.Codec) {
+    @"openai-responses/1": responses.Carry,
+
+    /// The carry before a request's first history element.
+    pub fn initial(codec: protocol.Codec) Carry {
+        return switch (codec) {
+            inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial),
+        };
+    }
+};
+
+/// The pinned codec's request headers for `settings`, written over `out`.
+pub fn requestHeaders(codec: protocol.Codec, settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
+    switch (codec) {
+        inline else => |tag| module(tag).requestHeaders(settings, out),
+    }
+}
+
+fn module(comptime codec: protocol.Codec) type {
     return switch (codec) {
-        .@"openai-responses/1" => &responses_encoder,
+        .@"openai-responses/1" => responses,
     };
 }
-
-const responses_encoder = native(responses.Encoder);
-
-pub const max_state_bytes = 16;
-
-/// A codec's encoder state, opaque to the Host.
-pub const State = struct {
-    bytes: [max_state_bytes]u8 align(8),
-};
-
-/// A request encoder linked into the Host. Each function works on a
-/// `State` in an `EncodeJob`, never on a stack.
-pub const Encoder = struct {
-    /// Replace the whole state with the one `carry` holds; false when the
-    /// codec cannot read it.
-    load: *const fn (state: *State, carry: *const codec_abi.Carry) bool,
-    /// Write the item's ops into `ops`, which starts empty.
-    step: *const fn (state: *State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status,
-};
-
-/// The `Encoder` of a codec type with `load(*const Carry) !T` and
-/// `encodeItem(*T, *const ItemHeader, *Ops) !Status`.
-pub fn native(comptime Codec: type) Encoder {
-    comptime std.debug.assert(@sizeOf(Codec) <= max_state_bytes and @alignOf(Codec) <= @alignOf(State));
-    const adapter = struct {
-        // A codec's error is its own fault, which the shell answers with
-        // one code, provider_codec_failed; the contract carries no name.
-        fn load(state: *State, carry: *const codec_abi.Carry) bool {
-            of(state).* = Codec.load(carry) catch return false;
-            return true;
-        }
-
-        // As in `load`: every error is the codec's, so it is `.failed`.
-        fn step(state: *State, header: *const codec_abi.ItemHeader, ops: *codec_abi.Ops) codec_abi.Status {
-            return of(state).encodeItem(header, ops) catch .failed;
-        }
-
-        fn of(state: *State) *Codec {
-            return @ptrCast(&state.bytes);
-        }
-    };
-    return .{ .load = adapter.load, .step = adapter.step };
-}
-
-/// One request's encoding, in its caller's storage for the request's life.
-/// The caller writes `header` for each item, steps, and runs each op `next`
-/// gives before it asks for another; once `next` gives null it writes the
-/// next item.
-pub const EncodeJob = struct {
-    encoder: *const Encoder,
-    state: State,
-    /// The codec's state at the last history-element boundary: empty at
-    /// the start, then each element's own carry, or a history memo's.
-    carry: codec_abi.Carry,
-    header: codec_abi.ItemHeader,
-    ops: codec_abi.Ops,
-    /// Where the item's next op begins.
-    offset: u16,
-    /// Whether the item's carry was read: nothing may follow it.
-    carried: bool,
-
-    pub const Error = error{ CodecFailed, CodecBadOp };
-
-    pub fn begin(self: *EncodeJob, codec: *const Encoder) Error!void {
-        self.encoder = codec;
-        self.carry = .{ .len = 0 };
-        if (!codec.load(&self.state, &self.carry)) return error.CodecFailed;
-    }
-
-    /// Continue after a history memo whose span ended in `carry`.
-    pub fn resumeFrom(self: *EncodeJob, carry: *const codec_abi.Carry) void {
-        self.carry = carry.*;
-    }
-
-    /// Encode the item in `header`. Before a history element and
-    /// history_end the state is reloaded from the carry, so nothing else
-    /// crosses a boundary and a memo copy continues exactly as a rebuild
-    /// does.
-    pub fn step(self: *EncodeJob) Error!void {
-        const kind: codec_abi.ItemKind = self.header.item;
-        if (kind.resumes() and !self.encoder.load(&self.state, &self.carry)) return error.CodecFailed;
-        self.ops.length = 0;
-        try self.open(self.encoder.step(&self.state, &self.header, &self.ops));
-    }
-
-    /// Done exactly at request_end; a failure is the codec's own.
-    fn open(self: *EncodeJob, status: codec_abi.Status) Error!void {
-        const kind: codec_abi.ItemKind = self.header.item;
-        switch (status) {
-            .failed => return error.CodecFailed,
-            .next, .done => if ((status == .done) != (kind == .request_end)) return error.CodecBadOp,
-        }
-        self.offset = 0;
-        self.carried = false;
-    }
-
-    /// The item's next op, judged as it is read: well formed; content only
-    /// of the item's handles; a header only of the settings item (its name
-    /// and value are judged where they are kept); a carry exactly once, as
-    /// the last op, of each item that ends a history element and of no
-    /// other. The job keeps the
-    /// carry and never returns it. Null once the item's ops end. Nothing
-    /// is sent before request_end, so the ops that ran before a bad one
-    /// wrote only request scratch, which the failure discards.
-    pub fn next(self: *EncodeJob) Error!?codec_abi.Op {
-        const kind: codec_abi.ItemKind = self.header.item;
-        var reader = self.ops.reader(self.offset);
-        while (try reader.next()) |op| {
-            if (self.carried) return error.CodecBadOp;
-            self.offset = reader.offset;
-            switch (op) {
-                .literal => return op,
-                .content => |content| return if (self.header.has(content.handle)) op else error.CodecBadOp,
-                .header => return if (kind == .settings) op else error.CodecBadOp,
-                .carry => |state| {
-                    if (!kind.endsElement()) return error.CodecBadOp;
-                    self.carried = true;
-                    self.carry = state;
-                },
-            }
-        }
-        if (kind.endsElement() and !self.carried) return error.CodecBadOp;
-        return null;
-    }
-};
 
 /// The HTTP error classifier of a pinned codec.
 pub fn classifier(codec: protocol.Codec) *const Classifier {
@@ -162,15 +83,11 @@ pub fn classifier(codec: protocol.Codec) *const Classifier {
 
 const responses_classifier = nativeClassifier(responses.Classifier);
 
-/// The alignment of a classifier's and an interpreter's state.
-const state_alignment = 16;
-
-/// What the built-in classifier needs: the Host serves no other.
-pub const max_classifier_state_bytes = std.mem.alignForward(usize, @sizeOf(responses.Classifier), state_alignment);
+pub const max_classifier_state_bytes = 512;
 
 /// A codec's classifier state, opaque to the Host.
 pub const ClassifierState = struct {
-    bytes: [max_classifier_state_bytes]u8 align(state_alignment),
+    bytes: [max_classifier_state_bytes]u8 align(16),
 };
 
 /// An HTTP error classifier linked into the Host. Each function works on a
@@ -262,96 +179,6 @@ pub const ClassifyJob = struct {
     }
 };
 
-/// The response interpreter of a pinned codec.
-pub fn interpreter(codec: protocol.Codec) *const Interpreter {
-    return switch (codec) {
-        .@"openai-responses/1" => &responses_interpreter,
-    };
-}
-
-const responses_interpreter = nativeInterpreter(responses.Interpreter);
-
-/// What the built-in interpreter needs: the Host serves no other.
-pub const max_interpreter_state_bytes = std.mem.alignForward(usize, @sizeOf(responses.Interpreter), state_alignment);
-
-/// A codec's interpreter state, opaque to the Host.
-pub const InterpreterState = struct {
-    bytes: [max_interpreter_state_bytes]u8 align(state_alignment),
-};
-
-/// A response interpreter linked into the Host. Each function works on an
-/// `InterpreterState` in an `InterpretJob`, never on a stack.
-pub const Interpreter = struct {
-    /// The state before the stream's first event.
-    init: *const fn (state: *InterpreterState, operation: codec_abi.Operation) void,
-    /// Read one window and write its records into `ops`, which starts empty.
-    step: *const fn (state: *InterpreterState, fed: *const codec_abi.EventFed, ops: *codec_abi.Ops) codec_abi.Status,
-};
-
-/// The `Interpreter` of a codec type with `init(*T, Operation)` and
-/// `interpret(*T, *const EventFed, *Ops) !Status`.
-pub fn nativeInterpreter(comptime Codec: type) Interpreter {
-    comptime std.debug.assert(@sizeOf(Codec) <= max_interpreter_state_bytes and @alignOf(Codec) <= @alignOf(InterpreterState));
-    const adapter = struct {
-        fn init(state: *InterpreterState, operation: codec_abi.Operation) void {
-            of(state).init(operation);
-        }
-
-        // Every error is the codec's own, so it is `.failed`.
-        fn step(state: *InterpreterState, fed: *const codec_abi.EventFed, ops: *codec_abi.Ops) codec_abi.Status {
-            return of(state).interpret(fed, ops) catch .failed;
-        }
-
-        fn of(state: *InterpreterState) *Codec {
-            return @ptrCast(&state.bytes);
-        }
-    };
-    return .{ .init = adapter.init, .step = adapter.step };
-}
-
-/// One response's interpretation, in its caller's storage. The caller
-/// steps each window it feeds and takes every record `next` gives before it
-/// feeds again.
-pub const InterpretJob = struct {
-    interpreter: *const Interpreter,
-    state: InterpreterState,
-    ops: codec_abi.Ops,
-    records: codec_abi.RecordReader,
-    /// Whether the window's answer ended with `need`, which nothing follows.
-    needed: bool,
-
-    pub const Error = error{ CodecFailed, CodecBadOp };
-
-    pub fn begin(self: *InterpretJob, codec: *const Interpreter, operation: codec_abi.Operation) void {
-        self.interpreter = codec;
-        self.records = .{ .bytes = &.{} };
-        codec.init(&self.state, operation);
-    }
-
-    /// Interpret the next window; true once the codec is done, which it may
-    /// be only at the stream's end and must be there unless it failed.
-    pub fn step(self: *InterpretJob, fed: *const codec_abi.EventFed) Error!bool {
-        self.ops.length = 0;
-        self.needed = false;
-        const status = self.interpreter.step(&self.state, fed, &self.ops);
-        self.records = self.ops.records();
-        return switch (status) {
-            .failed => error.CodecFailed,
-            .done => if (fed.end) true else error.CodecBadOp,
-            .next => false,
-        };
-    }
-
-    /// The window's next record, well formed, with nothing after a `need`.
-    /// Null once the window's records end.
-    pub fn next(self: *InterpretJob) Error!?codec_abi.Record {
-        const record = try self.records.next() orelse return null;
-        if (self.needed) return error.CodecBadOp;
-        if (record == .need) self.needed = true;
-        return record;
-    }
-};
-
 test "classifier findings are checked as they are read and a bad one fails the job" {
     const Case = struct { status: codec_abi.Status = .done, end: bool = true, ops: []const u8, expected: ClassifyJob.Error!usize };
     const report = [_]u8{ 8, 0, 1 } ++ std.mem.toBytes(@as(u64, 2)) ++ std.mem.toBytes(@as(u64, 8));
@@ -430,33 +257,39 @@ const TestItem = struct {
     handles: []const ?[]const u8 = &.{},
 };
 
-/// Encode `items` into `out`, running each op as the Host does, with
-/// std.json's string escaping standing in for the Host's cursors.
-fn encodeForTesting(job: *EncodeJob, items: []const TestItem, out: *std.Io.Writer) !void {
+/// Encode `items` into `out` from `encoder` and `carry`, as the Host does,
+/// with std.json's string escaping standing in for the Host's cursors.
+fn encodeForTesting(encoder: *Encoder, carry: *Carry, items: []const TestItem, out: *std.Io.Writer) !void {
+    var pieces: codec_abi.Pieces = .{ .len = 0 };
     for (items) |item| {
-        job.header.item = item.item;
-        job.header.handles = 0;
+        var header: codec_abi.ItemHeader = .{ .item = item.item, .handles = 0 };
         for (item.handles, 0..) |handle, index| {
-            if (handle != null) job.header.handles |= @as(u8, 1) << @intCast(index);
+            if (handle != null) header.handles |= @as(u8, 1) << @intCast(index);
         }
-        try job.step();
-        while (try job.next()) |op| switch (op) {
+        const kind: codec_abi.ItemKind = header.item;
+        if (kind.resumes()) encoder.* = .resumeFrom(carry.*);
+        try encoder.encodeItem(&header, &pieces);
+        if (kind.endsElement()) carry.* = encoder.carryOf();
+        for (pieces.slice()) |piece| switch (piece) {
             .literal => |bytes| try out.writeAll(bytes),
             .content => |content| switch (content.escape) {
                 .verbatim => try out.writeAll(item.handles[content.handle].?),
                 .json_string_v1 => try std.json.Stringify.encodeJsonStringChars(item.handles[content.handle].?, .{}, out),
             },
-            .carry, .header => unreachable,
         };
     }
 }
 
+fn beginForTesting() struct { Encoder, Carry } {
+    const carry: Carry = .initial(.@"openai-responses/1");
+    return .{ .resumeFrom(carry), carry };
+}
+
 test "a tool entry escapes its name and description as JSON strings" {
-    var job: EncodeJob = undefined;
-    try job.begin(encoder(.@"openai-responses/1"));
+    var encoder, var carry = beginForTesting();
     var buffer: [256]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
-    try encodeForTesting(&job, &.{.{ .item = .tool, .handles = &.{ "t", "say \"hi\"\\\n\x01é", "{}" } }}, &out);
+    try encodeForTesting(&encoder, &carry, &.{.{ .item = .tool, .handles = &.{ "t", "say \"hi\"\\\n\x01é", "{}" } }}, &out);
     const json = out.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
@@ -464,7 +297,7 @@ test "a tool entry escapes its name and description as JSON strings" {
     try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", json);
 }
 
-test "a job resumed from a history element's carry continues as the uninterrupted job" {
+test "a resumed encoder writes what an uninterrupted one writes" {
     const history = [_]TestItem{
         .{ .item = .{ .message = .user }, .handles = &.{"one"} },
         .{ .item = .{ .output_open = .{ .kind = .reasoning, .phase = .unphased, .omit_reasoning_text = true } } },
@@ -479,12 +312,11 @@ test "a job resumed from a history element's carry continues as the uninterrupte
     const tail = [_]TestItem{ .{ .item = .history_end }, .{ .item = .compaction_trigger }, .{ .item = .tools_start }, .{ .item = .text_format }, .{ .item = .request_end } };
     var whole_buffer: [2048]u8 = undefined;
     var whole: std.Io.Writer = .fixed(&whole_buffer);
-    var job: EncodeJob = undefined;
-    try job.begin(encoder(.@"openai-responses/1"));
-    try encodeForTesting(&job, &history, &whole);
-    try encodeForTesting(&job, &tail, &whole);
-    // Cut before the first element and after every one: a fresh job given
-    // only the carry writes the same remaining bytes.
+    var encoder, var carry = beginForTesting();
+    try encodeForTesting(&encoder, &carry, &history, &whole);
+    try encodeForTesting(&encoder, &carry, &tail, &whole);
+    // Cut before the first element and after every one: a fresh encoder
+    // given only the carry writes the same remaining bytes.
     for (0..history.len + 1) |cut| {
         if (cut != 0) {
             const kind: codec_abi.ItemKind = history[cut - 1].item;
@@ -492,90 +324,13 @@ test "a job resumed from a history element's carry continues as the uninterrupte
         }
         var resumed_buffer: [2048]u8 = undefined;
         var resumed: std.Io.Writer = .fixed(&resumed_buffer);
-        var first: EncodeJob = undefined;
-        try first.begin(encoder(.@"openai-responses/1"));
-        try encodeForTesting(&first, history[0..cut], &resumed);
-        var second: EncodeJob = undefined;
-        try second.begin(encoder(.@"openai-responses/1"));
-        second.resumeFrom(&first.carry);
-        try encodeForTesting(&second, history[cut..], &resumed);
-        try encodeForTesting(&second, &tail, &resumed);
+        var first, var first_carry = beginForTesting();
+        try encodeForTesting(&first, &first_carry, history[0..cut], &resumed);
+        var second = beginForTesting()[0];
+        try encodeForTesting(&second, &first_carry, history[cut..], &resumed);
+        try encodeForTesting(&second, &first_carry, &tail, &resumed);
         try std.testing.expectEqualStrings(whole.buffered(), resumed.buffered());
     }
     try std.testing.expectStringStartsWith(whole.buffered(), "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
-}
-
-test "codec ops are checked as they run and a bad op fails the job" {
-    const Case = struct { item: codec_abi.Item, handles: u8 = 0, status: codec_abi.Status = .next, ops: []const u8, expected: EncodeJob.Error!?u8 };
-    const carry_one = [_]u8{ 3, 1, 1 };
-    const close = [_]u8{ 1, 1, 0, '}' };
-    const oversized = [_]u8{ 3, codec_abi.max_carry_bytes + 1 } ++ @as([codec_abi.max_carry_bytes + 1]u8, @splat(0));
-    const header = [_]u8{ 4, 1, 2, 0, 'a', 'v', 'w' };
-    const settings: codec_abi.Item = .{ .settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 } };
-    for ([_]Case{
-        .{ .item = .tools_start, .ops = &.{ 1, 1, 0, '[' }, .expected = null },
-        .{ .item = .tool_result, .handles = 0b11, .ops = &([_]u8{ 2, 0, 1, 2, 1, 0 } ++ carry_one), .expected = 1 },
-        // A carry outside an element, after history_end, twice, before
-        // another op, or missing from an element.
-        .{ .item = .instructions, .ops = &carry_one, .expected = error.CodecBadOp },
-        .{ .item = .history_end, .ops = &carry_one, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &carry_one, .expected = error.CodecBadOp },
-        .{ .item = .output_close, .ops = &(carry_one ++ carry_one), .expected = error.CodecBadOp },
-        .{ .item = .output_close, .ops = &(carry_one ++ close), .expected = error.CodecBadOp },
-        .{ .item = .output_close, .ops = &close, .expected = error.CodecBadOp },
-        .{ .item = .{ .message = .user }, .handles = 1, .ops = &.{ 2, 0, 1 }, .expected = error.CodecBadOp },
-        // A handle the item lacks, or past the last handle.
-        .{ .item = .text_format, .ops = &.{ 2, 0, 0 }, .expected = error.CodecBadOp },
-        .{ .item = .{ .message = .user }, .handles = 0b01, .ops = &([_]u8{ 2, 1, 1 } ++ carry_one), .expected = error.CodecBadOp },
-        .{ .item = .tool, .handles = 0xff, .ops = &.{ 2, codec_abi.max_handles, 1 }, .expected = error.CodecBadOp },
-        // A header of the settings item only.
-        .{ .item = settings, .ops = &header, .expected = null },
-        .{ .item = .instructions, .handles = 1, .ops = &header, .expected = error.CodecBadOp },
-        .{ .item = .history_end, .ops = &header, .expected = error.CodecBadOp },
-        .{ .item = .tool_result, .handles = 0b11, .ops = &(header ++ carry_one), .expected = error.CodecBadOp },
-        // Malformed ops: an unknown tag or escape, an empty or cut literal,
-        // a cut content, carry or header, a carry past its bound, a header
-        // without a name, a header whose lengths sum past u16 or past the
-        // ops.
-        .{ .item = .tools_start, .ops = &.{0}, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &.{5}, .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = header[0 .. header.len - 1], .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = header[0..3], .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = &.{ 4, 0, 1, 0, 'v' }, .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = &.{ 4, 0x10, 0xff, 0xff }, .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = &.{ 4, 0xff, 0xff, 0xff }, .expected = error.CodecBadOp },
-        .{ .item = settings, .ops = &.{ 4, 0xff, 0, 0 }, .expected = error.CodecBadOp },
-        .{ .item = .tool, .handles = 1, .ops = &.{ 2, 0, 2 }, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &.{ 1, 0, 0 }, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &.{ 1, 2, 0, '[' }, .expected = error.CodecBadOp },
-        .{ .item = .tools_start, .ops = &.{ 1, 1 }, .expected = error.CodecBadOp },
-        .{ .item = .tool, .handles = 1, .ops = &.{ 2, 0 }, .expected = error.CodecBadOp },
-        .{ .item = .tool_result, .handles = 0b11, .ops = &.{ 3, 2, 1 }, .expected = error.CodecBadOp },
-        .{ .item = .tool_result, .handles = 0b11, .ops = &oversized, .expected = error.CodecBadOp },
-        // Done exactly at request_end; a failure is the codec's own.
-        .{ .item = .text_format, .status = .done, .ops = &.{}, .expected = error.CodecBadOp },
-        .{ .item = .request_end, .ops = &close, .expected = error.CodecBadOp },
-        .{ .item = .request_end, .status = .done, .ops = &close, .expected = null },
-        .{ .item = settings, .status = .failed, .ops = &.{}, .expected = error.CodecFailed },
-    }) |case| {
-        var job: EncodeJob = undefined;
-        job.header = .{ .item = case.item, .handles = case.handles };
-        job.carry = .{ .len = 0 };
-        job.ops.length = @intCast(case.ops.len);
-        @memcpy(job.ops.bytes[0..case.ops.len], case.ops);
-        const result = drainForTesting(&job, case.status);
-        if (case.expected) |expected| {
-            const carry = try result;
-            try std.testing.expectEqual(expected, if (carry) |value| value.slice()[0] else null);
-        } else |err| try std.testing.expectError(err, result);
-    }
-}
-
-/// Read every op of the item in `job` as the Host does, and return the
-/// item's carry.
-fn drainForTesting(job: *EncodeJob, status: codec_abi.Status) EncodeJob.Error!?codec_abi.Carry {
-    try job.open(status);
-    while (try job.next()) |op| std.debug.assert(op != .carry);
-    return if (job.carried) job.carry else null;
 }

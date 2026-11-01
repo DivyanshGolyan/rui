@@ -128,34 +128,6 @@ pub const OutputMetadataWriter = struct {
     }
 
     pub fn append(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
-        try self.charge();
-        const bytes = encode(record);
-        try self.file.writeStreamingAll(self.io, &bytes);
-        self.records += 1;
-        try self.count(record);
-    }
-
-    /// Write a record's place, zeroed, for `fill` to complete: a part whose
-    /// text arrives after its bag's members. It counts for nothing until
-    /// filled. Returns its index.
-    pub fn hold(self: *OutputMetadataWriter) !u64 {
-        try self.charge();
-        const zero: [output_metadata_record_bytes]u8 = @splat(0);
-        try self.file.writeStreamingAll(self.io, &zero);
-        self.records += 1;
-        return self.records - 1;
-    }
-
-    /// Complete the record `hold` placed at `index`.
-    pub fn fill(self: *OutputMetadataWriter, index: u64, record: OutputMetadataRecord) !void {
-        std.debug.assert(!self.sealed and index < self.records);
-        if (self.fail_writes) return error.InjectedMetadataFailure;
-        const bytes = encode(record);
-        try self.file.writePositionalAll(self.io, &bytes, index * output_metadata_record_bytes);
-        try self.count(record);
-    }
-
-    fn charge(self: *OutputMetadataWriter) !void {
         std.debug.assert(!self.sealed);
         if (self.fail_writes) return error.InjectedMetadataFailure;
         if (!self.budget.allocate(output_metadata_record_bytes)) {
@@ -164,15 +136,6 @@ pub const OutputMetadataWriter = struct {
         // A failed write ends validation; retain the complete fixed-record
         // reservation until deinit so a partial OS write is never uncharged.
         self.charged += output_metadata_record_bytes;
-    }
-
-    fn count(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
-        if (record.tag == .part and record.kind == .message) {
-            self.decoded_length = try std.math.add(u64, self.decoded_length, record.decoded_length);
-        }
-    }
-
-    fn encode(record: OutputMetadataRecord) [output_metadata_record_bytes]u8 {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(record.tag);
         bytes[1] = @backingInt(record.kind);
@@ -204,7 +167,11 @@ pub const OutputMetadataWriter = struct {
             std.mem.writeInt(u64, bytes[48..56], usage.output, .little);
         }
         @memcpy(bytes[72..104], &record.content_digest);
-        return bytes;
+        try self.file.writeStreamingAll(self.io, &bytes);
+        self.records += 1;
+        if (record.tag == .part and record.kind == .message) {
+            self.decoded_length = try std.math.add(u64, self.decoded_length, record.decoded_length);
+        }
     }
 
     pub fn sealForRead(self: *OutputMetadataWriter) !void {
