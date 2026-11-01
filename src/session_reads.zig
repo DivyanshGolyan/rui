@@ -15,6 +15,7 @@ const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
+const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const ReadPhase = departure.ReadPhase;
 
@@ -102,22 +103,26 @@ pub const Hint = union(enum) {
 };
 
 /// Reads the hint from the first Message at `position`. A refusal or content
-/// that is not text answers it with the reference; a canonical Store,
-/// transport or cancellation failure fails the read, as the page's would.
+/// that is not text answers it with the reference.
 fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
+    const line = try readFirstLine(requests, job, position) orelse return .absent;
+    return if (line.len == 0) .absent else .{ .line = line };
+}
+
+/// The first line of the Message at `position`, terminal-safe, or null when
+/// the Host refuses it or it is not text. A canonical Store, transport or
+/// cancellation failure fails the read, as the page's would.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64) !?Bounded(session_line.max_line_bytes) {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
     const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
-        error.InvalidResponse => return .absent,
+        error.InvalidResponse => return null,
         else => return err,
     };
     switch (reply) {
-        .line => |bytes| {
-            const line = session_line.firstLine(bytes);
-            return if (line.len == 0) .absent else .{ .line = plain(session_line.max_line_bytes, line) };
-        },
+        .line => |bytes| return plain(session_line.max_line_bytes, session_line.firstLine(bytes)),
         .failure => |failure| {
             if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
-            return .absent;
+            return null;
         },
     }
 }
@@ -171,6 +176,10 @@ pub const Job = struct {
     held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
+    // Messages waiting behind the work before this read, and the newest the
+    // opening showed queued (see View.Following).
+    queue: queued_line.Queue = .{},
+    opened: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -208,10 +217,15 @@ pub const Job = struct {
         echoes: Echoes = .{},
         // The Messages of the collapsed blocks in this read's output, in order.
         collapsed: Collected = .{},
-        // The opening's lowest unapplied position (see View.Pending).
+        // The opening's lowest unapplied position (see View.Pending), or the
+        // lowest a stop showed.
         lowest: ?u64 = null,
         // The job's Messages after this read.
         messages: Messages = .{},
+        // The Messages waiting behind the work after this read, and the
+        // opening's newest queued one.
+        queue: queued_line.Queue = .{},
+        opened: u64 = 0,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -322,26 +336,42 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
+    job.result.queue = job.queue;
+    job.result.opened = job.opened;
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(page.facts.work.work.state.holdsQueue(), &output);
         job.result.lowest = pending.lowest;
+        job.result.opened = pending.newest;
         // A queued Message older than the page shows only in a transcript's
         // listing, at the opening's seam. No later boundary may precede its
         // row, which shows nothing live.
         output.messages.shown = @max(output.messages.shown, pending.newest);
-    }
-    try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
+    } else for (page.facts.items[0..page.facts.count]) |item| if (item.value == .stop) {
+        // A stop shows the queued Messages it excluded before its own line:
+        // once excluded, a transcript beginning earlier in this read would
+        // list them at its seam too.
+        output.fence = item.position;
+        break;
+    };
+    const ended = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .queue = &job.result.queue, .opened = job.result.opened, .lowest = &job.result.lowest });
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     job.result.collapsed = output.blocks;
+    const queue = &job.result.queue;
+    if (queue.count != 0 and queue.newest != job.queue.newest) if (try readFirstLine(requests, job, queue.newest)) |line| {
+        queue.line = line;
+    };
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
-        if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
+        if (readEnd(job.result.messages, page.facts.more or ended != null, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
     }
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
+    } else if (ended) |index| {
+        // The next read starts at the stop, at this read's end.
+        job.result.cursor = if (index == 0) cursor else .{ .end = page.facts.end, .position = page.facts.items[index - 1].position, .ordinal = page.facts.items[index - 1].ordinal };
     } else {
         job.result.cursor = page.continuation() orelse .{ .position = page.facts.end };
         if (!page.facts.more) job.result.cursor.end = null;
@@ -406,11 +436,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 };
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
-                    const value = switch (item.value) {
-                        .admission => |value| value,
-                        else => continue,
-                    };
-                    if (!range.all and value.state == .applied) continue;
+                    const value = listed(item, range.all, job.opened) orelse continue;
                     try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
@@ -427,9 +453,29 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     }
 }
 
-/// The collapsed blocks one read writes: a page shows each item at most once.
+/// Whether a range lists this item, and its Message: every Message the live
+/// output of the range showed (`all`), or each one not applied at the
+/// range's end. Live output shows a person's or script's Message as its row,
+/// or at the stop that excluded it, and another Session's as its Admission.
+/// One admitted after the opening and still queued shows live later, so it
+/// is never listed.
+fn listed(item: protocol.ActivityItem, all: bool, opened: u64) ?protocol.ActivityItem.Message {
+    return switch (item.value) {
+        .admission => |value| if (all)
+            (if (value.sender != null) value else null)
+        else if (value.state == .applied or (value.sender == null and value.state == .queued and value.admission > opened))
+            null
+        else
+            value,
+        .user => |value| if (all and value.sender == null and value.admission > opened) value else null,
+        else => null,
+    };
+}
+
+/// The collapsed blocks one read writes: a page shows each item at most
+/// once, and a stop on it at most `View.stop_batch` Messages besides.
 pub const Collected = struct {
-    items: [@max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items)]View.Collapsed = undefined,
+    items: [@max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items) + View.stop_batch]View.Collapsed = undefined,
     count: usize = 0,
 
     pub fn slice(self: *const Collected) []const View.Collapsed {
@@ -446,6 +492,8 @@ const DisplayCapture = struct {
     end: u64 = 0,
     /// Messages shown before the current item.
     messages: Messages = .{},
+    /// No transcript begins at an item before this position.
+    fence: u64 = 0,
     /// Shown items where a transcript may begin.
     boundaries: Boundaries = .{},
     /// Shown Messages.
@@ -456,8 +504,17 @@ const DisplayCapture = struct {
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         _ = self.finish();
+        // Every Message up to a stop's cutoff has its row before the stop,
+        // or never gets one.
+        if (value.value == .stop) self.messages.answered = @max(self.messages.answered, value.value.stop.cutoff);
         self.current = value;
         self.current_start = self.offset;
+    }
+
+    /// Bytes until the next item belong to none: no transcript begins at
+    /// them, and no Message is recorded there.
+    pub fn detach(self: *@This()) void {
+        _ = self.finish();
     }
 
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
@@ -473,7 +530,7 @@ const DisplayCapture = struct {
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
-        if (self.messages.settled())
+        if (self.messages.settled() and current.position >= self.fence)
             self.boundaries.add(.{ .output = self.current_start, .cursor = beginningBefore(current, self.end), .admitted = current.position });
     }
 
@@ -492,16 +549,17 @@ const DisplayCapture = struct {
     }
 };
 
-/// Messages shown in live output, by admission id. A Message shows first as
-/// its Admission, or is listed at the opening's seam, and gains its
-/// conversation row later:
-/// at model-attempt admission, after a running tool's result when steered, or
-/// after the answer it queued behind. Admission ids follow Session positions,
-/// so the newest of each stands for every earlier one.
+/// Messages shown in live output, by admission id. Another Session's Message
+/// shows first as its Admission, and one queued at the opening is listed at
+/// its seam; each gains its conversation row later: at model-attempt
+/// admission, after a running tool's result when steered, or after the
+/// answer it queued behind. Admission ids follow Session positions, so the
+/// newest of each stands for every earlier one.
 pub const Messages = struct {
     /// The newest Message shown as its Admission or listed at the opening's seam.
     shown: u64 = 0,
-    /// The newest Message whose conversation row a read returned.
+    /// The newest Message whose conversation row a read returned, or up to
+    /// which a stop excluded every Message without one.
     answered: u64 = 0,
 
     /// Every shown Message has its conversation row before the next item, so
@@ -532,8 +590,9 @@ pub const Boundary = struct {
     admitted: u64,
 };
 
-/// One Message as a read's output shows it: its Admission live, or in the
-/// opening its row or unapplied input. `output` and `end` are output offsets
+/// One Message as a read's output shows it: live, another Session's
+/// Admission or a person's or script's row; in the opening, its row or
+/// unapplied input. `output` and `end` are output offsets
 /// until the UI records live ones. The state is as of `read_end`.
 pub const Echo = struct {
     output: u64,
@@ -564,9 +623,9 @@ pub const Echoes = struct {
 pub const Listing = union(enum) {
     /// A shown Message whose output left the view, from its own item.
     echo: Echo,
-    /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
-    /// only those not applied at `end`. `cursor` is where the next one is
-    /// searched for, backward.
+    /// Messages at positions in `[lowest, before)` at `end`, newest first:
+    /// every one live output showed, or those not applied at `end` (see
+    /// `listed`). `cursor` is where the next one is searched for, backward.
     range: struct { end: u64, lowest: u64, all: bool, cursor: protocol_reply.ActivityCursor },
 
     pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
@@ -586,8 +645,9 @@ pub const Record = struct {
     opening_count: usize = 0,
     live: [capacity]Echo = undefined,
     live_count: usize = 0,
-    /// Live echoes dropped beyond capacity: admissions echo live in position
-    /// order, so they are every admission in `[low, high]`.
+    /// Live echoes dropped beyond capacity: live echoes follow position
+    /// order, so they are every item live output showed as a Message in
+    /// `[low, high]` (see `listed`).
     dropped: ?struct { low: u64, high: u64, end: u64, read_end: u64 } = null,
 
     pub fn add(self: *Record, echo: Echo, opening: bool) void {

@@ -57,6 +57,10 @@ overflow_height: u16,
 status_height: u16,
 /// The status stands directly above the rule: it is about the input.
 status_row: u16,
+/// A queued Message's row, right above the status, when `queued_height` is
+/// one.
+queued_row: u16,
+queued_height: u16,
 /// The calls, their overflow row and the live line follow the document as
 /// the conversation's last lines, from this row.
 calls_row: u16,
@@ -97,6 +101,9 @@ pub const Input = struct {
     /// The index in `calls` of the running call whose row carries the
     /// work's clock.
     clock_call: ?usize = null,
+    /// A Message waits behind the work: its row sits above the status in a
+    /// row no other region needs, and is the first row dropped.
+    queued: bool = false,
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
@@ -140,6 +147,8 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .overflow_height = 0,
         .status_height = 0,
         .status_row = 0,
+        .queued_row = 0,
+        .queued_height = 0,
         .calls_row = 0,
         .live_row = 0,
         .live_height = 0,
@@ -219,14 +228,15 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     const budget = available - self.live_height;
     // A selected page needs a readable row so browsing can still advance.
     const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and budget > heading_height + call_rows);
-    const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve;
+    self.queued_height = @intFromBool(input.queued and budget > heading_height + call_rows + document_reserve);
+    const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve - self.queued_height;
     self.draft = draft_layout.fit(pieces, input.width - 2, input.cursor, shape, @min(draft_layout.cap(input.height), room), &self.draft_lines);
     const unreserved = input.height - self.draft.rows - self.rule_height - footer;
     // A transcript of this text shows the live line under its heading and a
     // readable row.
     const navigation: u16 = @intFromBool(unreserved > 1);
     self.browsing_height = unreserved - navigation - @intFromBool(input.live and document.text().len != 0 and unreserved > navigation + 1);
-    available = unreserved - self.live_height;
+    available = unreserved - self.live_height - self.queued_height;
     self.height = available - heading_height - call_rows;
     self.first = document.first(layout, self.height);
     const shown = document.measure(layout, self.first, self.height);
@@ -253,6 +263,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     // last line; only a whole Action is pushed down to the input.
     self.draft_top = input.height - self.line_height - self.draft.rows;
     self.status_row = self.draft_top - self.rule_height - self.status_height;
+    self.queued_row = self.status_row - self.queued_height;
     self.calls_row = self.navigation_height + self.document_offset + @as(u16, @intCast(self.document_rows));
     self.live_row = self.calls_row + call_rows + self.overflow_height;
     self.caret_row = self.draft_top + @as(u16, @intCast(shape.caret_line - self.draft.first));
@@ -364,6 +375,40 @@ test "the live line takes a row after every required row and before call rows" {
     try std.testing.expectEqual(@as(u16, 1), frame.overflow_height);
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     try std.testing.expectEqual(frame.live_row, frame.calls_row + 2);
+}
+
+test "a queued Message's row sits right above the status and is the first row dropped" {
+    var document: Viewport.Document = .{};
+    for (0..30) |_| try document.append("row\n");
+    var frame: Self = undefined;
+    var base: Self = undefined;
+    const calls = [_][]const u8{ "• First", "• Second" };
+    for (2..12) |height| for ([_][]const u8{ "", "Sent" }) |status| for ([_]bool{ false, true }) |live| {
+        var input: Input = .{ .width = 24, .height = @intCast(height), .status = status, .cursor = 0, .calls = &calls, .total_calls = 3, .live = live, .selected = false, .action_visible = false, .preview_complete = true };
+        // It never refuses a terminal the frame without it fits.
+        base.plan(&document, input) catch |err| {
+            input.queued = true;
+            try std.testing.expectError(err, frame.plan(&document, input));
+            continue;
+        };
+        input.queued = true;
+        try frame.plan(&document, input);
+        // It takes a row only from the conversation's text, never from
+        // calls, their overflow row, the live line, the status or the input.
+        try std.testing.expectEqual(@as(u16, @intFromBool(base.height != 0)), frame.queued_height);
+        try std.testing.expectEqual(base.height - frame.queued_height, frame.height);
+        try std.testing.expectEqual(base.used, frame.used);
+        try std.testing.expectEqual(base.overflow_height, frame.overflow_height);
+        try std.testing.expectEqual(base.live_height, frame.live_height);
+        try std.testing.expectEqual(base.status_row, frame.status_row);
+        try std.testing.expectEqual(base.draft_top, frame.draft_top);
+        if (frame.queued_height != 0) try std.testing.expectEqual(frame.status_row - 1, frame.queued_row);
+    };
+    // A full conversation ends right above it.
+    try frame.plan(&document, .{ .width = 80, .height = 24, .status = "", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .queued = true, .selected = false, .action_visible = false, .preview_complete = true });
+    try std.testing.expectEqual(@as(u16, 20), frame.queued_row);
+    try std.testing.expectEqual(frame.queued_row, frame.live_row + 1);
+    try std.testing.expectEqual(frame.draft_top - 1, frame.queued_row + 1);
 }
 
 test "the live row is kept only while the live line draws" {

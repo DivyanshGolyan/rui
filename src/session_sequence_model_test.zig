@@ -621,12 +621,36 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         }
         cursor = page.continuation();
     } else return error.HistoryDidNotDrain;
+    // A Message still queued shows above the input until it is taken: its
+    // Admission, found by exact content identity, must be in the frontend's
+    // queue by admission ID.
+    for (messages, digests, &reachable) |text, digest, *found| if (!found.*) {
+        found.* = try queuedAbove(front, requests, text.len, digest);
+    };
     var all_reachable = true;
     for (reachable, 0..) |found, index| {
         if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript.older });
         all_reachable = all_reachable and found;
     }
     try std.testing.expect(all_reachable);
+}
+
+fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest: [32]u8) !bool {
+    var cursor: protocol_reply.ActivityCursor = .{};
+    for (0..64) |_| {
+        const page = switch (try requests.activityPage(front.store, front.session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
+            .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
+                const queue = &front.live.queue;
+                return message.state == .queued and queue.count != 0 and queue.low <= message.admission and message.admission <= queue.high;
+            },
+            else => {},
+        };
+        cursor = page.continuation() orelse return false;
+    } else return error.ActivityDidNotDrain;
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {

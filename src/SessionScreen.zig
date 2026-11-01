@@ -9,6 +9,7 @@ const Frame = @import("TerminalFrame.zig");
 const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -570,7 +571,9 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
 /// What a frame shows around the input: the status above the rule, and under
 /// the input a notice until the next key, else the Session line. `live` is
 /// what work under way is doing now: its running call's row carries the
-/// clock, and any other work ends the shown text.
+/// clock, and any other work ends the shown text. `queue` holds the Messages
+/// waiting behind the work; the latest view shows the newest, dimmed, right
+/// above the status.
 pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
@@ -578,6 +581,7 @@ pub const Footer = struct {
     notice: []const u8 = "",
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
+    queue: ?*const queued_line.Queue = null,
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
@@ -651,6 +655,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .total_calls = live.total,
         .live = footer.live != null,
         .clock_call = clock_call,
+        .queued = !selected and footer.queue != null,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -682,6 +687,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
+    // Cells borrow the row's bytes until the frame is rendered.
+    var queued_text: [queued_line.text_capacity]u8 = undefined;
+    var queued_label: [queued_line.label_capacity]u8 = undefined;
+    if (layout.queued_height != 0) {
+        const queue = footer.queue.?;
+        const row = queued_line.row(&queued_text, &queued_label, queue.line.slice(), queue.count, size.col, self.vx.caps.unicode);
+        const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
+        _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
+        _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
+    }
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
@@ -1231,6 +1246,39 @@ test "a browsed page keeps the live line above the status" {
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
     // The page moves by the rows it shows.
     try std.testing.expectEqual(screen.height, screen.browsing_height);
+}
+
+test "a queued Message sits dimmed right above the status, in the latest view only" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const calls: View.Live = .{};
+    var queue: queued_line.Queue = .{};
+    queue.admit(4, 9);
+    queue.admit(6, 11);
+    try queue.line.set("also check the history scratch cache");
+    const footer: Footer = .{ .status = "Sent", .queue = &queue };
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("row39", rowText(screen, 6, &buffer));
+    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("Sent", rowText(screen, 8, &buffer));
+    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(column, 7).?.style.fg);
+    // A browsed page shows the conversation down to the status instead.
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
+    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    try std.testing.expect(std.mem.indexOf(u8, rowText(screen, 7, &buffer), "queued") == null);
 }
 
 test "a description's controls read escaped alike on its call row and on the live line" {

@@ -25,6 +25,7 @@ const Self = @This();
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -114,6 +115,10 @@ live: struct {
     // The lowest position of a Message seen unapplied, where a transcript's
     // search for them may stop; a stale value only costs reads.
     lowest: ?u64 = null,
+    // Messages waiting behind the work, shown dimmed above the input until
+    // live output shows them, and the newest the opening showed queued.
+    queue: queued_line.Queue = .{},
+    opened: u64 = 0,
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -169,7 +174,7 @@ const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queue = self.live.queue, .opened = self.live.opened, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -757,7 +762,7 @@ fn drawFrame(self: *Self) !void {
     const status = statusLines(&status_buffer, context.buffered(), base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = self.notice orelse "", .session = if (self.line.facts(&self.hint, self.session)) |facts| .{ .facts = facts, .shown = &self.shown } else null, .live = live, .queue = if (self.live.queue.count != 0) &self.live.queue else null }, &self.live.view));
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1240,6 +1245,9 @@ fn settleReader(self: *Self) !void {
 fn showStaged(self: *Self) !void {
     const result = &self.job.result;
     self.live.messages = result.messages;
+    // A taken Message leaves the queued row in the frame that shows it.
+    self.live.queue = result.queue;
+    self.live.opened = result.opened;
     if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
     var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd() };
     // Every cut in output order; at one offset an echo ends before a

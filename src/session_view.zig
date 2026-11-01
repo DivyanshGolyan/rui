@@ -9,6 +9,7 @@ const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -1497,21 +1498,58 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
     }
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
+/// What live output has shown of the Messages people and scripts sent. A
+/// live read updates it as it renders.
+pub const Following = struct {
+    /// Those waiting behind the work.
+    queue: *queued_line.Queue,
+    /// The newest Message the opening showed queued: it and older ones show
+    /// in the opening, never live.
+    opened: u64,
+    /// Lowered to the Admission position of each Message a stop shows.
+    lowest: *?u64,
+};
+
+/// The most queued Messages one read shows at a stop. A stop that excluded
+/// more ends its read before it; the next read shows the rest.
+pub const stop_batch = 16;
+
+/// Renders a page. A live page returns the index of the item it ended
+/// before, when a stop excluded more queued Messages than one read shows;
+/// null once every item rendered.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, following: Following) !?usize {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        if (!historical and item.value == .stop) {
+            compact_tools.* = false;
+            if (!try excludedAtStop(requests, store, session, page.facts.end, item.value.stop.cutoff, following, sink, colour)) return index;
+        }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
             .admission => |value| {
-                if (historical and value.state == .applied) continue;
+                if (historical) {
+                    if (value.state == .applied) continue;
+                } else if (value.sender == null) {
+                    // A person's or script's Message shows live when it is
+                    // taken: as its row, or at the stop that excluded it.
+                    // Until then it waits above the input.
+                    if (value.state != .applied) following.queue.admit(value.admission, item.position);
+                    continue;
+                }
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour);
             },
             .user => |value| {
-                if (!historical) continue; // Live Admission already showed it.
+                // Live, another Session's Message showed as its Admission,
+                // and one the opening showed queued never shows again.
+                if (!historical) {
+                    if (value.sender != null) continue;
+                    _ = following.queue.take(value.admission);
+                    if (value.admission <= following.opened) continue;
+                }
                 compact_tools.* = false;
                 try message(requests, store, session, item, value, .none, sink, colour);
             },
@@ -1570,5 +1608,38 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sendFailed(sink, failed.target);
             },
         }
+    }
+    return null;
+}
+
+/// Shows the queued Messages a stop excluded, oldest first, each labelled,
+/// before the stop's own line, at most `stop_batch` of them. Returns whether
+/// none is left. Their bytes belong to no item, so no transcript begins
+/// among them; a transcript that begins later lists them at its seam.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, end: u64, cutoff: u64, following: Following, sink: anytype, colour: bool) !bool {
+    const queue = following.queue;
+    const span = queue.excluded(cutoff) orelse return true;
+    sink.detach();
+    var cursor: protocol_reply.ActivityCursor = .{ .end = end, .position = queue.from - 1 };
+    var shown: usize = 0;
+    while (true) {
+        const page = switch (try requests.activityPage(store, session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| {
+            const value = switch (item.value) {
+                .admission => |value| value,
+                else => continue,
+            };
+            if (value.sender != null or value.admission < span.low) continue;
+            if (value.admission > span.high) return true;
+            if (shown == stop_batch) return false;
+            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+            following.lowest.* = @min(following.lowest.* orelse item.position, item.position);
+            if (queue.take(value.admission) and queue.count != 0) queue.from = item.position + 1;
+            shown += 1;
+        }
+        cursor = page.continuation() orelse return true;
     }
 }
