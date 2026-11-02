@@ -1701,6 +1701,73 @@ fn itemMember(data: []const u8, cursor: *const codec_abi.Cursor, member: *const 
     return .{ .parts = array };
 }
 
+/// What an accepted web_search_call item did. Its action is OpenAI's to
+/// extend: a shape Rui does not know reads as `.none`, never as a failure.
+/// Each name counts at its first appearance.
+pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi.HostedCall {
+    std.debug.assert(item.kind == .web_search_call);
+    var call: codec_abi.HostedCall = .{};
+    var action: ?u64 = null;
+    var status = false;
+    var offset = item.whole.start;
+    while (nextKey(data, &offset)) |member| {
+        const value = json.valueAt(data, @intCast(member.value));
+        offset = value.end;
+        switch (json.decodedTag(enum { status, action }, slice(data, member.key)) orelse continue) {
+            .status => if (!status) {
+                status = true;
+                call.failed = if (value.string) |text| json.decodedTag(enum { failed }, slice(data, text)) != null else false;
+            },
+            .action => if (action == null) {
+                action = member.value;
+            },
+        }
+    }
+    const start = action orelse return call;
+    if (data[@intCast(start)] != '{') return call;
+    const Strings = struct { type: ?Range = null, query: ?Range = null, url: ?Range = null, pattern: ?Range = null };
+    var strings: Strings = .{};
+    // A search may name its queries only as a list; its first then reads as the query.
+    var first_query: ?Range = null;
+    offset = start;
+    while (nextKey(data, &offset)) |member| {
+        const value = json.valueAt(data, @intCast(member.value));
+        offset = value.end;
+        if (data[@intCast(member.value)] == '[' and json.decodedTag(enum { queries }, slice(data, member.key)) != null) {
+            if (first_query == null) {
+                var element: u64 = member.value;
+                if (nextElement(data, &element)) |at| first_query = json.valueAt(data, @intCast(at)).string;
+            }
+            continue;
+        }
+        const string = value.string orelse continue;
+        const field = switch (json.decodedTag(std.meta.FieldEnum(Strings), slice(data, member.key)) orelse continue) {
+            .type => &strings.type,
+            .query => &strings.query,
+            .url => &strings.url,
+            .pattern => &strings.pattern,
+        };
+        if (field.* == null) field.* = string;
+    }
+    const kind = strings.type orelse return call;
+    switch (json.decodedTag(enum { search, open_page, find_in_page }, slice(data, kind)) orelse return call) {
+        .search => {
+            call.action = .search;
+            call.target = strings.query orelse first_query;
+        },
+        .open_page => {
+            call.action = .open_page;
+            call.target = strings.url;
+        },
+        .find_in_page => {
+            call.action = .find_in_page;
+            call.target = strings.url;
+            call.pattern = strings.pattern;
+        },
+    }
+    return call;
+}
+
 /// A block of an accepted item, whose `{` is at `start`, its members read
 /// once: its part kind, by its type, its text's contents and its whole text
 /// member.
@@ -2098,4 +2165,37 @@ test "every entry point answers the same with 0xAA or leftover scratch" {
     try describeForTesting(&events, &testing_scratch, &again);
     try std.testing.expectEqualStrings(expected.buffered(), again.buffered());
     try std.testing.expect(std.mem.indexOf(u8, expected.buffered(), "  part content output_text ok\n  bag \"annotations\":[]\n  part_end\n") != null);
+}
+
+test "a web search call reads as its action, its strings and its outcome" {
+    const Case = struct { item: []const u8, action: codec_abi.HostedAction, target: ?[]const u8 = null, pattern: ?[]const u8 = null, failed: bool = false };
+    for ([_]Case{
+        .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig \\\"io\\\"\",\"queries\":[\"a\"]}}", .action = .search, .target = "zig \\\"io\\\"" },
+        .{ .item = "{ \"action\" : { \"url\" : \"https://a.b\" , \"type\" : \"open_page\" } , \"status\" : \"failed\" }", .action = .open_page, .target = "https://a.b", .failed = true },
+        .{ .item = "{\"action\":{\"type\":\"find_in_page\",\"url\":\"u\",\"pattern\":\"p\",\"pattern\":\"q\"},\"action\":{\"type\":\"search\"}}", .action = .find_in_page, .target = "u", .pattern = "p" },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"query\":7}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[ \"first\" , \"second\" ]}}", .action = .search, .target = "first" },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[]}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[7,\"late\"]}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"future\",\"query\":\"q\"},\"status\":\"completed\"}", .action = .none },
+        .{ .item = "{\"action\":null,\"status\":null}", .action = .none },
+        .{ .item = "{\"id\":\"ws\",\"status\":\"fail\\u0065d\"}", .action = .none, .failed = true },
+    }) |case| {
+        const item: codec_abi.OutputItem = .{
+            .kind = .web_search_call,
+            .phase = .unphased,
+            .answer_phase = .unphased,
+            .omit_reasoning_text = false,
+            .whole = .{ .start = 0, .length = case.item.len },
+            .id = .{ .start = 0, .length = 0 },
+            .call = @splat(.{ .start = 0, .length = 0 }),
+            .members = undefined,
+        };
+        const call = hostedCall(case.item, &item);
+        try std.testing.expectEqual(case.action, call.action);
+        try std.testing.expectEqual(case.failed, call.failed);
+        for ([_]?Range{ call.target, call.pattern }, [_]?[]const u8{ case.target, case.pattern }) |range, expected| {
+            if (expected) |text| try std.testing.expectEqualStrings(text, slice(case.item, range.?)) else try std.testing.expect(range == null);
+        }
+    }
 }

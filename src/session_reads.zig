@@ -467,10 +467,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (job.opening) {
         var mark: ?protocol_reply.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
-            switch (item.value) {
-                .user, .assistant, .tool_result => mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
-                else => {},
-            }
+            if (conversationItem(item.value)) mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal };
         };
         // Nothing showed before the opening, so its start is a boundary even
         // when it shows nothing. Every Message it shows is at or after its
@@ -1682,9 +1679,16 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
 /// into the Conversation; before an Admission or call row it ends at the
 /// previous position, and before the first position there is nothing.
 fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.ConversationCursor {
-    return switch (first.value) {
-        .user, .assistant, .tool_result => .{ .end = end, .before_position = first.position, .before_ordinal = first.ordinal },
-        else => if (first.position > 1) .{ .end = first.position - 1 } else null,
+    if (conversationItem(first.value)) return .{ .end = end, .before_position = first.position, .before_ordinal = first.ordinal };
+    return if (first.position > 1) .{ .end = first.position - 1 } else null;
+}
+
+/// Whether an Activity row is also a Conversation item, so a cursor can
+/// name it: the kinds `ConversationItemKind` lists.
+fn conversationItem(value: protocol.ActivityItem.Value) bool {
+    return switch (value) {
+        .user, .assistant, .tool_result, .hosted_call => true,
+        .admission, .call, .outcome, .stop, .sent, .send_failed => false,
     };
 }
 
@@ -1696,6 +1700,9 @@ test "a live page's beginning precedes its first item, without repeating or skip
     for ([_]Case{
         .{ .item = .{ .position = 5, .at = 1, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
         .{ .item = .{ .position = 7, .ordinal = 2, .at = 1, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },
+        // A hosted call is a Conversation item at its own position, so the
+        // older page ends before it and never shows it again.
+        .{ .item = .{ .position = 6, .at = 1, .value = .{ .hosted_call = undefined } }, .cursor = .{ .end = 9, .before_position = 6 } },
         // Rows at position 4 that are not conversation items: the
         // Conversation before them ends at 3, so position 4's results stay
         // live and none repeats in the older page.

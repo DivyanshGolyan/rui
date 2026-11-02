@@ -67,12 +67,13 @@ pub const Prepared = struct {
                 }
             };
             const staged: Staged = .{ .io = io, .scratch = scratch, .start = self.offsets[index], .bytes = item.content.bytes, .window = &window };
-            if (item.kind == .tool_result and mode == .transcript) {
+            if ((item.kind == .tool_result or item.kind == .hosted_call) and mode == .transcript) {
                 try View.toolResult(item.presentation.?, staged, sink, colour, &compact);
                 continue;
             }
             compact = false;
             switch (item.kind) {
+                .hosted_call => try View.toolHeading(item.presentation.?, sink, colour, true),
                 .tool_result => {
                     try View.toolHeading(item.presentation.?, sink, colour, true);
                     try sink.feed("  ");
@@ -154,8 +155,9 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
     };
     var staging: Staging = .{ .io = io, .file = scratch };
     for (page.items[0..page.count], 0..) |item, index| {
-        if (item.content.bytes > item_bytes) continue;
         prepared.offsets[index] = staging.offset;
+        // A Hosted Call has no content to read.
+        if (item.content.bytes > item_bytes or item.kind == .hosted_call) continue;
         try source.read(item, index, &staging);
     }
     // Received-byte integrity does not prove that staging preserved those bytes.

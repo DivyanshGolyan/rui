@@ -416,6 +416,19 @@ pub const OutputItem = struct {
     members: Cursor,
 };
 
+/// What a hosted tool call did, as its item says: the action and the
+/// contents of its strings. A call the codec cannot read is `.none`, and
+/// still a call.
+pub const HostedAction = enum(u8) { none = 0, search = 1, open_page = 2, find_in_page = 3 };
+pub const HostedCall = struct {
+    action: HostedAction = .none,
+    /// The query a search ran, or the page an open or find read.
+    target: ?Range = null,
+    /// The text a find looked for.
+    pattern: ?Range = null,
+    failed: bool = false,
+};
+
 /// A completed response, the stages after the Host's completion gate.
 pub const Completed = struct {
     /// The verdict on the response's status, id, model and output list.

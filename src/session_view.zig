@@ -1549,6 +1549,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 };
                 try toolResult(result.presentation, Source{ .requests = requests, .store = store, .session = session, .item = item, .reference = result.content }, sink, colour, compact_tools);
             },
+            // A call the provider ran is its line alone, grouped with
+            // other tool rows like a result with no output.
+            .hosted_call => |presentation| {
+                const Empty = struct {
+                    pub fn read(_: @This(), _: anytype) !void {}
+                };
+                try toolResult(presentation, Empty{}, sink, colour, compact_tools);
+            },
             // Hidden call rows use admission-certified page metadata. Exact
             // proposal and permission inspection authenticate originals instead.
             .call => {},
@@ -1609,4 +1617,34 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
         }
         cursor = page.continuation() orelse return;
     }
+}
+
+test "hosted calls draw as tool rows: successes pack together, a failure stands apart" {
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const Empty = struct {
+        pub fn read(_: @This(), _: anytype) !void {}
+    };
+    var sink: Sink = .{};
+    var compact = false;
+    for ([_]struct { []const u8, protocol.ToolPresentation.Code }{
+        .{ "Search “zig 0.17”", .succeeded },
+        .{ "Open ziglang.org/x", .succeeded },
+        .{ "Find “Io” in ziglang.org/x", .failed },
+        .{ "Search the web", .succeeded },
+    }) |call| {
+        var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+        try description.set(call[0]);
+        try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, Empty{}, &sink, false, &compact);
+    }
+    try std.testing.expectEqualStrings(
+        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        sink.bytes[0..sink.length],
+    );
 }

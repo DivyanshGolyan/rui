@@ -79,6 +79,7 @@ const runnable_selection_sql = model_admission_domain.runnable_selection_sql;
 const schema_version = store_schema.schema_version;
 const session_stop_cutoff_sql = command_domain.session_stop_cutoff_sql;
 const settleCompactionForTesting = store_testing.settleCompactionForTesting;
+const settleItemsForTesting = store_testing.settleItemsForTesting;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
 const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
@@ -10554,7 +10555,7 @@ test "every activity row is dated by the fact that owns it" {
             .tool_result => 106,
             .outcome => 107,
             .stop => 108,
-            .sent, .send_failed => unreachable,
+            .hosted_call, .sent, .send_failed => unreachable,
         };
         try std.testing.expectEqual(expected, item.at);
         seen.insert(item.value);
@@ -12191,4 +12192,61 @@ test "saved Turn outcomes read back as the outcome that closed the Turn" {
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("completed", null));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("cancelled", 7));
     try std.testing.expectError(error.CorruptStore, TurnOutcome.decode("", null));
+}
+
+test "a web search call shows as its line, in the conversation and the activity, at its own position" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "search-config");
+    try submitTestMessage(&storage, &tmp, "search-input", "search-key", session.slice(), "what changed?");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&storage, &tmp, binding, &.{
+        "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig\\n0.17 \\\"notes\\\"\"}}",
+        "{\"type\":\"web_search_call\",\"id\":\"ws2\",\"status\":\"failed\",\"action\":{\"type\":\"open_page\",\"url\":\"https://www.ziglang.org/x\"}}",
+        "{\"type\":\"web_search_call\",\"id\":\"ws3\",\"action\":{\"type\":\"find_in_page\",\"url\":\"ziglang.org\",\"pattern\":\"Io\"}}",
+        "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+    }, "done");
+    const expected = [_]struct { []const u8, protocol.ToolPresentation.Code }{
+        .{ "Find “Io” in ziglang.org", .succeeded },
+        .{ "Open ziglang.org/x", .failed },
+        .{ "Search “zig 0.17 \"notes\"”", .succeeded },
+    };
+    var request: protocol.ConversationPage = .{};
+    try request.session.set(session.slice());
+    const page = try store_core.publicConversationPageForTesting(&storage, request);
+    // Newest first: the answer, the three calls in reverse, the Message.
+    try std.testing.expectEqual(@as(usize, 5), page.count);
+    try std.testing.expect(page.items[0].kind == .assistant);
+    for (page.items[1..4], expected, 0..) |item, want, index| {
+        try std.testing.expect(item.kind == .hosted_call);
+        try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+        try std.testing.expectEqual(page.items[0].position - 1 - index, item.position);
+        try std.testing.expectEqualStrings(want[0], item.presentation.?.description.?.slice());
+        try std.testing.expectEqual(want[1], item.presentation.?.code);
+        try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
+    }
+    try std.testing.expect(page.items[4].kind == .user);
+    // A cursor may stop at a call, and the page goes on from there.
+    request.end = page.end;
+    request.before_position = page.items[2].position;
+    const older = try store_core.publicConversationPageForTesting(&storage, request);
+    try std.testing.expectEqual(@as(usize, 2), older.count);
+    try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.description.?.slice());
+    // A call has no content to read.
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
+
+    const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
+    var calls: usize = 0;
+    for (activity.items[0..activity.count]) |item| if (item.value == .hosted_call) {
+        const want = expected[calls];
+        try std.testing.expectEqual(page.items[1 + calls].position, item.position);
+        try std.testing.expectEqualStrings(want[0], item.value.hosted_call.description.?.slice());
+        try std.testing.expectEqual(want[1], item.value.hosted_call.code);
+        calls += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), calls);
+    try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 }

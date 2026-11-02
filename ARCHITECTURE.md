@@ -939,6 +939,7 @@ The Codex source also recognizes legacy reasoning `text` and `compaction_summary
 Close consequential variants before accepting any output: item/content type, role, phase, status, annotation variant and Action control.
 V1 accepts only its text/function tool catalog and one provider-hosted tool, web search, not other hosted tools, tool programs, namespaced tools or encrypted function arguments.
 A `web_search_call` item (status absent, `completed` or `failed`) records a search the provider already ran inside the response; Rui creates no Action for it, keeps it whole in its provider bag and replays it so the next request sees what the model searched.
+The codec also reads its action (`search` with its query, or else the first of its `queries`; `open_page` with its url; `find_in_page` with its url and pattern) and whether its status is `failed`, as output metadata; an unknown action reads as no action.
 Known controls requesting those meanings (`caller:program`, asynchronous execution, a nonempty namespace or encrypted arguments) reject as `unsupported_provider_output`; preserving an unknown open field does not authorize an effect.
 Provider metadata cannot fabricate host-owned tool records, permissions, instruction updates or completed work.
 Reject provider-supplied `cell_id`, `executed_tool_calls` or `tool_calls_complete` in `internal_chat_message_metadata_passthrough` rather than promoting them to local authority.
@@ -3173,6 +3174,10 @@ Tool Call admission validates the original descriptor and atomically saves its n
 A valid Bash descriptor retains its label even when Bash is disabled and the call is rejected; malformed descriptors and unknown tools have null labels.
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
+One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the same 100-byte bound.
+The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
+Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
+Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
 
 Lightweight Current, Activity, Conversation and idle-classification reads validate call/Operation/Turn/Action linkage, complete sibling groups and public field metadata against the admission certificate without reopening command or private provider payloads.
 Presentation read work is independent of command byte length, not call count or history size.
@@ -3255,7 +3260,7 @@ The position only advances: one at or before the stored one changes nothing, so 
 A missing Session, or a position the Session has not reached, answers `mark_read_refused` with `SessionNotFound` or `PositionNotReached` and changes nothing; a canonical Store failure answers as for any request, and the client returns it as one.
 The write starts no work and changes no settings revision.
 Unlike other Session writes it touches nothing in the change ring: no Session list row shows the position, so a list watching the Session has nothing to read again.
-Wire version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, after version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Wire version 5 added the pages' `hosted_call` items, after version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 
 Opening reads the latest Activity page as before, and the page's `read_through` places the dim rule `── new since you looked ──` on a line of its own above the first shown item after it.
 The conversation opens at the latest view when the Session was never read, when no item after the position shows, or when the latest view shows the rule.
