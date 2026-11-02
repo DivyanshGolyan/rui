@@ -78,6 +78,23 @@ cases() {
 # Keep launch/wait in the shell, not a Python subprocess supervisor. The batch
 # shell remains alive through its fixture's status write; no traps, deadlines,
 # process groups or signal forwarding are added. Clock helpers exit immediately.
+with_deadline() {
+    python3 - "$@" <<'PY'
+import subprocess
+import sys
+
+seconds, command = float(sys.argv[1]), sys.argv[2:]
+process = subprocess.Popen(command)
+try:
+    sys.exit(process.wait(timeout=seconds))
+except subprocess.TimeoutExpired:
+    process.kill()
+    process.wait()
+    print(f"\nKilled after {seconds:.0f} s: the last test named above stalled.", flush=True)
+    sys.exit(124)
+PY
+}
+
 run_timed() (
     started=$(python3 - <<'PY'
 import time
@@ -141,8 +158,11 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
     names=
     phase=batch
     if [ "$part" = parallel ]; then
-        # Every other case enters the fixture boundary itself.
-        run_case execution native python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 "$test_binary"
+        # Every other case enters the fixture boundary itself. Off a TTY the
+        # unit runner prints each test's name as it starts, so a run killed
+        # at its deadline names the stalled test in this case's log, which a
+        # job timeout would discard (#755 stalled 34 minutes as "cancelled").
+        run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 "$test_binary"
     fi
     cases
     set -- $pids
