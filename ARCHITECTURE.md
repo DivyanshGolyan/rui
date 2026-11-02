@@ -2918,7 +2918,8 @@ Successful outcome aggregates do not repeat assistant rows.
 Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
 `AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare address as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for this on 2026-11-02).
 Other link targets, links inside code or emphasis, Markdown link titles and addresses longer than 2,048 bytes stay literal, and `/copy` still sends the Markdown with every address.
-Addresses stay within fixed bounds: a view keeps the addresses of its newest 512 links in 32 KiB, and a frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past either bound stays underlined but opens nothing.
+The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
+A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
 Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.
 It retains failure, indeterminate outcomes and capture or cleanup warnings even after a successful exit.
 The public result's tail delimiters control display only, never execution, permission or outcome classification.
