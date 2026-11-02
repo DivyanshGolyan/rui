@@ -56,6 +56,8 @@ def main():
             print(docker("logs", name, capture_output=True).stderr[-4000:], file=sys.stderr)
         return result.returncode
     finally:
+        # Unchecked: the tests' own result stays the outcome, and a container
+        # that failed to start leaves nothing to remove.
         subprocess.run(["docker", "rm", "--force", "--volumes", name], capture_output=True)
         shutil.rmtree(socket_dir, ignore_errors=True)
 

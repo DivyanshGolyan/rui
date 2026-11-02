@@ -38,6 +38,7 @@ const cores = .{
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
+    .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -64,7 +65,6 @@ test {
     _ = @import("TerminalEditor.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
-    _ = @import("store/wire/mysql.zig");
     inline for (cores) |core| _ = core[1];
 }
 
@@ -86,16 +86,18 @@ test "functional cores stay within the core boundary" {
     }
 }
 
-/// Every core as `importer`, a core one directory deep at most, spells its
-/// import.
+/// Every core as `importer` spells its import: relative within its own
+/// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
     @setEvalBranchQuota(10_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
+    var up: []const u8 = "";
+    for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";
     var names: [cores.len][]const u8 = undefined;
-    for (cores, &names) |core, *name| name.* = if (std.mem.startsWith(u8, core[0], directory))
+    for (cores, &names) |core, *name| name.* = if (directory.len > 0 and std.mem.startsWith(u8, core[0], directory))
         core[0][directory.len..]
     else
-        "../" ++ core[0];
+        up ++ core[0];
     return names;
 }
 
@@ -112,14 +114,6 @@ test "the HTTP/2 client's policy stays within the core boundary" {
     // may import no Rui core.
     if (core_boundary.check(@embedFile("h2/policy.zig"), &.{})) |violation| {
         std.debug.print("h2/policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
-        return error.CoreBoundaryViolation;
-    }
-}
-
-test "the MySQL wire client stays within the core boundary" {
-    // A self-contained sans-I/O core under src/store/wire/; it imports no Rui core.
-    if (core_boundary.check(@embedFile("store/wire/mysql.zig"), &.{})) |violation| {
-        std.debug.print("store/wire/mysql.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
     }
 }

@@ -11,9 +11,17 @@
 //!
 //! Packets other than result rows are decoded whole, so the receive buffer
 //! must hold `receive_buffer_min` bytes. A row streams: each value arrives as
-//! `.value` (its length) followed by `.bytes` slices, so a value of any size
-//! passes through a fixed buffer. Slices in events borrow the driver's input
-//! and stay valid until the driver discards the bytes they cover.
+//! `.value` (its length) followed by `.bytes` slices, so a row of up to the
+//! single-packet limit (16 MiB) passes through a fixed buffer. Slices in
+//! events borrow the driver's input and stay valid until the driver discards
+//! the bytes they cover.
+//!
+//! Session settings are the driver's: the handshake can only name
+//! utf8mb4_0900_ai_ci (a collation id fits one byte there), so the driver sets
+//! utf8mb4_0900_bin and the strict sql_mode with NO_BACKSLASH_ESCAPES by
+//! query, and can confirm the latter through `Status.no_backslash_escapes`.
+//! Which transports to offer is also the driver's policy; the client only
+//! refuses to send the password where it could be read.
 //!
 //! A command payload of 0xFFFFFF bytes or more would need a continuation
 //! packet. Rui's statements stay far below that (16 KiB batches, 128 KiB
@@ -237,6 +245,7 @@ const Capability = struct {
     const connect_with_db: u32 = 1 << 3;
     const protocol_41: u32 = 1 << 9;
     const ssl: u32 = 1 << 11;
+    const transactions: u32 = 1 << 13;
     const secure_connection: u32 = 1 << 15;
     const multi_statements: u32 = 1 << 16;
     const multi_results: u32 = 1 << 17;
@@ -249,7 +258,7 @@ const Capability = struct {
     /// INTERACTIVE (selects interactive_timeout), COMPRESS, SESSION_TRACK and
     /// OPTIONAL_RESULTSET_METADATA (column definitions are how a caller
     /// checks result types).
-    const required = found_rows | connect_with_db | protocol_41 | secure_connection |
+    const required = found_rows | connect_with_db | protocol_41 | transactions | secure_connection |
         multi_statements | multi_results | plugin_auth | plugin_auth_lenenc_client_data | deprecate_eof;
 };
 
@@ -257,7 +266,8 @@ const State = union(enum) {
     greeting,
     /// The SSLRequest went out; the next `read` sends the handshake response.
     tls,
-    auth: enum { scramble_sent, password_sent },
+    auth: Auth,
+
     ready,
     /// A query went out; its next statement's first packet is due.
     result,
@@ -265,6 +275,14 @@ const State = union(enum) {
     rows,
     row: Row,
     closed,
+
+    const Auth = enum {
+        /// The handshake response's scramble went out.
+        scramble_sent,
+        /// An AuthSwitchRequest's scramble went out; no second switch follows.
+        switched,
+        password_sent,
+    };
 
     const Row = struct {
         columns_left: u16,
@@ -372,22 +390,24 @@ pub const Client = struct {
         }
         if (capabilities & Capability.ssl == 0) return error.TlsRefused;
         var writer: PacketWriter = .start(out, self.nextSequence());
-        writer.int(u32, Capability.required | Capability.ssl);
-        writer.int(u32, max_packet_size);
-        writer.int(u8, charset_utf8mb4_0900_ai_ci);
-        writer.zeros(23);
+        self.writeLoginPrefix(&writer);
         self.state = .tls;
         return .{ .consumed = consumed, .event = .{ .start_tls = writer.finish() } };
     }
 
-    /// HandshakeResponse41.
-    fn writeResponse(self: *Client, out: []u8) usize {
-        const capabilities = Capability.required | if (self.options.transport == .tcp_tls) Capability.ssl else 0;
-        var writer: PacketWriter = .start(out, self.nextSequence());
-        writer.int(u32, capabilities);
+    /// The 32 bytes an SSLRequest consists of and a HandshakeResponse41
+    /// starts with.
+    fn writeLoginPrefix(self: *const Client, writer: *PacketWriter) void {
+        writer.int(u32, Capability.required | if (self.options.transport == .tcp_tls) Capability.ssl else 0);
         writer.int(u32, max_packet_size);
         writer.int(u8, charset_utf8mb4_0900_ai_ci);
         writer.zeros(23);
+    }
+
+    /// HandshakeResponse41.
+    fn writeResponse(self: *Client, out: []u8) usize {
+        var writer: PacketWriter = .start(out, self.nextSequence());
+        self.writeLoginPrefix(&writer);
         writer.nulString(self.options.user);
         if (self.options.password.len == 0) {
             writer.int(u8, 0);
@@ -404,7 +424,6 @@ pub const Client = struct {
     fn readAuth(self: *Client, in: []const u8, out: []u8) Error!Step {
         const payload = try self.packet(in) orelse return .more;
         const consumed = header_len + payload.len;
-        if (payload.len == 0) return error.ProtocolViolation;
         switch (payload[0]) {
             0x00 => {
                 _ = try parseOk(payload);
@@ -421,9 +440,12 @@ pub const Client = struct {
             0x01 => {
                 if (payload.len != 2) return error.ProtocolViolation;
                 switch (payload[1]) {
-                    3 => return .{ .consumed = consumed, .event = null },
+                    3 => {
+                        if (self.state.auth == .password_sent) return error.ProtocolViolation;
+                        return .{ .consumed = consumed, .event = null };
+                    },
                     4 => {
-                        if (self.state.auth != .scramble_sent) return error.ProtocolViolation;
+                        if (self.state.auth == .password_sent) return error.ProtocolViolation;
                         if (!self.options.transport.secure()) return error.AuthMethodRefused;
                         var writer: PacketWriter = .start(out, self.nextSequence());
                         writer.nulString(self.options.password);
@@ -443,6 +465,7 @@ pub const Client = struct {
                 const data = cursor.rest();
                 if (data.len != nonce_len + 1 or data[nonce_len] != 0) return error.ProtocolViolation;
                 self.nonce = data[0..nonce_len].*;
+                self.state = .{ .auth = .switched };
                 var writer: PacketWriter = .start(out, self.nextSequence());
                 if (self.options.password.len != 0) writer.bytes(&scramble(self.options.password, &self.nonce));
                 return .{ .consumed = consumed, .event = .{ .send = writer.finish() } };
@@ -454,7 +477,6 @@ pub const Client = struct {
     fn readResult(self: *Client, in: []const u8) Error!Step {
         const payload = try self.packet(in) orelse return .more;
         const consumed = header_len + payload.len;
-        if (payload.len == 0) return error.ProtocolViolation;
         switch (payload[0]) {
             0x00 => {
                 const ok = try parseOk(payload);
@@ -502,6 +524,7 @@ pub const Client = struct {
 
     fn readRowStart(self: *Client, in: []const u8) Error!Step {
         if (in.len < header_len + 1) return .more;
+        _ = try payloadLen(in);
         // A row's first byte is a value's length prefix, never 0xFE (a value
         // of 16 MiB or more) or 0xFF; those open the terminating OK or an ERR.
         switch (in[header_len]) {
@@ -576,7 +599,7 @@ pub const Client = struct {
     /// `in` does not hold all of it yet.
     fn packet(self: *Client, in: []const u8) Error!?[]const u8 {
         if (in.len < header_len) return null;
-        const len = std.mem.readInt(u24, in[0..3], .little);
+        const len = try payloadLen(in);
         if (len > max_control_payload) return error.PacketTooLarge;
         if (in.len < header_len + len) return null;
         _ = try self.header(in);
@@ -585,8 +608,8 @@ pub const Client = struct {
 
     /// Checks the packet header at the start of `in` and returns its length.
     fn header(self: *Client, in: []const u8) Error!u32 {
-        const len = std.mem.readInt(u24, in[0..3], .little);
-        if (len > max_payload or in[3] != self.sequence) return error.ProtocolViolation;
+        const len = try payloadLen(in);
+        if (in[3] != self.sequence) return error.ProtocolViolation;
         self.sequence +%= 1;
         return len;
     }
@@ -641,6 +664,14 @@ fn parseErr(payload: []const u8) Error!ServerError {
     // A server refusing the connection before the handshake sends no state.
     if (payload.len >= 9 and payload[3] == '#') sql_state = (try cursor.take(6))[1..6].*;
     return .{ .code = code, .sql_state = sql_state, .message = cursor.rest() };
+}
+
+/// The length in the packet header at the start of `in`. No packet the
+/// server sends on these paths is empty, and none needs a continuation.
+fn payloadLen(in: []const u8) Error!u32 {
+    const len = std.mem.readInt(u24, in[0..3], .little);
+    if (len == 0 or len > max_payload) return error.ProtocolViolation;
+    return len;
 }
 
 fn writeHeader(out: *[4]u8, len: u24, sequence: u8) void {
@@ -939,13 +970,16 @@ test "the scramble matches an independent caching_sha2_password computation" {
 
 const greeting = cached_tcp.chunks[0][1];
 
+const plain_options: Options = .{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp };
+const tls_options: Options = .{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp_tls };
+
 fn readOne(client: *Client, in: []const u8) Error!Step {
     var out: [send_buffer_min]u8 = undefined;
     return client.read(in, &out);
 }
 
 test "TLS: the SSLRequest goes first, and the handshake response follows it after the TLS handshake" {
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp_tls });
+    var client: Client = try .init(tls_options);
     var out: [send_buffer_min]u8 = undefined;
     const first = try client.read(greeting, &out);
     try std.testing.expectEqual(greeting.len, first.consumed);
@@ -967,22 +1001,22 @@ test "TLS is refused by a server that does not offer it" {
     // The capability's low half follows the version, connection id and nonce head.
     const at = 4 + 1 + std.mem.indexOfScalar(u8, edited[5..], 0).? + 1 + 4 + 8 + 1;
     edited[at + 1] &= ~@as(u8, Capability.ssl >> 8);
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp_tls });
+    var client: Client = try .init(tls_options);
     try std.testing.expectError(error.TlsRefused, readOne(&client, &edited));
     // The same greeting without TLS asked for is accepted.
-    var plain: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var plain: Client = try .init(plain_options);
     _ = try readOne(&plain, &edited);
 }
 
 test "MariaDB and MySQL before 8.4 are refused" {
     // MariaDB 11.4.13's greeting.
     const mariadb = comptime hex("5b0000000a31312e342e31332d4d6172696144422d75627532343034000300000050683a2859677c5800feff2d0200ff81150000000000001d000000244821696e6b4f297d5d3a47006d7973716c5f6e61746976655f70617373776f726400");
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var client: Client = try .init(plain_options);
     try std.testing.expectError(error.UnsupportedServer, readOne(&client, mariadb));
     var edited = greeting[0..greeting.len].*;
     try std.testing.expectEqualStrings("8.4.13", edited[5..11]);
     edited[7] = '0';
-    client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    client = try .init(plain_options);
     try std.testing.expectError(error.UnsupportedServer, readOne(&client, &edited));
     try checkVersion("9.1.0");
     try checkVersion("8.4.0");
@@ -995,11 +1029,11 @@ fn authSwitch(comptime body: []const u8) *const [5 + body.len]u8 {
 }
 
 test "an authentication switch is followed only to caching_sha2_password" {
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var client: Client = try .init(plain_options);
     _ = try readOne(&client, greeting);
     try std.testing.expectError(error.AuthMethodRefused, readOne(&client, authSwitch("mysql_native_password\x00aaaaaaaaaaaaaaaaaaaa\x00")));
 
-    client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    client = try .init(plain_options);
     _ = try readOne(&client, greeting);
     var out: [send_buffer_min]u8 = undefined;
     const fresh = "0123456789abcdefghij";
@@ -1011,19 +1045,46 @@ test "an authentication switch is followed only to caching_sha2_password" {
 test "a packet out of sequence is a protocol violation" {
     var edited = greeting[0..greeting.len].*;
     edited[3] = 1;
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var client: Client = try .init(plain_options);
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, &edited));
 }
 
 /// A client that has sent a query; the next packet's sequence id is 1.
 fn querying() !Client {
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var client: Client = try .init(plain_options);
     client.state = .ready;
     _ = try client.query(1);
     return client;
 }
 
+test "an authentication exchange takes each step at most once" {
+    const fresh = "0123456789abcdefghij";
+    const to_sha2 = authSwitch("caching_sha2_password\x00" ++ fresh ++ "\x00");
+    var client: Client = try .init(plain_options);
+    _ = try readOne(&client, greeting);
+    _ = try readOne(&client, to_sha2);
+    // A second switch, with the sequence id it would carry.
+    var again = to_sha2.*;
+    again[3] = 4;
+    try std.testing.expectError(error.ProtocolViolation, readOne(&client, &again));
+
+    var unix: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .unix_socket });
+    _ = try readOne(&unix, greeting);
+    _ = try readOne(&unix, "\x02\x00\x00\x02\x01\x04");
+    // After the password, only OK or ERR may follow.
+    try std.testing.expectError(error.ProtocolViolation, readOne(&unix, "\x02\x00\x00\x04\x01\x03"));
+}
+
 test "malformed results are refused" {
+    // An empty packet where a row may start, followed by bytes that would
+    // read as an ERR's first byte.
+    var empty_row = try querying();
+    empty_row.column_count = 1;
+    empty_row.state = .rows;
+    try std.testing.expectError(error.ProtocolViolation, readOne(&empty_row, "\x00\x00\x00\x01\xff\x00\x00\x02"));
+    // An empty packet where a statement's result is due.
+    var empty_result = try querying();
+    try std.testing.expectError(error.ProtocolViolation, readOne(&empty_result, "\x00\x00\x00\x01"));
     // A LOCAL INFILE request, which the client never enables.
     var client = try querying();
     try std.testing.expectError(error.ProtocolViolation, readOne(&client, "\x05\x00\x00\x01\xfbfile"));
@@ -1046,14 +1107,14 @@ test "malformed results are refused" {
 }
 
 test "a query that needs a continuation packet is refused" {
-    var client: Client = try .init(.{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp });
+    var client: Client = try .init(plain_options);
     client.state = .ready;
     try std.testing.expectError(error.StatementTooLarge, client.query(max_payload));
     try std.testing.expectEqualSlices(u8, &.{ 0xFE, 0xFF, 0xFF, 0, 3 }, &try client.query(max_payload - 1));
 }
 
 test "options that cannot cross the wire are refused" {
-    const valid: Options = .{ .user = "rui", .password = "pw", .database = "rui", .transport = .tcp };
+    const valid = plain_options;
     _ = try Client.init(valid);
     var options = valid;
     options.user = "r\x00ui";
@@ -1068,10 +1129,10 @@ test "options that cannot cross the wire are refused" {
 
 const cold_cache_tcp: Capture = .{
     .transport = .tcp,
-    .password = "5a84b390fc7c7f3979818722dff1fcec",
+    .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e3133000800000011495d0f0a04713500ffffff0200ffdf15000000000000000000002703267a55252a51526c4d3b0063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff0000000000000000000000000000000000000000000000727569002038d157ff48f79261eb3eaf0c53554e1d0a95262d52d59c1e57b85c8103d4a6bd7275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("4a0000000a382e342e31330008000000756f010f5b063e0500ffffff0200ffdf1500000000000000000000510d4954045a0374594652310063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff0000000000000000000000000000000000000000000000727569002078a1912d08c022a53612c2f0a09862819c582b3c3ebf18a367a7f96b105340257275690063616368696e675f736861325f70617373776f726400") },
         .{ .server, hex("020000020104") },
         .{ .server, hex("33000003ff8604233038533031476f7420616e206572726f722072656164696e6720636f6d6d756e69636174696f6e207061636b657473") },
     },
@@ -1081,8 +1142,8 @@ const wrong_password_unix: Capture = .{
     .transport = .unix_socket,
     .password = "not the password",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e31330009000000231243307a0c176900ffffff0200ffdf150000000000000000000040183e74353662383b7a6d2c0063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff00000000000000000000000000000000000000000000007275690020cd11f37f1bcba246f41fada2d066de5c9a3cc261cf45da59c23a9319a1e883587275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("4a0000000a382e342e313300090000005d74142c16232c7600ffffff0200ffdf15000000000000000000000b6d4331653e137743205a010063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff00000000000000000000000000000000000000000000007275690020034cfe28e0ed8eb93ffda1079f2d658d51660e12d8bb469a9e1b5ae0885499ce7275690063616368696e675f736861325f70617373776f726400") },
         .{ .server, hex("020000020104") },
         .{ .client, hex("110000036e6f74207468652070617373776f726400") },
         .{ .server, hex("47000004ff15042332383030304163636573732064656e69656420666f72207573657220277275692740276c6f63616c686f73742720287573696e672070617373776f72643a2059455329") },
@@ -1091,12 +1152,11 @@ const wrong_password_unix: Capture = .{
 
 const cached_tcp: Capture = .{
     .transport = .tcp,
-    .password = "5a84b390fc7c7f3979818722dff1fcec",
+    .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e3133000b0000000a237c2e5569670600ffffff0200ffdf15000000000000000000002323152219582c6d681049140063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff0000000000000000000000000000000000000000000000727569002001aea2310db82ec01a6b19c846d783c2a30b31901ef42cf702304b93527333c87275690063616368696e675f736861325f70617373776f726400") },
-        .{ .server, hex("020000020103") },
-        .{ .server, hex("0700000300000002000000") },
+        .{ .server, hex("4a0000000a382e342e3133000b000000707b484b7941282700ffffff0200ffdf15000000000000000000005d524949356c2a3b3c082c690063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff000000000000000000000000000000000000000000000072756900208260317366b9dafca8be6660ee581e0dfc982129abb114d18d57afebce2648327275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("0200000201030700000300000002000000") },
         .{ .client, hex("160000000353454c4543542043555252454e545f555345522829") },
         .{ .server, hex("010000010124000002036465660000000e43555252454e545f555345522829000cff0080040000fd00001f00000600000305727569402507000004fe000002000000") },
         .{ .client, hex("0100000001") },
@@ -1105,12 +1165,12 @@ const cached_tcp: Capture = .{
 
 const multi_statement: Capture = .{
     .transport = .unix_socket,
-    .password = "5a84b390fc7c7f3979818722dff1fcec",
+    .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e3133000e0000002916213506737e0600ffffff0200ffdf15000000000000000000002051382a781f311e716463600063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff00000000000000000000000000000000000000000000007275690020b3c45eab9e2df8ec822eae5b092f474f2f434bd972eb7ba49d4d1c07f99b29b27275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("4a0000000a382e342e3133000e0000005c63307b3a39013d00ffffff0200ffdf150000000000000000000071500a051906267e7e133c5b0063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff00000000000000000000000000000000000000000000007275690020715ec1979ce9997fca9c7a522bce7f873861d4016677c72bc0caefb1dac1f6ef7275690063616368696e675f736861325f70617373776f726400") },
         .{ .server, hex("020000020104") },
-        .{ .client, hex("21000003356138346233393066633763376633393739383138373232646666316663656300") },
+        .{ .client, hex("21000003326562343462663831313330336336613635363437333431646562633261666300") },
         .{ .server, hex("0700000400000002000000") },
         .{ .client, hex("08010000035345542053455353494f4e2073716c5f6d6f6465203d20275354524943545f414c4c5f5441424c45532c4e4f5f4241434b534c4153485f45534341504553273b435245415445205441424c4520742028696420424947494e54205052494d415259204b45592c20762056415242494e41525928313629204e4f54204e554c4c2c206e20424947494e54204e554c4c293b494e5345525420494e544f20742056414c5545532028312c20582736383639272c204e554c4c292c2028322c205827272c2037293b555044415445207420534554206e203d2037205748455245206964203d20323b53454c4543542069642c20762c206e2046524f4d2074204f52444552204259206964") },
         .{ .server, hex("070000010000000a020100") },
@@ -1124,10 +1184,10 @@ const multi_statement: Capture = .{
 
 const error_stops: Capture = .{
     .transport = .unix_socket,
-    .password = "5a84b390fc7c7f3979818722dff1fcec",
+    .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e3133000f000000140e470b2101730900ffffff0200ffdf15000000000000000000001d012d6d4f254d6c612a3f610063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff00000000000000000000000000000000000000000000007275690020b41f2bb91370c5c9547b3e4387fb2b70d06dd6ef95b732764bf4de4204babafb7275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("4a0000000a382e342e3133000f000000110a1b26676b120100ffffff0200ffdf1500000000000000000000554a74331b530e36411876560063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff000000000000000000000000000000000000000000000072756900209bec913ebc189f5e238c40ea9f75908b52d6ac29f1c69c61e91d9d79903d20ed7275690063616368696e675f736861325f70617373776f726400") },
         .{ .server, hex("020000020103") },
         .{ .server, hex("0700000300000002000000") },
         .{ .client, hex("6e00000003494e5345525420494e544f20742056414c5545532028332c205827272c204e554c4c293b20494e5345525420494e544f20742056414c5545532028332c205827272c204e554c4c293b20494e5345525420494e544f20742056414c5545532028342c205827272c204e554c4c29") },
@@ -1141,10 +1201,10 @@ const error_stops: Capture = .{
 
 const transaction: Capture = .{
     .transport = .unix_socket,
-    .password = "5a84b390fc7c7f3979818722dff1fcec",
+    .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
-        .{ .server, hex("4a0000000a382e342e313300100000001f325612450c090b00ffffff0200ffdf15000000000000000000000c4422010a216e28222c7b030063616368696e675f736861325f70617373776f726400") },
-        .{ .client, hex("5f0000010a822b0100000001ff0000000000000000000000000000000000000000000000727569002087644fb6c662809be27452daf446335ca6b1ba65942a2bd84598eb78364e63827275690063616368696e675f736861325f70617373776f726400") },
+        .{ .server, hex("4a0000000a382e342e31330010000000107643261530222f00ffffff0200ffdf1500000000000000000000052d6875622e5f345768066d0063616368696e675f736861325f70617373776f726400") },
+        .{ .client, hex("5f0000010aa22b0100000001ff00000000000000000000000000000000000000000000007275690020b92cc520b7830465d7bfe9e90a2f9d06198a70798368828ac36d66073a5542db7275690063616368696e675f736861325f70617373776f726400") },
         .{ .server, hex("020000020103") },
         .{ .server, hex("0700000300000002000000") },
         .{ .client, hex("3100000003424547494e3b20555044415445207420534554206e203d2031205748455245206964203d20313b20524f4c4c4241434b") },

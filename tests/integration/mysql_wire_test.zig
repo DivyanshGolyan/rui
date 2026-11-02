@@ -193,7 +193,6 @@ test "a multi-statement query reports each statement, matched rows and every val
     const driver = try std.testing.allocator.create(Driver);
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
-    defer driver.close() catch {};
 
     var transcript = try driver.run(
         "SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES';" ++
@@ -222,6 +221,7 @@ test "a multi-statement query reports each statement, matched rows and every val
         \\value 1 7
         \\rows_end no_backslash_escapes
     );
+    try driver.close();
 }
 
 test "a failing statement ends the query, and the statements after it never run" {
@@ -230,7 +230,6 @@ test "a failing statement ends the query, and the statements after it never run"
     const driver = try std.testing.allocator.create(Driver);
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
-    defer driver.close() catch {};
 
     var transcript = try driver.run(
         "INSERT INTO t VALUES (3, X'', NULL); INSERT INTO t VALUES (3, X'', NULL); INSERT INTO t VALUES (4, X'', NULL)",
@@ -247,6 +246,7 @@ test "a failing statement ends the query, and the statements after it never run"
         \\value 1 0
         \\rows_end
     );
+    try driver.close();
 }
 
 test "OK packets report an open transaction" {
@@ -255,7 +255,6 @@ test "OK packets report an open transaction" {
     const driver = try std.testing.allocator.create(Driver);
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
-    defer driver.close() catch {};
 
     var transcript = try driver.run("BEGIN; UPDATE t SET n = 1 WHERE id = 1; ROLLBACK");
     try transcript.expect(
@@ -263,6 +262,7 @@ test "OK packets report an open transaction" {
         \\ok 1 more in_transaction
         \\ok 0
     );
+    try driver.close();
 }
 
 test "a value larger than the receive buffer streams through it" {
@@ -271,12 +271,11 @@ test "a value larger than the receive buffer streams through it" {
     const driver = try std.testing.allocator.create(Driver);
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
-    defer driver.close() catch {};
 
     const len = 200_000;
     var transcript = try driver.run(std.fmt.comptimePrint("SELECT REPEAT('x', {d}) AS big", .{len}));
-    try std.testing.expect(transcript.chunks > len / mysql.receive_buffer_min);
     defer transcript.deinit();
+    try std.testing.expect(transcript.chunks > len / mysql.receive_buffer_min);
     const head = "columns 1\ncolumn big medium_blob\nrow\nvalue 200000 ";
     const tail = "\nrows_end";
     const text = transcript.text.written();
@@ -285,4 +284,5 @@ test "a value larger than the receive buffer streams through it" {
     const value = text[head.len .. text.len - tail.len];
     try std.testing.expectEqual(len, value.len);
     try std.testing.expectEqual(len, std.mem.count(u8, value, "x"));
+    try driver.close();
 }
