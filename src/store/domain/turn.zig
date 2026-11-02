@@ -151,14 +151,6 @@ pub fn recordContinuation(self: *Store, turn_id: u64, session_ref: []const u8) !
     if (c.sqlite3_changes(self.database) > 1) return error.CorruptStore;
 }
 
-pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {
-    const statement = try store_core.cached(self, "SELECT outcome_code FROM turn WHERE turn_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, turn_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL;
-}
-
 /// The Session's next position, or null when it does not exist: what page
 /// cursors and existence checks need, without its 4.6 KB configuration.
 pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {

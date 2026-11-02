@@ -414,13 +414,17 @@ pub const Store = struct {
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key));
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.result, command_domain.commandResult(&access, key));
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {

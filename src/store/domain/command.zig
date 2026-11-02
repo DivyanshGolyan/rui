@@ -12,7 +12,6 @@ const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
-const Access = @import("../access.zig").Access;
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
@@ -951,152 +950,6 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     return .{ .accepted = .{ .replayed = false } };
 }
 
-pub fn observeCommandLocked(self: *Store, key: []const u8) !CommandObservation {
-    const existing = try readExistingCommand(self, key);
-    const command = existing orelse return .{ .status = .absent };
-    var observation = CommandObservation{
-        .status = if (command.accepted) .accepted else .rejected,
-        .kind = command.kind,
-        .revision = command.revision,
-        .created = command.created,
-    };
-    observation.target = command.target;
-    observation.code = command.code;
-    if (command.kind == .message and command.accepted) {
-        const content_id = command.primary_content_id orelse
-            return error.CorruptStore;
-        const metadata = try content_domain.readContentMetadata(self, content_id);
-        observation.message = .{
-            .content = .{ .length = metadata.length, .digest = metadata.digest },
-            .queue = try readMessageQueue(
-                self,
-                key,
-                command.target.slice(),
-                content_id,
-                command.accepted,
-            ),
-        };
-        const queue = observation.message.?.queue orelse return error.CorruptStore;
-        switch (queue.state) {
-            .queued, .processing => {
-                observation.message.?.progress = try readMessageProgress(self, command.target.slice(), queue.state);
-            },
-            else => {},
-        }
-    } else if (command.kind == .session_stop and command.accepted) {
-        const selection = try readSessionStopSelection(self, key);
-        observation.session_stop = .{
-            .selection = selection,
-            .completion = try sessionStopCompletion(self, selection),
-        };
-    } else if (command.kind == .model_interruption) {
-        observation.model_interruption = try readModelInterruptionTarget(self, key);
-    } else if (command.kind == .permission_decision) {
-        const target = try readPermissionTarget(self, key);
-        observation.permission_action_id = target.action_id;
-        observation.permission_decision = target.decision;
-    }
-    return observation;
-}
-
-fn readMessageQueue(
-    self: *Store,
-    command_key: []const u8,
-    session_ref: []const u8,
-    content_id: i64,
-    accepted: bool,
-) !?AcceptedMessageQueue {
-    const statement = try store_core.cached(
-        self,
-        "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
-            "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
-            "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
-            "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
-            "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END " ++
-            "FROM message_admission m " ++
-            "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
-            "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
-            "WHERE m.command_key=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return if (accepted) error.CorruptStore else null;
-    if (step != c.SQLITE_ROW) return error.CorruptStore;
-    if (!accepted) return error.CorruptStore;
-    var stop_key: protocol.Bounded(128) = .{};
-    const excluding_stop = if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL)
-        null
-    else blk: {
-        try sqlite.readText(statement, 9, &stop_key);
-        break :blk stop_key.slice();
-    };
-    const projection = try readMessageProjectionRow(statement, excluding_stop);
-    if (!projection.session.eql(session_ref) or projection.content_id != content_id or
-        !projection.command_key.eql(command_key)) return error.CorruptStore;
-    return switch (projection.state) {
-        .pending => .{ .admission_id = projection.admission_id, .state = .queued },
-        .excluded => blk: {
-            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-            try code.set("session_stopped");
-            break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
-        },
-        .applied => |applied| blk: {
-            const outcome = applied.outcome_code orelse
-                break :blk .{ .admission_id = projection.admission_id, .state = .{ .processing = applied.binding } };
-            break :blk switch (try TurnOutcome.decode(outcome.slice(), applied.outcome_content_id)) {
-                .completed => |answer_id| completed: {
-                    const answer = try content_domain.readContentMetadata(self, answer_id);
-                    break :completed .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
-                        .binding = applied.binding,
-                        .answer = .{ .length = answer.length, .digest = answer.digest },
-                    } } };
-                },
-                .cancelled => .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } },
-                .retry_exhausted, .resource_exceeded, .failed => .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } },
-            };
-        },
-    };
-}
-
-/// A pending Message's progress is its Session's work: its own active
-/// Turn, or the work ahead of it in the queue.
-fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
-    const session = (try configuration_domain.readSessionFacts(self, session_ref, null)) orelse return error.CorruptStore;
-    const work = (try report_domain.readWorkLocked(self, session_ref, session.created_at, try store_core.readUnixMilliseconds(self.io))).work;
-    if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
-    return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
-}
-
-pub fn commandResultLocked(self: *Store, key: []const u8) !ContentReference {
-    const statement = try store_core.cached(
-        self,
-        "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
-            "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-            "AND m.admission_id<=stopped.admission_cutoff) FROM core_command command " ++
-            "JOIN message_admission m ON m.command_key=command.command_key " ++
-            "LEFT JOIN turn t ON t.turn_id=m.turn_id WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, key);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.ResultNotFound;
-    if (step != c.SQLITE_ROW) return error.ResultReadFailed;
-    if (c.sqlite3_column_int(statement, 2) != 0 and c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) {
-        return error.ResultFailed;
-    }
-    if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return error.ResultNotReady;
-    var outcome: protocol.Bounded(protocol.max_code_bytes) = .{};
-    try sqlite.readText(statement, 0, &outcome);
-    switch (try TurnOutcome.decode(outcome.slice(), try sqlite.readNullablePositiveI64(statement, 1))) {
-        .completed => |content_id| {
-            const metadata = try content_domain.readContentMetadata(self, content_id);
-            return .{ .length = metadata.length, .digest = metadata.digest };
-        },
-        .cancelled, .retry_exhausted, .resource_exceeded, .failed => return error.ResultFailed,
-    }
-}
-
 const ExistingCommand = struct {
     kind: protocol.CommandKind,
     target: protocol.Bounded(protocol.max_session_bytes),
@@ -1191,16 +1044,6 @@ pub fn classify(
     return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
 }
 
-/// `lookupCommand` for unconverted code.
-fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(&a, key, &saved);
-    try a.run();
-    return savedAnswer(&saved);
-}
-
 pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
     const cutoff = try latestSessionStopCutoff(self, session_ref);
     const statement = try store_core.cached(self, pending_message_count_sql);
@@ -1226,71 +1069,6 @@ pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
         },
         else => error.SessionStopReadFailed,
     };
-}
-
-fn readSessionStopSelection(self: *Store, command_key: []const u8) !SessionStopSelection {
-    const statement = try store_core.cached(
-        self,
-        "SELECT selected_turn_id,admission_cutoff FROM session_stop WHERE command_key=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const cutoff = c.sqlite3_column_int64(statement, 1);
-    if (cutoff < 0) return error.CorruptStore;
-    return .{
-        .selected_turn_id = if (try sqlite.readNullablePositiveI64(statement, 0)) |value| @intCast(value) else null,
-        .admission_cutoff = @intCast(cutoff),
-    };
-}
-
-fn readModelInterruptionTarget(self: *Store, command_key: []const u8) !ModelInterruptionTarget {
-    const statement = try store_core.cached(
-        self,
-        "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    var target = ModelInterruptionTarget{
-        .session = .{},
-        .turn_id = 0,
-        .operation_id = 0,
-    };
-    try sqlite.readText(statement, 0, &target.session);
-    var turn_text: protocol.Bounded(20) = .{};
-    try sqlite.readText(statement, 1, &turn_text);
-    var operation_text: protocol.Bounded(20) = .{};
-    try sqlite.readText(statement, 2, &operation_text);
-    target.turn_id = std.fmt.parseInt(u64, turn_text.slice(), 10) catch return error.CorruptStore;
-    target.operation_id = std.fmt.parseInt(u64, operation_text.slice(), 10) catch return error.CorruptStore;
-    return target;
-}
-
-const PermissionTarget = struct {
-    action_id: u64,
-    decision: protocol.PermissionDecision,
-};
-
-fn readPermissionTarget(self: *Store, command_key: []const u8) !PermissionTarget {
-    const statement = try store_core.cached(self, "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    var value: protocol.Bounded(20) = .{};
-    try sqlite.readText(statement, 0, &value);
-    var decision: protocol.Bounded(16) = .{};
-    try sqlite.readText(statement, 1, &decision);
-    return .{
-        .action_id = std.fmt.parseInt(u64, value.slice(), 10) catch return error.CorruptStore,
-        .decision = std.meta.stringToEnum(protocol.PermissionDecision, decision.slice()) orelse
-            return error.CorruptStore,
-    };
-}
-
-fn sessionStopCompletion(self: *Store, selection: SessionStopSelection) !protocol.SessionStopCompletion {
-    const turn_id = selection.selected_turn_id orelse return .completed;
-    return if (try turn_domain.turnIsComplete(self, turn_id)) .completed else .pending;
 }
 
 const insert_command = rsql.Write(.{
@@ -1340,43 +1118,230 @@ pub fn queueCommand(
     });
 }
 
+/// An accepted Message's admission, the Turn that applied it, the stop
+/// that excluded it while no Turn did, and the metadata of its text and
+/// of its answer, with its Session's creation time for its progress.
+const message_observation = rsql.Read(.{
+    .sql = "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
+        "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
+        "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
+        "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
+        "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END AS excluding_stop," ++
+        "input.byte_length AS input_length,input.digest AS input_digest,answer.byte_length AS answer_length,answer.digest AS answer_digest," ++
+        "s.created_at " ++
+        "FROM message_admission m JOIN content input ON input.content_id=m.content_id JOIN session s ON s.session_ref=m.session_ref " ++
+        "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
+        "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+        "LEFT JOIN content answer ON answer.content_id=t.outcome_content_id " ++
+        "WHERE m.command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct {
+        session_ref: protocol.Bounded(protocol.max_session_bytes),
+        content_id: rsql.Positive,
+        admission_id: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        turn_id: ?rsql.Positive,
+        operation_id: ?rsql.Positive,
+        attempt_ordinal: ?rsql.Positive,
+        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        excluding_stop: ?protocol.Bounded(128),
+        input_length: u64,
+        input_digest: [32]u8,
+        answer_length: ?u64,
+        answer_digest: ?[32]u8,
+        created_at: rsql.Positive,
+    },
+    .cardinality = .one,
+});
+
+/// The Action and decision a permission decision saved.
+const permission_target = rsql.Read(.{
+    .sql = "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { action_id: protocol.Bounded(20), decision: protocol.PermissionDecision },
+    .cardinality = .one,
+});
+
+/// Round 1 reads the saved command. Its kind picks what round 2 reads,
+/// keyed on the command alone: a dependent round, one more network round
+/// trip, run only for a kind that saved more than its answer. A queued or
+/// processing Message's progress is its Session's work, read by unconverted
+/// code until the work read is converted.
+pub fn observeCommand(a: anytype, key: []const u8) !CommandObservation {
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    try a.run();
+    const command = try savedAnswer(&saved) orelse return .{ .status = .absent };
+    var observation: CommandObservation = .{
+        .status = if (command.accepted) .accepted else .rejected,
+        .kind = command.kind,
+        .target = command.target,
+        .code = command.code,
+        .revision = command.revision,
+        .created = command.created,
+    };
+    switch (command.kind) {
+        .configure => {},
+        .message => if (command.accepted) {
+            var row: message_observation.Row = undefined;
+            a.read(message_observation, .{ .key = key }, &row);
+            try a.run();
+            const content_id = command.primary_content_id orelse return error.CorruptStore;
+            if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
+            const queue = try messageQueue(&row);
+            observation.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue };
+            switch (queue.state) {
+                .queued, .processing => observation.message.?.progress = try readMessageProgress(a.store, command.target.slice(), row.created_at.get(), queue.state),
+                else => {},
+            }
+        },
+        .session_stop => if (command.accepted) {
+            var row: stop_selection.Row = undefined;
+            a.read(stop_selection, .{ .key = key }, &row);
+            try a.run();
+            observation.session_stop = stopObservation(&row);
+        },
+        .model_interruption => {
+            var row: interruption_target.Row = undefined;
+            a.read(interruption_target, .{ .key = key }, &row);
+            try a.run();
+            observation.model_interruption = try modelInterruptionTarget(&row);
+        },
+        .permission_decision => {
+            var row: permission_target.Row = undefined;
+            a.read(permission_target, .{ .key = key }, &row);
+            try a.run();
+            observation.permission_action_id = std.fmt.parseInt(u64, row.action_id.slice(), 10) catch return error.CorruptStore;
+            observation.permission_decision = row.decision;
+        },
+    }
+    return observation;
+}
+
+/// Where an accepted Message stands in its Session's queue.
+fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
+    const projection = try projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
+    return switch (projection.state) {
+        .pending => .{ .admission_id = projection.admission_id, .state = .queued },
+        .excluded => blk: {
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+            try code.set("session_stopped");
+            break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
+        },
+        .applied => |applied| blk: {
+            const outcome = applied.outcome_code orelse
+                break :blk .{ .admission_id = projection.admission_id, .state = .{ .processing = applied.binding } };
+            break :blk switch (try TurnOutcome.decode(outcome.slice(), applied.outcome_content_id)) {
+                .completed => .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
+                    .binding = applied.binding,
+                    .answer = .{
+                        .length = row.answer_length orelse return error.CorruptStore,
+                        .digest = row.answer_digest orelse return error.CorruptStore,
+                    },
+                } } },
+                .cancelled => .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } },
+                .retry_exhausted, .resource_exceeded, .failed => .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } },
+            };
+        },
+    };
+}
+
+/// A pending Message's progress is its Session's work: its own active
+/// Turn, or the work ahead of it in the queue.
+fn readMessageProgress(self: *Store, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !MessageProgress {
+    const work = (try report_domain.readWorkLocked(self, session_ref, created_at, try store_core.readUnixMilliseconds(self.io))).work;
+    if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
+    return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
+}
+
+/// An accepted Message's outcome, whether a stop excluded it, and its
+/// answer's metadata.
+const message_result = rsql.Read(.{
+    .sql = "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
+        "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+        "AND m.admission_id<=stopped.admission_cutoff) AS stopped,answer.byte_length AS answer_length,answer.digest AS answer_digest " ++
+        "FROM core_command command JOIN message_admission m ON m.command_key=command.command_key " ++
+        "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN content answer ON answer.content_id=t.outcome_content_id " ++
+        "WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1",
+    .Args = struct { key: []const u8 },
+    .Row = struct {
+        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        stopped: bool,
+        answer_length: ?u64,
+        answer_digest: ?[32]u8,
+    },
+    .cardinality = .optional,
+});
+
+/// One round: the Message's outcome with its answer's metadata.
+pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
+    var result: message_result.Result = null;
+    a.read(message_result, .{ .key = key }, &result);
+    try a.run();
+    const row = result orelse return error.ResultNotFound;
+    const outcome = row.outcome_code orelse return if (row.stopped) error.ResultFailed else error.ResultNotReady;
+    switch (try TurnOutcome.decode(outcome.slice(), if (row.outcome_content_id) |id| @intCast(id.get()) else null)) {
+        .completed => return .{
+            .length = row.answer_length orelse return error.CorruptStore,
+            .digest = row.answer_digest orelse return error.CorruptStore,
+        },
+        .cancelled, .retry_exhausted, .resource_exceeded, .failed => return error.ResultFailed,
+    }
+}
+
+/// The columns a Message's projection reads, in a report's order.
+const MessageColumns = struct {
+    session_ref: protocol.Bounded(protocol.max_session_bytes),
+    content_id: rsql.Positive,
+    admission_id: rsql.Positive,
+    command_key: protocol.Bounded(128),
+    turn_id: ?rsql.Positive,
+    operation_id: ?rsql.Positive,
+    attempt_ordinal: ?rsql.Positive,
+    outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+    outcome_content_id: ?rsql.Positive,
+};
+
+/// `projectMessage` for a report's unconverted statement, whose columns
+/// are `MessageColumns`.
 pub fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const u8) !MessageProjection {
-    var projection: MessageProjection = undefined;
-    try sqlite.readText(statement, 0, &projection.session);
-    projection.content_id = c.sqlite3_column_int64(statement, 1);
-    const admission_id = c.sqlite3_column_int64(statement, 2);
-    try sqlite.readText(statement, 3, &projection.command_key);
-    if (projection.content_id <= 0 or admission_id <= 0) return error.CorruptStore;
-    projection.admission_id = @intCast(admission_id);
-    const turn_id = try sqlite.readNullablePositiveI64(statement, 4);
-    if (turn_id == null) {
-        if (c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL or
-            c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) return error.CorruptStore;
+    var row: MessageColumns = undefined;
+    try sqlite.decodeRow(MessageColumns, statement, &row);
+    return projectMessage(&row, excluding_stop);
+}
+
+/// Where a Message stands, from `row`'s `MessageColumns` fields:
+/// applied by a Turn, excluded by the stop `excluding_stop`, or pending.
+fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProjection {
+    var projection: MessageProjection = .{
+        .admission_id = row.admission_id.get(),
+        .command_key = row.command_key,
+        .session = row.session_ref,
+        .content_id = @intCast(row.content_id.get()),
+        .state = .pending,
+    };
+    const turn_id = row.turn_id orelse {
+        if (row.operation_id != null or row.attempt_ordinal != null or row.outcome_code != null or row.outcome_content_id != null) return error.CorruptStore;
         if (excluding_stop) |key| {
             var stop_key: protocol.Bounded(128) = .{};
             try stop_key.set(key);
             projection.state = .{ .excluded = stop_key };
-        } else {
-            projection.state = .pending;
         }
         return projection;
-    }
+    };
     if (excluding_stop != null) return error.CorruptStore;
-    const operation_id = try sqlite.readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
-    const attempt_ordinal = try sqlite.readNullablePositiveI64(statement, 6) orelse return error.CorruptStore;
-    var outcome_code: ?protocol.Bounded(protocol.max_code_bytes) = null;
-    if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) {
-        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-        try sqlite.readText(statement, 7, &code);
-        if (code.len == 0) return error.CorruptStore;
-        outcome_code = code;
-    }
-    const outcome_content_id = try sqlite.readNullablePositiveI64(statement, 8);
-    if (outcome_code == null and outcome_content_id != null) return error.CorruptStore;
+    if (row.outcome_code) |code| if (code.len == 0) return error.CorruptStore;
+    if (row.outcome_code == null and row.outcome_content_id != null) return error.CorruptStore;
     projection.state = .{ .applied = .{
-        .binding = .{ .turn_id = @intCast(turn_id.?), .operation_id = @intCast(operation_id), .attempt_ordinal = @intCast(attempt_ordinal) },
-        .outcome_code = outcome_code,
-        .outcome_content_id = outcome_content_id,
+        .binding = .{
+            .turn_id = turn_id.get(),
+            .operation_id = (row.operation_id orelse return error.CorruptStore).get(),
+            .attempt_ordinal = (row.attempt_ordinal orelse return error.CorruptStore).get(),
+        },
+        .outcome_code = row.outcome_code,
+        .outcome_content_id = if (row.outcome_content_id) |id| @intCast(id.get()) else null,
     } };
     return projection;
 }
