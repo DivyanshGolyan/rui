@@ -176,11 +176,11 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// and the draft line the previous frame showed first.
 /// `anchor` is the byte that started the composer's first shown line last
 /// frame. `edits` counts changes to its bytes and never repeats for a new
-/// draft. `listed` is the previous frame's `Screen.listed`.
+/// draft.
 /// The most bytes a draft holds, as the shell's line editor caps it.
 pub const draft_capacity = 65_536;
 
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0, listed: bool = false };
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0 };
 
 /// Where the next input goes, which the shell's route and `render` both
 /// read: the composer, the composer frozen while a start waits, or the
@@ -837,11 +837,10 @@ pub const State = struct {
     /// Open from /model until a pick, Esc or typing; it acts only while
     /// `layout` shows it.
     picker: ?Picker = null,
-    /// The command list's highlighted row; each edit returns it to the first.
-    list_row: usize = 0,
-    /// The draft `edits` at which Esc or Enter closed the command list: it
-    /// stays closed until the draft changes, as in a conversation.
-    commands_closed: ?u32 = null,
+    /// The command list the latest frame built for the draft, which the
+    /// shell keeps from each `Screen.commands`: the one value Enter, Esc,
+    /// the arrows and Tab act on, as in a conversation.
+    commands: ?slash_commands.Shown = null,
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
     /// How the open picker's latest model-list read ended.
@@ -1909,11 +1908,6 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             // Typing leaves the picker for the draft; at the choice, so
             // does a paste, which the composer takes from its start.
             if (state.picker != null and (value.draft.bytes.len != 0 or mode == .choice)) state.closePicker();
-            // An edit shows a new list, from its first row.
-            switch (outcome) {
-                .append, .redraw => state.list_row = 0,
-                else => {},
-            }
             break :composer outcome;
         },
     };
@@ -1926,9 +1920,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 // A shown command list takes the arrows, as the picker
                 // does. Home and End stay the draft's: the list shows only
                 // over a draft, where the composer takes them.
-                if (if (value.draft.listed) commandList(state, value.draft) else null) |shown| {
-                    state.list_row = if (pressed == .previous) state.list_row -| 1 else @min(state.list_row + 1, shown.count - 1);
-                } else select(state, pressed);
+                if (shownCommands(state, value.draft)) |shown| shown.move(pressed == .next) else select(state, pressed);
             } else select(state, pressed),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
@@ -1938,8 +1930,8 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
-            } else if (value.draft.listed and commandList(state, value.draft) != null) {
-                state.commands_closed = value.draft.edits;
+            } else if (shownCommands(state, value.draft)) |shown| {
+                shown.close();
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
@@ -1954,8 +1946,8 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         // Enter in a list the latest frame drew takes the highlighted
         // entry: it runs the command that entry completes, or adds the word
         // another follows. A screen too short for the list shows none.
-        .submit => if (picker != null) pick(state, effects) else if (if (value.draft.listed) commandList(state, value.draft) else null) |shown| {
-            const taken = shown.enter(state.list_row);
+        .submit => if (picker != null) pick(state, effects) else if (shownCommands(state, value.draft)) |shown| {
+            const taken = shown.list.enter(shown.highlight);
             if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
                 var line: [draft_capacity]u8 = undefined;
                 @memcpy(line[0..value.draft.bytes.len], value.draft.bytes);
@@ -1964,7 +1956,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             } else {
                 // The draft grows, or refuses a word it cannot hold, so the
                 // next list starts at its top.
-                state.list_row = 0;
+                shown.highlight = 0;
                 effects.add(.{ .append = taken.rest });
             }
         } else try enter(state, value.draft.bytes, effects),
@@ -2536,9 +2528,9 @@ pub const Screen = struct {
     /// The byte the composer's first shown line starts at, for the next
     /// frame's `Draft.anchor`.
     draft_anchor: usize = 0,
-    /// It showed the draft's command list, for the next frame's
-    /// `Draft.listed`: Esc closes only a list the person saw.
-    listed: bool = false,
+    /// The command list it built for the draft, for the shell to keep as
+    /// `State.commands`: Esc closes only a list the person saw.
+    commands: ?slash_commands.Shown = null,
     /// It drew the spinner, which changes with the frame: the shell draws
     /// the next one in `spin_interval_ms`.
     spins: bool = false,
@@ -2776,16 +2768,16 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     if (fits) input.plan(&painter, draft, height);
     // The picker shows only over an empty draft, as `shownPicker` assumes.
     std.debug.assert(state.picker == null or draft.bytes.len == 0);
-    const matches = commandList(state, draft);
-    const at = layout(state, if (fits) @intCast(input.view.rows) else 0, if (matches) |listed| listed.count else 0);
+    screen.commands = nextCommands(state, draft);
+    const at = layout(state, if (fits) @intCast(input.view.rows) else 0, if (screen.commands) |shown| shown.rows() else 0);
+    if (screen.commands) |*shown| shown.drew(at.commands.len() != 0);
     @memcpy(lines[0..at.top], top[0..at.top]);
     if (fits) {
         lines[at.input] = try ruleLine(&painter, input.view);
-        screen.listed = at.commands.len() != 0;
-        if (screen.listed) try commandLines(&painter, &matches.?, state.list_row, lines[at.commands.start..at.commands.end]);
+        if (at.commands.len() != 0) try commandLines(&painter, &screen.commands.?, lines[at.commands.start..at.commands.end]);
         const hinted = height - hintRows(state);
         try composer(&painter, state, draft, &input, lines[at.commands.end..hinted]);
-        lines[hinted] = try hints(&painter, state, draft, screen.listed);
+        lines[hinted] = try hints(&painter, state, draft, at.commands.len() != 0);
         // A notice's further lines follow its first.
         if (hinted + 1 < height) {
             const notice = &state.notice.?;
@@ -2809,37 +2801,38 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     return screen;
 }
 
-/// What the list between the rule and the draft shows for `draft`, while
-/// the person types a command; null for any other draft or when nothing
-/// matches. The next Session's model offers its efforts.
-pub fn commandList(state: *const State, draft: Draft) ?slash_commands.List {
-    if (state.commands_closed) |closed| if (closed == draft.edits) return null;
-    return suggestion(state, draft);
-}
-
-/// The list `draft` would show, whether or not Esc closed it.
-pub fn suggestion(state: *const State, draft: Draft) ?slash_commands.List {
+/// The list between the rule and the draft as it is now, while the person
+/// types a command, after the latest frame's; null for any other draft or
+/// when nothing matches. The next Session's model offers its efforts.
+pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
     if (state.inputMode() != .compose) return null;
     const held = state.settings.get(startOption("reasoning-effort").?);
     const context: slash_commands.Context = .{
         .model = state.nextBinding().model,
         .effort = if (held) |text| std.meta.stringToEnum(model_capability.ReasoningEffort, text) else null,
     };
-    const listed = commands.suggest(draft.bytes, context) orelse return null;
-    return if (listed.count != 0) listed else null;
+    return slash_commands.Shown.next(state.commands, draft.edits, commands.suggest(draft.bytes, context));
+}
+
+/// The list for `draft`, which Enter, Esc and the arrows act on when the
+/// latest frame drew a list.
+fn shownCommands(state: *State, draft: Draft) ?*slash_commands.Shown {
+    return slash_commands.Shown.drawnNow(&state.commands, nextCommands(state, draft));
 }
 
 /// One row per entry, as a conversation lists them: its text, then its
 /// description, quiet, at one column, the highlighted row on the selection
 /// ground. When more match than rows fit, the last row counts the rest and
 /// the rows follow the highlight.
-fn commandLines(painter: *Painter, listed: *const slash_commands.List, highlight: usize, lines: [][]const Span) error{OutOfMemory}!void {
+fn commandLines(painter: *Painter, drawn: *const slash_commands.Shown, lines: [][]const Span) error{OutOfMemory}!void {
+    const listed = &drawn.list;
+    const highlight = drawn.highlight;
     const shown = slash_commands.named(listed.count, lines.len);
     const first = listed.firstShown(highlight, lines.len);
     const room = painter.width -| 2;
     const column = listed.descriptionColumn();
     for (lines[0..shown], listed.shown()[first..][0..shown], first..) |*line, entry, index| {
-        painter.begin(index == listed.row(highlight));
+        painter.begin(index == highlight);
         _ = try painter.put(1, entry.shown, room, .{ .colour = .strong });
         if (entry.description.len != 0 and room > column) _ = try painter.put(1 + column, entry.description, room - column, .{ .colour = .quiet });
         line.* = try painter.finish();
@@ -3849,11 +3842,16 @@ var test_edits: u32 = 0;
 fn typeText(state: *State, text: []const u8) !Draft {
     // Each typed draft is a new edit, as the line editor counts them.
     test_edits +%= 1;
-    var draft: Draft = .{ .bytes = text, .cursor = text.len, .edits = test_edits };
-    // As a frame with room draws it.
-    draft.listed = commandList(state, draft) != null;
+    const draft: Draft = .{ .bytes = text, .cursor = text.len, .edits = test_edits };
     try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
+    drawWithRoom(state, draft);
     return draft;
+}
+
+/// What a frame with room for the command list leaves the shell keeping.
+fn drawWithRoom(state: *State, draft: Draft) void {
+    state.commands = nextCommands(state, draft);
+    if (state.commands) |*shown| shown.drew(true);
 }
 
 /// The line editor's Enter on `draft`.
@@ -4504,13 +4502,16 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     const narrowed = try draftLines(&state, try typeText(&state, "/m"), 80, 24);
     defer std.testing.allocator.free(narrowed);
     try expectLines(narrowed, 21, &.{ " /model                choose the model new Sessions use", " › /m" });
-    try std.testing.expectEqualStrings("odel", commandList(&state, try typeText(&state, "/m")).?.completion(0));
-    try std.testing.expectEqualStrings("onfigure ", commandList(&state, try typeText(&state, "/c")).?.completion(0));
+    _ = try typeText(&state, "/m");
+    try std.testing.expectEqualStrings("odel", state.commands.?.list.completion(0));
+    _ = try typeText(&state, "/c");
+    try std.testing.expectEqualStrings("onfigure ", state.commands.?.list.completion(0));
     // No list for text, `//`, a word past its command, or a name no command
     // starts.
     for ([_][]const u8{ "fix it", "//home", "/model ", "/status" }) |text| {
         errdefer std.debug.print("draft={s}\n", .{text});
-        try std.testing.expect(commandList(&state, try typeText(&state, text)) == null);
+        _ = try typeText(&state, text);
+        try std.testing.expect(state.commands == null);
     }
 }
 
@@ -4519,7 +4520,7 @@ test "Enter takes a row only from a list the latest frame drew, and a long line 
     defer state.deinit();
     // A screen too short for the list drew none: Enter runs `/e` as typed.
     var draft = try typeText(&state, "/e");
-    draft.listed = false;
+    state.commands.?.drew(false);
     const unlisted = try submit(&state, draft);
     for (unlisted.slice()) |effect| try std.testing.expect(effect != .exit);
     draft = try typeText(&state, "/e");
@@ -4532,6 +4533,30 @@ test "Enter takes a row only from a list the latest frame drew, and a long line 
     try std.testing.expectEqualStrings("ask", state.settings.get(startOption("permission-mode").?).?);
 }
 
+test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    // The frame drew `/e`'s list; `x` changes the draft before a frame
+    // lists it, and Enter takes /exit from `/ex`'s list.
+    const drawn = try typeText(&state, "/e");
+    try std.testing.expectEqual(.drawn, state.commands.?.seen);
+    const typed: Draft = .{ .bytes = "/ex", .cursor = 3, .edits = drawn.edits +% 1 };
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = typed } }));
+    try expectEffects(&.{.exit}, try submit(&state, typed));
+    // The frame drew `/m`'s list; Backspace leaves `/`, whose list Down
+    // moves through, the selected Session kept.
+    const model = try typeText(&state, "/m");
+    const erased: Draft = .{ .bytes = "/", .cursor = 1, .edits = model.edits +% 1 };
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = erased } }));
+    const selected = state.selected;
+    try expectEffects(&.{}, try press(&state, erased, .next));
+    try std.testing.expectEqual(selected, state.selected);
+    try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
+    // Esc closes that list and keeps the draft.
+    try expectEffects(&.{}, try press(&state, erased, .clear));
+    try std.testing.expectEqual(.closed, state.commands.?.seen);
+}
+
 test "arrows move the command list's highlight, and Enter takes it: a word another follows, or the command it completes" {
     var state = try opened(&mixed);
     defer state.deinit();
@@ -4539,25 +4564,28 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     // The selected Session's row stays put while the list takes the arrows.
     const selected = state.selected;
     _ = try step(&state, .{ .composed = .{ .input = .{ .composer = .{ .action = .next } }, .draft = draft } });
-    try std.testing.expectEqual(@as(usize, 1), state.list_row);
+    try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
     try std.testing.expectEqual(selected, state.selected);
     // Enter on /exit, highlighted, runs it.
     try expectEffects(&.{.exit}, try submit(&state, draft));
     // /configure alone only says its usage: Enter adds its word and a
     // space, for an option.
-    state.list_row = 0;
+    state.commands.?.highlight = 0;
     try expectEffects(&.{.{ .append = "configure " }}, try submit(&state, draft));
     // An option that takes a value is added for it, and the next list
     // starts at its top, however far down the highlight was.
     draft = try typeText(&state, "/configure ");
-    state.list_row = 3;
+    state.commands.?.highlight = 3;
     try expectEffects(&.{.{ .append = "--label " }}, try submit(&state, draft));
-    try std.testing.expectEqual(@as(usize, 0), state.list_row);
+    // A draft too full for the word refuses it and stays as it was; its
+    // next frame lists it from the top too.
+    drawWithRoom(&state, draft);
+    try std.testing.expectEqual(@as(usize, 0), state.commands.?.highlight);
     draft = try typeText(&state, "/configure --permission-mode ");
-    const modes = commandList(&state, draft).?;
+    const modes = state.commands.?.list;
     try std.testing.expectEqualStrings("bypass", modes.shown()[0].word);
     // A value is whole: Enter holds the setting.
-    state.list_row = 1;
+    state.commands.?.highlight = 1;
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     try std.testing.expectEqualStrings("ask", state.settings.get(startOption("permission-mode").?).?);
 }
@@ -4588,20 +4616,23 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2, .listed = true };
+    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
-    try std.testing.expect(commandList(&state, draft) != null);
+    drawWithRoom(&state, draft);
+    try std.testing.expectEqual(.drawn, state.commands.?.seen);
     try expectEffects(&.{}, try press(&state, draft, .clear));
-    try std.testing.expect(commandList(&state, draft) == null);
+    try std.testing.expectEqual(.closed, state.commands.?.seen);
     const shown = try draftLines(&state, draft, 80, 24);
     defer std.testing.allocator.free(shown);
     try expectLines(shown, 22, &.{ " › /m", " esc clear" });
     // With the list closed, Esc clears the draft.
-    draft.listed = false;
+    drawWithRoom(&state, draft);
+    try std.testing.expectEqual(.closed, state.commands.?.seen);
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     // An edit opens it again.
     draft = .{ .bytes = "/mo", .cursor = 3, .edits = 3 };
-    try std.testing.expect(commandList(&state, draft) != null);
+    drawWithRoom(&state, draft);
+    try std.testing.expectEqual(.drawn, state.commands.?.seen);
     // The hint says what Enter does to each slash draft.
     const runs = try draftLines(&state, try typeText(&state, "/exit "), 80, 24);
     defer std.testing.allocator.free(runs);
@@ -4615,11 +4646,9 @@ test "a command word wrapped past the draft's cap shows no list, and Esc clears 
     const draft = try typeText(&state, "/configure");
     var screen = try sizedRender(&state, draft, 8, 9, .{}, 0);
     defer screen.deinit();
-    try std.testing.expect(!screen.listed);
-    try std.testing.expect(commandList(&state, draft) != null);
-    var shown = draft;
-    shown.listed = screen.listed;
-    try expectEffects(&.{.clear_draft}, try press(&state, shown, .clear));
+    try std.testing.expectEqual(.hidden, screen.commands.?.seen);
+    state.commands = screen.commands;
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -7204,7 +7233,8 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     defer std.testing.allocator.free(cut);
     try expectLines(cut, 1, &.{ " Defaults (read only):", " Output cut at 8 KiB." });
     // Typing "/" lists /setup's options as a conversation does.
-    try std.testing.expectEqualStrings("--model ", commandList(&state, try typeText(&state, "/setup ")).?.shown()[0].word);
+    _ = try typeText(&state, "/setup ");
+    try std.testing.expectEqualStrings("--model ", state.commands.?.list.shown()[0].word);
 }
 
 test "a command the person did not see end is named on the way out" {
