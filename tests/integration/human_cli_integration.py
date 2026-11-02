@@ -2748,7 +2748,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 {"role": "user", "content": [{"type": "input_text", "text": reason}]}], continuation
             assert f"• {description} — Denied" in settled and reason in settled, settled
             os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            # Read the screen until exit: restoring the terminal drains it.
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
             completed = True
             return
@@ -2869,7 +2871,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             details += action_ready(ready_read, master)
             assert fixture.command("session", "inspect", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
             os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            # Read the screen until exit: restoring the terminal drains it.
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert len(endpoint.requests) == 1
@@ -3053,7 +3057,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
                 read_terminal(master, "+1 more calls · /status", composer=True)
                 terminal_step(master, "\x01\x0b/exit", "Detached.")
-                assert caller.wait(timeout=5) == 0, caller.stderr.read()
+                # Read the screen until exit: restoring the terminal drains it.
+                _, errors = terminal_exit(caller, master)
+                assert caller.returncode == 0, errors
+                forget_terminal(master)  # The next caller's screen starts at its first byte.
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -3240,7 +3247,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         os.write(master, b"Y")
         read_terminal(master, "› next cafXYé!")
         caller.send_signal(signal.SIGTERM)
-        assert caller.wait(timeout=5) == 0, caller.stderr.read()
+        # Read the screen until exit: restoring the terminal drains it.
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "signal after inspection handoff did not restore terminal"
         # Opening uses certified labels, not undisplayed exact proposal fields.
