@@ -2,6 +2,8 @@ name: Conflict alert
 on:
   push:
     branches: [main]
+  # Auto-land's GITHUB_TOKEN fast-forward emits no push event, so it dispatches this.
+  workflow_dispatch:
 permissions:
   contents: read
   pull-requests: write
@@ -10,14 +12,14 @@ concurrency:
   cancel-in-progress: true
 jobs:
   alert:
-    if: ${{ !github.event.repository.private }}
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Comment on each open PR that this push left conflicting
+      - name: Comment on each open PR that this move of main left conflicting
         env:
           GH_TOKEN: ${{ github.token }}
           MAIN_SHA: ${{ github.sha }}

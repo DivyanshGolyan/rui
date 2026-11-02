@@ -1,77 +1,98 @@
 #!/usr/bin/env python3
-"""Comment on each open PR that a push to main left conflicting.
+"""Comment on each open PR that a move of main left conflicting.
 
 GitHub runs no checks on a PR that conflicts with its base, and no event says
 so: the PR just sits without CI (#780 waited about 45 minutes). After every
-push to main this asks GitHub for each open PR's merge state and comments on
-each conflicting PR once per PR head, naming the main commit. The comment is
-the event that reaches whoever watches the PR.
+move of main (a PR merge, or Auto-land's fast-forward, which dispatches this)
+it asks GitHub for each open PR's merge state and comments on each
+conflicting PR once per PR head, naming the main commit. The comment is the
+event that reaches whoever watches the PR.
 """
 import json
 import os
+import subprocess
+import sys
 import time
-import urllib.request
 
-API = "https://api.github.com"
+from auto_land import gh
+
 MARKER = "<!-- conflict-alert head={head} -->"
 
 
-def github(method, path, body=None):
-    data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(API + path, data=data, method=method, headers={
-        "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+def github(method, path, fields=()):
+    args = ["api", "-X", method, path]
+    for name, value in fields:
+        args += ["-f", f"{name}={value}"]
+    return json.loads(gh(*args) or "null")
 
 
-def settled(api, repo, number, attempts=10, delay=6, sleep=time.sleep):
-    """GitHub computes mergeability after a push in the background; a read
-    starts it, and later reads return it once known."""
-    for attempt in range(attempts):
-        pr = api("GET", f"/repos/{repo}/pulls/{number}")
-        if pr["mergeable"] is not None:
-            return pr
-        if attempt + 1 < attempts:
-            sleep(delay)
-    return pr
-
-
-def comments(api, repo, number):
+def pages(api, path):
+    """Every row of a paged list: `gh api --paginate` fails through the cloud sessions' proxy."""
     page = 1
     while True:
-        batch = api("GET", f"/repos/{repo}/issues/{number}/comments?per_page=100&page={page}")
+        batch = api("GET", f"{path}&per_page=100&page={page}")
         yield from batch
         if len(batch) < 100:
             return
         page += 1
 
 
+def settled(api, repo, number, main_sha, attempts=10, delay=6, sleep=time.sleep):
+    """The PR once GitHub has judged it against main_sha, or None.
+
+    GitHub recomputes mergeability in the background after main moves, so an
+    early read can still return the old answer: a clean answer counts only
+    when its test merge sits on main_sha.
+    """
+    for attempt in range(attempts):
+        pr = api("GET", f"repos/{repo}/pulls/{number}")
+        if pr["state"] != "open" or pr["mergeable"] is False:
+            return pr
+        if pr["mergeable"]:
+            merge = api("GET", f"repos/{repo}/commits/{pr['merge_commit_sha']}")
+            if merge["parents"][0]["sha"] == main_sha:
+                return pr
+        if attempt + 1 < attempts:
+            sleep(delay)
+    return None
+
+
 def alert(api, repo, main_sha, sleep=time.sleep):
-    """Comment on every open PR into main that conflicts with it; return their numbers."""
-    alerted = []
-    numbers = [pr["number"] for pr in api("GET", f"/repos/{repo}/pulls?state=open&base=main&per_page=100")]
+    """Comment on every open PR into main that conflicts with main_sha.
+
+    Returns the PRs commented on and the PRs that could not be judged; one
+    PR's failure does not stop the others.
+    """
+    numbers = [pr["number"] for pr in pages(api, f"repos/{repo}/pulls?state=open&base=main")]
     for number in numbers:  # Start GitHub computing every PR's mergeability before waiting on any.
-        api("GET", f"/repos/{repo}/pulls/{number}")
+        api("GET", f"repos/{repo}/pulls/{number}")
+    alerted, unjudged = [], []
     for number in numbers:
-        pr = settled(api, repo, number, sleep=sleep)
-        if pr["mergeable"] is not False:
-            continue
-        marker = MARKER.format(head=pr["head"]["sha"])
-        if any(marker in comment["body"] for comment in comments(api, repo, pr["number"])):
-            continue
-        api("POST", f"/repos/{repo}/issues/{pr['number']}/comments", {"body": (
-            f"{marker}\nThis PR conflicts with main at {main_sha[:12]}, so GitHub runs no checks on it. "
-            "Merge origin/main into the branch and push.")})
-        alerted.append(pr["number"])
-    return alerted
+        try:
+            pr = settled(api, repo, number, main_sha, sleep=sleep)
+            if pr is None:
+                print(f"::warning::#{number}: GitHub did not judge its merge with {main_sha[:12]} in time")
+                unjudged.append(number)
+                continue
+            if pr["state"] != "open" or pr["mergeable"]:
+                continue
+            marker = MARKER.format(head=pr["head"]["sha"])
+            if any(marker in comment["body"] for comment in pages(api, f"repos/{repo}/issues/{number}/comments?")):
+                continue
+            api("POST", f"repos/{repo}/issues/{number}/comments", [("body", (
+                f"{marker}\nThis PR conflicts with main at {main_sha[:12]}, so GitHub runs no checks on it. "
+                "Merge origin/main into the branch and push."))])
+            alerted.append(number)
+        except (subprocess.CalledProcessError, KeyError, IndexError) as failure:
+            print(f"::warning::#{number}: {failure}: {getattr(failure, 'stderr', '') or ''}".strip())
+            unjudged.append(number)
+    return alerted, unjudged
 
 
 def main():
-    alerted = alert(github, os.environ["GITHUB_REPOSITORY"], os.environ["MAIN_SHA"])
-    print("conflicting:", " ".join(f"#{number}" for number in alerted) or "none newly")
+    alerted, unjudged = alert(github, os.environ["GITHUB_REPOSITORY"], os.environ["MAIN_SHA"])
+    print("commented on:", " ".join(f"#{number}" for number in alerted) or "none")
+    sys.exit(1 if unjudged else 0)
 
 
 if __name__ == "__main__":
