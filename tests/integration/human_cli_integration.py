@@ -1192,10 +1192,22 @@ def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
         assert remaining > 0 and next_frame(master, remaining) is not None, ("did not return to live", shown)
 
 
+# The clock that ends a live line ("• Waiting · 12s") redraws every second
+# while work runs; it is not a change of what the screen says.
+LIVE_CLOCK = re.compile(r"^([•!?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
+
+
 def settle_screen(master, quiet=1.0, timeout=15):
-    """Drain frames until none arrives for `quiet` seconds; return the screen."""
+    """Drain frames until none but a live clock's tick arrives for `quiet`
+    seconds; return the screen. A ticking clock never goes quiet for a full
+    second, so ticks alone must not keep the screen unsettled."""
     deadline = time.monotonic() + timeout
-    while next_frame(master, quiet) is not None:
+    still = LIVE_CLOCK.sub(r"\1", current_screen(master))
+    quiet_until = time.monotonic() + quiet
+    while (frame := next_frame(master, max(0, quiet_until - time.monotonic()))) is not None:
+        if LIVE_CLOCK.sub(r"\1", frame) != still:
+            still = LIVE_CLOCK.sub(r"\1", frame)
+            quiet_until = time.monotonic() + quiet
         assert time.monotonic() < deadline, ("screen never settled", current_screen(master))
     return current_screen(master)
 
@@ -3512,7 +3524,17 @@ def store_selection_cases(state, workspace, valid_store):
                         lambda: os.close(slave), stop_created_host)
 
 
-def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None):
+def drop_spent_readiness(descriptor):
+    """Discard notifications already queued: input sent next spends every
+    offer made so far. A redraw while the choice waits (a Host update the
+    screen does not show) offers that frame too, so a queued byte may be
+    from an offer the fixture never waited for; left there, the next wait
+    would take it as readiness for input the caller has not seen handled."""
+    while select.select([descriptor], [], [], 0)[0]:
+        assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
+
+
+def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None, send=None):
     """Supply normal terminal credit until the actual fresh-input boundary.
 
     Read exactly one notification, never a future choice's byte. Return the
@@ -3521,7 +3543,12 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows
     the caller is checking that paused state itself. Deliberately
     withheld-credit controls must select the pipe directly. `shows` names
     the offered frame awaited when it is not the choice, such as a reason's.
+    `send` is input written first, after dropping offers it spends, so the
+    notification read is one made after that input was handled.
     """
+    if send is not None:
+        drop_spent_readiness(descriptor)
+        os.write(master, send)
     capture = terminal_capture(master)
     deadline = time.monotonic() + timeout
     frames = []
@@ -7225,14 +7252,14 @@ def main(selected="all"):
             # A chord at the choice is refused and spends its freshness: the
             # Enter right behind it decides nothing.
             for invalid in ("\x01", "\x1ba", "\x1b[1;3C"):
-                os.write(master, (invalid + "\n").encode())
-                rejected_choice = action_ready(ready_read, master)
+                rejected_choice = action_ready(ready_read, master, send=(invalid + "\n").encode())
                 rejected_choice += "\n" + current_screen(master)
                 # Durable effects are the oracle.
                 assert CHOICE in rejected_choice, (invalid, rejected_choice)
                 assert counter.read_text() == "x", "refused chord approved an Action"
                 assert set(records.glob("*.json")) == before_choice, "refused chord captured authorization"
                 assert current_screen(master).count("? Write interactive effect") == 1, "refusal repeated the command"
+            drop_spent_readiness(ready_read)
             completed_turn = terminal_step(master, "", "interactive complete", composer=True)
             assert "\ninteractive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             decision_record, = set(records.glob("*.json")) - before_choice
