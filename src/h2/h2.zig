@@ -294,8 +294,12 @@ pub const Sink = union(enum) {
     buffer: []u8,
 };
 
+/// GET sends no body, so `prepare` refuses one with a body.
+pub const Method = enum { post, get };
+
 pub const Request = struct {
     endpoint: Endpoint,
+    method: Method = .post,
     /// Copied by `prepare` into one owned block of exact length, so the
     /// caller may wipe its own copies (credentials) once it returns; a
     /// borrowed field leaves only its two addresses there. The block is
@@ -497,6 +501,7 @@ pub const Client = extern struct {
 
 pub const Exchange = struct {
     url: []const u8,
+    method: Method = .post,
     fields: []const Field,
     body: []const u8,
     /// The response body lands here; a longer one ends `.sink_refused`.
@@ -544,6 +549,7 @@ pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
     var stream: Stream = .idle;
     try client.prepare(&stream, .{
         .endpoint = endpoint,
+        .method = request.method,
         .fields = request.fields,
         .body = .{ .bytes = request.body },
         .sink = .{ .buffer = request.response },

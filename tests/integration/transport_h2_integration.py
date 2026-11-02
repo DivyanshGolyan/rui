@@ -51,6 +51,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.eager_sse = eager_sse
         self.observed_shape = observed_shape
         self.answers = {}
+        # The body a GET of a model list is answered with; None answers 404.
+        self.models = None
         self.isolation = isolation
         self.stream_ids = {}
         self.resets = []
@@ -250,6 +252,16 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.REFUSED_STREAM)
                         # Reopen upload credit so the replay can send its body.
                         conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 65535})
+                        continue
+                    if dict(event.headers)[b":method"] == b"GET":
+                        # A model list: it has no body and is not a model request.
+                        models = self.server.models
+                        payload = models if models is not None else b"{}"
+                        conn.send_headers(event.stream_id, [
+                            (":status", "200" if models is not None else "404"),
+                            ("content-type", "application/json"), ("content-length", str(len(payload))),
+                        ])
+                        outgoing_bodies[event.stream_id] = payload
                         continue
                     bodies[event.stream_id] = bytearray()
                 elif isinstance(event, h2.events.DataReceived):

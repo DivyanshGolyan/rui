@@ -1,5 +1,6 @@
 const std = @import("std");
 const model_capability = @import("model_capability.zig");
+const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
@@ -175,6 +176,7 @@ pub const Kind = enum {
     activity_page,
     activity_content,
     person_message,
+    model_list,
 };
 
 pub const ConfigureCommand = struct {
@@ -998,12 +1000,13 @@ pub const Request = union(Kind) {
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
     person_message: ReadPersonMessage,
+    model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .person_message => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .person_message, .model_list => {},
         }
     }
 
@@ -1340,6 +1343,8 @@ const Parser = struct {
             .activity_content
         else if (kind_text.eql("person_message"))
             .person_message
+        else if (kind_text.eql("model_list"))
+            .model_list
         else
             return error.UnknownCommand;
 
@@ -1356,6 +1361,7 @@ const Parser = struct {
         switch (kind) {
             .host_info => out.* = .{ .host_info = .{ .store = store } },
             .host_stop => out.* = .{ .host_stop = .{ .store = store } },
+            .model_list => out.* = .{ .model_list = .{ .store = store } },
             .configure => {
                 out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
                 try self.parseConfigure(&out.configure);
@@ -2346,6 +2352,8 @@ pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",
 /// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
+pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
+/// Holes: Store.
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
 /// Holes: Store, key.
 pub const read_result_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
@@ -2413,6 +2421,7 @@ pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, mod
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
+pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
 pub const max_list_sessions_request_bytes = maxShapeBytes(.{ list_sessions_request, list_sessions_since_request, list_sessions_changed_request });
@@ -2432,7 +2441,7 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
     proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,    person_message_request,
+    activity_content_request,    person_message_request,        model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2609,6 +2618,13 @@ comptime {
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
+/// Each served provider's models: `model_list.writeProviders` follows the
+/// head, then the tail.
+pub const model_list_reply = struct {
+    pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
+    pub const tail = "}";
+    pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
+};
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.

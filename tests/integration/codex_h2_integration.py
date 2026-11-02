@@ -35,7 +35,7 @@ def assert_managed_descriptor_rejection(rejected, limit):
     required = inherited + fixed_host + 403 + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
                     inherited=inherited, fixed_host=fixed_host, clients=403,
-                    execution=10, authentication=authentication, self_wake=2)
+                    execution=10, authentication=authentication, model_list=0, self_wake=2)
     assert fields == expected, (fields, expected)
     assert limit < required - 4 * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
@@ -216,6 +216,10 @@ def openai_base_url_run():
     tls.load_cert_chain(root / "cert.pem", root / "key.pem")
     tls.set_alpn_protocols(["h2"])
     endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    endpoint.models = json.dumps({"object": "list", "data": [
+        {"id": "gpt-6-sol", "object": "model", "created": 1, "owned_by": "openai"},
+        {"id": "custom-model", "object": "model", "created": 2, "owned_by": "you"},
+    ]}).encode()
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     store = root / "store"
@@ -223,10 +227,17 @@ def openai_base_url_run():
     complete = False
     try:
         # A served provider uses system trust, which this certificate joins.
-        host, _ = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai"], env={
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai"], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
         })
+        # The Host fetches the key's model list once at start and keeps it.
+        listed = fixture.wait_for(
+            lambda: (value if (value := h2_fixture.closed_host_request(ready["socket"], store, "model_list"))
+                     ["providers"][0]["source"] != "pending" else None),
+            "the OpenAI model list", timeout=20)
+        assert listed["providers"] == [{"provider": "openai", "source": "live", "models": [
+            {"id": "gpt-6-sol", "listed": True}, {"id": "custom-model", "listed": False}]}], listed
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
@@ -237,12 +248,15 @@ def openai_base_url_run():
         observation, answer, _ = fixture.wait_for_result_release(store, "custom-base", session, time.monotonic() + 20)
         assert observation["result"]["status"] == "completed", observation
         assert answer == b"answer-custom-base", answer
-        [headers] = endpoint.request_headers
-        assert headers[b":path"] == b"/custom/v1/responses", headers
-        assert headers[b":authority"].startswith(b"localhost:"), headers
-        assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
-        assert b"chatgpt-account-id" not in headers, headers
-        print("openai base URL passed: the key goes over TLS to /custom/v1/responses under RUI_OPENAI_BASE_URL")
+        # The key goes only to the list and the Responses endpoint beside it.
+        assert [(headers[b":method"], headers[b":path"]) for headers in endpoint.request_headers] == [
+            (b"GET", b"/custom/v1/models"), (b"POST", b"/custom/v1/responses")], endpoint.request_headers
+        for headers in endpoint.request_headers:
+            assert headers[b":authority"].startswith(b"localhost:"), headers
+            assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
+            assert b"chatgpt-account-id" not in headers, headers
+        assert b"content-length" not in endpoint.request_headers[0], endpoint.request_headers[0]
+        print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, and the live list comes back")
         complete = True
     finally:
         def retire():

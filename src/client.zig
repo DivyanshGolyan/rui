@@ -323,6 +323,30 @@ pub const Requests = struct {
         };
     }
 
+    /// Each served provider's models, parsed into `arena`, which owns them.
+    pub fn modelList(self: Requests, store_path: []const u8, arena: std.mem.Allocator) !protocol_reply.ModelList {
+        try self.check();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.model_list_request, .{paths.store.slice()});
+        const fd = try openRead(self, &paths, "/v1/model-list", body.slice());
+        defer closeSocket(self.io, fd);
+        const Sink = struct {
+            bytes: std.ArrayList(u8) = .empty,
+            arena: std.mem.Allocator,
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                if (s.bytes.items.len + bytes.len > protocol.model_list_reply.max_bytes) return error.ResponseTooLarge;
+                try s.bytes.appendSlice(s.arena, bytes);
+            }
+        };
+        var sink: Sink = .{ .arena = arena };
+        var buffer: ReplyBuffer = .{};
+        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
+            .report => try protocol_reply.parseModelList(arena, sink.bytes.items),
+            .command => error.InvalidResponse,
+        };
+    }
+
     /// Complete scoped bytes once; callers still use readProposalField for calls.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
@@ -2183,6 +2207,17 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
     try std.testing.expectEqual(@as(u64, 0), try file.length(std.testing.io));
 }
 
+test "a model list without a Host to answer it fails before any parse" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    const requests: Requests = .{ .io = std.testing.io };
+    try std.testing.expect(if (requests.modelList(store, arena.allocator())) |_| false else |_| true);
+}
+
 test "client capture rejects noncanonical Session references before publication" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -3145,6 +3180,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.person_message_request, .{ &store, &session, optional_id, id, Direction.backward }, protocol.max_person_message_request_bytes },
+        .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
     };
     var largest: usize = 0;
     inline for (cases, 0..) |case, index| {
