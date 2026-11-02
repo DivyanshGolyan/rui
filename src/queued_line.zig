@@ -27,7 +27,9 @@ pub const Drawn = struct { admission: u64 = 0, position: u64 = 0 };
 /// still waits exactly when no position after `drawn` starts the wait. The
 /// row shows while this is not zero, whatever the work is doing.
 pub fn unshown(count: u64, oldest_position: u64, drawn: Drawn) u64 {
-    return count - @intFromBool(count != 0 and oldest_position <= drawn.position);
+    // Every Message waiting now was admitted at or after the one shown.
+    std.debug.assert(count == 0 or drawn.position <= oldest_position);
+    return count - @intFromBool(count != 0 and oldest_position == drawn.position);
 }
 
 test "the row counts only the waiting Messages live output has not shown" {

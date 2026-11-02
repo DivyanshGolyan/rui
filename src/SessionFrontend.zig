@@ -116,8 +116,9 @@ live: struct {
     messages: reads.Messages = .{},
     // The Messages live output shows since its newest mark.
     echoes: reads.Record = .{},
-    // The lowest position of a Message seen unapplied, where a transcript's
-    // search for them may stop; a stale value only costs reads.
+    // Where a transcript's search for the Messages a seam lists may stop
+    // (see reads.listed): at most the lowest position of one seen or not yet
+    // searched for; a stale value only costs reads.
     lowest: ?u64 = null,
     // The Messages a person or script sent that wait behind the work, as
     // the Host reported them at the cursor; the first line the queued row
@@ -1370,6 +1371,10 @@ fn settleReader(self: *Self) !void {
         self.inspection.command_running = false;
     }
     if (end == .complete and self.reading.phase == .history) {
+        // What a seam's search found holds whatever the view now shows.
+        if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
+            self.live.lowest = @max(known, floor);
+        };
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
         if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
@@ -1416,7 +1421,7 @@ fn settleReader(self: *Self) !void {
 /// What the queued row shows, if it shows (see `queued_line.unshown`): the
 /// newest waiting Message, by the line read from it, and how many wait
 /// that live output has not shown.
-fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
     const count = queued_line.unshown(queued.count, queued.oldest_position, self.live.drawn);
     if (count == 0) return null;
