@@ -53,14 +53,8 @@ pub const Context = struct {
     /// connection holds no OpenSSL record buffers; partial writes from a
     /// moving buffer, for nghttp2's frame buffer.
     pub fn init(trust: h2.Trust) h2.EndpointError!Context {
-        const ctx = c.SSL_CTX_new(c.TLS_client_method()) orelse return error.OutOfMemory;
+        const ctx = newContext() orelse return error.OutOfMemory;
         errdefer c.SSL_CTX_free(ctx);
-        if (c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION) != 1) return error.OutOfMemory;
-        c.SSL_CTX_set_verify(ctx, c.SSL_VERIFY_PEER, null);
-        _ = c.SSL_CTX_set_mode(ctx, c.SSL_MODE_RELEASE_BUFFERS | c.SSL_MODE_ENABLE_PARTIAL_WRITE | c.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-        _ = c.SSL_CTX_set_session_cache_mode(ctx, c.SSL_SESS_CACHE_OFF);
-        if (c.SSL_CTX_set_cipher_list(ctx, tls12_ciphers) != 1) return error.OutOfMemory;
-        _ = c.SSL_CTX_set_options(ctx, no_ticket | no_renegotiation);
         // Inverted convention: 0 is success.
         if (c.SSL_CTX_set_alpn_protos(ctx, alpn_h2, alpn_h2.len) != 0) return error.OutOfMemory;
         const bio_method = newBioMethod() orelse return error.OutOfMemory;
@@ -88,13 +82,7 @@ pub const Context = struct {
             c.SSL_free(ssl);
             return null;
         }
-        // A deferred session's name is checked by SecTrust, not OpenSSL.
-        const named = if (kind == .ip_literal)
-            self.deferred or c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1
-        else
-            c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and (self.deferred or c.SSL_set1_host(ssl, &host_z) == 1);
-        // A wildcard covers a whole label (`*.example.com`), never part of one.
-        c.SSL_set_hostflags(ssl, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        const named = nameHost(ssl, host_z[0..host.len :0], kind, self.deferred);
         if (!named) {
             c.SSL_free(ssl);
             return null;
@@ -104,7 +92,40 @@ pub const Context = struct {
     }
 };
 
-fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
+/// A client context with the settings every Rui TLS connection shares:
+/// TLS 1.2 or later with AEAD suites on 1.2, no renegotiation, peer
+/// verification, no session cache or tickets, no record buffers held while
+/// idle, and partial writes from a moving buffer. The caller adds trust and
+/// any ALPN.
+pub fn newContext() ?*c.SSL_CTX {
+    const ctx = c.SSL_CTX_new(c.TLS_client_method()) orelse return null;
+    if (c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION) != 1 or
+        c.SSL_CTX_set_cipher_list(ctx, tls12_ciphers) != 1)
+    {
+        c.SSL_CTX_free(ctx);
+        return null;
+    }
+    c.SSL_CTX_set_verify(ctx, c.SSL_VERIFY_PEER, null);
+    _ = c.SSL_CTX_set_mode(ctx, c.SSL_MODE_RELEASE_BUFFERS | c.SSL_MODE_ENABLE_PARTIAL_WRITE | c.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    _ = c.SSL_CTX_set_session_cache_mode(ctx, c.SSL_SESS_CACHE_OFF);
+    _ = c.SSL_CTX_set_options(ctx, no_ticket | no_renegotiation);
+    return ctx;
+}
+
+/// Sets what `ssl` verifies `host` against: SNI and the name check for a
+/// DNS name, the IP check (and no SNI) for an IP literal. A deferred
+/// session's name is checked by SecTrust, not OpenSSL.
+pub fn nameHost(ssl: *c.SSL, host_z: [*:0]const u8, kind: HostKind, deferred: bool) bool {
+    const named = if (kind == .ip_literal)
+        deferred or c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), host_z) == 1
+    else
+        c.SSL_set_tlsext_host_name(ssl, host_z) == 1 and (deferred or c.SSL_set1_host(ssl, host_z) == 1);
+    // A wildcard covers a whole label (`*.example.com`), never part of one.
+    c.SSL_set_hostflags(ssl, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+    return named;
+}
+
+pub fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
     defer c.ERR_clear_error();
     switch (trust) {
         .ca_file => |path| {

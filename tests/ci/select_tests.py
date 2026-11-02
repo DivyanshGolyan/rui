@@ -100,6 +100,8 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
     (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig"),
+     ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux"),
     (("src/store/wire/mysql.zig", "tests/integration/mysql_wire*", "build.zig"),
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)"),
@@ -196,7 +198,7 @@ RULES = (
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "test-codec-runtime", "admission-integration", "dispatch-integration",
+    "test", "test-h2", "test-pg", "test-codec-runtime", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",

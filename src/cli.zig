@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.EmptyMessageInput) {
             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        } else if (err != error.HostStopped) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -110,7 +110,8 @@ fn run(init: std.process.Init) !void {
         // Model rejection already names the ID, supported IDs and repair;
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
-        if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
+        // A stopped Host already said how to start it and resume.
+        if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
         stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
