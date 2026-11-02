@@ -1209,7 +1209,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         .changed => {
             for (state.pending.items) |*incoming| {
                 if (lookup(state.by_reference.items, incoming.reference)) |at| {
-                    carry(incoming, &state.rows.items[at]);
+                    carry(state, incoming, &state.rows.items[at]);
                     state.rows.items[at] = incoming.*;
                 } else try state.rows.append(state.gpa, incoming.*);
             }
@@ -1220,7 +1220,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             try reindex(state);
             for (state.pending.items) |*old| {
                 if (lookup(state.by_reference.items, old.reference)) |at| {
-                    carry(&state.rows.items[at], old);
+                    carry(state, &state.rows.items[at], old);
                 } else if (state.entryOf(old.reference)) |entry| {
                     state.track(entry, null);
                     entry.listed = null;
@@ -1236,12 +1236,20 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
 }
 
 /// What a listing's row keeps of the row it replaces.
-fn carry(incoming: *Row, old: *const Row) void {
+fn carry(state: *State, incoming: *Row, old: *const Row) void {
     keepMark(incoming, old);
     // What the overview knows of the same first Message's first line, read,
     // unreadable or asked for, still holds.
     const same = if (incoming.first) |first| if (old.first) |known| first.admission == known.admission else false else false;
     if (same) incoming.line = old.line;
+    retitle(state, incoming, title(state, old).text);
+}
+
+/// The terminal's record names a Session by its row's title, so a row
+/// whose title is no longer `was` has its record sent again.
+fn retitle(state: *State, row: *const Row, was: []const u8) void {
+    if (std.mem.eql(u8, title(state, row).text, was)) return;
+    if (state.entryOf(row.reference)) |entry| if (entry.status != null) state.unsend(entry);
 }
 
 /// The same mark keeps the second it last changed, so a state change under
@@ -1379,10 +1387,11 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
         row.line = .unavailable;
         return;
     };
+    // A Label or the reference, not a read line: `lines` growing leaves it.
+    const was = title(state, row).text;
     try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
-    // The line may name the Session now, so its record says so.
-    if (row.label == null) if (state.entryOf(row.reference)) |entry| if (entry.status != null) state.unsend(entry);
+    retitle(state, row, was);
 }
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms

@@ -486,10 +486,15 @@ fn event(self: *Self, value: view.Event) !?Next {
 /// Hands the terminal the program status records the core holds unsent, as
 /// many as its next frame takes. With notifications off it clears those it
 /// set, whether or not any record changed since, and the core holds every
-/// record again for when they are back on.
+/// record again for when they are back on. After a frame cut short it
+/// clears them all and sets each again.
 fn sendStatuses(self: *Self) void {
     const terminal = self.terminal;
     if (terminal.program_status != .supported) return;
+    if (terminal.statuses_cut) {
+        terminal.statuses_cut = false;
+        if (terminal.clearStatuses()) self.state.resendStatuses();
+    }
     if (!terminal.statuses_set and !self.state.statusesWaiting()) return;
     if (!terminal.notificationsOn()) {
         if (terminal.clearStatuses()) self.state.resendStatuses();
@@ -1783,6 +1788,108 @@ test "turning notifications off clears records already sent, with no Session cha
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try overview.draw(0) == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), "\x1b]7501;state=clear:id=rui\x1b\\\x1b[?2026h"));
+}
+
+test "a Session's record takes its new name when only its Label changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Listing = struct {
+        var label: ?[]const u8 = null;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            if (label) |text| {
+                page.rows[0].label = .{};
+                page.rows[0].label.?.set(text) catch unreachable;
+            }
+            return null;
+        }
+    };
+    Listing.label = null;
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    const by_line = "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), by_line) != null);
+    // Named while it still works: the record keeps its state, under the Label.
+    Listing.label = "Lane four";
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=TGFuZSBmb3Vy\x1b\\"));
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;") == null);
+    // The Label cleared, its first line names it again.
+    Listing.label = null;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 180_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), by_line));
+}
+
+test "records a frame cut short may not have written are set again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Listing = struct {
+        var finished = false;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            if (finished) for (page.rows[0..page.count]) |*row| {
+                row.work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
+            };
+            return null;
+        }
+    };
+    Listing.finished = false;
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    Seen.now.listed = 2;
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;state=working:id=rui/b4n8wd:") != null);
+    // Both finish; the terminal takes no output, and Enter opens one
+    // before the frame with their records is written.
+    Listing.finished = true;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    const filler: [4096]u8 = @splat('x');
+    while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
+    while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+    try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
+    const next = (try overview.draw(0)).?;
+    while (rig.drawn(&buffer).len != 0) {}
+    try std.testing.expect(overview.proceed(next) == null);
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 61_000 }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    const written = rig.drawn(&buffer);
+    const other = if (std.mem.eql(u8, &next.open, "k7m2qx")) "b4n8wd" else "k7m2qx";
+    var done: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&done, "\x1b]7501;state=done:id=rui/{s}:", .{other})) != null);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=clear:id=rui\x1b\\"));
 }
 
 test "a later Turn's finish the conversation read first is still a record when the next listing shows it" {

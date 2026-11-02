@@ -41,6 +41,12 @@ program_status: ProgramStatus = .unsupported,
 /// notification.
 status_bytes: [4096]u8 = undefined,
 status_len: usize = 0,
+/// Bytes of program status reports that begin the frame being written and
+/// are not yet written.
+statuses_writing: usize = 0,
+/// A frame cut short may have left a report unwritten or half written, so
+/// what records the terminal holds is unknown.
+statuses_cut: bool = false,
 /// Rui set records on the terminal since it last cleared them.
 statuses_set: bool = false,
 /// `wanted` once the terminal reported mode 1007 reset, `on` once Rui
@@ -409,7 +415,12 @@ pub fn write(self: *Self, bytes: []const u8) !void {
         try self.writeAll("\x1b[?1007h");
         self.alternate_scroll = .on;
     }
-    try self.writeAll(bytes);
+    self.writeAll(bytes) catch |err| {
+        if (self.statuses_writing != 0) self.statuses_cut = true;
+        self.statuses_writing = 0;
+        return err;
+    };
+    self.statuses_writing -|= bytes.len;
 }
 
 fn writeAll(self: *Self, bytes: []const u8) !void {
@@ -666,10 +677,12 @@ pub fn takeNotification(self: *Self) []const u8 {
 }
 
 /// Writes, as a frame's first bytes, the waiting program status reports and
-/// notification, and lets them go: a frame that fails drops them.
+/// notification, and lets them go: a frame that fails drops the
+/// notification and leaves the reports `statuses_cut`.
 pub fn writeWaiting(self: *Self, out: *std.Io.Writer) std.Io.Writer.Error!void {
     const statuses = self.status_bytes[0..self.status_len];
     self.status_len = 0;
+    self.statuses_writing = statuses.len;
     try out.writeAll(statuses);
     try out.writeAll(self.takeNotification());
 }
