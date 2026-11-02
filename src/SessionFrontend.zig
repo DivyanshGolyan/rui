@@ -1157,7 +1157,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
-        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
+        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !screen.listed or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
         .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
@@ -1541,16 +1541,15 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         } else try self.beginMessage(.{ .message = ticket }),
         // Enter in a shown list takes its highlighted entry: it runs the
         // command that entry completes, or adds the word another follows.
-        .command => if (self.commandList()) |list| {
-            var line: [512]u8 = undefined;
-            switch (list.enter(self.input.composition().bytes, self.listRow(), &line)) {
-                .run => |text| {
-                    self.slashCommand(text);
+        // Only a list the latest frame drew: a screen too short for one
+        // shows none, and Enter there runs the line as typed.
+        .command => if (if (screen.listed) self.commandList() else null) |list| {
+            const taken = list.enter(self.listRow());
+            switch (self.input.append(taken.rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => if (taken.runs) {
+                    self.slashCommand(self.input.composition().bytes);
                     self.input.clear();
-                },
-                .add => |rest| switch (self.input.append(rest)) {
-                    .refused => |why| self.notice = refusedNotice(why),
-                    else => {},
                 },
             }
         } else {
@@ -2873,6 +2872,26 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     // Ctrl-G stands for Esc and Alt-Esc.
     try sendKeys(self, "\x07");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
+}
+
+test "Up, Down and Enter take a row only from a list the latest frame drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Typed since the latest frame, so never seen: Down scrolls rather
+    // than moving a hidden highlight, and Enter runs the line as typed.
+    try stepKeys(held, "/\x1b[B");
+    try std.testing.expectEqual(@as(usize, 0), self.listRow());
+    try stepKeys(held, "\x15/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Drawn: Enter takes the highlighted /help.
+    try stepKeys(held, "/he");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {

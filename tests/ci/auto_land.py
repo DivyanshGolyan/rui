@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Land Linux-green tips on main; promote exact Mac-and-upgrade-green main SHAs to stable.
+"""Promote exact Mac-and-upgrade-green main SHAs to stable.
 
-Runs from trusted main code. Main and stable writes share one serialized
-workflow and are non-force. Landing dispatches the existing qualification
-workflows, and promotion the release workflow, explicitly because
-GITHUB_TOKEN pushes do not emit push workflows.
+Changes reach main by merging their PRs. Runs from trusted main code; stable
+writes are serialized and non-force. Qualification and release are dispatched
+explicitly because GITHUB_TOKEN pushes do not emit push workflows.
 Missing or failed Mac qualification holds stable, never main, and so does an
 open stable-red issue. Promotion first closes the issues landed commits fix,
 because GitHub ignores closing keywords in GITHUB_TOKEN pushes.
@@ -18,15 +17,10 @@ import time
 
 from select_tests import changed_paths
 
-BRANCH = re.compile(r"wip/land-[0-9]+")
 UPGRADE = "previous-release-upgrade.yml"
 RELEASE = "release.yml"
-# check.yml's run-name for a dispatch; the base it selected from.
-DISPATCH_BASE = re.compile(r"Selected checks from base ([0-9a-f]{40})")
+# check.yml's run-name for a stable qualification; the base it selected from.
 STABLE_BASE = re.compile(r"Stable qualification from base ([0-9a-f]{40})")
-# GITHUB_TOKEN has no `workflows` permission, so GitHub rejects its push of
-# any commit that changes a workflow file.
-WORKFLOW_FILES = ".github/workflows/"
 # report_issue.py files each stable qualification red under this label. Only a
 # fix commit closes the issue, so a later green candidate cannot promote past it.
 STABLE_RED = "stable-red"
@@ -152,26 +146,6 @@ def latest(workflow, sha, branch):
     return max(rows, key=lambda row: row["id"], default=None)
 
 
-def decide(fast_forward, selected, changed):
-    """Return 'not-fast-forward', 'unqualified', 'pending', 'red', 'manual' or 'land'.
-
-    selected carries coverage and the Linux aggregate. Overall run status and
-    Mac results cannot delay or reject a successful Linux aggregate.
-    """
-    if not fast_forward:
-        return "not-fast-forward"
-    if selected is not None and not selected["covers"]:
-        # A dispatch from a base main does not contain may have skipped owners.
-        return "unqualified"
-    if selected is None or selected.get("linux") is None:
-        return "pending"
-    if selected["linux"] != "success":
-        return "red"
-    if any(path.startswith(WORKFLOW_FILES) for path in changed):
-        return "manual"
-    return "land"
-
-
 def aggregate(run, name):
     """Conclusion of a Selected aggregate in its latest attempt."""
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -190,49 +164,13 @@ def stable_ready(selected, upgrade):
                         for run in (selected, upgrade)))
 
 
-def number(branch):
-    return int(branch.rsplit("-", 1)[1])
-
-
 def contains(sha, ancestor):
     return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, sha],
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def tips():
-    """Fetch main and every wip/land-N; return [(branch, sha)], lowest N first."""
-    git("fetch", "--quiet", "--prune", "origin", "+refs/heads/main:refs/remotes/origin/main",
-        "+refs/heads/wip/land-*:refs/remotes/origin/wip/land-*")
-    refs = [line.split() for line in git("for-each-ref", "--format=%(refname:lstrip=3) %(objectname)",
-                                         "refs/remotes/origin/wip/land-*").splitlines()]
-    return sorted((ref for ref in refs if BRANCH.fullmatch(ref[0])), key=lambda ref: number(ref[0]))
-
-
-def preflight(branch, sha):
-    """Fail a landing-tip push before it qualifies a second open stack.
-
-    At most one wip/land-N is open: refs main already contains are landed and
-    never count; any other ref is a second open stack, even one this push
-    contains. Add work to the open stack by pushing its own branch, or retire
-    it (back it up, then delete it) before starting the next number.
-    """
-    if not BRANCH.fullmatch(branch):
-        raise SystemExit(f"{branch} is not a wip/land-N landing branch")
-    refs = tips()
-    main_sha = git("rev-parse", "origin/main")
-    newer = [other for other, _ in refs if number(other) > number(branch)]
-    if newer:
-        raise SystemExit(f"{branch} is below {newer[-1]}; land numbers only increase")
-    others = [f"{other} {tip}" for other, tip in refs if other != branch and not contains(main_sha, tip)]
-    if others:
-        raise SystemExit(f"{', '.join(others)} is still open; push to it, wait until it lands, or retire it")
-    print(f"{branch} {sha} is the only open landing stack")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preflight", metavar="BRANCH",
-                        help="fail unless BRANCH at HEAD is the only open landing stack")
     parser.add_argument("--qualify-main", action="store_true",
                         help="dispatch only absent current-main Mac and upgrade qualification")
     parser.add_argument("--promote-stable", action="store_true",
@@ -242,28 +180,15 @@ def main():
     args = parser.parse_args()
     if args.check_qualification_run is not None:
         return check_qualification_run(args.check_qualification_run)
-    if args.preflight:
-        return preflight(args.preflight, git("rev-parse", "HEAD"))
     if args.qualify_main:
         return qualify_main()
     if args.promote_stable:
         return promote_stable()
-    # The triggering event only wakes the lander: GitHub drops a pending run
-    # when a newer one queues, so every run decides the current open stack.
-    refs = tips()
-    if not refs:
-        return
-    # Only the highest-numbered tip is open; lower ones landed or were superseded.
-    branch, sha = refs[-1]
-    main_sha = git("rev-parse", "origin/main")
-    if contains(main_sha, sha):
-        print(f"{branch} {sha} is already in main")
-        return
-    land(branch, sha, main_sha)
+    parser.error("name an action")
 
 
 def check_qualification_run(run_id):
-    """A parent ID permits only a wait; it supplies no landing or promotion evidence."""
+    """A parent ID permits only a wait; it supplies no promotion evidence."""
     if run_id <= 0:
         raise SystemExit("qualification run ID must be positive")
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -277,43 +202,11 @@ def check_qualification_run(run_id):
         raise SystemExit("parent must be this repository's dispatched main qualification")
 
 
-def land(branch, sha, main_sha):
-    """Decide one tip and fast-forward main; the always-run phase qualifies it."""
-    fast_forward = contains(sha, main_sha)
-    # NUL-delimited, so Git never quotes a strict path out of recognition.
-    paths = changed_paths(main_sha, sha)[0] if fast_forward else []
-    selected = latest("check.yml", sha, branch)
-    if selected:
-        selected["covers"] = covers(selected, sha, main_sha, paths)
-        selected["linux"] = aggregate(selected, "linux")
-    verdict = decide(fast_forward, selected, paths)
-    links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
-                      for name, run in (("Selected", selected),) if run)
-    print(f"{branch} {sha} onto main {main_sha}: {verdict}\n{links}")
-    if verdict == "manual":
-        print("GITHUB_TOKEN cannot push workflow-file changes; this tip needs a manual push.")
-    if verdict != "land":
-        return False
-    # Re-decide coverage if main moved. The workflow serializes both ref writers.
-    if moved(main_sha, branch):
-        return False
-    pushed = subprocess.run(["git", "push", "origin", f"{sha}:refs/heads/main"],
-                            capture_output=True, text=True)
-    if pushed.returncode:
-        if moved(main_sha, branch):
-            return False
-        raise SystemExit(f"Push of {sha} to main failed:\n{pushed.stderr}")
-    print(f"Fast-forwarded main from {main_sha} to {sha}; stable unchanged")
-    # This push emits no push event, so PRs it left conflicting hear of it through a dispatch.
-    dispatch("conflict-alert.yml", run_exists=lambda: False)
-    return True
-
-
 def qualify_main():
     """Fill absent runs only; existing pending, offline or red runs are not retried.
 
-    The workflow's always-run promotion phase calls this under the shared writer
-    lock, including after a main push whose earlier dispatch was interrupted.
+    Promotion calls this under the workflow's writer lock, including after a
+    main push whose earlier dispatch was interrupted.
     """
     git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
         "+refs/heads/stable:refs/remotes/origin/stable")
@@ -336,8 +229,7 @@ def promote_stable():
     if not contains(main_sha, stable_sha):
         print("stable is not on main's history; stable promotion held")
         return
-    # The landing just above, a merged PR or an earlier failed close: each
-    # fix still unpromoted closes its issue before the hold is read.
+    # A merged PR or an earlier failed close: each fix still unpromoted closes its issue before the hold is read.
     close_fixed_issues(f"{stable_sha}..{main_sha}")
     if reds := open_stable_reds():
         listed = ", ".join(f"#{red['number']} {red['title']}" for red in reds)
@@ -347,8 +239,7 @@ def promote_stable():
         selected = latest("check.yml", sha, "main")
         if not selected:
             continue
-        selected["covers"] = covers(selected, sha, stable_sha,
-                                    changed_paths(stable_sha, sha)[0], STABLE_BASE)
+        selected["covers"] = covers(selected, sha, stable_sha, changed_paths(stable_sha, sha)[0])
         selected["macos"] = aggregate(selected, "macos")
         upgrade = latest(UPGRADE, sha, "main")
         if not stable_ready(selected, upgrade):
@@ -366,28 +257,16 @@ def promote_stable():
     print(f"No newer exact-SHA Mac-and-upgrade-green main commit; stable remains {stable_sha}")
 
 
-def covers(selected, sha, destination_sha, paths, title=DISPATCH_BASE):
-    """Whether selection spans every changed path from the destination to sha.
+def covers(selected, sha, stable_sha, paths):
+    """Whether a stable qualification's selection spans every path stable..sha changes.
 
-    A push run selects from the main merge base, which the one open stack keeps
-    equal to main. A dispatch selects from its recorded base, which the current
-    destination (main or stable) must contain; base..sha must include every
-    path destination..sha changes, including reversions after the base.
+    It selects from its recorded base, which stable must contain; base..sha must
+    include every path stable..sha changes, including reversions after the base.
     """
-    if selected["event"] == "push":
-        return title is DISPATCH_BASE
-    base = title.fullmatch(selected.get("display_title") or "")
-    if not base or not contains(destination_sha, base[1]):
+    base = STABLE_BASE.fullmatch(selected.get("display_title") or "")
+    if not base or not contains(stable_sha, base[1]):
         return False
     return set(paths) <= set(changed_paths(base[1], sha)[0])
-
-
-def moved(main_sha, branch):
-    git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
-    if git("rev-parse", "origin/main") == main_sha:
-        return False
-    print(f"main moved from {main_sha}; re-deciding {branch} on the next run")
-    return True
 
 
 if __name__ == "__main__":

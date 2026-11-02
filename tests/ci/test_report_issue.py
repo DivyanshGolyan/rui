@@ -347,27 +347,13 @@ class ReportTest(unittest.TestCase):
             self.run_main(fake)
             self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
-    def test_passing_jobs_are_read_only_for_retried_failures_on_landing_tips(self):
-        retried = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
-                          'is a flake to fix, not a clean pass.') + BASH +
-                   logged('::warning::test-h2 failed (exit 1); one automatic retry.') + ZIG_CRASH)
+    def test_only_failed_jobs_are_read(self):
+        passing = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
+                          'is a flake to fix, not a clean pass.') + BASH)
         jobs = [dict(id=1, name='linux suites (check)', conclusion='success'),
                 dict(id=2, name='linux suites (logic)', conclusion='failure'),
                 dict(id=3, name='plan', conclusion='success')]
-        fake = FakeGitHub(jobs, {1: retried, 2: GATE, 3: logged('planned')})
-        self.run_main(fake, '--retried-only')
-        titles = [call[call.index('--title') + 1] for call in fake.made('create')]
-        # Both retried batches are filed, however many retries the job made.
-        self.assertEqual(len(titles), 2)
-        self.assertIn('tests/integration/bash_integration.py: assert process_exists', titles[0])
-        self.assertIn('read cap defers expiry', titles[1])
-        body = fake.made('create')[0]
-        self.assertIn('passed only on its automatic retry', body[body.index('--body') + 1])
-        # The landing tip's own red belongs to its author, not an issue.
-        self.assertNotIn('repos/o/r/actions/jobs/2/logs', [call[-1] for call in fake.calls])
-
-        # A run that is not a landing tip reads only its failed jobs.
-        fake = FakeGitHub(jobs, {1: retried, 2: GATE, 3: logged('planned')})
+        fake = FakeGitHub(jobs, {1: passing, 2: GATE, 3: logged('planned')})
         self.run_main(fake)
         self.assertEqual([call[-1] for call in fake.calls if call[0] == 'api' and call[-1].endswith('/logs')],
                          ['repos/o/r/actions/jobs/2/logs'])
@@ -429,13 +415,10 @@ class WiringTest(unittest.TestCase):
                 self.assertIn('always()', job)
                 self.assertNotIn('--title', job)
 
-    def test_stable_reds_are_labelled_and_landing_tips_report_only_flakes(self):
+    def test_selected_checks_report_only_stable_reds(self):
         job = self.report_job('check.yml')
         self.assertIn('--workflow "Stable qualification"', job)
         self.assertIn('--label stable-red', job)
-        self.assertIn('--workflow "Selected checks"', job)
-        self.assertIn('--retried-only', job)
-        self.assertIn("startsWith(github.ref, 'refs/heads/wip/land-')", job)
         self.assertIn('inputs.stable', job)
         self.assertIn("needs.macos.result != 'success'", job)
         self.assertNotIn("'pull_request'", job)

@@ -729,10 +729,18 @@ fn tab(self: *Editor) KeyOutcome {
 pub fn append(self: *Editor, text: []const u8) KeyOutcome {
     if (text.len == 0) return .none;
     self.cursor = self.length;
-    return switch (self.insertText(text, false)) {
-        .append => .redraw,
-        else => |outcome| outcome,
-    };
+    const outcome = self.insertText(text, false);
+    // A rejected draft, one this text overflowed among them, never runs.
+    if (self.rejected) |why| return .{ .refused = why };
+    return if (outcome == .append) .redraw else outcome;
+}
+
+test "an append that overflows the draft is refused, not cut short" {
+    var storage: [8]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.append("/abc"));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("defgh"));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("x"));
 }
 
 test "Tab over a partial character or a rejected draft does what it did before completion" {

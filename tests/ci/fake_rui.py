@@ -3,9 +3,10 @@ from pathlib import Path
 import sqlite3
 
 
-def script(version_line, wire, answer):
+def script(version_line, wire, answer, pause=False):
     """A build that prints version_line for --version, answers Host questions
     as a build speaking `wire` would, and prints `answer` for anything else.
+    Only a `pause` build knows host pause; earlier builds called it host stop.
     TEST_HOST names the running Host's wire, or `busy` for a Host that holds
     the Store but does not answer. TEST_REPORT_FAULT=1 makes defaults inspect
     and host status fail. The JSON mirrors cli.zig's writers;
@@ -31,6 +32,7 @@ case "$*" in
         [ -z "${{TEST_REPORT_FAULT-}}" ] || exit 1
         printf '{{"version":"1","type":"host_status","status":"%s"}}\\n' "$(state)"
         [ "$(state)" != incompatible ] ;;
+    "host pause --help") {'exit 0' if pause else 'exit 1'} ;;
     *) echo '{answer}' ;;
 esac
 '''
