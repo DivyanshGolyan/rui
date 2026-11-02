@@ -619,11 +619,13 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
-            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour);
+            var compact = false;
+            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour, &compact);
             job.result.listing = null;
         },
         .range => |range| {
             var cursor = range.cursor;
+            var compact = false;
             while (true) {
                 const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
                     .page => |page| page,
@@ -632,7 +634,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
                     const value = listed(item, range.shown) orelse continue;
-                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
+                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
@@ -690,7 +692,7 @@ fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem
 
 test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
     const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
+    const peer: protocol.NamedPeer = .{ .session = .{ .len = 0 } };
     const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
     // Live output showed Message 10 while it waited before the dropped
     // span, and Message 14 by its end.

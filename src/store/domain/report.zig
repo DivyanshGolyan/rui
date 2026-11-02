@@ -500,7 +500,7 @@ fn readFirstMessageLocked(self: *Store, session_ref: []const u8) !?protocol.Firs
         .position = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
         .admission = admission,
         .admitted_at = @intCast(try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore),
-        .sender = try reads_domain.readPeer(self, statement, 2),
+        .sender = try reads_domain.readPeer(statement, 2),
         .content = .{ .length = metadata.length, .digest = metadata.digest },
     };
 }

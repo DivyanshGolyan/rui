@@ -19,6 +19,37 @@ pub fn isControl(scalar: u21) bool {
         scalar >= 0x2066 and scalar <= 0x2069;
 }
 
+/// A link the answer renderer shows by its text: OSC 8 carries its address,
+/// so a terminal opens it on click and the address is not laid out.
+pub const link_open = "\x1b]8;;";
+pub const link_end = "\x1b\\";
+pub const link_close = link_open ++ link_end;
+/// The longest address a link carries; a longer one stays literal text.
+pub const max_link_bytes = 2048;
+
+/// An address a terminal may open: http or https with a host, every byte
+/// printable ASCII, so it cannot end or extend the OSC 8 sequence it rides in.
+pub fn linkTarget(uri: []const u8) bool {
+    if (uri.len > max_link_bytes) return false;
+    const rest = if (std.ascii.startsWithIgnoreCase(uri, "https://"))
+        uri["https://".len..]
+    else if (std.ascii.startsWithIgnoreCase(uri, "http://"))
+        uri["http://".len..]
+    else
+        return false;
+    if (rest.len == 0 or rest[0] == '/') return false;
+    for (uri) |byte| if (byte <= ' ' or byte >= 0x7f) return false;
+    return true;
+}
+
+test "only a printable http or https address with a host is a link target" {
+    for ([_][]const u8{ "https://github.com/a/b", "http://x", "HTTPS://Example.com/?q=(1)#f" }) |uri| try std.testing.expect(linkTarget(uri));
+    for ([_][]const u8{ "", "https://", "http:///path", "ftp://x", "javascript:alert(1)", "src/a.zig", "https://a b", "https://a\x1b\\", "https://é", "https://a\x7f" }) |uri| try std.testing.expect(!linkTarget(uri));
+    const longest = "https://" ++ @as([max_link_bytes - "https://".len]u8, @splat('a'));
+    try std.testing.expect(linkTarget(longest));
+    try std.testing.expect(!linkTarget(longest ++ "a"));
+}
+
 mode: Mode,
 utf8: [4]u8 = undefined,
 utf8_len: usize = 0,
