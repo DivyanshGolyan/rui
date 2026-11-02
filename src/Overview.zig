@@ -493,6 +493,7 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
+    if (try self.resize()) |value| if (self.proceed(value)) |ending| return ending;
     if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
     // After the open: keys typed during the wait act on the overview.
     var next = try self.askBackground();
@@ -616,6 +617,14 @@ fn composerDraft(self: *const Self) view.Draft {
     return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor };
 }
 
+/// Takes the queued job at `index` out of the queue.
+fn take(self: *Self, index: usize) Job {
+    const job = self.jobs[index];
+    std.mem.copyForwards(Job, self.jobs[index .. self.job_count - 1], self.jobs[index + 1 .. self.job_count]);
+    self.job_count -= 1;
+    return job;
+}
+
 fn queue(self: *Self, job: Job) void {
     std.debug.assert(self.job_count < max_jobs);
     self.jobs[self.job_count] = job;
@@ -636,12 +645,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
             if (job != .start) break index;
         } else null,
     };
-    const next: Job = if (at) |index| next: {
-        const job = self.jobs[index];
-        std.mem.copyForwards(Job, self.jobs[index .. self.job_count - 1], self.jobs[index + 1 .. self.job_count]);
-        self.job_count -= 1;
-        break :next job;
-    } else .{ .mark_read = self.reads.unsent() orelse return };
+    const next: Job = if (at) |index| self.take(index) else .{ .mark_read = self.reads.unsent() orelse return };
     self.job.deinit(self.init.gpa);
     self.job = next;
     try self.worker.start(self.init.io, self, work);
@@ -655,7 +659,12 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         const byte = [1]u8{0};
         _ = std.c.write(self.done[1], &byte, 1);
     }
-    const requests = task.requests();
+    return self.runJob(task.requests());
+}
+
+/// Runs `job`, on the worker's thread or, for a save on the way out, the
+/// loop's.
+fn runJob(self: *Self, requests: client.Requests) !void {
     switch (self.job) {
         .host => self.host = self.ops.host(self),
         .list => if (try self.ops.list(self, requests, self.traversal.cursor, &self.page)) |failure| return failure.err(),
@@ -697,6 +706,21 @@ fn sendMark(self: *Self, requests: client.Requests, mark: *const Reads.Mark, unt
         error.CanonicalStoreFailure => return err,
         else => {},
     };
+}
+
+/// On the way out, runs each save the core asked for that the worker never
+/// started, as the worker would, each answer stepping the core: a save is a
+/// local file write that outlives the overview, and the departure says how
+/// it ended. No other queued job runs.
+fn flushSaves(self: *Self) !void {
+    const requests: client.Requests = .{ .io = self.init.io };
+    while (for (self.jobs[0..self.job_count], 0..) |job, index| {
+        if (job == .save) break index;
+    } else null) |index| {
+        self.job.deinit(self.init.gpa);
+        self.job = self.take(index);
+        _ = try self.deliver(self.runJob(requests));
+    }
 }
 
 /// On the way out, sends every position the Host lacks, all within one
@@ -784,8 +808,8 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
-        .provider = held.given(held.at(start, "provider") orelse if (start.default_provider) |provider| @tagName(provider) else null),
-        .model = held.given(held.at(start, "model") orelse start.defaultModel()),
+        .provider = held.given(start.binding().provider),
+        .model = held.given(start.binding().model),
         .tools = held.at(start, "tools") orelse product_defaults.tools,
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
         .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
@@ -904,38 +928,41 @@ fn askBackground(self: *Self) !?Next {
     return null;
 }
 
-/// Every input takes one route: the composer, with the overview's one key
-/// table, then one core step, whether or not the draft changed. While a
-/// start waits for its answer the composer is frozen: the keys the table
-/// binds still act, and nothing edits the text a failed start leaves to
-/// retry.
+/// Every input takes one route, the one the core's input mode names, then
+/// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    // The sign-in choice holds the input row, as an Action's choice does in
-    // a conversation: arrows move it and Enter picks; typing goes to the
-    // draft, which leaves the picker.
-    if (self.state.choosingSignIn()) switch (TerminalEditor.select(view.keys, decoded)) {
-        // A key the choice ignores still takes the step, as in the composer.
-        .none => return self.event(.{ .composed = .{ .outcome = .none, .draft = self.composerDraft() } }),
-        .action => |action| return self.event(.{ .composed = .{ .outcome = .{ .action = action }, .draft = self.composerDraft() } }),
-        .left => return self.event(.{ .composed = .{ .outcome = .{ .action = .left }, .draft = self.composerDraft() } }),
-        .right => return self.event(.{ .composed = .{ .outcome = .{ .action = .right }, .draft = self.composerDraft() } }),
-        .enter => return self.event(.{ .composed = .{ .outcome = .submit, .draft = self.composerDraft() } }),
-        .refused => return self.event(.{ .composed = .{ .outcome = .{ .refused = .unbound }, .draft = self.composerDraft() } }),
-        .text => {},
+    const input = route(self.state.inputMode(), &self.composer, decoded);
+    return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
+}
+
+/// One input through `mode`'s route, with the overview's one key table.
+/// The composer edits. Frozen while a start waits, the keys the table binds
+/// still act, and nothing edits the text a failed start leaves to retry.
+/// At the sign-in choice, as at an Action's choice in a conversation, the
+/// arrows and Enter are the choice's; typing and a paste go to the
+/// composer, which takes a paste from its start to its end.
+fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput.Decoded) view.Input {
+    return switch (mode) {
+        .compose => .{ .composer = composer.apply(view.keys, decoded) },
+        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
+        .choice => switch (TerminalEditor.select(view.keys, decoded)) {
+            .none => .{ .choice = .none },
+            .action => |action| .{ .choice = .{ .action = action } },
+            .left => .{ .choice = .left },
+            .right => .{ .choice = .right },
+            .enter => .{ .choice = .enter },
+            .refused => .{ .choice = .refused },
+            .text => .{ .composer = composer.apply(view.keys, decoded) },
+        },
     };
-    const outcome: keymap.Outcome(view.Action) = if (self.state.starting())
-        if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none
-    else
-        self.composer.apply(view.keys, decoded);
-    return self.event(.{ .composed = .{ .outcome = outcome, .draft = self.composerDraft() } });
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
 /// not already show. The shown screen says whether it changes with the
 /// next frame.
 fn draw(self: *Self, frame: u64) !?Next {
-    const size = self.terminal.geometry();
-    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), size.col, size.row, self.caps, frame);
+    if (try self.resize()) |next| return next;
+    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
     errdefer screen.deinit();
     self.draft_anchor = screen.draft_anchor;
     self.frame.clearRetainingCapacity();
@@ -965,6 +992,14 @@ fn draw(self: *Self, frame: u64) !?Next {
     self.terminal.wrote();
     self.shown = screen;
     return null;
+}
+
+/// Steps the terminal's size when it changed, so the frame drawn next and
+/// the keys read until the one after act on one layout.
+fn resize(self: *Self) !?Next {
+    const size = self.terminal.geometry();
+    if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
+    return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
 }
 
 fn forget(self: *Self) void {
@@ -1089,18 +1124,15 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, saves the newest pick whose save never ran,
-/// then writes the ledger's guidance before anything that can return. The departure is whole before the restore
-/// result is read. A conversation's own guidance and the Detached notice
-/// follow.
+/// `complete` as the loop does, runs the saves the core asked for, then
+/// writes the ledger's guidance before anything that can return. The
+/// departure is whole before the restore result is read. A conversation's
+/// own guidance and the Detached notice follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
-    const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
-    // A local file write, so it ends before the departure says how.
-    if (self.state.saveWanted()) |binding| {
-        _ = self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(self.ops.save_default(self, binding)) } }) catch {};
-    }
+    const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
+    const saved = self.flushSaves();
     // A ledger entry prints well under 512 bytes.
     var bytes: [view.max_requests * 512 + view.max_late_save_bytes]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
@@ -1112,11 +1144,15 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             const marked = self.flushMarks();
             try restored;
             _ = try answered;
+            try saved;
             try marked;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
             if (answered) |_| {} else |err| left.ended = err;
+            saved catch |err| {
+                left.ended = err;
+            };
             return self.leave(left.*, restored);
         },
     }
@@ -1426,6 +1462,8 @@ const Rig = struct {
         rig.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = rig.screen, .input = rig.keys[0], .output = rig.output[1] };
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
         rig.overview.terminal = &rig.terminal;
+        // As the loop does before it reads a key.
+        _ = try rig.overview.resize();
         return rig;
     }
 
@@ -1549,7 +1587,7 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     // Down to gpt-6-luna, which both sign-ins offer: Enter shows the choice
     // at the default's sign-in, Right moves it, and Enter picks.
     try std.testing.expect(try rig.press("\x1b[B\n") == null);
-    try std.testing.expect(overview.state.choosingSignIn());
+    try std.testing.expect(overview.state.inputMode() == .choice);
     try std.testing.expect(try rig.press("\x1b[C\n") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
@@ -1575,7 +1613,7 @@ test "any key at the sign-in choice cancels a stop prompt, arrows and ignored ke
     try std.testing.expect(try rig.press("/model\n") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[B\n") == null);
-    try std.testing.expect(overview.state.choosingSignIn());
+    try std.testing.expect(overview.state.inputMode() == .choice);
     try std.testing.expect(try rig.press("\x18") == null);
     try std.testing.expect(overview.state.prompt != null);
     // Arrows, and keys the choice ignores: Backspace, Delete, Tab.
@@ -1687,6 +1725,43 @@ test "a pick made while a save runs is written before the departure, which names
     try std.testing.expectEqualStrings("gpt-6.1-sol", Seen.now.saved.?.model.slice());
     try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use gpt-6.1-sol") != null);
     try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") == null);
+}
+
+test "a pick after /configure --model starts the pick, not the held model" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/configure --model gpt-5.5\n") == null);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // The held model leads; Down to gpt-6-luna, Enter shows the sign-in
+    // choice at ChatGPT, and Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "a paste the composer rejects at the sign-in choice leaves the choice, and typing after it starts a Session" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter shows the choice.
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(rig.overview.state.inputMode() == .choice);
+    // A standalone combining mark, which the composer cannot add alone.
+    try std.testing.expect(try rig.press("\x1b[200~\xcc\x81\x1b[201~") == null);
+    try std.testing.expect(rig.overview.state.picker == null);
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
+    try std.testing.expect(Seen.now.saved == null);
 }
 
 test "a model list the Host cannot answer and one Rui cannot read reach the core apart" {
@@ -3134,7 +3209,6 @@ test "every key does what the overview's table says, through the editor, in ever
         }
         try std.testing.expect(ending == null);
         switch (action) {
-            .left, .right => unreachable,
             .previous, .next, .select_previous, .select_next, .first, .last => {
                 const row: usize = switch (action) {
                     .previous, .select_previous => 1,

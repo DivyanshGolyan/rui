@@ -2283,9 +2283,11 @@ The change second sets each pulse's phase, so marks that changed apart pulse apa
 Only a Unicode, colour screen pulses, and a row faded while the Host does not answer holds still.
 The core ticks as each pulse ends, the overview wakes for frames only while a pulsing mark is on screen, and each frame writes only the cells that changed.
 Enter on a row opens that Session's conversation; Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-Every input takes one route: the shell's line editor applies it with the overview's one key table (`keys` in `src/overview_view.zig`), and the core steps with the outcome and the draft as it then stands.
-No key is caught ahead of the editor.
+Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
+In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
 While a start awaits its answer the composer is frozen: the table's keys still act, nothing edits, and a failed start keeps its text.
+At the model picker's sign-in choice the arrows and Enter are the choice's own and the table's keys keep their meaning, while typing and a paste go to the line editor, which takes a paste from its start to its end.
+The core holds the terminal's size, which the shell steps before each frame, and one pure `layout` divides the screen into the top, the list, the picker and the input; `render` draws from it, and the core acts on the picker only while it shows it.
 Enter's start effect borrows only until the next step; the shell copies its text and held settings into one allocation its job owns, so Esc may clear the draft and the settings while the start runs.
 The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
@@ -2331,18 +2333,21 @@ Bare `rui` accepts no initial Message operand.
 Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
 The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
 Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
-Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the saved default first, then the models Rui's table knows in its order, then the others by name under "Other models", tagged "default limits".
+Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the next Session's model first (the saved default, unless `/configure` holds a model), then the models Rui's table knows in its order, then the others by name under "Other models", tagged "default limits".
 The overview's worker reads the list and builds the menu, so the screen never waits, and the menu is freed when the picker closes.
 A list still loading says so and is read again with the next listing, a fallback list says the live one is unavailable, and each sign-in the Host does not serve shows one line naming its login command.
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
 On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
+When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
 The sign-ins are named "ChatGPT" (`codex`) and "API key" (`openai`).
-Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the default's sign-in, where Left and Right move and Enter picks.
-Esc steps back from the choice to the models, then closes the picker, and typing leaves it for the draft.
+Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
+Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
 Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
+A pick clears the provider and model `/configure` held, since it is the newer choice; one core function, `nextBinding`, names what the next start uses, and the start, the picker's `default` tag and the `New Sessions use` line all read it.
+An overview left without a pick writes nothing, and a failed save is not retried; picking again saves again.
 An Other model is picked like any other and runs with default limits.
 A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
-A save queued or running as the overview ends finishes first, and the departure text reports it if the person left before it ended.
+A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
 The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.

@@ -299,9 +299,10 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
         merge_allocations = @max(merge_allocations, counting.count);
         try std.testing.expectEqual(@as(usize, total), state.rows.items.len);
 
+        _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
         counting.count = 0;
         const render_start = nanosecondsNow();
-        var screen = try overview_view.render(counting.allocator(), &state, .{}, 200, 60, .{}, 0);
+        var screen = try overview_view.render(counting.allocator(), &state, .{}, .{}, 0);
         render_ns[run] = nanosecondsNow() - render_start;
         render_allocations = @max(render_allocations, counting.count);
         screen.deinit();

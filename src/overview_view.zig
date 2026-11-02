@@ -139,10 +139,8 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 
 /// What a key does in the overview. `clear` empties the draft, else the
 /// held start settings. `select_*` choose a Session even while the picker
-/// is open; `previous` and `next` move the picker's highlight there.
-/// `left` and `right` are ← and → at the sign-in choice, which no key
-/// table binds: the shell sends them there as the composer would an action.
-pub const Action = enum { previous, next, select_previous, select_next, first, last, left, right, clear, exit, stop };
+/// shows; `previous` and `next` move the picker's highlight there.
+pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop };
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -172,8 +170,26 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// frame.
 pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0 };
 
-/// What the composer made of one input, and its draft as that input left it.
-pub const Composed = struct { outcome: keymap.Outcome(Action), draft: Draft };
+/// Where the next input goes, which the shell's route and `render` both
+/// read: the composer, the composer frozen while a start waits, or the
+/// sign-in choice drawn in its place.
+pub const InputMode = enum { compose, frozen, choice };
+
+/// What one input did, and the draft as that input left it.
+pub const Composed = struct { input: Input, draft: Draft };
+
+/// One input as its route took it: through the composer (or the frozen
+/// composer), or at the sign-in choice. Typing and a paste at the choice go
+/// to the composer, so a `composer` input in `choice` mode leaves the choice.
+pub const Input = union(enum) {
+    composer: keymap.Outcome(Action),
+    choice: Choice,
+};
+
+/// An input at the sign-in choice, as `TerminalEditor.select` names it
+/// apart from typing: the screen's keys, the choice's own arrows and Enter,
+/// a refused chord, or nothing.
+pub const Choice = union(enum) { none, action: Action, left, right, enter, refused };
 
 pub const Delta = enum {
     not_modified,
@@ -307,6 +323,9 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
+    /// The size of the screen the shell draws next; keys read until the
+    /// next one act on that screen.
+    resized: Size,
     /// The shell's clock, in Unix milliseconds.
     tick: u64,
     list: ListReply,
@@ -410,6 +429,36 @@ pub const Default = struct {
     }
 };
 
+/// What the next Session starts on: the provider and the model `/configure`
+/// holds, else the default's. Its slices borrow the state until the next
+/// `step`.
+pub const Binding = struct {
+    provider: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+
+    /// The provider's sign-in, as the terminal names it, else as given.
+    fn signIn(self: Binding) []const u8 {
+        const name = self.provider orelse return "sign-in unknown";
+        return if (std.meta.stringToEnum(Provider, name)) |provider| provider.signIn() else name;
+    }
+};
+
+/// Picks on their way to the preferences file. One save runs at a time:
+/// a pick made while one runs waits, and only the newest waits. Only `step`
+/// changes it.
+pub const Save = struct {
+    /// The newest pick waiting for the running save to end.
+    wanted: ?Default = null,
+    /// The pick the shell is saving.
+    running: ?Default = null,
+    /// The newest save that ended since the person left, which the way out
+    /// tells; one that ended before, the overview said.
+    last: ?SaveEnded = null,
+};
+
+/// The screen in cells.
+pub const Size = struct { width: u16 = 0, height: u16 = 0 };
+
 /// The model picker /model opens: the models, then, for a model more than
 /// one sign-in offers, the sign-in choice on the input row.
 pub const Picker = struct {
@@ -507,16 +556,17 @@ pub const StartSettings = struct {
 pub const StartRequest = struct {
     settings: *const StartSettings,
     text: []const u8,
-    /// The binding for what the settings leave out.
-    default: ?Default = null,
+    /// The provider and model, `nextBinding`'s: the shell reads these, never
+    /// the settings' own.
+    binding: Binding = .{},
 
     pub fn own(self: StartRequest, gpa: Allocator) error{OutOfMemory}!OwnedStart {
-        const model = if (self.default) |*binding| binding.model.slice() else "";
-        const bytes = try gpa.alloc(u8, self.text.len + self.settings.used + model.len);
-        @memcpy(bytes[0..self.text.len], self.text);
-        @memcpy(bytes[self.text.len..][0..self.settings.used], self.settings.bytes[0..self.settings.used]);
-        @memcpy(bytes[self.text.len + self.settings.used ..], model);
-        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .default_provider = if (self.default) |binding| binding.provider else null, .default_model_len = model.len };
+        const provider = self.binding.provider orelse "";
+        const model = self.binding.model orelse "";
+        const bytes = try gpa.alloc(u8, self.text.len + self.settings.used + provider.len + model.len);
+        var writer = std.Io.Writer.fixed(bytes);
+        inline for (.{ self.text, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
+        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
     }
 };
 
@@ -526,17 +576,22 @@ pub const OwnedStart = struct {
     bytes: []u8,
     text_len: usize,
     held: [start_options.len]?StartSettings.Range,
-    default_provider: ?Provider = null,
-    default_model_len: usize = 0,
+    /// The binding's lengths, its bytes last: the provider, then the model.
+    provider_len: ?usize = null,
+    model_len: ?usize = null,
 
     pub fn text(self: *const OwnedStart) []const u8 {
         return self.bytes[0..self.text_len];
     }
 
-    /// The default's model, when there is a default.
-    pub fn defaultModel(self: *const OwnedStart) ?[]const u8 {
-        if (self.default_provider == null) return null;
-        return self.bytes[self.bytes.len - self.default_model_len ..];
+    /// The provider and model the Session starts on.
+    pub fn binding(self: *const OwnedStart) Binding {
+        const model_len = self.model_len orelse 0;
+        const provider_end = self.bytes.len - model_len;
+        return .{
+            .provider = if (self.provider_len) |len| self.bytes[provider_end - len .. provider_end] else null,
+            .model = if (self.model_len != null) self.bytes[provider_end..] else null,
+        };
     }
 
     pub fn get(self: *const OwnedStart, option: usize) ?[]const u8 {
@@ -689,9 +744,15 @@ pub const State = struct {
     /// The last Host start host-info gave, kept while the Host gives none.
     started_at: ?u64 = null,
 
-    /// What new Sessions get. A pick replaces it at once, and a save
-    /// follows it to the preferences file.
+    /// The person's default for new Sessions. A pick replaces it at once,
+    /// and a save follows it to the preferences file. `nextBinding` says
+    /// what the next Session starts on.
     default: ?Default = null,
+    save: Save = .{},
+    /// The screen the shell draws, which `layout` divides.
+    size: Size = .{},
+    /// Open from /model until a pick, Esc or typing; it acts only while
+    /// `layout` shows it.
     picker: ?Picker = null,
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
@@ -699,13 +760,6 @@ pub const State = struct {
     menu_read: enum { unread, read, unanswered, invalid } = .unread,
     /// A model-list read is in flight.
     asking_models: bool = false,
-    /// The binding of the `save_default` that is unanswered.
-    asking_save: ?Default = null,
-    /// The newest pick whose save has not ended. Every pick is saved, the
-    /// newest after any save already running; nothing else saves.
-    unsaved: ?Default = null,
-    /// The newest save that ended, and whether the person saw how.
-    saved: ?struct { binding: Default, outcome: Saved, shown: bool } = null,
 
     /// The token of the last completed listing.
     token: ?Token = null,
@@ -747,19 +801,34 @@ pub const State = struct {
         self.cwd = try self.intern(options.cwd);
     }
 
-    /// The input row is the sign-in choice.
-    pub fn choosingSignIn(self: *const State) bool {
-        return if (self.picker) |picker| picker.step == .sign_in else false;
+    /// Where the next input goes. The sign-in choice holds the input row
+    /// only while the screen shows the picker.
+    pub fn inputMode(self: *const State) InputMode {
+        if (self.starting()) return .frozen;
+        if (self.shownPicker()) |picker| if (picker.step == .sign_in) return .choice;
+        return .compose;
     }
 
-    /// The pick still to be saved, if any.
-    pub fn saveWanted(self: *const State) ?Default {
-        return self.unsaved;
+    /// The picker, while the screen shows it: keys act on nothing else.
+    /// The picker shows only over an empty draft, one row.
+    pub fn shownPicker(self: *const State) ?*const Picker {
+        const picker = if (self.picker) |*open| open else return null;
+        return if (layout(self, 1).picker.len() != 0) picker else null;
     }
 
-    /// The menu as the picker shows it, the default first.
+    /// What the next Session starts on: what `/configure` holds, else the
+    /// default.
+    pub fn nextBinding(self: *const State) Binding {
+        const default = if (self.default) |*binding| binding else null;
+        return .{
+            .provider = self.settings.get(startOption("provider").?) orelse if (default) |binding| @tagName(binding.provider) else null,
+            .model = self.settings.get(startOption("model").?) orelse if (default) |binding| binding.model.slice() else null,
+        };
+    }
+
+    /// The menu as the picker shows it, the next Session's model first.
     fn shownMenu(self: *const State) model_picker.Shown {
-        return self.menu.shown(if (self.default) |*binding| binding.model.slice() else null);
+        return self.menu.shown(self.nextBinding().model);
     }
 
     /// The open picker's highlighted entry of `menu`.
@@ -1257,8 +1326,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    // The Host serves no sign-in for the start's provider.
-                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) startProvider(state) else null;
+                    // The Host serves no sign-in for the start's provider,
+                    // which the frozen composer kept as it started.
+                    const next = state.nextBinding().provider;
+                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) std.meta.stringToEnum(Provider, next orelse "") else null;
                     if (missing) |provider| {
                         state.say(.attention, "! {s} sign-in missing · {s}", .{ provider.signIn(), provider.login() });
                     } else state.say(.attention, "! Not started: {s}", .{code});
@@ -1274,7 +1345,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
             }
         },
-        .leave => state.left = true,
+        .leave => {
+            state.left = true;
+            // The person saw how every earlier save ended.
+            state.save.last = null;
+        },
+        .resized => |size| state.size = size,
         .observed => |read| if (try state.observe(read)) |kind| if (!read.opening) effects.add(.{ .notify = .{ .name = read.name, .kind = kind, .more = 0 } }),
         .open => |ref| {
             state.selected = ref;
@@ -1295,34 +1371,27 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .models => |read| readModels(state, read),
         .saved => |ended| {
-            state.asking_save = null;
             // That pick's save ended, failed or not: only a new pick asks again.
-            if (state.unsaved) |*newest| if (newest.eql(&ended.binding)) {
-                state.unsaved = null;
-            };
-            state.saved = .{ .binding = ended.binding, .outcome = ended.outcome, .shown = !state.left };
+            std.debug.assert(ended.binding.eql(&state.save.running.?));
+            state.save.running = null;
+            state.save.last = ended;
             // A pick that came while this save ran is said by its own save.
-            if (!state.left and state.saveWanted() == null) {
-                const model = ended.binding.model.slice();
-                const sign_in = ended.binding.provider.signIn();
+            if (state.save.wanted == null) {
+                const next = state.nextBinding();
+                const model = next.model orelse "";
+                const sign_in = next.signIn();
                 switch (ended.outcome) {
                     .done => state.say(.quiet, "New Sessions use {s} · {s}", .{ model, sign_in }),
-                    .unconfirmed => state.say(.attention, "! Saved {s} · {s}; durability unconfirmed", .{ model, sign_in }),
+                    .unconfirmed => state.say(.attention, "! Saved {s} · {s}; durability unconfirmed", .{ ended.binding.model.slice(), ended.binding.provider.signIn() }),
                     .failed => |why| state.say(.quiet, "Default not saved ({s}); new Sessions here still use {s} · {s}", .{ why orelse "check ~/.config/rui/preferences", model, sign_in }),
                 }
             }
-            askSave(state, &effects);
+            startSave(state, &effects);
         },
     }
     // Opening a Session shows the person its outcome.
     for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
     return effects;
-}
-
-/// The provider a start names: its held setting, else the default's.
-fn startProvider(state: *const State) ?Provider {
-    if (state.settings.get(startOption("provider").?)) |name| return std.meta.stringToEnum(Provider, name);
-    return if (state.default) |binding| binding.provider else null;
 }
 
 /// Takes a model-list answer. A failed read keeps the open picker's list.
@@ -1360,7 +1429,7 @@ fn readModels(state: *State, read: ModelsRead) void {
 }
 
 /// The sign-in beside `current` that `providers` holds, in provider order.
-fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Action) Provider {
+fn nextSignIn(providers: model_picker.Providers, current: Provider, side: enum { left, right }) Provider {
     const order = std.enums.values(Provider);
     var at = std.mem.indexOfScalar(Provider, order, current).?;
     while (true) {
@@ -1370,7 +1439,6 @@ fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Action
                 at += 1;
                 if (at == order.len) return current;
             },
-            else => unreachable,
         }
         if (providers.contains(order[at])) return order[at];
     }
@@ -1384,7 +1452,7 @@ pub const max_late_save_bytes = 512;
 /// request left in the ledger, and one for a save the person did not see
 /// end.
 pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (state.saved) |*late| if (!late.shown) {
+    if (state.save.last) |*late| {
         const model = late.binding.model.slice();
         const sign_in = late.binding.provider.signIn();
         switch (late.outcome) {
@@ -1392,7 +1460,7 @@ pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer
             .unconfirmed => try writer.print("rui: New Sessions use {s} · {s}; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ model, sign_in }),
             .failed => |why| try writer.print("rui: {s} · {s} was not saved as the default ({s}).\n", .{ model, sign_in, why orelse "check ~/.config/rui/preferences" }),
         }
-    };
+    }
     for (state.requests[0..state.request_count]) |*request| {
         const text = request.text.slice();
         switch (request.kind) {
@@ -1441,13 +1509,12 @@ fn askModels(state: *State, effects: *Effects) void {
     effects.add(.list_models);
 }
 
-/// Asks to save the newest pick, one save at a time: picks made while one
-/// runs are saved after it, only the newest. A failed save is not retried;
-/// picking again is.
-fn askSave(state: *State, effects: *Effects) void {
-    if (state.asking_save != null) return;
-    const binding = state.unsaved orelse return;
-    state.asking_save = binding;
+/// Hands the waiting pick to the shell to save once no save runs. A
+/// failed save is not retried; picking again is.
+fn startSave(state: *State, effects: *Effects) void {
+    if (state.save.running != null) return;
+    const binding = state.save.wanted orelse return;
+    state.save = .{ .running = binding, .last = state.save.last };
     effects.add(.{ .save_default = binding });
 }
 
@@ -1707,28 +1774,48 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
 }
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
-/// the prompt and Esc only cancels it.
+/// the prompt and Esc only cancels it. Keys act on the picker only while
+/// the screen shows it.
 fn compose(state: *State, value: Composed, effects: *Effects) void {
     state.notice = null;
     const prompt = state.prompt;
     state.prompt = null;
-    // Typing leaves the picker for the draft.
-    if (value.draft.bytes.len != 0 and state.picker != null) state.closePicker();
-    switch (value.outcome) {
+    const mode = state.inputMode();
+    const outcome: keymap.Outcome(Action) = switch (value.input) {
+        .choice => |choice| choice: {
+            std.debug.assert(mode == .choice);
+            const picker = &state.picker.?;
+            break :choice switch (choice) {
+                .none => .none,
+                .action => |pressed| .{ .action = pressed },
+                .refused => .{ .refused = .unbound },
+                .left, .right => {
+                    const providers = state.menu.entries[state.highlighted().?].providers;
+                    picker.step = .{ .sign_in = nextSignIn(providers, picker.step.sign_in, if (choice == .left) .left else .right) };
+                    return;
+                },
+                .enter => return pick(state, effects),
+            };
+        },
+        .composer => |outcome| composer: {
+            // Typing leaves the picker for the draft; at the choice, so
+            // does a paste, which the composer takes from its start.
+            if (state.picker != null and (value.draft.bytes.len != 0 or mode == .choice)) state.closePicker();
+            break :composer outcome;
+        },
+    };
+    const picker: ?*Picker = if (state.shownPicker() != null) &state.picker.? else null;
+    switch (outcome) {
         .action => |pressed| switch (pressed) {
-            .previous, .next, .first, .last => if (state.picker) |*picker| {
-                if (picker.step == .models) pickerMove(state, picker, pressed);
+            .previous, .next, .first, .last => if (picker) |shown| {
+                if (shown.step == .models) pickerMove(state, shown, pressed);
             } else move(state, pressed),
             .select_previous => move(state, .previous),
             .select_next => move(state, .next),
-            .left, .right => if (state.picker) |*picker| switch (picker.step) {
-                .models => {},
-                .sign_in => |current| picker.step = .{ .sign_in = nextSignIn(state.menu.entries[state.highlighted().?].providers, current, pressed) },
-            },
             // Esc steps back: from the sign-in choice to the models, then
             // out of the picker.
-            .clear => if (prompt != null) {} else if (state.picker) |*picker| switch (picker.step) {
-                .sign_in => picker.step = .models,
+            .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
+                .sign_in => shown.step = .models,
                 .models => state.closePicker(),
             } else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
@@ -1740,7 +1827,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             },
         },
         .none, .append, .redraw => {},
-        .submit => if (state.picker != null) pick(state, effects) else enter(state, value.draft.bytes, effects),
+        .submit => if (picker != null) pick(state, effects) else enter(state, value.draft.bytes, effects),
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
@@ -1807,14 +1894,19 @@ fn enter(state: *State, text: []const u8, effects: *Effects) void {
     // As in a conversation, `//` starts text with one slash.
     if (text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
         if (!state.request(.start, null)) return;
-        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .default = state.default } });
+        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
     }
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
     if (std.mem.eql(u8, name, "/model")) {
         if (std.mem.trim(u8, text[name.len..], " ").len != 0) return state.say(.attention, "! /model takes nothing; it lists the models", .{});
-        effects.add(.clear_draft);
         state.picker = .{};
+        // Visible equals actionable: a picker the screen cannot show never opens.
+        if (state.shownPicker() == null) {
+            state.picker = null;
+            return state.say(.attention, "! Screen too small for /model", .{});
+        }
+        effects.add(.clear_draft);
         return askModels(state, effects);
     }
     if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /model /configure /exit", .{});
@@ -1847,17 +1939,23 @@ fn pick(state: *State, effects: *Effects) void {
             var offering = entry.providers.iterator();
             const first = offering.next().?;
             if (offering.next() == null) break :choice first;
-            const preferred = if (state.default) |binding| binding.provider else first;
-            picker.step = .{ .sign_in = if (entry.providers.contains(preferred)) preferred else first };
+            const next = std.meta.stringToEnum(Provider, state.nextBinding().provider orelse "") orelse first;
+            picker.step = .{ .sign_in = if (entry.providers.contains(next)) next else first };
             return;
         },
     };
     var binding: Default = .{ .provider = provider, .model = .{ .len = 0 } };
     binding.model.set(entry.id) catch unreachable;
     state.default = binding;
-    state.unsaved = binding;
+    // The pick is newer than what /configure holds for the next Session.
+    var kept: StartSettings = .{};
+    inline for (start_options, 0..) |name, option| if (comptime !std.mem.eql(u8, name, "provider") and !std.mem.eql(u8, name, "model")) {
+        if (state.settings.get(option)) |value| kept.put(option, value) catch unreachable;
+    };
+    state.settings = kept;
+    state.save.wanted = binding;
     state.closePicker();
-    askSave(state, effects);
+    startSave(state, effects);
 }
 
 const configure_usage = blk: {
@@ -2333,8 +2431,57 @@ const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, e
 const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .sides = "←→", .up = "↑", .down = "↓", .newline = "↵" };
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
-/// Draws the overview. `frame` picks each pulsing mark's glyph.
-pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
+/// Where the screen's rows go: the top from row 0, a gap, the list, the
+/// picker right above the input, then the input's rule, composer rows and
+/// hints. The core reads it to know what shows; `render` draws from it.
+pub const Layout = struct {
+    top: u16 = 0,
+    list: Rows = .{},
+    /// Empty while the picker is closed or the screen leaves it no row.
+    picker: Rows = .{},
+    /// The rule's row; `size.height` when the screen is too small for the
+    /// input.
+    input: u16 = 0,
+
+    pub const Rows = struct {
+        start: u16 = 0,
+        end: u16 = 0,
+
+        pub fn len(self: Rows) u16 {
+            return self.end - self.start;
+        }
+    };
+};
+
+/// The rows of `state`'s screen when the draft takes `draft_rows` rows.
+/// The picker takes the rows right above the input, as many as it needs;
+/// the list keeps the rest, and at least the selected Session's row, which
+/// Ctrl-X stops.
+pub fn layout(state: *const State, draft_rows: u16) Layout {
+    const height = state.size.height;
+    if (height == 0 or state.size.width == 0) return .{};
+    const top: u16 = @intCast(@min(topRows(state), height));
+    const input: u16 = if (height >= 6 and state.size.width >= 6) height - 2 - draft_rows else height;
+    var picker: Layout.Rows = .{ .start = input, .end = input };
+    const kept: u16 = @intFromBool(state.selected != null and state.rows.items.len != 0);
+    if (state.picker != null and top + 1 + kept < input) {
+        picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
+    }
+    return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input };
+}
+
+/// The top's rows: the title, the alarm bands or else the headline, the
+/// Host's health, and what changed since the person looked.
+fn topRows(state: *const State) usize {
+    const bands = @as(usize, @intFromBool(state.unreachable_since_ms != null)) + @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
+    return 1 + @max(bands, 1) + 1 + @intFromBool(sinceLooked(state) != null);
+}
+
+/// Draws the overview at `state.size`. `frame` picks each pulsing mark's
+/// glyph.
+pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
+    const width = state.size.width;
+    const height = state.size.height;
     var screen: Screen = .{ .arena = .init(gpa), .width = width, .lines = &.{}, .depth = caps.depth, .skin = caps.skin() };
     errdefer screen.deinit();
     var painter: Painter = .{ .arena = screen.arena.allocator(), .caps = caps, .glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs, .width = width, .frame = frame };
@@ -2371,28 +2518,25 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
         top[count] = try sinceLine(&painter, news);
         count += 1;
     }
-    const row = @min(count, height);
-    @memcpy(lines[0..row], top[0..row]);
+    std.debug.assert(count == topRows(state));
     // The bottom: the rule, the composer's rows and the hints, in the same
     // rows a conversation gives its input.
-    var bottom = height;
-    if (height >= 6 and width >= 6) {
-        var layout: ComposerLayout = undefined;
-        layout.plan(&painter, draft, height);
-        bottom = height - 2 - layout.view.rows;
-        lines[bottom] = try ruleLine(&painter, layout.view);
-        try composer(&painter, state, draft, &layout, lines[bottom + 1 .. height - 1]);
+    var input: ComposerLayout = undefined;
+    const fits = height >= 6 and width >= 6;
+    if (fits) input.plan(&painter, draft, height);
+    // The picker shows only over an empty draft, as `shownPicker` assumes.
+    std.debug.assert(state.picker == null or draft.bytes.len == 0);
+    const at = layout(state, if (fits) @intCast(input.view.rows) else 0);
+    @memcpy(lines[0..at.top], top[0..at.top]);
+    if (fits) {
+        lines[at.input] = try ruleLine(&painter, input.view);
+        try composer(&painter, state, draft, &input, lines[at.input + 1 .. height - 1]);
         lines[height - 1] = try hints(&painter, state, draft);
-        screen.draft_anchor = layout.lines[0].start;
-        if (!state.starting() and !state.choosingSignIn()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
+        screen.draft_anchor = input.lines[0].start;
+        if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.input + 1 + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
     }
-    // The picker takes the rows right above the input; the list keeps the
-    // rest, and at least the selected Session's row, which Ctrl-X stops.
-    const kept: usize = @intFromBool(state.selected != null and state.rows.items.len != 0);
-    if (state.picker) |*picker| if (row + 1 + kept < bottom) {
-        bottom -= @intCast(try pickerLines(&painter, state, picker, lines[row + 1 + kept .. bottom]));
-    };
-    if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
+    if (at.picker.len() != 0) try pickerLines(&painter, state, &state.picker.?, lines[at.picker.start..at.picker.end]);
+    if (at.list.len() != 0) try list(&painter, state, lines[at.list.start..at.list.end]);
     screen.pulses = painter.pulsed;
     return screen;
 }
@@ -2819,13 +2963,13 @@ const DraftPieces = struct {
 };
 
 /// The draft's shown lines, one per row of `rows`, the prompt on its first.
-fn composer(painter: *Painter, state: *const State, draft: Draft, layout: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
-    std.debug.assert(rows.len == layout.view.rows);
+fn composer(painter: *Painter, state: *const State, draft: Draft, input: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
+    std.debug.assert(rows.len == input.view.rows);
     const room = painter.width -| 4;
-    if (state.picker) |picker| if (picker.step == .sign_in) {
-        rows[0] = try signInChoice(painter, state.menu.entries[state.highlighted().?].providers, picker.step.sign_in);
+    if (state.inputMode() == .choice) {
+        rows[0] = try signInChoice(painter, state.menu.entries[state.highlighted().?].providers, state.picker.?.step.sign_in);
         return;
-    };
+    }
     if (draft.bytes.len == 0) {
         painter.begin(false);
         _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
@@ -2834,9 +2978,9 @@ fn composer(painter: *Painter, state: *const State, draft: Draft, layout: *const
         return;
     }
     const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
-    for (layout.lines[0..rows.len], rows, 0..) |line, *out, index| {
+    for (input.lines[0..rows.len], rows, 0..) |line, *out, index| {
         painter.begin(false);
-        if (layout.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+        if (input.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
         _ = try painter.put(3, draft.bytes[line.start..line.end], room, style);
         out.* = try painter.finish();
     }
@@ -2849,7 +2993,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
     if (state.prompt) |prompt| {
         const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
-    } else if (state.picker) |picker| {
+    } else if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
         const used = if (state.notice) |*notice| try painter.put(1, notice.text(), room, .{ .colour = notice.colour }) + 1 else 0;
         const text = if (picker.step == .sign_in)
@@ -2900,69 +3044,97 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
     }
 }
 
-/// The picker's lines at the end of `lines`, as many as it needs; returns
-/// how many. At the sign-in choice only the chosen model shows. Otherwise a
-/// note while the list loads or after a read failed, the models from the
-/// highlighted one's window with those Rui does not list under "Other
-/// models", then a line for each sign-in the Host does not serve and each
-/// list that is loading or unavailable. The highlighted model always shows;
-/// the notes and "N more" take only the rows the models leave.
-fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, lines: [][]const Span) error{OutOfMemory}!usize {
+/// What the picker shows in `room` rows: at the sign-in choice only the
+/// chosen model. Otherwise a note while the list loads or after a read
+/// failed, the models from the highlighted one's window with those Rui does
+/// not list under "Other models", then a line for each sign-in the Host
+/// does not serve and each list that is loading or unavailable. The
+/// highlighted model always shows; the notes and "N more" take only the
+/// rows the models leave.
+const PickerFit = struct {
+    above: bool = false,
+    /// Model rows, the "Other models" heading among them.
+    shown: usize = 0,
+    more: bool = false,
+    notes: usize = 0,
+
+    fn used(self: PickerFit) usize {
+        return @as(usize, @intFromBool(self.above)) + self.shown + @intFromBool(self.more) + self.notes;
+    }
+};
+
+fn pickerFit(state: *const State, room: usize) PickerFit {
+    if (room == 0) return .{};
+    if (state.picker.?.step == .sign_in) return .{ .shown = 1 };
+    const above = state.menu_read != .read;
+    var note_count: usize = 0;
+    for (std.enums.values(Provider)) |provider| note_count += @intFromBool(pickerNote(state, provider) != null);
+    const items = pickerItems(state);
+    const notes_room = room -| @intFromBool(above) -| note_count;
+    const shown = @min(items, max_picker_rows, @max(notes_room, @min(items, 1)));
+    var spare = room - shown;
+    const show_above = above and spare != 0;
+    spare -= @intFromBool(show_above);
+    const show_notes = @min(note_count, spare);
+    spare -= show_notes;
+    return .{ .above = show_above, .shown = shown, .more = shown < items and spare != 0, .notes = show_notes };
+}
+
+/// The picker's model rows: each entry, and the "Other models" heading
+/// before the first one the Host does not know.
+fn pickerItems(state: *const State) usize {
+    return state.menu.entries.len + @intFromBool(state.shownMenu().others() < state.menu.entries.len);
+}
+
+/// Why the picker has a line for `provider`'s sign-in: its list loads or
+/// stands in for an unavailable live one, or the Host does not serve it.
+fn pickerNote(state: *const State, provider: Provider) ?enum { pending, fallback, login } {
     const menu = &state.menu;
+    const kept = menu.entries.len != 0 or for (menu.sources.values) |source| {
+        if (source != null) break true;
+    } else false;
+    if (state.menu_read != .read and !kept) return null;
+    const source = menu.sources.get(provider) orelse return .login;
+    return switch (source) {
+        .pending => .pending,
+        .table_fallback => .fallback,
+        .table, .live => null,
+    };
+}
+
+/// Fills `lines`, the rows `layout` gave the picker, as `pickerFit` says.
+fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, lines: [][]const Span) error{OutOfMemory}!void {
+    const menu = &state.menu;
+    const fit = pickerFit(state, lines.len);
+    std.debug.assert(fit.used() == lines.len);
     if (picker.step == .sign_in) {
         painter.begin(false);
         _ = try painter.put(4, picker.highlight.slice(), painter.width -| 5, .{ .colour = .strong });
-        lines[lines.len - 1] = try painter.finish();
-        return 1;
+        lines[0] = try painter.finish();
+        return;
     }
     const kept = menu.entries.len != 0 or for (menu.sources.values) |source| {
         if (source != null) break true;
     } else false;
-    const above: ?[]const u8 = switch (state.menu_read) {
-        .read => null,
-        .unread => try std.fmt.allocPrint(painter.arena, "Loading models{s}", .{painter.glyphs.ellipsis}),
-        .unanswered => if (kept) "The Host did not answer; this is the last list" else "Models unavailable: the Host did not answer",
-        .invalid => if (kept) "The Host's model list was not valid; this is the last list" else "Models unavailable: the Host's list was not valid",
-    };
-    var notes: [std.enums.values(Provider).len][]const u8 = undefined;
-    var note_count: usize = 0;
-    if (state.menu_read == .read or kept) for (std.enums.values(Provider)) |provider| {
-        const name = provider.signIn();
-        const said: ?[]const u8 = if (menu.sources.get(provider)) |source| switch (source) {
-            .pending => try std.fmt.allocPrint(painter.arena, "{s}: loading its models{s}", .{ name, painter.glyphs.ellipsis }),
-            .table_fallback => try std.fmt.allocPrint(painter.arena, "{s}: its live list is unavailable", .{name}),
-            .table, .live => null,
-        } else try std.fmt.allocPrint(painter.arena, "{s}: run {s} in your shell", .{ name, provider.login() });
-        if (said) |text| {
-            notes[note_count] = text;
-            note_count += 1;
-        }
-    };
-    // Model rows: each entry, and the "Other models" heading before the
-    // first one the Host does not know.
-    const shown_menu = state.shownMenu();
-    const others = shown_menu.others();
-    const items = menu.entries.len + @intFromBool(others < menu.entries.len);
-    const notes_room = lines.len -| @intFromBool(above != null) -| note_count;
-    const shown = @min(items, max_picker_rows, @max(notes_room, @min(items, 1)));
-    var spare = lines.len - shown;
-    const show_above = above != null and spare != 0;
-    spare -= @intFromBool(show_above);
-    const show_notes = @min(note_count, spare);
-    spare -= show_notes;
-    const more = shown < items and spare != 0;
-    const used = @intFromBool(show_above) + shown + @intFromBool(more) + show_notes;
-    var line = lines.len - used;
-    if (show_above) {
-        lines[line] = try quietLine(painter, above.?);
+    var line: usize = 0;
+    if (fit.above) {
+        lines[line] = try quietLine(painter, switch (state.menu_read) {
+            .read => unreachable,
+            .unread => try std.fmt.allocPrint(painter.arena, "Loading models{s}", .{painter.glyphs.ellipsis}),
+            .unanswered => if (kept) "The Host did not answer; this is the last list" else "Models unavailable: the Host did not answer",
+            .invalid => if (kept) "The Host's model list was not valid; this is the last list" else "Models unavailable: the Host's list was not valid",
+        });
         line += 1;
     }
+    const shown_menu = state.shownMenu();
+    const others = shown_menu.others();
+    const items = pickerItems(state);
     const row = if (state.highlighted()) |at| shown_menu.row(at) else 0;
     const highlighted = row + @intFromBool(row >= others);
-    const first = @min((highlighted + 1) -| shown, items - shown);
+    const first = @min((highlighted + 1) -| fit.shown, items - fit.shown);
     const tag_column = 4 + @min(menu.widest, 24) + 4;
     var listed: usize = 0;
-    for (first..first + shown) |item| {
+    for (first..first + fit.shown) |item| {
         if (item == others) {
             painter.begin(false);
             _ = try painter.put(2, "Other models", painter.width -| 3, .{ .colour = .ink, .bold = true });
@@ -2973,16 +3145,24 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
         }
         line += 1;
     }
-    if (more) {
+    if (fit.more) {
         lines[line] = try quietLine(painter, try std.fmt.allocPrint(painter.arena, "{d} more", .{menu.entries.len - listed}));
         line += 1;
     }
-    for (notes[0..show_notes]) |text| {
-        lines[line] = try quietLine(painter, text);
+    var noted: usize = 0;
+    for (std.enums.values(Provider)) |provider| {
+        if (noted == fit.notes) break;
+        const note = pickerNote(state, provider) orelse continue;
+        const name = provider.signIn();
+        lines[line] = try quietLine(painter, switch (note) {
+            .pending => try std.fmt.allocPrint(painter.arena, "{s}: loading its models{s}", .{ name, painter.glyphs.ellipsis }),
+            .fallback => try std.fmt.allocPrint(painter.arena, "{s}: its live list is unavailable", .{name}),
+            .login => try std.fmt.allocPrint(painter.arena, "{s}: run {s} in your shell", .{ name, provider.login() }),
+        });
         line += 1;
+        noted += 1;
     }
     std.debug.assert(line == lines.len);
-    return used;
 }
 
 /// One of the picker's dim lines, under its models.
@@ -2996,7 +3176,7 @@ fn modelLine(painter: *Painter, state: *const State, entry: model_picker.Entry, 
     const highlighted = state.picker.?.highlight.eql(entry.id);
     painter.begin(highlighted);
     if (highlighted) _ = try painter.put(2, painter.glyphs.prompt, 1, .{ .colour = .strong });
-    const is_default = if (state.default) |*binding| binding.model.eql(entry.id) else false;
+    const is_default = if (state.nextBinding().model) |model| std.mem.eql(u8, model, entry.id) else false;
     const tag: []const u8 = if (!entry.known)
         (if (is_default) try std.fmt.allocPrint(painter.arena, "default {s} default limits", .{painter.glyphs.dot}) else "default limits")
     else if (is_default) "default" else "";
@@ -3027,12 +3207,12 @@ fn signInChoice(painter: *Painter, providers: model_picker.Providers, highlight:
 /// selection shows.
 fn list(painter: *Painter, state: *const State, lines: [][]const Span) error{OutOfMemory}!void {
     if (state.rows.items.len == 0) return;
-    const layout = Layout.of(state);
-    const selected_line = if (state.selected) |ref| if (position(state, ref)) |at| layout.lineOf(state, at) else null else null;
+    const lines_of = ListLines.of(state);
+    const selected_line = if (state.selected) |ref| if (position(state, ref)) |at| lines_of.lineOf(state, at) else null else null;
     const offset = if (selected_line) |line| (line + 1) -| lines.len else 0;
     const columns = Columns.of(painter.width);
     for (lines, offset..) |*line, number| {
-        const item = layout.item(state, number) orelse break;
+        const item = lines_of.item(state, number) orelse break;
         line.* = switch (item) {
             .gap => &.{},
             .heading => |group| try heading(painter, group),
@@ -3046,31 +3226,31 @@ const Item = union(enum) { gap, heading: Group, row: usize, more: usize };
 
 /// Lines of the list, group by group: a gap before each group but the
 /// first, its heading, its shown rows, then its "more" line when folded.
-const Layout = struct {
+const ListLines = struct {
     first_line: std.enums.EnumArray(Group, usize),
     shown: std.enums.EnumArray(Group, usize),
 
-    fn of(state: *const State) Layout {
-        var layout: Layout = .{ .first_line = .initFill(0), .shown = .initFill(0) };
+    fn of(state: *const State) ListLines {
+        var lines_of: ListLines = .{ .first_line = .initFill(0), .shown = .initFill(0) };
         var line: usize = 0;
         for (std.enums.values(Group)) |group| {
             const run = state.runs.get(group);
             if (run.len == 0) continue;
             if (line != 0) line += 1;
             const shown = if (folded(state, group)) fold_rows else run.len;
-            layout.first_line.set(group, line);
-            layout.shown.set(group, shown);
+            lines_of.first_line.set(group, line);
+            lines_of.shown.set(group, shown);
             line += 1 + shown + @intFromBool(shown < run.len);
         }
-        return layout;
+        return lines_of;
     }
 
-    fn lineOf(self: *const Layout, state: *const State, at: usize) usize {
+    fn lineOf(self: *const ListLines, state: *const State, at: usize) usize {
         const group = state.rows.items[state.order.items[at]].group();
         return self.first_line.get(group) + 1 + (at - state.runs.get(group).start);
     }
 
-    fn item(self: *const Layout, state: *const State, line: usize) ?Item {
+    fn item(self: *const ListLines, state: *const State, line: usize) ?Item {
         var previous_end: usize = 0;
         for (std.enums.values(Group)) |group| {
             const run = state.runs.get(group);
@@ -3315,21 +3495,37 @@ fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
 }
 
 /// A key the overview binds, pressed with `draft` in the composer.
+/// A key the table binds, through the route the state's input mode picks.
 fn press(state: *State, draft: Draft, action: Action) !Effects {
-    return step(state, .{ .composed = .{ .outcome = .{ .action = action }, .draft = draft } });
+    const input: Input = if (state.inputMode() == .choice) .{ .choice = .{ .action = action } } else .{ .composer = .{ .action = action } };
+    return step(state, .{ .composed = .{ .input = input, .draft = draft } });
+}
+
+/// ← or → at the sign-in choice.
+fn choose(state: *State, side: enum { left, right }) !Effects {
+    std.debug.assert(state.inputMode() == .choice);
+    return step(state, .{ .composed = .{ .input = .{ .choice = if (side == .left) .left else .right }, .draft = .{} } });
+}
+
+/// Renders `state` at `width` by `height`, which the shell steps before it
+/// draws.
+fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Screen {
+    try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
+    return render(std.testing.allocator, state, draft, caps, frame);
 }
 
 /// Types `text` as the whole draft, its caret at the end, as the shell's
 /// line editor reports an edit, and returns that draft.
 fn typeText(state: *State, text: []const u8) !Draft {
     const draft: Draft = .{ .bytes = text, .cursor = text.len };
-    try expectEffects(&.{}, try step(state, .{ .composed = .{ .outcome = .redraw, .draft = draft } }));
+    try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     return draft;
 }
 
 /// The line editor's Enter on `draft`.
 fn submit(state: *State, draft: Draft) !Effects {
-    return step(state, .{ .composed = .{ .outcome = .submit, .draft = draft } });
+    const input: Input = if (state.inputMode() == .choice) .{ .choice = .enter } else .{ .composer = .submit };
+    return step(state, .{ .composed = .{ .input = input, .draft = draft } });
 }
 
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
@@ -3375,17 +3571,17 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
 
 /// A notice, which reads whole on a 40-column overview in the row under its
 /// input.
-fn expectNotice(state: *const State, expected: ?[]const u8) !void {
+fn expectNotice(state: *State, expected: ?[]const u8) !void {
     return expectNoticeAt(state, expected, true);
 }
 
 /// A notice whose data (a Host's code, the list of start settings) may be
 /// cut at the edge of a narrow overview; its wording is not.
-fn expectNoticeWithData(state: *const State, expected: []const u8) !void {
+fn expectNoticeWithData(state: *State, expected: []const u8) !void {
     return expectNoticeAt(state, expected, false);
 }
 
-fn expectNoticeAt(state: *const State, expected: ?[]const u8, whole_at_40: bool) !void {
+fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
@@ -3403,12 +3599,12 @@ fn expectSelected(state: *const State, expected: *const [6]u8) !void {
     try std.testing.expectEqualStrings(expected, &(state.selected orelse return error.TestExpectedSelection));
 }
 
-fn screenText(state: *const State, width: u16, height: u16, caps: Caps) ![]u8 {
+fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
     return frameText(state, width, height, caps, 0);
 }
 
-fn frameText(state: *const State, width: u16, height: u16, caps: Caps, frame: u64) ![]u8 {
-    var screen = try render(std.testing.allocator, state, .{}, width, height, caps, frame);
+fn frameText(state: *State, width: u16, height: u16, caps: Caps, frame: u64) ![]u8 {
+    var screen = try sizedRender(state, .{}, width, height, caps, frame);
     defer screen.deinit();
     var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
     errdefer text.deinit();
@@ -3416,7 +3612,7 @@ fn frameText(state: *const State, width: u16, height: u16, caps: Caps, frame: u6
     return text.toOwnedSlice();
 }
 
-fn expectScreen(state: *const State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
+fn expectScreen(state: *State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
     const actual = try screenText(state, width, height, caps);
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
@@ -3481,11 +3677,11 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         }
         // The mark takes its colour, and the word one only when it needs
         // the person or is quiet.
-        var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
+        var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
         defer screen.deinit();
         try std.testing.expectEqual(Background.selection, screen.styleAt(5, 1).?.background);
         state.selected = null;
-        var unselected = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
+        var unselected = try sizedRender(&state, .{}, 80, 24, .{}, 0);
         defer unselected.deinit();
         try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(5, 2).?);
         const tone: Colour = switch (case.colour) {
@@ -3518,7 +3714,7 @@ test "a retry that has fallen due reads as starting in its words, mark and colou
     const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
     const end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
     try std.testing.expectEqualStrings("  ○ Write the notes                                  Starting                2s", text[start..end]);
-    var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{ .depth = .none }, 0);
+    var screen = try sizedRender(&state, .{}, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
     try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(5, 2).?);
     try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(5, 53).?);
@@ -3567,7 +3763,7 @@ test "a mark pulses out of step with others for a moment after its row changes, 
         // Older changes hold still.
         try std.testing.expectEqualStrings("×", markOf(text, "Failed three seconds ago"));
         try std.testing.expectEqualStrings("●", markOf(text, "Working a while"));
-        var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, frame);
+        var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
         defer screen.deinit();
         try std.testing.expect(screen.pulses);
         // A pulsing mark keeps its rule's colour.
@@ -3583,7 +3779,7 @@ test "a mark pulses out of step with others for a moment after its row changes, 
             const text = try frameText(&state, 80, 24, caps, frame);
             defer std.testing.allocator.free(text);
             try std.testing.expectEqualStrings(first, text);
-            var screen = try render(std.testing.allocator, &state, .{}, 80, 24, caps, frame);
+            var screen = try sizedRender(&state, .{}, 80, 24, caps, frame);
             defer screen.deinit();
             try std.testing.expect(!screen.pulses);
         }
@@ -3592,8 +3788,8 @@ test "a mark pulses out of step with others for a moment after its row changes, 
 
 test "a state change under the same mark holds still, and a new mark pulses" {
     const Pulses = struct {
-        fn at(state: *const State) !bool {
-            var screen = try render(std.testing.allocator, state, .{}, 80, 24, .{}, 1);
+        fn at(state: *State) !bool {
+            var screen = try sizedRender(state, .{}, 80, 24, .{}, 1);
             defer screen.deinit();
             return screen.pulses;
         }
@@ -3631,7 +3827,7 @@ test "the overview ticks as each pulse ends, and once every change is old nothin
     _ = try step(&state, .{ .tick = (test_now_s + 3) * 1000 });
     try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
     for (0..pulse_dots.len + 1) |frame| {
-        var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, frame);
+        var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
         defer screen.deinit();
         try std.testing.expect(!screen.pulses);
     }
@@ -3648,8 +3844,8 @@ test "the screen asks for frames only while a pulsing mark shows" {
     var state = try opened(&rows);
     defer state.deinit();
     const Pulses = struct {
-        fn at(from: *const State, height: u16) !bool {
-            var screen = try render(std.testing.allocator, from, .{}, 80, height, .{}, 1);
+        fn at(from: *State, height: u16) !bool {
+            var screen = try sizedRender(from, .{}, 80, height, .{}, 1);
             defer screen.deinit();
             return screen.pulses;
         }
@@ -3680,11 +3876,11 @@ test "a frame writes only what changed on the screen the terminal shows" {
         defer state.deinit();
         state.selected = null;
         const plain = caps.depth == .none;
-        var still = try render(std.testing.allocator, &state, .{}, 80, 24, caps, 0);
+        var still = try sizedRender(&state, .{}, 80, 24, caps, 0);
         defer still.deinit();
-        var pulsed = try render(std.testing.allocator, &state, .{}, 80, 24, caps, 1);
+        var pulsed = try sizedRender(&state, .{}, 80, 24, caps, 1);
         defer pulsed.deinit();
-        var wider = try render(std.testing.allocator, &state, .{}, 81, 24, caps, 1);
+        var wider = try sizedRender(&state, .{}, 81, 24, caps, 1);
         defer wider.deinit();
         // Unknown contents, or another size, clear and draw every line.
         for ([_]struct { *const Screen, ?*const Screen }{ .{ &still, null }, .{ &wider, &still } }) |case| {
@@ -3708,7 +3904,7 @@ test "a frame writes only what changed on the screen the terminal shows" {
         }
         // A line laid out anew is cleared and drawn whole; the others stay.
         const draft = try typeText(&state, "hi");
-        var typed = try render(std.testing.allocator, &state, draft, 80, 24, caps, 0);
+        var typed = try sizedRender(&state, draft, 80, 24, caps, 0);
         defer typed.deinit();
         const composed = try frameBytes(&typed, &still);
         defer std.testing.allocator.free(composed);
@@ -3799,7 +3995,7 @@ test "a cancelled stop prompt sends nothing" {
     try expectSelected(&state, "r4t9vw");
     // So does input that left the draft as it was.
     try expectEffects(&.{}, try press(&state, .{}, .stop));
-    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .outcome = .none, .draft = .{} } }));
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .none }, .draft = .{} } }));
     try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
     // A row that finished after the prompt opened has nothing left to stop.
     try expectEffects(&.{}, try press(&state, .{}, .stop));
@@ -4007,13 +4203,13 @@ test "start settings are the options session start shares with /configure" {
     for (expected, start_options) |want, got| try std.testing.expectEqualStrings(want, got);
 }
 
-fn expectStyle(state: *const State, row: usize, column: usize, expected: Style) !void {
-    var screen = try render(std.testing.allocator, state, .{}, 80, 24, .{}, 0);
+fn expectStyle(state: *State, row: usize, column: usize, expected: Style) !void {
+    var screen = try sizedRender(state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
     try std.testing.expectEqual(expected, screen.styleAt(row, column).?);
 }
 
-fn expectScreenLine(state: *const State, line: usize, expected: []const u8) !void {
+fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
     const text = try screenText(state, 80, 24, .{});
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -4043,7 +4239,7 @@ test "a line the editor rejects says why once; text it could not take clears" {
         var state = try opened(&mixed);
         defer state.deinit();
         draft = try typeText(&state, "first");
-        const effects = try step(&state, .{ .composed = .{ .outcome = case[0], .draft = draft } });
+        const effects = try step(&state, .{ .composed = .{ .input = .{ .composer = case[0] }, .draft = draft } });
         try expectEffects(if (case[2]) &.{.clear_draft} else &.{}, effects);
         try expectNotice(&state, case[1]);
         // The next edit clears the notice.
@@ -4131,13 +4327,13 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     var state = try opened(&mixed);
     defer state.deinit();
     const Expect = struct {
-        fn cursor(from: *const State, typed: Draft, width: u16, expected: ?Screen.Cursor) !void {
-            var screen = try render(std.testing.allocator, from, typed, width, 24, .{}, 0);
+        fn cursor(from: *State, typed: Draft, width: u16, expected: ?Screen.Cursor) !void {
+            var screen = try sizedRender(from, typed, width, 24, .{}, 0);
             defer screen.deinit();
             try std.testing.expectEqual(expected, screen.cursor);
         }
-        fn composerLine(from: *const State, typed: Draft, expected: []const u8) !void {
-            var screen = try render(std.testing.allocator, from, typed, 80, 24, .{}, 0);
+        fn composerLine(from: *State, typed: Draft, expected: []const u8) !void {
+            var screen = try sizedRender(from, typed, 80, 24, .{}, 0);
             defer screen.deinit();
             var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer text.deinit();
@@ -4176,8 +4372,8 @@ test "a draft past its cap scrolls inside the composer and the rule counts what 
     defer state.deinit();
     const text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
     const Expect = struct {
-        fn rows(from: *const State, typed: Draft, caps: Caps, rule: []const u8, top: []const u8, anchor: usize) !void {
-            var screen = try render(std.testing.allocator, from, typed, 40, 40, caps, 0);
+        fn rows(from: *State, typed: Draft, caps: Caps, rule: []const u8, top: []const u8, anchor: usize) !void {
+            var screen = try sizedRender(from, typed, 40, 40, caps, 0);
             defer screen.deinit();
             var written: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer written.deinit();
@@ -4639,7 +4835,7 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectScreenLine(&state, 1, " Host stopped 0s ago. Run rui host start.");
     try expectScreenLine(&state, 2, " Host not responding. Last update 1s ago.");
-    var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
+    var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
     try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(7, 2).?);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
@@ -4704,7 +4900,7 @@ test "the band derives provider trouble from rows, in priority order" {
 /// Renders `state` at 80x24 and 200x60 and compares both screens.
 /// Renders `state` at 80x24 and 200x60 and compares both screens, and the
 /// 80x24 screen's styles.
-fn expectScreens(state: *const State, caps: Caps, small: []const u8, small_styles: []const u8, large: []const u8) !void {
+fn expectScreens(state: *State, caps: Caps, small: []const u8, small_styles: []const u8, large: []const u8) !void {
     try expectScreen(state, 80, 24, caps, small);
     try expectStyles(state, 80, 24, caps, small_styles);
     try expectScreen(state, 200, 60, caps, large);
@@ -4713,8 +4909,8 @@ fn expectScreens(state: *const State, caps: Caps, small: []const u8, small_style
 /// One letter per cell: `.` unstyled; `s`trong, `i`nk, `n`ormal, `q`uiet,
 /// `m`ark, ru`l`e, `a`ttention, `f`ailure or `b`and colour; `r` selected or
 /// reversed. Capitals are bold.
-fn expectStyles(state: *const State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
-    var screen = try render(std.testing.allocator, state, .{}, width, height, caps, 0);
+fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []const u8) !void {
+    var screen = try sizedRender(state, .{}, width, height, caps, 0);
     defer screen.deinit();
     var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer text.deinit();
@@ -4747,7 +4943,7 @@ fn expectBand(rows: []const Listed, small: []const u8, small_styles: []const u8,
     try expectScreens(&state, .{}, small, small_styles, large);
     // The band spans the line, in its colour or, without colour, reversed.
     for ([_]Caps{ .{}, .{ .depth = .none } }, [_]Style{ .{ .colour = .on_band, .background = .band, .bold = true }, .{ .bold = true, .reverse = true } }) |caps, style| {
-        var screen = try render(std.testing.allocator, &state, .{}, 80, 24, caps, 0);
+        var screen = try sizedRender(&state, .{}, 80, 24, caps, 0);
         defer screen.deinit();
         try std.testing.expectEqual(style, screen.styleAt(1, 0).?);
         try std.testing.expectEqual(style, screen.styleAt(1, 79).?);
@@ -5469,7 +5665,7 @@ test "render draws ASCII without colour" {
         \\ ^v select - enter open - ctrl+x stop
         \\
     );
-    var screen = try render(std.testing.allocator, &state, .{}, 200, 60, caps, 0);
+    var screen = try sizedRender(&state, .{}, 200, 60, caps, 0);
     defer screen.deinit();
     for (screen.lines) |line| for (line) |span| {
         try std.testing.expectEqual(Colour.normal, span.style.colour);
@@ -5484,7 +5680,7 @@ test "render fits any screen size" {
     var state = try opened(&mixed);
     defer state.deinit();
     for ([_][2]u16{ .{ 0, 0 }, .{ 8, 2 }, .{ 20, 5 }, .{ 40, 10 }, .{ 119, 30 }, .{ 2048, 24 }, .{ 4096, 6 } }) |size| {
-        var screen = try render(std.testing.allocator, &state, .{}, size[0], size[1], .{}, 0);
+        var screen = try sizedRender(&state, .{}, size[0], size[1], .{}, 0);
         defer screen.deinit();
         try std.testing.expectEqual(@as(usize, size[1]), screen.lines.len);
         for (screen.lines) |line| for (line) |span| try std.testing.expect(span.column + span.cells <= size[0]);
@@ -5499,7 +5695,7 @@ test "the composer needs six rows and six columns, and shows nothing smaller" {
     for (1..9) |w| for (1..9) |h| {
         const width: u16 = @intCast(w);
         const height: u16 = @intCast(h);
-        var screen = try render(std.testing.allocator, &state, .{ .bytes = "draft", .cursor = 5 }, width, height, .{}, 0);
+        var screen = try sizedRender(&state, .{ .bytes = "draft", .cursor = 5 }, width, height, .{}, 0);
         defer screen.deinit();
         const fits = width >= 6 and height >= 6;
         try std.testing.expectEqual(fits, screen.cursor != null);
@@ -5514,7 +5710,7 @@ test "a full-capacity draft of spaces keeps the composer's caret on screen" {
     var state = try opened(&mixed);
     defer state.deinit();
     const spaces: [65536]u8 = @splat(' ');
-    var screen = try render(std.testing.allocator, &state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
+    var screen = try sizedRender(&state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
     defer screen.deinit();
     try std.testing.expectEqual(@as(?Screen.Cursor, .{ .row = 22, .column = 3 }), screen.cursor);
 }
@@ -5540,7 +5736,7 @@ test "every line fits the screen as the terminal measures it" {
     defer state.deinit();
     draft = try typeText(&state, rockets);
     for ([_]Caps{ .{ .width = .unicode }, .{ .width = .wcwidth }, .{ .unicode = false } }) |caps| for ([_]u16{ 80, 41, 24 }) |width| {
-        var screen = try render(std.testing.allocator, &state, draft, width, 24, caps, 0);
+        var screen = try sizedRender(&state, draft, width, 24, caps, 0);
         defer screen.deinit();
         for (screen.lines) |line| for (line) |span| try std.testing.expectEqual(gwidth.gwidth(span.text, caps.width), span.cells);
         const text = try screenText(&state, width, 24, caps);
@@ -5586,7 +5782,7 @@ test "your Sessions keep a bright title once they end" {
     var state = try opened(&.{ session("k7m2qx", .{ .finished = ago(60) }, .{ .label = "Fix it", .yours = true }), session("r4t9vw", .{ .finished = ago(90) }, .{ .label = "Map it" }) });
     defer state.deinit();
     state.selected = null;
-    var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
+    var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
     try std.testing.expectEqual(Style{ .colour = .strong, .bold = true }, screen.styleAt(5, 4).?);
     try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(8, 4).?);
@@ -5707,8 +5903,8 @@ fn playFrame(bytes: []const u8, cells: []Cell, width: usize, method: gwidth.Meth
     try std.testing.expectEqual(Cell{}, Cell{ .fg = pen.fg, .bg = pen.bg, .bold = pen.bold, .reverse = pen.reverse });
 }
 
-fn expectPainted(state: *const State, width: u16, height: u16, caps: Caps) !void {
-    var screen = try render(std.testing.allocator, state, .{}, width, height, caps, 0);
+fn expectPainted(state: *State, width: u16, height: u16, caps: Caps) !void {
+    var screen = try sizedRender(state, .{}, width, height, caps, 0);
     defer screen.deinit();
     var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer bytes.deinit();
@@ -5908,9 +6104,11 @@ fn openPicker(state: *State, lists: []const model_list.Entry) !void {
     try answerModels(state, lists);
 }
 
+/// An overview on a 60 by 24 screen with `default`.
 fn pickerState(default: ?Default) !State {
     var state = try opened(&fresh);
     state.default = default;
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     return state;
 }
 
@@ -5924,11 +6122,11 @@ fn shownRow(state: *const State, row: usize) []const u8 {
     return state.shownMenu().entry(row).id;
 }
 
-fn pickerScreen(state: *const State) ![]u8 {
+fn pickerScreen(state: *State) ![]u8 {
     return screenText(state, 60, 24, .{ .unicode = true });
 }
 
-fn onScreen(state: *const State, text: []const u8) !bool {
+fn onScreen(state: *State, text: []const u8) !bool {
     const screen = try pickerScreen(state);
     defer std.testing.allocator.free(screen);
     return std.mem.indexOf(u8, screen, text) != null;
@@ -5987,15 +6185,15 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     try openPicker(&state, &both);
     const draft = try typeText(&state, "");
     try expectEffects(&.{}, try submit(&state, draft));
-    try std.testing.expect(state.choosingSignIn());
+    try std.testing.expect(state.inputMode() == .choice);
     try std.testing.expectEqual(Provider.openai, state.picker.?.step.sign_in);
     try std.testing.expect(try onScreen(&state, "Use    ChatGPT   › API key"));
     // Left moves to ChatGPT and stops there.
-    try expectEffects(&.{}, try press(&state, draft, .left));
-    try expectEffects(&.{}, try press(&state, draft, .left));
+    try expectEffects(&.{}, try choose(&state, .left));
+    try expectEffects(&.{}, try choose(&state, .left));
     try std.testing.expectEqual(Provider.codex, state.picker.?.step.sign_in);
     // A refused key's notice leaves the choice's keys in view.
-    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .outcome = .{ .refused = .unbound }, .draft = draft } }));
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .choice = .refused }, .draft = draft } }));
     {
         const screen = try pickerScreen(&state);
         defer std.testing.allocator.free(screen);
@@ -6005,7 +6203,7 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     }
     // Esc goes back to the models, then closes the picker.
     try expectEffects(&.{}, try press(&state, draft, .clear));
-    try std.testing.expect(state.picker != null and !state.choosingSignIn());
+    try std.testing.expect(state.picker != null and state.inputMode() == .compose);
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
     // gpt-6.1-sol only ChatGPT offers: Enter saves it without a choice.
@@ -6077,8 +6275,9 @@ test "a start submitted before the pick's save ends runs on the pick" {
     draft = try typeText(&state, "Try");
     const effects = try submit(&state, draft);
     try std.testing.expectEqual(@as(usize, 1), effects.len);
-    const binding = effects.slice()[0].start.default.?;
-    try std.testing.expect(binding.eql(&Default.of("codex", "gpt-6-luna").?));
+    const binding = effects.slice()[0].start.binding;
+    try std.testing.expectEqualStrings("codex", binding.provider.?);
+    try std.testing.expectEqualStrings("gpt-6-luna", binding.model.?);
 }
 
 test "picks made during one save are saved after it, only the newest" {
@@ -6107,7 +6306,7 @@ test "picks made during one save are saved after it, only the newest" {
 test "every pick is saved, even of the default the overview opened on, and an untouched overview saves nothing" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
-    try std.testing.expect(state.saveWanted() == null);
+    try std.testing.expect(state.save.wanted == null and state.save.running == null);
     const draft = try typeText(&state, "");
     try openPicker(&state, &.{chatgpt});
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
@@ -6215,7 +6414,7 @@ test "the Session row's highlight stays in view while the picker is open, even o
     // ChatGPT's models and the API-key login note fill a short screen.
     try openPicker(&state, &.{chatgpt});
     for (8..25) |height| {
-        var screen = try render(std.testing.allocator, &state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
+        var screen = try sizedRender(&state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
         defer screen.deinit();
         var highlighted: usize = 0;
         for (screen.lines) |line| {
@@ -6249,7 +6448,7 @@ test "Shift-Up and Shift-Down choose a Session in both picker steps, and leave t
         // gpt-6-luna is offered by both sign-ins: Enter asks which.
         if (state.picker.?.step == .models) try expectEffects(&.{}, try submit(&state, draft));
     }
-    try std.testing.expect(state.choosingSignIn());
+    try std.testing.expect(state.inputMode() == .choice);
 }
 
 test "with no sign-in served, the picker shows each login line instead of models" {
@@ -6299,4 +6498,29 @@ test "a start the Host refuses for want of its sign-in names the sign-in and its
     try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.signIn()) != null);
     try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.login()) != null);
     try std.testing.expect(std.mem.indexOf(u8, said, "model_capability_unavailable") == null);
+}
+
+test "a picker the screen cannot show never acts: /model says so, and keys on a hidden picker pick nothing" {
+    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    defer state.deinit();
+    // At 8 rows the top, the selected Session and the input leave the
+    // picker none.
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    var draft = try typeText(&state, "/model");
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expect(state.picker == null);
+    try std.testing.expectEqual(Colour.attention, state.notice.?.colour);
+    // Opened on a taller screen, then shrunk: Down and Enter act on what
+    // the screen shows, which holds no model.
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
+    try openPicker(&state, &.{chatgpt});
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    try std.testing.expect(state.shownPicker() == null);
+    draft = try typeText(&state, "");
+    _ = try press(&state, draft, .next);
+    for ((try submit(&state, draft)).slice()) |effect| try std.testing.expect(effect != .save_default);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
+    const screen = try screenText(&state, 60, 8, .{ .unicode = true });
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-") == null);
 }
