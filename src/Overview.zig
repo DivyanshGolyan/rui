@@ -835,7 +835,15 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             self.menu = .{};
             return self.event(.{ .models = .{ .menu = menu } });
         },
-        .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome), .saved_effort = self.savedEffort() catch null } }),
+        .save => |binding| return self.event(.{
+            .saved = .{
+                .ended = .{ .binding = binding, .outcome = savedAs(outcome) },
+                // An unreadable file only leaves the effort out of the notice:
+                // the save that wrote it reports its own failure, and the next
+                // start reads the file again and is refused with the error.
+                .saved_effort = self.savedEffort() catch null,
+            },
+        }),
         .command => |command| {
             const output = &self.output;
             const ran: view.Ran = .{
@@ -898,8 +906,9 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
         }
     };
     const label: client.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
-    const effort = held.policy(held.at(start, "reasoning-effort"));
-    const start_effort: view.StartEffort = .{ .held = held.at(start, "reasoning-effort"), .model = start.binding().model };
+    const held_effort = held.at(start, "reasoning-effort");
+    const effort = held.policy(held_effort);
+    const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
@@ -1299,7 +1308,11 @@ noinline fn writeDeparture(self: *const Self) void {
     // A ledger entry prints well under 512 bytes.
     var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
-    view.writeDeparture(&self.state, &guidance) catch unreachable;
+    // Read now and whatever this launch named, since the line speaks for
+    // later launches. An unreadable file only leaves the effort out: the
+    // next launch that reads it reports the error.
+    const saved_effort = if (self.options.home.len == 0) null else if (preferences.load(self.options.home)) |values| values.reasoning_effort else |_| null;
+    view.writeDeparture(&self.state, saved_effort, &guidance) catch unreachable;
     _ = stderr.write(guidance.buffered());
 }
 
@@ -1973,6 +1986,59 @@ test "the save's notice names the effort the next start applies, as the start se
     }
 }
 
+test "the departure names the effort saved now, even after a launch that named its binding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var ops = file_saving_operations;
+    ops.save_default = struct {
+        fn save(self: *Self, binding: view.Default) !void {
+            Seen.now.saves += 1;
+            try saveDefault(self, binding);
+            return error.PreferenceDirectorySyncFailed;
+        }
+    }.save;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5", .selectors = .{ .store = "/store", .provider = "codex", .model = "gpt-5.5" } }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna, picked with ChatGPT; max is saved before the
+    // person leaves and the save ends.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .max } }, &.initFill(.configured));
+    var buffer: [1024]u8 = undefined;
+    const guidance = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "rui: New Sessions use gpt-6-luna · max · ChatGPT; durability unconfirmed") != null);
+}
+
+test "an unreadable preferences file leaves the effort out of the notice and refuses the start" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .max } }, &.initFill(.configured));
+    var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});
+    defer config.close(std.testing.io);
+    const bad = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
+    try bad.writeStreamingAll(std.testing.io, "version=1\n");
+    bad.close(std.testing.io);
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · ChatGPT", rig.overview.state.notice.?.text());
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+    try std.testing.expectEqualStrings("! Not started: InvalidPreferences", rig.overview.state.notice.?.text());
+}
+
 test "a start takes the saved effort only when the launch read saved defaults" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2165,7 +2231,7 @@ test "a canonical Store failure ends the overview, which names the start's recov
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
-    try view.writeDeparture(&rig.overview.state, &departure.writer);
+    try view.writeDeparture(&rig.overview.state, null, &departure.writer);
     try std.testing.expect(std.mem.indexOf(u8, departure.written(), "rui request recover fenced-handle") != null);
 }
 
@@ -2266,7 +2332,7 @@ test "a stop whose reply was lost names its request on departure" {
     const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
-    try view.writeDeparture(&rig.overview.state, &departure.writer);
+    try view.writeDeparture(&rig.overview.state, null, &departure.writer);
     try std.testing.expectEqualStrings(guidance, departure.written());
     // Its row takes no second stop: Ctrl-X names the recovery and sends nothing.
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
