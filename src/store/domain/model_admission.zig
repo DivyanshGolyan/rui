@@ -31,14 +31,14 @@ pub const ModelAdmissionKind = enum { message, tool_continuation };
 const complete_tool_results_sql =
     store_schema.resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
-    ") AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=(" ++
+    ") AND (SELECT count(*) FROM model_tool_call tool_call WHERE tool_call.operation_id=current.operation_id)=(" ++
     " SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
     ") AND NOT EXISTS(" ++
-    " SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call " ++
-    " ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
-    " LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id " ++
-    " AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND (" ++
-    " call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
+    " SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call tool_call " ++
+    " ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+    " LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id " ++
+    " AND action.call_ordinal=tool_call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND (" ++
+    " tool_call.operation_id IS NULL OR (tool_call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
     ")" ++
     ")";
 /// Whether the Turn's `current` Operation lets it continue once input arrives.
@@ -228,17 +228,17 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
         "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
         "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
         "WHERE p.operation_id=i.operation_id AND p.item_ordinal=i.item_ordinal) + " ++
-        "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call call " ++
-        "JOIN content name ON name.content_id=call.name_content_id JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
-        "JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
-        "WHERE call.operation_id=i.operation_id AND call.item_ordinal=i.item_ordinal),0)),0) FROM model_output_item i " ++
+        "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
+        "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+        "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+        "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal),0)),0) FROM model_output_item i " ++
         "WHERE i.session_ref=?1 AND i.session_position>=max(?2+1,coalesce((SELECT max(anchor.session_position) " ++
         "FROM model_operation b INDEXED BY model_operation_compaction_bases JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
         "WHERE b.session_ref=?1 AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=?3 AND anchor.item_kind=4),0))) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED BY model_operation_context_history " ++
-        "CROSS JOIN model_tool_call call ON call.operation_id=o.operation_id " ++
-        "JOIN content c ON c.content_id=call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND call.acceptance_position>max(?2,?3)) + " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id " ++
+        "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>max(?2,?3)) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
         "WHERE a.session_ref=?1 AND a.acceptance_position>max(?2,?3)) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++

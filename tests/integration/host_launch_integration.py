@@ -189,7 +189,7 @@ def status(store, env):
     assert result.returncode == 0, result.stderr
     # Metadata is exactly one JSON value on stdout.
     value = json.loads(result.stdout)
-    assert value["version"] == "4" and value["type"] == "host_status", result
+    assert value["version"] == host_process.WIRE_VERSION and value["type"] == "host_status", result
     return value
 
 
@@ -396,7 +396,7 @@ def startup_limits(root, env):
                         header, body = bytes(response).split(b"\r\n\r\n", 1)
                         assert header.startswith(b"HTTP/1.1 503 "), response
                         assert json.loads(body) == {
-                            "version": "4", "type": "busy", "code": "ordinary_capacity_exhausted",
+                            "version": host_process.WIRE_VERSION, "type": "busy", "code": "ordinary_capacity_exhausted",
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
@@ -431,7 +431,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "4", "type": "busy", "code": "control_capacity_exhausted",
+                                "version": host_process.WIRE_VERSION, "type": "busy", "code": "control_capacity_exhausted",
                             }, response
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
@@ -441,7 +441,7 @@ def startup_limits(root, env):
                         borrowers.pop().close()
                     # One stalled discovery must not borrow either control
                     # place. Exercise both request-line and body stalls.
-                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 2\r\n\r\n"
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
                         discovery = socket.socket(socket.AF_UNIX)
                         borrowers.append(discovery)
@@ -458,7 +458,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "4", "type": "busy", "code": "discovery_capacity_exhausted",
+                                "version": host_process.WIRE_VERSION, "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
                             control = socket.socket(socket.AF_UNIX)
@@ -521,9 +521,9 @@ def startup_limits(root, env):
     for wire in (None, "future"):
         with sqlite3.connect(database) as connection:
             connection.execute(f"PRAGMA user_version={SCHEMA}")
-            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
             if wire is not None:
-                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
         original = hashlib.sha256(database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(store, env)
@@ -555,9 +555,9 @@ def startup_limits(root, env):
     for schema, wire in ((21, "1"), (SCHEMA, None), (SCHEMA, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
-            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
             if wire is not None:
-                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
         original = hashlib.sha256(hostile_database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(hostile, env)

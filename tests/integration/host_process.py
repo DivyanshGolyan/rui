@@ -69,6 +69,7 @@ import io
 import json
 import mmap
 import pathlib
+import re
 import selectors
 import socket
 import socketserver
@@ -448,9 +449,21 @@ def preserve_failure_metadata(path, collect):
         return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
 
 
+def _wire_version():
+    source = pathlib.Path(__file__).parents[2] / "src/protocol.zig"
+    match = re.search(r'^pub const wire_version = "(\d+)";$', source.read_text(), re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"{source} declares no wire_version")
+    return match[1]
+
+
+# The wire version fixtures speak, read from its one owner.
+WIRE_VERSION = _wire_version()
+
+
 # The Store format fixtures expect, stated independently of src/store.zig so a
 # format change must update its fixtures deliberately.
-STORE_SCHEMA = 46
+STORE_SCHEMA = 48
 
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and

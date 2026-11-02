@@ -734,7 +734,7 @@ const Grammar = struct {
                 record = .{ .tag = .text, .kind = .message, .ordinal = ordinal, .start = 0, .length = 0, .decoded_length = text_length, .content_digest = text_digest };
                 try metadata.append(&record);
             },
-            .reasoning, .compaction => {},
+            .reasoning, .compaction, .web_search_call => {},
         }
         const id_digest = Decoded.of(data, item.id, null, null).digest;
         if (self.added) |added| if (added.kind != kind or !std.mem.eql(u8, &added.id_digest, &id_digest)) return error.ContradictoryProviderOutput;
@@ -746,7 +746,7 @@ const Grammar = struct {
             },
             .message => self.answer.accept(&.{ .ordinal = ordinal, .phase = item.answer_phase, .length = text_length, .digest = text_digest, .non_whitespace = non_whitespace }),
             .function_call => self.call_count += 1,
-            .reasoning => {},
+            .reasoning, .web_search_call => {},
         }
         record = .{
             .tag = .item,
@@ -1084,6 +1084,13 @@ const replay_cases = [_]struct { item: []const u8, operation: output_format.Mode
     .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"refusal\",\"refusal\":\"not a summary\"}]}", .import = error.UnsupportedReasoningBlock },
     .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical\"}", .operation = .compaction },
     .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .operation = .compaction, .import = error.ContinuationUnavailable },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"q\",\"queries\":[\"q\"]}}" },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"failed\",\"action\":{\"type\":\"find_in_page\",\"url\":\"u\",\"pattern\":\"p\"},\"encrypted_content\":null}" },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"action\":{\"type\":\"future\"}}" },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"searching\"}", .import = error.UnsupportedItemStatus },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"encrypted_content\":7}", .import = error.ExpectedJsonString },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"\"}", .import = error.EmptyProviderIdentity },
+    .{ .item = "{\"type\":\"web_search_call\",\"id\":\"ws\",\"status\":\"completed\"}", .operation = .compaction, .import = error.UnsupportedProviderOutput },
     .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .import = error.UnsupportedItemType },
     .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}" },
     .{ .item = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}" },

@@ -651,7 +651,7 @@ fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_positi
             "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
             "AND owner.admission_position<current.admission_position AND " ++
             "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-            "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)),NULL," ++
+            "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL," ++
             "item.replay_omits_reasoning_text " ++
             "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
             "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
@@ -771,13 +771,13 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
         try sqlite.readText(item, 2, &session);
         const proposal = try reads_domain.proposalLocked(self, session.slice(), position);
         if (proposal.metadata.operation != scan.source or proposal.metadata.call_ordinal != scan.calls) return error.CorruptStore;
-        const outcome = try store_core.cached(self, "SELECT coalesce(call.acceptance_position,action.acceptance_position)," ++
-            "coalesce(call.rejection_content_id,action.resolution_content_id)," ++
-            "CASE WHEN call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
-            "action.session_ref=source.session_ref AND action.tool_kind=call.action_kind) THEN 1 ELSE 0 END " ++
-            "FROM model_tool_call call JOIN model_operation source ON source.operation_id=call.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+        const outcome = try store_core.cached(self, "SELECT coalesce(tool_call.acceptance_position,action.acceptance_position)," ++
+            "coalesce(tool_call.rejection_content_id,action.resolution_content_id)," ++
+            "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
+            "action.session_ref=source.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END " ++
+            "FROM model_tool_call tool_call JOIN model_operation source ON source.operation_id=tool_call.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+            "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2");
         defer sqlite.resetCached(outcome);
         try sqlite.bindU64(outcome, 1, scan.source);
         try sqlite.bindU64(outcome, 2, scan.calls);
@@ -831,9 +831,9 @@ fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64
     const statement = try store_core.cached(
         self,
         "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
-            "call.name_content_id,call.call_id_content_id,call.arguments_content_id,item.part_count,item.message_content_id " ++
+            "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,item.part_count,item.message_content_id " ++
             "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
-            "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
+            "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
             "WHERE current.operation_id=?1",
     );
     defer sqlite.resetCached(statement);
@@ -952,7 +952,7 @@ fn partFits(item: OutputItemKind, array: output_format.PartArray, kind: output_f
             .content => kind == .opaque_block or kind == .reasoning_text,
             .none => false,
         },
-        .function_call, .compaction => false,
+        .function_call, .compaction, .web_search_call => false,
     };
 }
 
@@ -977,18 +977,18 @@ fn readHistoricalToolResultLocked(
 ) !?HistoricalToolResult {
     const source_operation_id = view.active_tool_group_source_id orelse unreachable;
     const after_call_ordinal = view.active_tool_group_after_ordinal;
-    const next_call = "SELECT call.call_ordinal,call.call_id_content_id," ++
-        "coalesce(call.rejection_content_id,action.resolution_content_id),current.admission_position " ++
+    const next_call = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id," ++
+        "coalesce(tool_call.rejection_content_id,action.resolution_content_id),current.admission_position " ++
         "FROM model_operation current " ++
         "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
-        "CROSS JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
-        "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
+        "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
-        "AND coalesce(call.acceptance_position,action.acceptance_position)<current.admission_position ";
+        "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position ";
     const statement = if (after_call_ordinal == null)
-        try store_core.cached(self, next_call ++ "AND call.call_ordinal>=0 ORDER BY call.call_ordinal LIMIT 1")
+        try store_core.cached(self, next_call ++ "AND tool_call.call_ordinal>=0 ORDER BY tool_call.call_ordinal LIMIT 1")
     else
-        try store_core.cached(self, next_call ++ "AND call.call_ordinal>?3 ORDER BY call.call_ordinal LIMIT 1");
+        try store_core.cached(self, next_call ++ "AND tool_call.call_ordinal>?3 ORDER BY tool_call.call_ordinal LIMIT 1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, view.binding.operation_id);
     try sqlite.bindU64(statement, 2, source_operation_id);

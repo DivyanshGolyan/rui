@@ -28,6 +28,9 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
+// WireVersion is the Host's src/protocol.zig wire_version; tests/ci checks they agree.
+const WireVersion = "4"
+
 const (
 	GoVersion         = "go1.27.1"
 	TeardownAllowance = 10 * time.Second
@@ -403,7 +406,7 @@ func ExchangeUnix(deadline Deadline, socketPath string, route string, value any,
 		return err
 	}
 	header := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\n%sConnection: close\r\n\r\n",
+		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: "+WireVersion+"\r\n%sConnection: close\r\n\r\n",
 		route,
 		len(body),
 		EnvironmentHeader(route),

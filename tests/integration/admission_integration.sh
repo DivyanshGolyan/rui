@@ -31,13 +31,14 @@ session_refs() {
 # providers before capture. Exercise the Host's saved rejection boundary with
 # explicit wire records instead, then recover those same records through CLI.
 wire_configure() {
-    python3 - "$rui" "$store" "$ready" "$@" <<'PYWIRE'
+    PYTHONPATH="$root/tests/integration" python3 - "$rui" "$store" "$ready" "$@" <<'PYWIRE'
 import json, pathlib, socket, subprocess, sys
+from host_process import WIRE_VERSION
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
 configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
-body = json.dumps({'version': '4', 'kind': 'configure', 'store': store,
+body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
     captured.write(body)
@@ -51,7 +52,7 @@ with socket.socket(socket.AF_UNIX) as client:
     client.settimeout(15)
     client.connect(socket_path)
     client.sendall(('POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n'
-        f'Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 4\r\n'
+        f'Content-Length: {len(body)}\r\nX-Rui-Wire-Version: {WIRE_VERSION}\r\n'
         'X-Rui-Test-Drop-Reply: after-commit\r\n\r\n').encode() + body)
     assert not client.recv(16384), 'lost rejection unexpectedly delivered a reply'
 PYWIRE
@@ -274,11 +275,11 @@ done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
 import json, os, pathlib, socket, subprocess, sys, time
-from host_process import is_peer_disconnect, preserve_failure_metadata, stop_process
+from host_process import WIRE_VERSION, is_peer_disconnect, preserve_failure_metadata, stop_process
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
-    "version": "4",
+    "version": WIRE_VERSION,
     "kind": "configure",
     "store": os.path.realpath(store),
     "key": "draining-request",
@@ -301,7 +302,7 @@ header = (
     "Host: local\r\n"
     "Content-Type: application/json\r\n"
     f"Content-Length: {len(body)}\r\n"
-    "X-Rui-Wire-Version: 4\r\n\r\n"
+    f"X-Rui-Wire-Version: {WIRE_VERSION}\r\n\r\n"
 ).encode()
 response = bytearray()
 try:
@@ -349,7 +350,7 @@ python3 - "$rui" "$store" <<'PY'
 import json, pathlib, select, socket, sys, time
 sys.path.insert(0, "tests/integration")
 import control_integration as control
-from host_process import HostDiagnostics, PeerCensus, dispose_all, stop_process
+from host_process import WIRE_VERSION, HostDiagnostics, PeerCensus, dispose_all, stop_process
 
 store = pathlib.Path(sys.argv[2])
 host, fields = control.start_host(store, observations="control_peers")
@@ -381,7 +382,7 @@ try:
 
     # Prove the usable-looking partial key reached ingress after retirement;
     # absence after restart alone would also pass if this request were refused.
-    body = json.dumps({"version":"4","kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
+    body = json.dumps({"version":WIRE_VERSION,"kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
     # A closed object is already invalid without the required Session fields.
     # Leave the next field unfinished so the streaming parser must await input.
     body = body[:-1] + b","
@@ -390,7 +391,7 @@ try:
         try:
             client.settimeout(3)
             client.connect(socket_path)
-            client.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\n\r\n" % (len(body) + 50)).encode() + body)
+            client.sendall((("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: " + WIRE_VERSION + "\r\n\r\n") % (len(body) + 50)).encode() + body)
             return client
         except BaseException:
             client.close()
@@ -574,11 +575,12 @@ before_session=$(printf '%s' "$before_retry" | session_id)
 # An incomplete message envelope with a usable key never publishes content,
 # a command answer or a queue row.
 socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
-python3 - "$socket" "$store" "$main_session" <<'PY'
+PYTHONPATH="$root/tests/integration" python3 - "$socket" "$store" "$main_session" <<'PY'
 import json, socket, sys
+from host_process import WIRE_VERSION
 socket_path, store, session = sys.argv[1:]
 body = json.dumps({
-    "version": "4",
+    "version": WIRE_VERSION,
     "kind": "message",
     "store": store,
     "key": "partial-message-key",
@@ -595,7 +597,7 @@ client.sendall(
      "Content-Type: application/json\r\n"
      f"Content-Length: {len(body) + 20}\r\n"
      "X-Rui-Environment-Bytes: 0\r\n"
-     "X-Rui-Wire-Version: 4\r\n\r\n").encode()
+     f"X-Rui-Wire-Version: {WIRE_VERSION}\r\n\r\n").encode()
 )
 client.sendall(body)
 client.close()
@@ -788,16 +790,17 @@ write_session=$(printf '%s' "$write_retry" | session_id)
 # Crash the first request while its streamed instructions still have a name.
 stop_host
 start_host
-python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
+PYTHONPATH="$root/tests/integration" python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
 import json, os, signal, socket, sys, time
+from host_process import WIRE_VERSION
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
-request = {"version":"4", "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
+request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
 prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
 with socket.socket(socket.AF_UNIX) as connection:
     connection.connect(fields["socket"])
     body = prefix.encode() + b'x' * 32768
-    connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Rui-Wire-Version: 4\r\n\r\n' + body)
+    connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Rui-Wire-Version: ' + WIRE_VERSION.encode() + b'\r\n\r\n' + body)
     path = os.path.join(store, 'scratch', 'request-0-1.tmp')
     deadline = time.monotonic() + 5
     while not os.path.exists(path):
@@ -987,7 +990,7 @@ require_test 'wire-version Host crash leaves its Unix socket' -S "$wire_socket"
 python3 - "$wire_store/rui.sqlite3" <<'PY'
 import sqlite3, sys
 database = sqlite3.connect(sys.argv[1])
-database.execute("UPDATE store_meta SET value='future' WHERE key='wire_version'")
+database.execute("UPDATE store_meta SET meta_value='future' WHERE meta_key='wire_version'")
 database.commit()
 database.close()
 PY

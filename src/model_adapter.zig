@@ -2480,7 +2480,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     var body_buffer: [2048]u8 = undefined;
     const body = try std.fmt.bufPrint(
         &body_buffer,
-        "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
+        "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
         .{session.slice()},
     );
     var used: std.atomic.Value(u64) = .init(0);
@@ -3494,6 +3494,8 @@ test "every replayed output item parses equal to the item the provider sent" {
         .{ .sent = "{\"type\":\"message\",\"id\":\"m_2\",\"role\":\"assistant\",\"phase\":null,\"content\":[{\"type\":\"output_text\",\"text\":\"a\\u0000b\\ud83d\\ude42\",\"annotations\":[],\"future\":\"kept\"}]}" },
         .{ .sent = "{\"st\\u0061tus\":\"completed\",\"type\":\"message\",\"id\":\"m_3\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"text\":\"first\",\"type\":\"output_text\"},{\"type\":\"output_text\",\"text\":\"\"}]}" },
         .{ .sent = "{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"completed\",\"name\":\"unknown\",\"call_id\":\"call\\nA\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"future\":[]}" },
+        .{ .sent = "{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig 0.17 release\",\"sources\":[{\"type\":\"url\",\"url\":\"https://ziglang.org\"}]},\"created_by\":\"z\"}", .replayed = "{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"zig 0.17 release\",\"sources\":[{\"type\":\"url\",\"url\":\"https://ziglang.org\"}]}}" },
+        .{ .sent = "{\"type\":\"web_search_call\",\"id\":\"ws_2\",\"status\":\"failed\",\"action\":{\"type\":\"open_page\",\"url\":\"https://example.com/a?b=\\u00e9\"},\"encrypted_content\":\"e\"}" },
         .{ .sent = "{\"type\":\"message\",\"id\":\"m_4\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}" },
     };
     var sent: [cases.len][]const u8 = undefined;

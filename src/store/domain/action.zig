@@ -97,9 +97,9 @@ pub fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comp
 fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
     const statement = try store_core.cached(
         self,
-        "SELECT call." ++ column ++ ",item.session_position FROM action_operation action JOIN model_tool_call call " ++
-            "ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
-            "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
+        "SELECT tool_call." ++ column ++ ",item.session_position FROM action_operation action JOIN model_tool_call tool_call " ++
+            "ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+            "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
             "WHERE action.action_id=?1 AND action.session_ref=?2",
     );
     defer sqlite.resetCached(statement);
@@ -165,10 +165,10 @@ pub fn admitNextActionAttemptLocked(
 pub fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
     const statement = try store_core.cached(
         self,
-        "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
+        "SELECT revision.workspace,tool_call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
-            "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
             "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
             "AND action.resolution_code IS NULL",
     );
@@ -201,7 +201,7 @@ pub fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding)
     const statement = try store_core.cached(
         self,
         "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
-            "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
+            "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.command_seq LIMIT 1) " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
     );
