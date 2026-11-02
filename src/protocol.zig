@@ -597,21 +597,34 @@ pub const ToolPresentation = struct {
     }
 };
 
-/// A peer Session named on a Message, in the same Store, with its label as
-/// the Store holds it when read: empty when the Session has none.
+/// A peer Session named on a Message, in the same Store.
 pub const Peer = struct {
+    session: Bounded(max_session_bytes),
+
+    pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{self.session.slice()});
+    }
+};
+
+/// A peer as a Message row names it: with its label as the Store holds it
+/// when read, empty when the Session has none. Only rows a reader shows
+/// carry it; listings keep the bare `Peer`.
+pub const NamedPeer = struct {
     session: Bounded(max_session_bytes),
     label: Bounded(max_label_bytes) = .{},
 
     pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"label\":", Hole{ .optional_string = max_label_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
+    pub fn writeJson(self: NamedPeer, out: *std.Io.Writer) !void {
         try writeShape(out, json_shape, .{ self.session.slice(), if (self.label.len == 0) null else self.label.slice() });
     }
 
     /// What a reader calls it: its label, or its ID when it has none.
-    pub fn name(self: *const Peer) []const u8 {
+    pub fn name(self: *const NamedPeer) []const u8 {
         return if (self.label.len == 0) self.session.slice() else self.label.slice();
     }
 };
@@ -634,13 +647,13 @@ pub const ActivityItem = struct {
     };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
     // A null `sender` means a human or script sent the Message.
-    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?Peer = null };
+    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
     pub const Call = ProposalMetadata;
     pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
-    pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
-    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(max_code_bytes) };
+    pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
+    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: NamedPeer, code: Bounded(max_code_bytes) };
 
     /// Holes: position, ordinal, at; then the value's shape, then `tail`.
     pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
@@ -650,7 +663,7 @@ pub const ActivityItem = struct {
     /// Each value kind's JSON, named by its tag.
     pub const value_shapes = struct {
         /// Holes: admission, key, turn, state, admitted at, sender, content.
-        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         pub const admission = message;
         pub const user = message;
         /// Hole: content.
@@ -666,9 +679,9 @@ pub const ActivityItem = struct {
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
-        pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = Peer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         /// Holes: key, target, code.
-        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = Peer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     };
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
@@ -2707,7 +2720,7 @@ pub const conversation_page_reply = struct {
     /// A Hosted Call item, which has no content. Holes: position, ordinal.
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     /// A User item's admission. Holes: second, sending peer.
-    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer } };
+    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer } };
     /// A Tool Result or Hosted Call item's presentation. Hole: it.
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentation } };
     pub const item_end = .{"}"};

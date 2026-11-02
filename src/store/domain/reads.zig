@@ -129,7 +129,7 @@ pub const PublicConversationItem = struct {
     content: ContentReference,
     presentation: ?protocol.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
-    sender: ?protocol.Peer = null, // A User item's sending peer Session.
+    sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
 };
 
 pub const PublicConversationPage = struct {
@@ -785,24 +785,24 @@ fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission:
     var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = @intCast(try sqlite.readNullablePositiveI64(statement, 6) orelse return error.CorruptStore) };
     try sqlite.readText(statement, 0, &message.key);
     if (applied) message.turn = @intCast(try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
-    message.sender = try readPeer(self, statement, 7);
+    message.sender = if (try readPeer(statement, 7)) |sender| try peerNamed(self, sender.session) else null;
     return .{ .message = message, .content_id = content_id };
 }
 
-pub fn readPeer(self: *Store, statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
+pub fn readPeer(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
     if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
     var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sqlite.readText(statement, column, &sender);
-    return try peerNamed(self, sender);
+    return .{ .session = sender };
 }
 
 /// A peer Session with its label as the Store holds it now, so a rename
 /// shows on every row that names it. One indexed lookup per peer row.
-pub fn peerNamed(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.Peer {
+pub fn peerNamed(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.NamedPeer {
     const statement = try store_core.cached(self, "SELECT label FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session.slice());
-    var peer: protocol.Peer = .{ .session = session };
+    var peer: protocol.NamedPeer = .{ .session = session };
     switch (c.sqlite3_step(statement)) {
         // A failed send can name a Session this Store never held.
         c.SQLITE_DONE => {},

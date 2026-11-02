@@ -212,7 +212,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     // peer's a line ending in `…`; Ctrl-O opens either. Others keep their
     // notice.
     var prepared: Prepared = .{ .page = .{ .end = 4, .count = 3, .more = false } };
-    var sender: protocol.Peer = .{ .session = .{} };
+    var sender: protocol.NamedPeer = .{ .session = .{} };
     try sender.session.set("k7m2qx");
     prepared.page.items[0] = .{ .position = 4, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8200, .digest = @splat(0) }, .admitted_at = 1_800_000_000, .sender = sender };
     prepared.page.items[1] = .{ .position = 3, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 8193, .digest = @splat(0) } };

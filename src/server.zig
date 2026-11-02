@@ -3158,7 +3158,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
     // A label is a description's size, so the worst one doubles as both.
-    const peer: protocol.Peer = .{ .session = session, .label = description };
+    const peer: protocol.NamedPeer = .{ .session = session, .label = description };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{

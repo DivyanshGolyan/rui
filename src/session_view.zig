@@ -91,7 +91,7 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     }
     try std.testing.expectEqual(@as(c_int, 0), setenv("TZ", "UTC0", 1));
     tzset();
-    var peer: protocol.Peer = .{ .session = .{} };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const S = Mark.summary;
     const N = Mark.sidenote;
@@ -193,7 +193,7 @@ pub fn PeerLine(comptime Sink: type) type {
 
         /// `compact` is the tool rows' grouping: a row after another one
         /// joins it without a blank line.
-        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.Peer, length: u64, compact: *bool) !void {
+        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, length: u64, compact: *bool) !void {
             self.* = .{ .sink = sink, .length = length };
             if (!compact.*) try sink.feed("\n");
             compact.* = true;
@@ -255,7 +255,7 @@ pub fn PeerLine(comptime Sink: type) type {
 
 /// A send this Session made that its target refused: set apart, as a failed
 /// tool row is.
-pub fn sendFailed(sink: anytype, target: protocol.Peer, compact: *bool) !void {
+pub fn sendFailed(sink: anytype, target: protocol.NamedPeer, compact: *bool) !void {
     compact.* = false;
     try sink.feed("\n" ++ Mark.summary ++ "! Messaged ");
     try peerName(sink, target);
@@ -263,7 +263,7 @@ pub fn sendFailed(sink: anytype, target: protocol.Peer, compact: *bool) !void {
 }
 
 /// A peer's label, escaped as any label is, or its ID when it has none.
-fn peerName(sink: anytype, peer: protocol.Peer) !void {
+fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
     var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
     try escaped.feed(peer.name());
     try escaped.finish();
