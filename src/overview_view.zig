@@ -18,6 +18,7 @@ const codex_credential_policy = @import("codex_credential_policy.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
+const terminal_control = @import("terminal_control.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 const transport_policy = @import("transport_policy.zig");
@@ -1864,11 +1865,11 @@ const Painter = struct {
     }
 
     /// The glyph shown for a code point that cannot reach the terminal: a
-    /// control character or an invalid byte, or without Unicode anything
-    /// past ASCII.
+    /// control or bidi character or an invalid byte, or without Unicode
+    /// anything past ASCII.
     fn standIn(self: *const Painter, codepoint: u21) ?[]const u8 {
         if (codepoint == '\n') return self.glyphs.newline;
-        if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint < 0xa0) or codepoint == replacement) return "?";
+        if (terminal_control.isControl(codepoint) or codepoint == replacement) return "?";
         if (!self.caps.unicode and codepoint > 0x7e) return "?";
         return null;
     }
@@ -4374,6 +4375,20 @@ test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
     try expectScreenLine(&state, 6, "  ● Bell? and ?[31mred                                                       5s");
+}
+
+test "bidi controls in a title or a starter's Label cannot reorder a row" {
+    const bidi = "\u{202e}\u{2066}\u{200f}\u{061c}";
+    var state = try opened(&.{
+        session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Pay " ++ bidi ++ "evil" }),
+        session("t7v8w9", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "Next", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".* } }),
+    });
+    defer state.deinit();
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Pay ????evil") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "for \"Pay ?…") != null);
+    for ([_][]const u8{ "\u{202e}", "\u{2066}", "\u{200f}", "\u{061c}" }) |control| try std.testing.expect(std.mem.indexOf(u8, text, control) == null);
 }
 
 test "only the finished and the failed or stopped groups fold" {

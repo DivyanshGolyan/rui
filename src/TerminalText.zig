@@ -1,5 +1,6 @@
 const std = @import("std");
 const stderr = @import("stderr.zig");
+const terminal_control = @import("terminal_control.zig");
 const Self = @This();
 
 pub const Mode = enum { line, multiline };
@@ -73,7 +74,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
                 if (value == '"') return out.writeAll("\\\"");
                 if (value == '\\') return out.writeAll("\\\\");
             }
-            if (value >= 0x20 and value != 0x7f or
+            if (!terminal_control.isControl(value) or
                 self.mode == .multiline and (value == '\n' or value == '\t'))
             {
                 return out.writeAll(&.{value});
@@ -95,11 +96,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
         const scalar = std.unicode.utf8Decode(slice) catch {
             return self.finish(out);
         };
-        if (scalar >= 0x80 and scalar <= 0x9f or scalar == 0x061c or
-            scalar >= 0x202a and scalar <= 0x202e or
-            scalar >= 0x2066 and scalar <= 0x2069 or
-            scalar == 0x200e or scalar == 0x200f)
-        {
+        if (terminal_control.isControl(scalar)) {
             var escaped: [12]u8 = undefined;
             try out.writeAll(try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{scalar}));
         } else try out.writeAll(slice);
