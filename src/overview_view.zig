@@ -354,7 +354,7 @@ pub const Event = union(enum) {
     /// A model-list read ended.
     models: ModelsRead,
     /// A save of the default ended.
-    saved: SaveEnded,
+    saved: SaveAnswer,
     /// A read the open conversation applied.
     observed: Observed,
     /// The command `step` asked the shell to run ended.
@@ -439,6 +439,42 @@ pub const ModelsRead = union(enum) {
 
 /// A save of `binding` as the default ended as `outcome`.
 pub const SaveEnded = struct { binding: Default, outcome: Saved };
+
+/// How a save ended, with the effort the saved defaults hold once it
+/// ended, as this overview's starts read them: null when the launch reads
+/// none or they could not be read.
+pub const SaveAnswer = struct { ended: SaveEnded, saved_effort: ?ReasoningEffort = null };
+
+const ReasoningEffort = model_capability.ReasoningEffort;
+
+/// Which effort from the saved defaults a start applies: none when the
+/// start holds an effort of its own, `default` included, or names no model;
+/// else the saved one when the model offers it.
+pub const StartEffort = struct {
+    /// What `/configure --reasoning-effort` holds for the start.
+    held: ?[]const u8,
+    model: ?[]const u8,
+
+    /// Whether the saved effort can reach the start, so the shell reads it.
+    pub fn readsSaved(self: StartEffort) bool {
+        return self.held == null and self.model != null;
+    }
+
+    /// The effort the start applies from `saved`, which is null when the
+    /// launch reads no saved defaults.
+    pub fn applied(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
+        if (!self.readsSaved()) return null;
+        return model_capability.startEffort(saved, self.model.?);
+    }
+};
+
+/// A saved effort as the lines that name the next Session's model show it
+/// after the model, as a conversation's status line does.
+fn effortSuffix(effort: ?ReasoningEffort) []const u8 {
+    return switch (effort orelse return "") {
+        inline else => |tag| session_line.separator ++ @tagName(tag),
+    };
+}
 
 /// How a save of the default ended.
 pub const Saved = union(enum) {
@@ -908,6 +944,11 @@ pub const State = struct {
 
     /// What the next Session starts on: what `/configure` holds, else the
     /// default.
+    /// What `/configure --reasoning-effort` holds for the next start.
+    fn heldEffort(self: *const State) ?[]const u8 {
+        return self.settings.get(startOption("reasoning-effort").?);
+    }
+
     pub fn nextBinding(self: *const State) Binding {
         const default = if (self.default) |*binding| binding else null;
         return .{
@@ -1473,7 +1514,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .models => |read| readModels(state, read),
         .ran => |ran| try ranCommand(state, ran),
-        .saved => |ended| {
+        .saved => |answer| {
+            const ended = answer.ended;
             // That pick's save ended, failed or not: only a new pick asks again.
             std.debug.assert(ended.binding.eql(&state.save.running.?));
             state.save.running = null;
@@ -1483,10 +1525,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 const next = state.nextBinding();
                 const model = next.model orelse "";
                 const sign_in = next.signIn();
+                const start: StartEffort = .{ .held = state.heldEffort(), .model = next.model };
+                const effort_suffix = effortSuffix(start.applied(answer.saved_effort));
                 switch (ended.outcome) {
-                    .done => state.say(.quiet, "New Sessions use {s} · {s}", .{ model, sign_in }),
+                    .done => state.say(.quiet, "New Sessions use {s}{s} · {s}", .{ model, effort_suffix, sign_in }),
                     .unconfirmed => state.say(.attention, "! Saved {s} · {s}; durability unconfirmed", .{ ended.binding.model.slice(), ended.binding.provider.signIn() }),
-                    .failed => |why| state.say(.quiet, "Default not saved ({s}); new Sessions here still use {s} · {s}", .{ why orelse "check ~/.config/rui/preferences", model, sign_in }),
+                    .failed => |why| state.say(.quiet, "Default not saved ({s}); new Sessions here still use {s}{s} · {s}", .{ why orelse "check ~/.config/rui/preferences", model, effort_suffix, sign_in }),
                 }
             }
             startSave(state, &effects);
@@ -1557,14 +1601,17 @@ pub const max_late_command_bytes = max_output_bytes + 96;
 
 /// What the shell prints once the terminal is restored: one line for each
 /// request left in the ledger, and one for a save the person did not see
-/// end.
-pub fn writeDeparture(state: *const State, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+/// end. `saved_effort` is the effort the saved defaults hold now, which a
+/// later launch that reads them applies.
+pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     if (state.save.last) |*late| {
         const model = late.binding.model.slice();
         const sign_in = late.binding.provider.signIn();
+        // Held start settings end with the overview.
+        const effort_suffix = effortSuffix((StartEffort{ .held = null, .model = model }).applied(saved_effort));
         switch (late.outcome) {
-            .done => try writer.print("rui: New Sessions use {s} · {s}.\n", .{ model, sign_in }),
-            .unconfirmed => try writer.print("rui: New Sessions use {s} · {s}; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ model, sign_in }),
+            .done => try writer.print("rui: New Sessions use {s}{s} · {s}.\n", .{ model, effort_suffix, sign_in }),
+            .unconfirmed => try writer.print("rui: New Sessions use {s}{s} · {s}; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ model, effort_suffix, sign_in }),
             .failed => |why| try writer.print("rui: {s} · {s} was not saved as the default ({s}).\n", .{ model, sign_in, why orelse "check ~/.config/rui/preferences" }),
         }
     }
@@ -2804,7 +2851,7 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
 /// when nothing matches. The next Session's model offers its efforts.
 pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
     if (state.inputMode() != .compose) return null;
-    const held = state.settings.get(startOption("reasoning-effort").?);
+    const held = state.heldEffort();
     const context: slash_commands.Context = .{
         .model = state.nextBinding().model,
         .effort = if (held) |text| std.meta.stringToEnum(model_capability.ReasoningEffort, text) else null,
@@ -4400,7 +4447,7 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
     try expectNotice(&state, "! Busy; try again shortly.");
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
-    try writeDeparture(&state, &departure.writer);
+    try writeDeparture(&state, null, &departure.writer);
     try std.testing.expectEqualStrings(expected.written(), departure.written());
 }
 
@@ -4801,7 +4848,7 @@ test "an unconfirmed start clears the composer and names the request that recove
     defer state.deinit();
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
-    try writeDeparture(&state, &departure.writer);
+    try writeDeparture(&state, null, &departure.writer);
     try std.testing.expectEqualStrings("", departure.written());
 
     draft = try typeText(&state, "/configure --permission-mode ask");
@@ -4822,7 +4869,7 @@ test "an unconfirmed start clears the composer and names the request that recove
     draft = try typeText(&state, "Fix it again");
     _ = try submit(&state, draft);
     try expectEffects(&.{.clear_draft}, try step(&state, .{ .start = .{ .unconfirmed = second } }));
-    try writeDeparture(&state, &departure.writer);
+    try writeDeparture(&state, null, &departure.writer);
     try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover " ++ handle ++ "\n" ++
         "rui: Not sure the new Session started. Check with: rui request recover " ++ second ++ "\n", departure.written());
 }
@@ -4846,7 +4893,7 @@ test "leaving with a start in flight says what became of it" {
         if (case.result) |result| try expectEffects(&.{}, try step(&state, .{ .start = result }));
         var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer departure.deinit();
-        try writeDeparture(&state, &departure.writer);
+        try writeDeparture(&state, null, &departure.writer);
         try std.testing.expectEqualStrings(case.departure, departure.written());
     }
     // With no start in flight, leaving says nothing of one.
@@ -4855,7 +4902,7 @@ test "leaving with a start in flight says what became of it" {
     try expectEffects(&.{}, try step(&state, .leave));
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
-    try writeDeparture(&state, &departure.writer);
+    try writeDeparture(&state, null, &departure.writer);
     try std.testing.expectEqualStrings("", departure.written());
 }
 
@@ -6647,7 +6694,7 @@ fn pickerState(default: ?Default) !State {
 
 /// The save of `model` with `provider` ended as `outcome`.
 fn saveEnded(provider: []const u8, model: []const u8, outcome: Saved) Event {
-    return .{ .saved = .{ .binding = Default.of(provider, model).?, .outcome = outcome } };
+    return .{ .saved = .{ .ended = .{ .binding = Default.of(provider, model).?, .outcome = outcome } } };
 }
 
 /// The model the picker shows at `row`, the default first.
@@ -6863,6 +6910,46 @@ test "a failed save is not retried, but picking the same model again saves it" {
     try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "New Sessions use gpt-5.5") != null);
 }
 
+test "the lines that name the next Session's model name the saved effort its start applies" {
+    // gpt-6-luna offers max and gpt-5.5 does not. An effort /configure
+    // holds, `default` included, keeps the saved one from the next start,
+    // but not from launches after this overview.
+    const Case = struct { model: []const u8, held: ?[]const u8 = null, saved: ?ReasoningEffort, next: []const u8, later: []const u8 };
+    const cases = [_]Case{
+        .{ .model = "gpt-6-luna", .saved = .max, .next = " · max", .later = " · max" },
+        .{ .model = "gpt-6-luna", .saved = null, .next = "", .later = "" },
+        .{ .model = "gpt-5.5", .saved = .max, .next = "", .later = "" },
+        .{ .model = "gpt-6-luna", .held = "low", .saved = .max, .next = "", .later = " · max" },
+        .{ .model = "gpt-6-luna", .held = "default", .saved = .max, .next = "", .later = " · max" },
+    };
+    for (cases) |case| for ([_]Saved{ .done, .{ .failed = null }, .unconfirmed }) |outcome| {
+        var state = try pickerState(Default.of("codex", case.model));
+        defer state.deinit();
+        var line: [64]u8 = undefined;
+        if (case.held) |held| try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, try std.fmt.bufPrint(&line, "/configure --reasoning-effort {s}", .{held}))));
+        const draft = try typeText(&state, "");
+        try openPicker(&state, &.{chatgpt});
+        try expectEffects(&.{.{ .save_default = Default.of("codex", case.model).? }}, try submit(&state, draft));
+        var ended = saveEnded("codex", case.model, outcome);
+        ended.saved.saved_effort = case.saved;
+        // Each outcome but `unconfirmed` is said on screen, the one after
+        // leaving on the way out.
+        if (outcome == .unconfirmed) _ = try step(&state, .leave);
+        try expectEffects(&.{}, try step(&state, ended));
+        var expected: [160]u8 = undefined;
+        switch (outcome) {
+            .done => try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "New Sessions use {s}{s} · ChatGPT", .{ case.model, case.next }), state.notice.?.text()),
+            .failed => try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · ChatGPT", .{ case.model, case.next }), state.notice.?.text()),
+            .unconfirmed => {
+                var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer departure.deinit();
+                try writeDeparture(&state, case.saved, &departure.writer);
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · ChatGPT; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
+            },
+        }
+    };
+}
+
 test "a loading list is read again with the next listing, and a failed read keeps the list under a note" {
     var state = try pickerState(Default.of("openai", "gpt-6-luna"));
     defer state.deinit();
@@ -7006,7 +7093,7 @@ test "a save that ends after the person left is told on the way out" {
         try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-6-luna", saved)));
         var bytes: [max_late_save_bytes]u8 = undefined;
         var departure = std.Io.Writer.fixed(&bytes);
-        try writeDeparture(&state, &departure);
+        try writeDeparture(&state, null, &departure);
         try std.testing.expect(std.mem.indexOf(u8, departure.buffered(), "gpt-6-luna") != null);
     }
 }
@@ -7272,7 +7359,7 @@ test "a command the person did not see end is named on the way out" {
         if (!case.leave_first) _ = try step(&state, .leave);
         var bytes: [max_late_command_bytes]u8 = undefined;
         var departure = std.Io.Writer.fixed(&bytes);
-        try writeDeparture(&state, &departure);
+        try writeDeparture(&state, null, &departure);
         try std.testing.expectEqualStrings(case.expected, departure.buffered());
     }
 }

@@ -2359,6 +2359,8 @@ An overview left without a pick writes nothing, and a failed save is not retried
 An Other model is picked like any other and runs with default limits.
 A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
 A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
+The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · ChatGPT`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
+The departure speaks for later launches, so it names the effort saved as the overview ends, whatever this launch named; one rule, `StartEffort`, decides the effort for the start and for both lines.
 The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.
