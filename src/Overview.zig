@@ -573,6 +573,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(),
+        .append => |text| _ = self.composer.append(text),
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
@@ -950,9 +951,18 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
-/// An empty draft, whose Tab completes the overview's commands.
+/// An empty draft, whose Tab puts in the command list's highlighted word.
 fn emptyComposer(self: *Self) TerminalEditor {
-    return .{ .buffer = &self.draft, .completion = view.commands.complete };
+    return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion } };
+}
+
+/// Tab: the rest of the highlighted entry's word; null for a draft no list
+/// is for, which takes the tab.
+fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+    const self: *const Self = @ptrCast(@alignCast(context));
+    if (view.commands.suggest(draft, .{}) == null) return null;
+    const list = view.commandList(&self.state, self.composerDraft()) orelse return "";
+    return list.completion(self.state.list_row);
 }
 
 /// One input through `mode`'s route, with the overview's one key table.

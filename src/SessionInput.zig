@@ -53,15 +53,31 @@ serial: u64 = 0,
 recall: Recall = .{},
 /// Counts the draft's changes: each edit, clear, send and recalled Message.
 revision: u64 = 0,
+/// What Tab adds; null until the screen sets it, so Tab types a tab.
+completion: ?Editor.Completion = null,
 
 pub fn init(self: *Self) void {
     self.* = .{};
     for (&self.editors, 0..) |*editor, bank| editor.* = self.empty(@intCast(bank));
 }
 
-/// A bank's empty draft, whose Tab completes a slash command.
+/// A bank's empty draft, whose Tab completes what the command list shows.
 fn empty(self: *Self, bank: u1) Editor {
-    return .{ .buffer = &self.banks[bank], .completion = slash_commands.complete };
+    return .{ .buffer = &self.banks[bank], .completion = self.completion };
+}
+
+/// Sets what Tab adds in every draft, now and after each reset.
+pub fn complete(self: *Self, completion: Editor.Completion) void {
+    self.completion = completion;
+    for (&self.editors) |*editor| editor.completion = completion;
+}
+
+/// Adds `text` at the draft's end, as Tab's completion does.
+pub fn append(self: *Self, text: []const u8) void {
+    const editor = &self.editors[self.active];
+    const edits = editor.edits;
+    _ = editor.append(text);
+    if (editor.edits != edits) self.changed();
 }
 
 pub fn composition(self: *const Self) View {
@@ -410,15 +426,22 @@ test "a recall step lands only on the draft it began from, one at a time" {
     try std.testing.expect(input.nextStep() == null);
 }
 
-test "Tab completes a command word at the draft's end and adds a tab anywhere else" {
+test "Tab puts in the list's first word at the draft's end and adds a tab anywhere else" {
+    const List = struct {
+        fn add(_: *const anyopaque, draft: []const u8) ?[]const u8 {
+            const list = slash_commands.suggest(draft, .{}) orelse return null;
+            return if (list.count == 0) "" else list.completion(0);
+        }
+    };
     const cases = [_]struct { typed: []const u8, shown: []const u8 }{
         .{ .typed = "/st\t", .shown = "/status" },
         .{ .typed = "/st\x1b[D\x1b[D\t", .shown = "/status" },
         .{ .typed = "/cop\t", .shown = "/copy " },
-        .{ .typed = "/c\t", .shown = "/co" },
-        .{ .typed = "/c\t\t", .shown = "/co" },
+        .{ .typed = "/c\t", .shown = "/configure " },
+        .{ .typed = "/c\t\t", .shown = "/configure --permission-mode " },
         .{ .typed = "/zz\t", .shown = "/zz" },
-        .{ .typed = "/copy \t", .shown = "/copy \t" },
+        .{ .typed = "/copy \t", .shown = "/copy code" },
+        .{ .typed = "/rename \t", .shown = "/rename \t" },
         .{ .typed = "//c\t", .shown = "//c\t" },
         .{ .typed = "hi\t", .shown = "hi\t" },
         .{ .typed = "\t", .shown = "\t" },
@@ -426,6 +449,7 @@ test "Tab completes a command word at the draft's end and adds a tab anywhere el
     for (cases) |case| {
         var input: Self = undefined;
         input.init();
+        input.complete(.{ .context = &{}, .add = List.add });
         for (case.typed) |byte| _ = input.feed(byte);
         try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
         try std.testing.expectEqual(case.shown.len, input.composition().cursor);

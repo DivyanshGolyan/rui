@@ -419,8 +419,12 @@ def compaction_settings_case(home, store, workspace, socket_path):
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
         # /effort and /rename are /configure's flags, with its checks and messages.
-        efforts = terminal_step(master, "/effort", "/effort LEVEL switches", composer=True)
-        assert "Efforts: low · [medium] · high · xhigh · max · /effort LEVEL switches" in efforts, efforts
+        # "/effort " lists the model's levels, the one in force marked.
+        efforts = command_frame(master, "/effort ", lambda frame: "current" in frame, end="")
+        levels = [row.split()[0] for row in efforts.split("\n") if row.split() and row.split()[0] in ("none", "low", "medium", "high", "xhigh", "max")]
+        assert levels == ["low", "medium", "high", "xhigh", "max"], efforts
+        assert any(row.split() == ["medium", "current"] for row in efforts.split("\n")), efforts
+        command_frame(master, "\x15", lambda frame: "current" not in frame, end="")
         configured_frame(master, "/effort high")
         configured_frame(master, "/rename lane five")
         status = flat(status_frame(master, session))
@@ -429,12 +433,12 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
         configured_frame(master, '/rename "lane four"')
         assert "Label: lane four" in flat(status_frame(master, session))
-        terminal_step(master, '/effort "high', "Usage: /effort [LEVEL]", composer=True)
+        terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
         told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
         for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
                                        ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
             assert told(short, marker) == told(spelled, marker), short
-        terminal_step(master, "/rename", "! Usage: /rename NAME", composer=True)
+        terminal_step(master, "/rename ", "! Usage: /rename NAME", composer=True)
         # Typing "/" lists the commands the word starts above the input; Tab
         # completes, a space or Esc closes the list, and the input stays put.
         listed = command_frame(master, "/c", lambda frame: "\n› /c" in frame, end="")
@@ -446,7 +450,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert "/configure [OPTIONS]" not in bare and "/copy [code|file]" in bare and bare.split("\n").index("› /cop") == draft, bare
         completed = command_frame(master, "\t", lambda frame: "› /copy" in frame and "/copy [code|file]" not in frame, end="")
         assert completed.split("\n").index("› /copy") == draft, completed
-        closed = command_frame(master, "\x15/ef\x1b", lambda frame: "› /ef" in frame and "/effort [LEVEL]" not in frame, end="")
+        closed = command_frame(master, "\x15/ef\x1b", lambda frame: "› /ef" in frame and "/effort LEVEL" not in frame, end="")
         assert "Esc returns to the overview" not in closed, closed
         command_frame(master, "\x15", lambda frame: frame.split("\n")[draft] == "›", end="")
         terminal_step(master, "/exit", "Detached.")
