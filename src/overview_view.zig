@@ -140,7 +140,9 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 /// What a key does in the overview. `clear` empties the draft, else the
 /// held start settings. `select_*` choose a Session even while the picker
 /// is open; `previous` and `next` move the picker's highlight there.
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop };
+/// `left` and `right` are ← and → at the sign-in choice, which no key
+/// table binds: the shell sends them there as the composer would an action.
+pub const Action = enum { previous, next, select_previous, select_next, first, last, left, right, clear, exit, stop };
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -324,13 +326,9 @@ pub const Event = union(enum) {
     models: ModelsRead,
     /// A save of the default ended.
     saved: SaveEnded,
-    /// An arrow at the sign-in choice.
-    sign_in: Side,
     /// A read the open conversation applied.
     observed: Observed,
 };
-
-pub const Side = enum { left, right };
 
 /// How a model-list read ended.
 pub const ModelsRead = union(enum) {
@@ -1315,10 +1313,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
             askSave(state, &effects);
         },
-        .sign_in => |side| if (state.picker) |*picker| switch (picker.step) {
-            .models => {},
-            .sign_in => |current| picker.step = .{ .sign_in = nextSignIn(state.menu.entries[state.highlighted().?].providers, current, side) },
-        },
     }
     // Opening a Session shows the person its outcome.
     for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
@@ -1366,7 +1360,7 @@ fn readModels(state: *State, read: ModelsRead) void {
 }
 
 /// The sign-in beside `current` that `providers` holds, in provider order.
-fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Side) Provider {
+fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Action) Provider {
     const order = std.enums.values(Provider);
     var at = std.mem.indexOfScalar(Provider, order, current).?;
     while (true) {
@@ -1376,6 +1370,7 @@ fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Side) 
                 at += 1;
                 if (at == order.len) return current;
             },
+            else => unreachable,
         }
         if (providers.contains(order[at])) return order[at];
     }
@@ -1726,6 +1721,10 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             } else move(state, pressed),
             .select_previous => move(state, .previous),
             .select_next => move(state, .next),
+            .left, .right => if (state.picker) |*picker| switch (picker.step) {
+                .models => {},
+                .sign_in => |current| picker.step = .{ .sign_in = nextSignIn(state.menu.entries[state.highlighted().?].providers, current, pressed) },
+            },
             // Esc steps back: from the sign-in choice to the models, then
             // out of the picker.
             .clear => if (prompt != null) {} else if (state.picker) |*picker| switch (picker.step) {
@@ -5992,8 +5991,8 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     try std.testing.expectEqual(Provider.openai, state.picker.?.step.sign_in);
     try std.testing.expect(try onScreen(&state, "Use    ChatGPT   › API key"));
     // Left moves to ChatGPT and stops there.
-    try expectEffects(&.{}, try step(&state, .{ .sign_in = .left }));
-    try expectEffects(&.{}, try step(&state, .{ .sign_in = .left }));
+    try expectEffects(&.{}, try press(&state, draft, .left));
+    try expectEffects(&.{}, try press(&state, draft, .left));
     try std.testing.expectEqual(Provider.codex, state.picker.?.step.sign_in);
     // A refused key's notice leaves the choice's keys in view.
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .outcome = .{ .refused = .unbound }, .draft = draft } }));

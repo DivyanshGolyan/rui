@@ -916,8 +916,8 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     if (self.state.choosingSignIn()) switch (TerminalEditor.select(view.keys, decoded)) {
         .none => return null,
         .action => |action| return self.event(.{ .composed = .{ .outcome = .{ .action = action }, .draft = self.composerDraft() } }),
-        .left => return self.event(.{ .sign_in = .left }),
-        .right => return self.event(.{ .sign_in = .right }),
+        .left => return self.event(.{ .composed = .{ .outcome = .{ .action = .left }, .draft = self.composerDraft() } }),
+        .right => return self.event(.{ .composed = .{ .outcome = .{ .action = .right }, .draft = self.composerDraft() } }),
         .enter => return self.event(.{ .composed = .{ .outcome = .submit, .draft = self.composerDraft() } }),
         .refused => return self.event(.{ .composed = .{ .outcome = .{ .refused = .unbound }, .draft = self.composerDraft() } }),
         .text => {},
@@ -1559,6 +1559,33 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "an arrow at the sign-in choice cancels a stop prompt like any other key" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    // A working Session, which Ctrl-X asks to stop.
+    overview.state.selected = shownRow(rig, 2);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(overview.state.choosingSignIn());
+    try std.testing.expect(try rig.press("\x18") == null);
+    try std.testing.expect(overview.state.prompt != null);
+    for ([_][]const u8{ "\x1b[D", "\x1b[C" }) |arrow| {
+        try std.testing.expect(try rig.press(arrow) == null);
+        try std.testing.expect(overview.state.prompt == null);
+        // Ctrl-X asks again rather than stopping.
+        try std.testing.expect(try rig.press("\x18") == null);
+        try std.testing.expect(overview.state.prompt != null);
+    }
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
 }
 
 test "a save still queued as the overview ends runs, and the way out names it" {
@@ -3105,6 +3132,7 @@ test "every key does what the overview's table says, through the editor, in ever
         }
         try std.testing.expect(ending == null);
         switch (action) {
+            .left, .right => unreachable,
             .previous, .next, .select_previous, .select_next, .first, .last => {
                 const row: usize = switch (action) {
                     .previous, .select_previous => 1,
