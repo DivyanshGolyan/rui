@@ -181,6 +181,24 @@ pub fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
     }
 }
 
+/// The tests' touch oracle: each table that carries a Session, the columns
+/// naming the Sessions a new or removed row changes, then those an updated
+/// row changes. An admission's sender, position, content and time are
+/// written once, so an update changes only its recipient.
+pub const touch_oracle_owners = .{
+    .{ "session", .{"session_ref"}, .{"session_ref"} },
+    .{ "session_revision", .{"session_ref"}, .{"session_ref"} },
+    .{ "message_admission", .{ "session_ref", "sender_session_ref" }, .{"session_ref"} },
+    .{ "sent_rejection", .{"sender_session_ref"}, .{"sender_session_ref"} },
+    .{ "turn", .{"session_ref"}, .{"session_ref"} },
+    .{ "session_stop", .{"session_ref"}, .{"session_ref"} },
+    .{ "model_operation", .{"session_ref"}, .{"session_ref"} },
+    .{ "action_operation", .{"session_ref"}, .{"session_ref"} },
+    .{ "conversation_entry", .{"session_ref"}, .{"session_ref"} },
+    .{ "model_output_item", .{"session_ref"}, .{"session_ref"} },
+    .{ "model_tool_call", .{"session_ref"}, .{"session_ref"} },
+};
+
 /// Test builds: a temporary trigger on each table that carries a Session
 /// notes every Session whose rows change, for `untouchedForTesting`.
 /// It precedes every cached statement, so none re-prepares.
@@ -188,24 +206,7 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
     try setLimit(database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 1);
     try exec(database, "CREATE TEMP TABLE touched_oracle(session_ref TEXT)");
-    // Each table that carries a Session: the columns naming the Sessions a
-    // new or removed row changes, then those an updated row changes. An
-    // admission's sender, position, content and time are written once, so
-    // an update changes only its recipient.
-    const owners = .{
-        .{ "session", .{"session_ref"}, .{"session_ref"} },
-        .{ "session_revision", .{"session_ref"}, .{"session_ref"} },
-        .{ "message_admission", .{ "session_ref", "sender_session_ref" }, .{"session_ref"} },
-        .{ "sent_rejection", .{"sender_session_ref"}, .{"sender_session_ref"} },
-        .{ "turn", .{"session_ref"}, .{"session_ref"} },
-        .{ "session_stop", .{"session_ref"}, .{"session_ref"} },
-        .{ "model_operation", .{"session_ref"}, .{"session_ref"} },
-        .{ "action_operation", .{"session_ref"}, .{"session_ref"} },
-        .{ "conversation_entry", .{"session_ref"}, .{"session_ref"} },
-        .{ "model_output_item", .{"session_ref"}, .{"session_ref"} },
-        .{ "model_tool_call", .{"session_ref"}, .{"session_ref"} },
-    };
-    inline for (owners) |owner| {
+    inline for (touch_oracle_owners) |owner| {
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
             const body = comptime blk: {
                 var text: []const u8 = "";

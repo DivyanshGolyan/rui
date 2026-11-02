@@ -793,7 +793,8 @@ pub const SqliteDiagnostic = struct {
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
 // buffer belongs in memory of its own, like the change ring's. The production
-// Store is 744 bytes, 768 in test builds; the margin fits a scalar, never a buffer.
+// Store is 744 bytes; test builds add 24 bytes of counters and sit exactly at
+// 768, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
@@ -995,8 +996,9 @@ pub fn touch(self: *Store, session_ref: []const u8) !void {
     self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
 }
 
-/// Opens the entry point's write transaction: the only BEGIN of a Store
-/// transaction.
+/// Opens an entry point's write transaction. Every entry point begins
+/// here; only opening the Store, in `schema.bootstrap`, issues a BEGIN of
+/// its own, before any entry point can run.
 pub fn begin(self: *Store) !void {
     std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
     try execute(self, "BEGIN IMMEDIATE");
@@ -1225,15 +1227,18 @@ pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExha
     return value;
 }
 
-/// Reads `columns`' next values from the committed rows: at open, and after
-/// a rollback, which gives back every value its transaction took. Committed
-/// values always have their rows, so none is handed out twice.
 /// Re-reads every id after a test wrote rows past the Host, as reopening
 /// would.
 pub fn reloadIdentitiesForTesting(self: *Store) !void {
     try loadIdentities(self, .full);
 }
 
+/// Reads `columns`' next values from the committed rows: at open, and after
+/// a rollback, which gives back every value its transaction took. Re-reading
+/// max() rather than restoring a snapshot taken at BEGIN stays correct when
+/// a COMMIT's outcome is unknown, because only committed rows count: a
+/// value whose row committed is never handed out twice, and one whose row
+/// did not is handed out again.
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
     inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
         const table = switch (column) {

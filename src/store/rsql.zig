@@ -218,8 +218,8 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
 //   own name. Any other column needs an AS. A SessionHead field takes the
 //   three columns `session_ref,workspace_key,next_position`, and a Row
 //   holds at most one, so no two fields of one type can trade places.
-// - A write to a table with a `session_ref` names one Session, with the
-//   marker `@session(?k)` on that column (see `sessionError`).
+// - A write to a table that carries Sessions names one Session, with the
+//   marker `@session(?k)` on its session_ref (see `sessionError`).
 
 /// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
@@ -515,8 +515,8 @@ fn columnName(comptime column: []const Token) ?[]const u8 {
 }
 
 /// Why a write's Session is unnamed or named anywhere but on its table's
-/// own `session_ref`, or null. A write to a table with a `session_ref`
-/// carries exactly one marker `@session(?k)`, where ?k is a SessionHead
+/// own `session_ref`, or null. A write to a table that carries Sessions
+/// (`schema.carriesSessions`) carries exactly one marker `@session(?k)`, where ?k is a SessionHead
 /// field used nowhere else, and:
 /// - an INSERT of one row gives it as the `session_ref` value;
 /// - an UPDATE or DELETE has the conjunct `session_ref=@session(?k)`
@@ -524,7 +524,7 @@ fn columnName(comptime column: []const Token) ?[]const u8 {
 ///   with no OR or BETWEEN outside parentheses, and names `session_ref`
 ///   nowhere else outside parentheses.
 /// So every row it writes belongs to the Session that ?k's head names. A
-/// write to any other table binds no SessionHead.
+/// write to any other table binds no SessionHead and writes no marker.
 ///
 /// A table with a second Session column (message_admission and
 /// sent_rejection's `sender_session_ref`) is refused here until PR 5
@@ -539,9 +539,9 @@ fn sessionError(comptime tokens: []const Token, comptime Args: type, comptime us
             if (token.kind == .marker and std.mem.eql(u8, token.markerName(), "session")) markers = markers ++ .{index};
         }
         const fields = @typeInfo(Args).@"struct".field_types;
-        if (!schema.hasColumn(table, "session_ref")) {
-            if (markers.len != 0) return "rsql: " ++ table ++ " has no session_ref; write no @session";
-            for (fields) |Field| if (Field == SessionHead) return "rsql: " ++ table ++ " has no session_ref; bind no SessionHead";
+        if (!schema.carriesSessions(table)) {
+            if (markers.len != 0) return "rsql: " ++ table ++ " carries no Sessions; write no @session";
+            for (fields) |Field| if (Field == SessionHead) return "rsql: " ++ table ++ " carries no Sessions; bind no SessionHead";
             return null;
         }
         if (markers.len != 1) return "rsql: a write to " ++ table ++ " names its Session exactly once, as @session(?k)";
@@ -1095,10 +1095,12 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now),(?1,'other',?3,0,@now)", Stop, void).?);
 }
 
-test "a write to a table without session_ref names no Session" {
-    try std.testing.expectEqualStrings("rsql: content has no session_ref; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
+test "a write to a table that carries no Sessions names no Session" {
+    try std.testing.expectEqualStrings("rsql: content carries no Sessions; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
     try std.testing.expectEqualStrings("rsql: sent_rejection names a second Session; its typed writes come with PR 5", comptime statementError(.write, "DELETE FROM sent_rejection WHERE sender_session_ref=?1", struct { ref: []const u8 }, void).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO content(content_id) VALUES(?1)", struct { turn_id: u64 }, void));
+    // A command's target text, which need not name a Session.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "DELETE FROM model_interruption_command WHERE session_ref=?1", struct { target: []const u8 }, void));
 }
 
 test "typed statements are held to the dialect rules" {
@@ -1108,13 +1110,6 @@ test "typed statements are held to the dialect rules" {
     try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now, the Host's second", comptime statementError(.write, "UPDATE content SET private=unixepoch()", None, void).?);
     try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime statementError(.write, "INSERT OR IGNORE INTO content(content_id) VALUES(1)", None, void).?);
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime statementError(.write, "UPDATE content SET private=1 WHERE private IS 0", None, void).?);
-}
-
-test "the tables that carry Sessions are the ones the touch oracle watches" {
-    inline for (.{ "session", "session_revision", "message_admission", "sent_rejection", "turn", "session_stop", "model_operation", "action_operation", "conversation_entry", "model_output_item", "model_tool_call" }) |table| {
-        try std.testing.expect(comptime schema.carriesSessions(table));
-    }
-    inline for (.{ "content", "core_command" }) |table| try std.testing.expect(!comptime schema.carriesSessions(table));
 }
 
 test "a read is keyed to one row only when keys pin every table it reads" {

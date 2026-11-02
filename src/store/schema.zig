@@ -630,8 +630,12 @@ pub const indexes = [_]Index{
 };
 
 /// Whether `table`'s rows belong to Sessions: it has a `session_ref` or a
-/// `sender_session_ref`. The tests' touch oracle watches exactly these.
+/// `sender_session_ref`, except the command logs whose `session_ref` is the
+/// target text a command named, which need not be a Session (an invalid or
+/// unknown target is recorded with its rejection). The tests' touch oracle
+/// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
+    if (std.mem.eql(u8, table, "model_interruption_command")) return false;
     return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
 }
 
