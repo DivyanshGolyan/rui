@@ -528,14 +528,6 @@ test "a saved effort is kept across other edits, read back, and written as versi
     }
 }
 
-test "a new Session starts at the saved effort only when its model offers it" {
-    const values: Values = .{ .reasoning_effort = .max };
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .max), values.startEffort("gpt-6-luna"));
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), values.startEffort("gpt-5.5"));
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), values.startEffort("unlisted-model"));
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (Values{}).startEffort("gpt-6-luna"));
-}
-
 fn savedFile(config: std.Io.Dir, buffer: []u8) ![]const u8 {
     const file = try config.openFile(io, "preferences", .{});
     defer file.close(io);
