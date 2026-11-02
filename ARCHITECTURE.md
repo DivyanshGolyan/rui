@@ -2248,7 +2248,8 @@ A saved Store is the global default for commands without `--store` (captured req
 Interactive `/setup` keeps the same future-default capability.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
-A new Session whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
+A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
+A start naming both `--provider` and `--model` reads no saved defaults, the effort included, so a script that spells them never depends on the preferences file; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
 `/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; `/configure --reasoning-effort` changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
@@ -2829,7 +2830,7 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up, Down, Home and End move the highlight while the list shows; there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
+The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 `/effort` needs a level: alone it states its usage, and the list offers the levels.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
@@ -3683,16 +3684,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-`rui host stop [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
+`rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
 A lost reply prints an exact retry command retaining that instance.
 Matching in-flight retries may receive the same acknowledgement; a replacement returns `host_instance_changed` without action.
 
-Stop affects all work in the selected Store.
+Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
 After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
-Host stop adds no PID signal, force escalation, Session stop or separate shutdown authority.
+Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Peer collaboration has no Rui-owned group lifecycle.
 Operators compose ordinary Session stops over known addresses or stop the entire selected Host, including unrelated work there.

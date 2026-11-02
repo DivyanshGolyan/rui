@@ -380,18 +380,18 @@ def main():
             # rediscover or stop live replacement B.
             assert actor("stop", store, target) == "instance_changed"
             assert instance(store) == newer
-            stale_cli = subprocess.run([RUI, "host", "stop", "--store", store, "--instance", target],
+            stale_cli = subprocess.run([RUI, "host", "pause", "--store", store, "--instance", target],
                                        capture_output=True, text=True, timeout=10)
             assert stale_cli.returncode != 0 and "Host instance changed" in stale_cli.stderr and stale_cli.stdout == "", stale_cli
             assert instance(store) == newer
-            current_cli = subprocess.run([RUI, "host", "stop", "--store", store],
+            current_cli = subprocess.run([RUI, "host", "pause", "--store", store],
                                          capture_output=True, text=True, timeout=10)
             assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
-                "version": host_process.WIRE_VERSION, "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
+                "version": host_process.WIRE_VERSION, "type": "host_pause", "status": "acknowledged", "store": str(store.resolve()),
                 "instance": newer, "retirement": "unconfirmed",
             }, current_cli
             notice = current_cli.stderr
-            assert notice.startswith("rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store "), current_cli
+            assert notice.startswith("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store "), current_cli
             assert notice.endswith(f" --instance {newer}\n") and notice.count("\n") == 1, current_cli
             assert replacement.wait(timeout=10) != 0
             replacement.stdout.close()

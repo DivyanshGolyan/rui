@@ -157,9 +157,11 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             if (choosing) |row| {
                 try std.testing.expect(!self.screen.vx.screen.cursor_vis);
                 var storage: [256]u8 = undefined;
-                for (0..window.height) |index| {
-                    if (std.mem.eql(u8, rowText(window, @intCast(index), &storage), row)) break;
-                } else return error.ChoiceRowMissing;
+                const shown = for (0..window.height) |index| {
+                    if (std.mem.eql(u8, rowText(window, @intCast(index), &storage), row)) break true;
+                } else false;
+                if (!shown) std.debug.print("choice row not on screen: '{s}'\n", .{row});
+                try std.testing.expect(shown);
                 return;
             }
             try std.testing.expect(self.screen.vx.screen.cursor_vis);

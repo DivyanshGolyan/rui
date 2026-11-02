@@ -35,16 +35,16 @@ Set `RUI` to the full `bin/rui` path of a compatible build, and use `"$RUI"` in 
 	```
 
 3. If a Host is running, let its work finish.
-   Then stop it, because `host stop` interrupts all remaining work:
+   Then pause it, because `host pause` interrupts all remaining work:
 
 	```sh
-	"$RUI" host stop --store "$STORE"
+	"$RUI" host pause --store "$STORE"
 	"$RUI" host status --store "$STORE"
 	```
 
-	If the installer said that this version cannot stop the Host, use the `host stop` command it printed instead, which runs your previous build.
+	If the installer said that this version cannot stop the Host, use the command it printed instead, which runs your previous build.
 	Wait until status reports `"status":"unavailable"`.
-	The stop acknowledgment alone is not enough.
+	The pause acknowledgment alone is not enough.
 
 4. Copy the whole stopped Store into a new private directory.
    Never copy `rui.sqlite3` alone, because committed work can still be only in `rui.sqlite3-wal` after a crash.

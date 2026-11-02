@@ -31,6 +31,11 @@ const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const preferences = @import("preferences.zig");
+
+comptime {
+    // The draft holds what a conversation's does.
+    std.debug.assert(view.draft_capacity == SessionInput.capacity);
+}
 const Self = @This();
 
 pub const Options = struct {
@@ -46,6 +51,9 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
+    /// The launch named the Store, provider and model, so, as there, a
+    /// start reads no saved defaults, the saved effort included.
+    explicit: bool = false,
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
 };
@@ -305,10 +313,12 @@ interrupted: *client.Cancellation,
 input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
-draft: [SessionInput.capacity]u8 = undefined,
+draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
+/// The shown frame listed the draft's commands.
+listed: bool = false,
 /// The worker's descriptors: it writes one byte as its job ends.
 done: [2]c_int = .{ -1, -1 },
 /// Signal wakes.
@@ -445,7 +455,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .terminal = undefined,
         .interrupted = interrupted,
     };
-    self.composer = self.emptyComposer();
+    self.composer = self.emptyComposer(0);
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -573,7 +583,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
-        .clear_draft => self.composer = self.emptyComposer(),
+        .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         // A refused addition says so as a refused key does.
         .append => |text| switch (self.composer.append(text)) {
             .refused => |why| refused = why,
@@ -622,7 +632,7 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor };
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits, .listed = self.listed };
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -821,7 +831,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const effort = held.policy(held.at(start, "reasoning-effort"));
-    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.home.len == 0) null else if (start.binding().model) |model|
+    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.explicit or self.options.home.len == 0) null else if (start.binding().model) |model|
         (try preferences.load(self.options.home)).startEffort(model)
     else
         null;
@@ -958,8 +968,9 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
 }
 
 /// An empty draft, whose Tab puts in the command list's highlighted word.
-fn emptyComposer(self: *Self) TerminalEditor {
-    return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion } };
+/// `edits` continues the count, so no two drafts share one.
+fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
+    return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
 
 /// Tab: the rest of the highlighted entry's word; null for a draft no list
@@ -967,7 +978,8 @@ fn emptyComposer(self: *Self) TerminalEditor {
 fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (view.commands.suggest(draft, .{}) == null) return null;
-    const list = view.commandList(&self.state, self.composerDraft()) orelse return "";
+    // Tab still takes a word after Esc closed the list.
+    const list = view.suggestion(&self.state, self.composerDraft()) orelse return "";
     return list.completion(self.state.list_row);
 }
 
@@ -1001,6 +1013,7 @@ fn draw(self: *Self, frame: u64) !?Next {
     var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
     errdefer screen.deinit();
     self.draft_anchor = screen.draft_anchor;
+    self.listed = screen.listed;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
     // Waiting reports and a notification go first, through the frame's
@@ -1335,6 +1348,7 @@ const Seen = struct {
         model: ?protocol.Bounded(64) = null,
         permission_mode: protocol.Bounded(64) = .{},
         label: ?protocol.Bounded(64) = null,
+        reasoning_effort: ?protocol.Bounded(64) = null,
     } = .{},
     stops: usize = 0,
     stopped: view.Reference = @splat(0),
@@ -1414,6 +1428,7 @@ const fake_operations: Operations = .{
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
+                .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
             reply.* = .{ .outcome = .accepted, .session = "n3w5es".* };
             reply.handle.set("start-handle") catch unreachable;
@@ -1823,6 +1838,35 @@ test "a start with no saved binding names no model, so the Host refuses it" {
     try std.testing.expect(Seen.now.start.provider == null and Seen.now.start.model == null);
     try std.testing.expectEqualStrings(product_defaults.permission_mode, Seen.now.start.permission_mode.slice());
     try std.testing.expect(Seen.now.start.label == null);
+}
+
+test "a start takes the saved effort only when the launch read saved defaults" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" }, .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
+    inline for (.{ false, true }) |explicit| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = explicit }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        if (explicit) try std.testing.expect(Seen.now.start.reasoning_effort == null) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
+    }
+    // A launch that named everything starts even over an unreadable file.
+    var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});
+    defer config.close(std.testing.io);
+    const bad = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
+    try bad.writeStreamingAll(std.testing.io, "version=1\n");
+    bad.close(std.testing.io);
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = true }, fake_operations, &cancellation);
+    defer rig.close();
+    const starts = Seen.now.starts;
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(starts + 1, Seen.now.starts);
 }
 
 test "the loop opens the resumed Session first, lists on its tick, draws once and leaves on Ctrl-D" {
@@ -3155,7 +3199,7 @@ test "Shift-Up and Shift-Down select the row above and below, whatever the draft
             .{ .bytes = "\x1b[1;2:1B", .row = 3 },
         }) |case| {
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
-            rig.overview.composer = rig.overview.emptyComposer();
+            rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
             try std.testing.expect(try rig.press(draft) == null);
             rig.overview.state.selected = shownRow(rig, 2);
             try std.testing.expect(try rig.press(case.bytes) == null);
