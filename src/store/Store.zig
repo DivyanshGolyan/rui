@@ -17,6 +17,7 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const rsql = @import("rsql.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -1098,6 +1099,7 @@ pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !Pro
 /// with `resetCached` before releasing the Store mutex. Comptime only
 /// pins the SQL to static storage, so one body serves every statement.
 pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
+    comptime rsql.checkStatement(sql);
     return cachedStatic(self, sql);
 }
 
@@ -1121,6 +1123,7 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
 
 /// Runs a cached statement that returns no rows.
 pub inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
+    comptime rsql.checkStatement(sql);
     return executeStatic(self, sql);
 }
 
