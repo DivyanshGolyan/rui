@@ -603,7 +603,7 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
     const insert_call = try store_core.cached(
         self,
         "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id," ++
-            "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata,session_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
     );
     defer sqlite.resetCached(insert_call);
     try sqlite.bindU64(insert_call, 1, binding.operation_id);
@@ -625,6 +625,7 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
         @memcpy(field_metadata[index * 40 + 8 ..][0..32], &field.content_digest);
     }
     try sqlite.bindBlob(insert_call, 12, &field_metadata);
+    try sqlite.bindText(insert_call, 13, session_ref_slice);
     try sqlite.expectDone(insert_call);
 
     if (rejection_code == null) {
