@@ -64,6 +64,7 @@ test {
     _ = @import("TerminalEditor.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
+    _ = @import("store/wire/mysql.zig");
     inline for (cores) |core| _ = core[1];
 }
 
@@ -111,6 +112,14 @@ test "the HTTP/2 client's policy stays within the core boundary" {
     // may import no Rui core.
     if (core_boundary.check(@embedFile("h2/policy.zig"), &.{})) |violation| {
         std.debug.print("h2/policy.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
+        return error.CoreBoundaryViolation;
+    }
+}
+
+test "the MySQL wire client stays within the core boundary" {
+    // A self-contained sans-I/O core under src/store/wire/; it imports no Rui core.
+    if (core_boundary.check(@embedFile("store/wire/mysql.zig"), &.{})) |violation| {
+        std.debug.print("store/wire/mysql.zig:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ violation.line, violation.text });
         return error.CoreBoundaryViolation;
     }
 }
