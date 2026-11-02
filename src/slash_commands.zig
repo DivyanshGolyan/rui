@@ -421,25 +421,17 @@ pub const List = struct {
         return self.entries[0..self.count];
     }
 
-    /// The highlighted entry's index: `highlight`, or the last entry when
-    /// the list narrowed under it (the model changed, say) before an edit
-    /// reset it.
-    pub fn row(self: *const List, highlight: usize) usize {
-        std.debug.assert(self.count != 0);
-        return @min(highlight, self.count - 1);
-    }
-
     /// What Tab or Enter adds to the draft for the highlighted entry: the
     /// rest of its word.
     pub fn completion(self: *const List, highlight: usize) []const u8 {
-        return self.entries[self.row(highlight)].word[self.typed.len..];
+        return self.entries[highlight].word[self.typed.len..];
     }
 
     /// What Enter does with the highlighted entry: adds the rest of its
     /// word to the draft, and then, when `runs`, runs the line that makes,
     /// without the space `rest` ends with when another word may follow.
     pub fn enter(self: *const List, highlight: usize) struct { rest: []const u8, runs: bool } {
-        const entry = self.entries[self.row(highlight)];
+        const entry = self.entries[highlight];
         if (!entry.runs) return .{ .rest = self.completion(highlight), .runs = false };
         return .{ .rest = std.mem.trimEnd(u8, entry.word, " ")[self.typed.len..], .runs = true };
     }
@@ -447,7 +439,7 @@ pub const List = struct {
     /// The first of `rows` rows that keep the highlighted entry in view.
     pub fn firstShown(self: *const List, highlight: usize, rows: usize) usize {
         const fit = named(self.count, rows);
-        return @min((self.row(highlight) + 1) -| fit, self.count - fit);
+        return @min((highlight + 1) -| fit, self.count - fit);
     }
 
     /// Cells from a row's start to its description: the widest shown text
@@ -457,6 +449,70 @@ pub const List = struct {
         var widest: usize = 0;
         for (self.shown()) |entry| widest = @max(widest, entry.shown.len);
         return widest + 2;
+    }
+};
+
+/// The list built for one draft revision, and what the latest frame did
+/// with a list: the one value Enter, Esc, the arrows and Tab act on. A key
+/// on a draft changed since the frame first brings it to that draft through
+/// `next`, as the next frame would, so its rows are always the draft's.
+/// Enter, Esc and the arrows act on it only when the latest frame drew a
+/// list; Tab completes from it also after Esc closed it or when the screen
+/// had no rows for it.
+pub const Shown = struct {
+    list: List,
+    /// The draft revision the list was built for.
+    revision: u64,
+    /// The highlighted entry: the first until Up or Down moves it, and the
+    /// last when the list narrowed under it (the model changed, say).
+    highlight: usize = 0,
+    seen: enum { drawn, hidden, closed } = .hidden,
+
+    /// The list, `list`, for the draft at `revision`, after `previous`:
+    /// while the draft is the one `previous` was built for, it keeps its
+    /// highlight and stays closed once Esc closed it; any edit starts a list
+    /// at its first row. It counts as drawn while the latest frame drew a
+    /// list, until a frame records its own. Null when nothing matches.
+    pub fn next(previous: ?Shown, revision: u64, list: ?List) ?Shown {
+        const built = list orelse return null;
+        if (built.count == 0) return null;
+        const kept = previous orelse return .{ .list = built, .revision = revision };
+        if (kept.revision != revision) return .{ .list = built, .revision = revision, .seen = if (kept.seen == .drawn) .drawn else .hidden };
+        return .{ .list = built, .revision = revision, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
+    }
+
+    /// The list Enter, Esc and the arrows act on: `stored`, the latest
+    /// frame's, becomes `current`, its `next` for the draft as it is now,
+    /// when the latest frame drew a list.
+    pub fn drawnNow(stored: *?Shown, current: ?Shown) ?*Shown {
+        stored.* = current orelse return null;
+        const kept = &stored.*.?;
+        return if (kept.seen == .drawn) kept else null;
+    }
+
+    /// The rows the list asks of the frame: none once Esc closed it.
+    pub fn rows(self: *const Shown) usize {
+        return if (self.seen == .closed) 0 else self.list.count;
+    }
+
+    /// Records whether the frame had rows for the list.
+    pub fn drew(self: *Shown, drawn: bool) void {
+        if (self.seen != .closed) self.seen = if (drawn) .drawn else .hidden;
+    }
+
+    /// Esc: the list stays closed until the draft changes.
+    pub fn close(self: *Shown) void {
+        self.seen = .closed;
+    }
+
+    /// What Tab adds to the draft: the rest of the highlighted entry's word.
+    pub fn completion(self: *const Shown) []const u8 {
+        return self.list.completion(self.highlight);
+    }
+
+    /// Up or Down: the highlight moves, stopping at the list's ends.
+    pub fn move(self: *Shown, down: bool) void {
+        self.highlight = if (down) @min(self.highlight + 1, self.list.count - 1) else self.highlight -| 1;
     }
 };
 
@@ -592,13 +648,46 @@ test "/configure lists its options, then an option's fixed values" {
         }
     }
     // A highlight past a list that narrowed takes its last row.
-    try std.testing.expectEqual(@as(usize, 0), trigger.row(5));
-    try std.testing.expectEqualStrings("default", trigger.completion(5));
+    const narrowed_under = Shown.next(.{ .list = trigger, .revision = 1, .highlight = 5 }, 1, trigger).?;
+    try std.testing.expectEqual(@as(usize, 0), narrowed_under.highlight);
+    try std.testing.expectEqualStrings("default", trigger.completion(narrowed_under.highlight));
     // After a value, options again.
     try std.testing.expectEqualStrings("--tools ", conversation.suggest("/configure --permission-mode ask --t", .{}).?.shown()[0].word);
     // Quoted text is the shell's to read; the list stops.
     try std.testing.expect(conversation.suggest("/configure --label \"a ", .{}) == null);
     try std.testing.expectEqualStrings("--permission-mode ", overview.suggest("/configure ", .{}).?.shown()[0].word);
+}
+
+test "a key's list is the draft's own, and counts as drawn when the latest frame drew a list" {
+    const c = conversation.suggest("/c", .{}).?;
+    const co = conversation.suggest("/co", .{}).?;
+    var stored: ?Shown = Shown.next(null, 1, c);
+    stored.?.drew(true);
+    Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
+    try std.testing.expectEqualStrings(c.completion(1), Shown.next(stored, 1, c).?.completion());
+    // A key on a draft changed since the frame takes that draft's list,
+    // from its first row, still drawn.
+    const changed = Shown.drawnNow(&stored, Shown.next(stored, 2, co)).?;
+    try std.testing.expectEqual(@as(usize, 0), changed.highlight);
+    try std.testing.expectEqualStrings(co.completion(0), changed.completion());
+    // Esc closes it for this draft: Tab still completes, nothing else acts.
+    changed.close();
+    stored = Shown.next(stored, 2, co);
+    stored.?.drew(true);
+    try std.testing.expectEqual(@as(usize, 0), stored.?.rows());
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 2, co)) == null);
+    try std.testing.expectEqualStrings(co.completion(0), Shown.next(stored, 2, co).?.completion());
+    // The frame drew no list, so a key on the next draft finds none drawn
+    // until a frame draws it.
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 3, c)) == null);
+    stored = Shown.next(stored, 3, c);
+    stored.?.drew(false);
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) == null);
+    stored.?.drew(true);
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) != null);
+    // A draft no list is for leaves the frame's value as it was.
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 5, null)) == null);
+    try std.testing.expectEqual(@as(u64, 4), stored.?.revision);
 }
 
 test "the list order is the names' order and every listed usage fits before the descriptions" {
