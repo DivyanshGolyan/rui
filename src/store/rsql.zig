@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-pub const Dialect = enum { sqlite, postgres, mysql };
+pub const Dialect = enum { sqlite };
 
 /// Whether table, column and index names must avoid every engine's reserved
 /// words, and text must not name `rowid`. Today's format names a column
@@ -21,29 +21,35 @@ const reserved_names = [_][]const u8{
 /// Words some engine lacks or reads differently, each with the portable form.
 const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "GLOB", .fix = "write @charset(column,'set') or @initial(column,'set')" },
-    .{ .word = "typeof", .fix = "test IS NULL / IS NOT NULL, or read content.raw" },
-    .{ .word = "unixepoch", .fix = "write @now (the Host second is bound by the Access)" },
+    .{ .word = "typeof", .fix = "test IS NULL or IS NOT NULL" },
+    .{ .word = "unixepoch", .fix = "bind the Host's time as a parameter" },
 };
 
 /// Why `text` is not portable Rui SQL, or null. With `reserved` set, `rowid`
-/// is rejected too. String literals are not inspected.
+/// is rejected too. String literals are not inspected; comments and quoted
+/// identifiers are refused, so nothing else escapes the scan.
 pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(100 * text.len + 1000);
         var index: usize = 0;
         while (index < text.len) {
             const byte = text[index];
+            const pair: []const u8 = text[index..@min(index + 2, text.len)];
             if (byte == '\'') {
                 index = literalEnd(text, index);
-            } else if (byte == '|' and index + 1 < text.len and text[index + 1] == '|') {
+            } else if (std.mem.eql(u8, pair, "||")) {
                 return "rsql: '||' is OR on MySQL; compute the text in Zig";
+            } else if (std.mem.eql(u8, pair, "--") or std.mem.eql(u8, pair, "/*")) {
+                return "rsql: '" ++ pair ++ "' comments hide text from this check; write the note as a Zig comment";
+            } else if (byte == '"') {
+                return "rsql: '\"' quotes a name on Postgres but a string on MySQL; write names bare and strings in single quotes";
             } else if (isWordStart(byte)) {
                 const word = text[index..wordEnd(text, index)];
                 index += word.len;
                 for (forbidden_words) |forbidden| {
                     if (std.ascii.eqlIgnoreCase(word, forbidden.word)) return "rsql: '" ++ word ++ "' is not portable; " ++ forbidden.fix;
                 }
-                if (reserved and std.ascii.eqlIgnoreCase(word, "rowid")) return "rsql: 'rowid' is SQLite's hidden key; use the explicit sequence column";
+                if (reserved and std.ascii.eqlIgnoreCase(word, "rowid")) return "rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column";
                 if (std.ascii.eqlIgnoreCase(word, "IS")) {
                     var next_start = skipSpace(text, index);
                     var next: []const u8 = text[next_start..wordEnd(text, next_start)];
@@ -85,7 +91,6 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
         if (portabilityError(text, reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
         return switch (dialect) {
             .sqlite => renderSqlite(text),
-            .postgres, .mysql => @compileError("rsql: " ++ @tagName(dialect) ++ " is not rendered yet"),
         };
     }
 }
@@ -240,14 +245,23 @@ test "markers nest, and text outside them is copied" {
 
 test "non-portable text names its fix" {
     try std.testing.expectEqualStrings("rsql: 'GLOB' is not portable; write @charset(column,'set') or @initial(column,'set')", comptime portabilityError("x NOT GLOB '*[^a]*'", false).?);
-    try std.testing.expectEqualStrings("rsql: 'typeof' is not portable; test IS NULL / IS NOT NULL, or read content.raw", comptime portabilityError("typeof(x)='blob'", false).?);
-    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now (the Host second is bound by the Access)", comptime portabilityError("at<=unixepoch()", false).?);
+    try std.testing.expectEqualStrings("rsql: 'typeof' is not portable; test IS NULL or IS NOT NULL", comptime portabilityError("typeof(x)='blob'", false).?);
+    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; bind the Host's time as a parameter", comptime portabilityError("at<=unixepoch()", false).?);
     try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime portabilityError("a||b='ab'", false).?);
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS 'x'", false).?);
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS NOT 1", false).?);
-    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; use the explicit sequence column", comptime portabilityError("rowid>1", true).?);
+    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("rowid>1", true).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("rowid>1", false));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a IS NULL AND b IS NOT NULL AND c='GLOB || IS 1' AND isolated=1", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a-1>0 AND b/2<3 AND c='-- /* \"'", true));
+}
+
+test "comments and double quotes cannot hide text from the check" {
+    const comment = "rsql: '--' comments hide text from this check; write the note as a Zig comment";
+    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 -- it's\n AND b GLOB 'x'", false).?);
+    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 --", false).?);
+    try std.testing.expectEqualStrings("rsql: '/*' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("a>0 /* it's */ AND b GLOB 'x'", false).?);
+    try std.testing.expectEqualStrings("rsql: '\"' quotes a name on Postgres but a string on MySQL; write names bare and strings in single quotes", comptime portabilityError("\"a'\" GLOB 'x'", false).?);
 }
 
 test "reserved names are refused once checked" {

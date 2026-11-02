@@ -17,17 +17,43 @@ const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 45;
-/// FNV-1a of the SQLite DDL for schema_version; the build fails when they disagree.
-pub const sqlite_schema_digest: u64 = 0x720709f73b39654e;
+/// `digest()` of each schema_version, oldest first. A change to what
+/// `bootstrap` executes needs a new row, and so a new schema_version.
+/// Review rule: a row, once merged, is never edited.
+pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
+    .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
+};
+comptime {
+    for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
+        if (row.schema_version <= previous.schema_version) @compileError("bootstrap_digests: versions must ascend");
+    }
+    const current = bootstrap_digests[bootstrap_digests.len - 1];
+    if (current.schema_version != schema_version) @compileError(std.fmt.comptimePrint(
+        "bootstrap_digests: append .{{ .schema_version = {d}, .digest = 0x{x:0>16} }}",
+        .{ schema_version, digest() },
+    ));
+    if (current.digest != digest()) @compileError(std.fmt.comptimePrint(
+        "the Store's bootstrap changed: bump schema_version and append its digest 0x{x:0>16}",
+        .{digest()},
+    ));
+}
 
-/// SQL membership of `column` in a set of enum tags or enum literals,
-/// generated at compile time. An OR of equalities, not IN: SQLite builds a
-/// temporary b-tree for an IN list of more than two values each time the
-/// statement runs.
+/// SQL membership of `column` in a closed set of enum tags or text literals:
+/// IN up to two values, else an OR of equalities, because SQLite builds a
+/// temporary b-tree for an IN list of more than two each time the statement
+/// runs.
 pub inline fn oneOf(comptime column: []const u8, comptime set: anytype) []const u8 {
-    comptime var sql: []const u8 = "(";
-    inline for (set, 0..) |tag, index| sql = sql ++ (if (index == 0) "" else " OR ") ++ column ++ "='" ++ @tagName(tag) ++ "'";
-    return sql ++ ")";
+    return comptime blk: {
+        var names: []const []const u8 = &.{};
+        for (set) |value| names = names ++ .{if (@TypeOf(value) == []const u8) value else @tagName(value)};
+        var sql: []const u8 = "";
+        if (names.len <= 2) {
+            for (names, 0..) |name, index| sql = sql ++ (if (index == 0) "" else ",") ++ "'" ++ name ++ "'";
+            break :blk column ++ " IN (" ++ sql ++ ")";
+        }
+        for (names, 0..) |name, index| sql = sql ++ (if (index == 0) "" else " OR ") ++ column ++ "='" ++ name ++ "'";
+        break :blk "(" ++ sql ++ ")";
+    };
 }
 
 /// The Resolutions whose output later context reads, as fixed literals: the
@@ -581,7 +607,8 @@ pub const indexes = [_]Index{
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        @setEvalBranchQuota(1_000_000);
+        // Today's 46 tables and indexes take about 68,000 branches (measured).
+        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
         var text: []const u8 = "";
         for (tables) |table| text = text ++ createTable(dialect, table) ++ ";\n";
         for (indexes) |index| text = text ++ createIndex(dialect, index) ++ ";\n";
@@ -593,9 +620,8 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
 pub const ObjectName = struct { kind: enum { table, index }, name: []const u8 };
 
 /// Every table and named index an existing Store may hold.
-pub fn objectNames(comptime dialect: rsql.Dialect) []const ObjectName {
+pub fn objectNames() []const ObjectName {
     return comptime blk: {
-        if (dialect != .sqlite) @compileError("schema: " ++ @tagName(dialect) ++ " has no object names yet");
         var names: []const ObjectName = &.{};
         for (tables) |table| names = names ++ .{ObjectName{ .kind = .table, .name = table.name }};
         for (indexes) |index| names = names ++ .{ObjectName{ .kind = .index, .name = index.name }};
@@ -603,22 +629,25 @@ pub fn objectNames(comptime dialect: rsql.Dialect) []const ObjectName {
     };
 }
 
-/// FNV-1a over the rendered DDL, so a DDL change without a new
-/// schema_version fails the build. FNV-1a, not SHA-256: it is a fixed
-/// algorithm, and SHA-256 of the DDL costs seconds of every compile.
-pub fn digest(comptime dialect: rsql.Dialect) u64 {
+/// FNV-1a over every statement `bootstrap` executes, in order, so changing
+/// any of them without a new schema_version fails the build. FNV-1a, not
+/// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
+/// compile.
+pub fn digest() u64 {
     return comptime blk: {
-        @setEvalBranchQuota(10 * ddl(dialect).len + 1000);
-        break :blk std.hash.Fnv1a_64.hash(ddl(dialect));
+        var text: []const u8 = "";
+        for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
+        @setEvalBranchQuota(10 * text.len + 1000);
+        break :blk std.hash.Fnv1a_64.hash(text);
     };
 }
 
-comptime {
-    if (digest(.sqlite) != sqlite_schema_digest) @compileError(std.fmt.comptimePrint(
-        "the SQLite schema changed: bump schema_version and pin sqlite_schema_digest = 0x{x:0>16}",
-        .{digest(.sqlite)},
-    ));
-}
+const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id});
+const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
+/// The wire version is bound, not spliced: it has its own check on open, so
+/// a wire bump is no schema change.
+const store_meta_sql = "INSERT INTO store_meta(key,value) VALUES('wire_version',?1),('store_selector',?2)";
+const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
     var lines: []const []const u8 = &.{};
@@ -668,7 +697,7 @@ fn columnCheck(comptime column: Column) ?[]const u8 {
         .flag => name ++ " IN (0,1)",
         .text => |octets| if (octets) |bounds| lengthBound("@octets(" ++ name ++ ")", bounds) else null,
         .bytes => |octets| if (octets) |bounds| lengthBound("length(" ++ name ++ ")", bounds) else null,
-        .tag => |values| tagCheck(name, values),
+        .tag => |values| oneOf(name, values),
     };
     const type_bound = bound orelse return column.check;
     const body = if (column.check) |check| type_bound ++ " AND " ++ check else type_bound;
@@ -680,18 +709,6 @@ fn lengthBound(comptime length: []const u8, comptime bounds: Octets) []const u8 
     if (bounds.min == bounds.max) return std.fmt.comptimePrint("{s}={d}", .{ length, bounds.max });
     if (bounds.min == 0) return std.fmt.comptimePrint("{s}<={d}", .{ length, bounds.max });
     return std.fmt.comptimePrint("{s} BETWEEN {d} AND {d}", .{ length, bounds.min, bounds.max });
-}
-
-/// An IN list up to two values, else an OR of equalities: SQLite builds a
-/// temporary b-tree for an IN list of more than two each time it runs.
-fn tagCheck(comptime name: []const u8, comptime values: []const []const u8) []const u8 {
-    var text: []const u8 = "";
-    if (values.len <= 2) {
-        for (values, 0..) |value, position| text = text ++ (if (position == 0) "" else ",") ++ "'" ++ value ++ "'";
-        return name ++ " IN (" ++ text ++ ")";
-    }
-    for (values, 0..) |value, position| text = text ++ (if (position == 0) "" else " OR ") ++ name ++ "='" ++ value ++ "'";
-    return "(" ++ text ++ ")";
 }
 
 fn referenceClause(comptime key: ForeignKey) []const u8 {
@@ -726,11 +743,12 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "BEGIN EXCLUSIVE");
     errdefer sqlite.rollback(database);
     try sqlite.exec(database, ddl(.sqlite));
-    try sqlite.exec(database, "PRAGMA application_id=1280591409");
-    try sqlite.exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
-    const statement = try sqlite.prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','" ++ protocol.wire_version ++ "'),('store_selector',?1)");
+    try sqlite.exec(database, identity_sql);
+    try sqlite.exec(database, version_sql);
+    const statement = try sqlite.prepare(database, store_meta_sql);
     defer _ = c.sqlite3_finalize(statement);
-    try sqlite.bindText(statement, 1, selector);
+    try sqlite.bindText(statement, 1, protocol.wire_version);
+    try sqlite.bindText(statement, 2, selector);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
 }
@@ -740,7 +758,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
 const unexpected_objects_sql = blk: {
     var table_names: []const u8 = "";
     var index_names: []const u8 = "";
-    for (objectNames(.sqlite)) |object| switch (object.kind) {
+    for (objectNames()) |object| switch (object.kind) {
         .table => table_names = table_names ++ (if (table_names.len == 0) "'" else ",'") ++ object.name ++ "'",
         .index => index_names = index_names ++ (if (index_names.len == 0) "'" else ",'") ++ object.name ++ "'",
     };
