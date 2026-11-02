@@ -527,6 +527,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(pg_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
+    const release_small = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
@@ -540,6 +541,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.step.dependOn(&format.step);
+    fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
@@ -582,6 +584,7 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(h2_test_step);
         process_integrations.step.dependOn(pg_test_step);
     }
+    process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
