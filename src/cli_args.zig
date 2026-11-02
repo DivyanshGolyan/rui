@@ -243,6 +243,12 @@ pub const Definition = struct {
         if (self.mutation and self.optionNamed("kind") == null) try writer.writeAll("Keep the pre-send recovery identity printed on stderr. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original with rui request inspect; never infer permission to resubmit with a fresh key.\n");
     }
 
+    /// The argument shape of option `name`: null when there is no such
+    /// option, a null shape for a flag.
+    pub fn argumentOf(self: Definition, name: []const u8) ??[]const u8 {
+        return (self.optionNamed(name) orelse return null).argument;
+    }
+
     fn optionNamed(self: Definition, name: []const u8) ?Option {
         return self.options[self.indexOf(name) orelse return null];
     }

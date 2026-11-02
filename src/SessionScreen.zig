@@ -776,8 +776,10 @@ pub const Footer = struct {
     command: bool = false,
     status: []const u8 = "",
     notice: []const u8 = "",
-    /// The commands the draft's command word starts, listed above the input.
-    commands: ?slash_commands.conversation.Matches = null,
+    /// What the list above the input shows for the draft, and its
+    /// highlighted row.
+    commands: ?slash_commands.List = null,
+    highlight: usize = 0,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -791,21 +793,21 @@ pub const Footer = struct {
 /// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
 
-/// One row per command, its usage aligned and its description quiet. When
-/// more match than rows fit, the last row counts the rest, unless it is
-/// the only row: then it shows the first command.
-fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.conversation.Matches, overflow: *[32]u8) void {
-    var matches = commands;
-    const total = matches.count;
+/// One row per entry, its text aligned and its description quiet, the
+/// highlighted one reversed as the Action's choice is. When more match
+/// than rows fit, the last row counts the rest, unless it is the only row;
+/// the rows follow the highlight.
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, list: *const slash_commands.List, highlight: usize, overflow: *[32]u8) void {
+    const total = list.count;
     const rows = slash_commands.named(total, layout.list_height);
-    for (0..rows) |index| {
-        const name = matches.next().?;
-        const usage = slash_commands.conversation.usage.get(name);
-        _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index)), .height = 1 }).print(&.{
-            .{ .text = usage, .style = self.style(.user) },
-            .{ .text = slash_commands.conversation.padding[usage.len..] },
-            .{ .text = slash_commands.conversation.table.get(name).description.?, .style = self.style(.quiet) },
-        }, .{ .wrap = .none });
+    const first = list.firstShown(highlight, layout.list_height);
+    const column = list.descriptionColumn();
+    for (list.shown()[first..][0..rows], first..) |entry, index| {
+        var text = self.style(.user);
+        text.reverse = index == list.row(highlight);
+        const cells = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index - first)), .height = 1 });
+        _ = cells.printSegment(.{ .text = entry.shown, .style = text }, .{ .wrap = .none });
+        if (entry.description.len != 0 and column < cells.width) _ = cells.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });
     }
     if (rows == total or rows == layout.list_height) return;
     const text = std.fmt.bufPrint(overflow, slash_commands.more, .{total - rows}) catch unreachable;
@@ -927,7 +929,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var rule_label: [64]u8 = undefined;
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     var overflow: [32]u8 = undefined;
-    if (layout.list_height != 0) self.drawCommands(window, &layout, footer.commands.?, &overflow);
+    if (layout.list_height != 0) self.drawCommands(window, &layout, &footer.commands.?, footer.highlight, &overflow);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -1577,7 +1579,7 @@ test "a command list of one row shows a command, not only how many match" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const calls: View.Live = .{};
-    const footer: Footer = .{ .commands = slash_commands.conversation.Matches.of("/").? };
+    const footer: Footer = .{ .commands = slash_commands.conversation.suggest("/", .{}).? };
     var buffer: [256]u8 = undefined;
     for ([_]u16{ 6, 9, 24 }) |rows| {
         errdefer std.debug.print("rows={d}\n", .{rows});

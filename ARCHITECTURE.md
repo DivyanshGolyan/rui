@@ -2815,14 +2815,22 @@ The Session screen stays in place and no command reads terminal input.
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
 `slash_commands.zig` holds one table per screen of each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
-The list shows while the draft is one line that starts with one `/` and holds no space yet: a row for each command the word starts, in the rows right above the input that a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
-When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the first match.
-It goes on the first space, on Enter and when nothing matches.
-Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes; otherwise they do what they always did.
-Tab adds the matching names' common start, and a space after a whole name that takes an argument; in any other draft, or over a partial character or a rejected draft, Tab does what it always did.
-The arrows keep scrolling the conversation.
-The overview lists, completes and closes its own commands, `/configure`, `/exit` and `/model`, the same way, in rows the Sessions above can spare, because the agreed design has the two screens behave the same (Divyansh, 2026-10-31); the line under its input says what Enter and Esc do to the draft.
-`/effort` alone shows `Efforts: low · [medium] · high · xhigh · /effort LEVEL switches`, the efforts the Session's model supports with the one in force bracketed, from the Session line's facts.
+`/requests`, `/recover`, `/result`, `/inspect-action` and `/discard` are for recovery: they work and `/help` names them, but the list leaves them out (Divyansh, 2026-11-02).
+The list shows while the draft is one line that starts with one `/`: while it holds no space, a row for each command the word starts; after a command's name, a row for each choice the word being typed starts.
+The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the screen's model offers, the one in force marked `current` (the Session's model in a conversation, the next Session's in the overview, none before a read names it); and for `/configure` and `/setup` each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
+A quote or a backslash in the words ends the list: that text is the shell grammar's to read.
+The rows sit right above the input, in the rows a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
+When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
+It goes when nothing matches.
+One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
+Tab adds the rest of the highlighted word, and a space when another word may follow, also after Esc closed the list; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
+A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
+Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
+So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
+Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
+While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
+The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+`/effort` needs a level: alone it states its usage, and the list offers the levels.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.

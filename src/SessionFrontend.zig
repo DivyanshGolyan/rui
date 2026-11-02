@@ -24,7 +24,8 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const slash_commands = @import("slash_commands.zig").conversation;
+const slash_commands_shared = @import("slash_commands.zig");
+const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
@@ -59,6 +60,8 @@ tmux: bool = false,
 input: Input = undefined,
 /// The draft revision Esc closed the command list on; any edit reopens it.
 commands_closed: ?u64 = null,
+/// The list row Up and Down moved to, for the draft revision they moved it on.
+list_highlight: struct { revision: u64 = 0, row: usize = 0 } = .{},
 submission: Submission = undefined,
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
@@ -274,6 +277,7 @@ pub const Outcome = enum { detached, interrupted, returned };
 pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, known_read: ?u64, lender: Lender) !Outcome {
     self.* = .{ .known_read = known_read, .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     self.input.init();
+    self.input.complete(.{ .context = self, .add = tabCompletion });
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
     defer terminal.pump = null;
@@ -489,8 +493,6 @@ const Slash = union(enum) {
     history: History,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
-    /// /effort alone: this model's efforts, from the Session line's facts.
-    efforts,
     /// The Session's model and sign-in, which never change.
     model,
     discard,
@@ -516,8 +518,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .effort => if (command.argument.len == 0) .efforts else .{ .inspection = .command },
-        .@"inspect-action", .setup, .configure, .result, .rename => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -553,7 +554,6 @@ fn slashCommand(self: *Self, text: []const u8) void {
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
         .login => self.notice = "Login uses " ++ comptime protocol.Provider.codex.login() ++ " in your shell.",
-        .efforts => self.notice = self.efforts(),
         .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
@@ -562,22 +562,6 @@ fn slashCommand(self: *Self, text: []const u8) void {
         },
         .unknown => self.unknownCommand(text),
     }
-}
-
-/// The efforts the Session's model supports, the effective one marked.
-fn efforts(self: *Self) []const u8 {
-    if (self.line.read == null) return "Efforts show once the Session is read.";
-    const model = self.line.model.slice();
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    var listed = false;
-    for (std.enums.values(model_capability.ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
-        const current = self.line.effort == effort;
-        writer.print("{s}{s}{s}{s}", .{ if (listed) " · " else "Efforts: ", if (current) "[" else "", @tagName(effort), if (current) "]" else "" }) catch unreachable;
-        listed = true;
-    };
-    if (!listed) return "Rui lists no efforts for this model.";
-    writer.writeAll(" · /effort LEVEL switches") catch unreachable;
-    return writer.buffered();
 }
 
 const model_tail = " · new Session: /model in overview";
@@ -613,7 +597,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/result", "! Usage: /result KEY" },
         .{ "/rename", "! Usage: /rename NAME" },
         .{ "/rename lane four", "" },
-        .{ "/effort", "Efforts show once the Session is read." },
+        .{ "/effort", "! Usage: /effort LEVEL" },
         .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
@@ -664,22 +648,24 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
     };
 }
 
-test "frontend /effort alone lists the efforts the Session's model supports and marks the one in force" {
+test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    const cases = .{
-        .{ "gpt-5.5", @as(?model_capability.ReasoningEffort, .medium), "Efforts: low · [medium] · high · xhigh · /effort LEVEL switches" },
-        .{ "gpt-6-luna", @as(?model_capability.ReasoningEffort, .max), "Efforts: low · medium · high · xhigh · [max] · /effort LEVEL switches" },
-        .{ "unlisted-model", @as(?model_capability.ReasoningEffort, null), "Rui lists no efforts for this model." },
-    };
-    inline for (cases) |case| {
-        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = case[1] };
-        try self.line.model.set(case[0]);
-        self.notice = null;
-        self.slashCommand("/effort");
-        try std.testing.expectEqualStrings(case[2], self.notice.?);
-        try std.testing.expect(self.input.queuedCommand() == null);
-    }
+    for ("/effort ") |byte| _ = self.input.feed(byte);
+    try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
+    try std.testing.expect(self.commandList() == null);
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
+    try self.line.model.set("gpt-5.5");
+    const list = self.commandList().?;
+    try std.testing.expectEqualStrings("low", list.shown()[0].word);
+    try std.testing.expectEqualStrings("current", list.shown()[1].description);
+    // Down moves the highlight, which Tab puts in the draft.
+    try std.testing.expect(self.moveListRow(true));
+    try std.testing.expectEqualStrings("medium", self.commandList().?.completion(self.listRow()));
+    // Typing moves it back to the first.
+    _ = self.input.feed('m');
+    try std.testing.expectEqualStrings("/effort m", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("edium", self.commandList().?.completion(self.listRow()));
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -965,7 +951,7 @@ fn drawFrame(self: *Self) !void {
     const position = self.live.cursor.position;
     const through = if (self.transcript.newer) |newer| newer.through else null;
     // Reading completes only after delivery; the receipt stales the frame.
-    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .highlight = self.listRow(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     switch (change.shown) {
         .none => {},
         .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| span.first <= at else false, position, span.next),
@@ -976,12 +962,46 @@ fn drawFrame(self: *Self) !void {
     }
 }
 
-/// The commands the draft's command word starts, unless Esc closed the
-/// list on this draft.
-fn commandList(self: *const Self) ?slash_commands.Matches {
+/// What the list above the draft shows: the commands its command word
+/// starts, or the choices for the word typed after one, unless Esc closed
+/// the list on this draft. Null when nothing matches.
+fn commandList(self: *const Self) ?slash_commands_shared.List {
     if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
-    const matches = slash_commands.Matches.of(self.input.composition().bytes) orelse return null;
-    return if (matches.count != 0) matches else null;
+    return self.suggestion();
+}
+
+/// The list the draft calls for, shown or closed.
+fn suggestion(self: *const Self) ?slash_commands_shared.List {
+    // The Session's model offers its efforts once a read names it.
+    const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
+    const list = slash_commands.suggest(self.input.composition().bytes, context) orelse return null;
+    return if (list.count != 0) list else null;
+}
+
+/// The highlighted row of the list: the first until Up or Down moves it on
+/// this draft.
+fn listRow(self: *const Self) usize {
+    return if (self.list_highlight.revision == self.input.revision) self.list_highlight.row else 0;
+}
+
+/// Up or Down in a list moves its highlight, stopping at its ends; false
+/// when no list shows for the draft.
+fn moveListRow(self: *Self, down: bool) bool {
+    const list = self.commandList() orelse return false;
+    const row = self.listRow();
+    self.list_highlight = .{ .revision = self.input.revision, .row = if (down) @min(row + 1, list.count - 1) else row -| 1 };
+    self.dirty = true;
+    return true;
+}
+
+/// Tab: the rest of the highlighted entry's word; null for a draft no list
+/// is for, which takes the tab.
+fn tabCompletion(context: *const anyopaque, _: []const u8) ?[]const u8 {
+    const self: *const Self = @ptrCast(@alignCast(context));
+    if (slash_commands.suggest(self.input.composition().bytes, .{}) == null) return null;
+    // Tab completes after Esc closed the list too, from its first row.
+    const list = self.suggestion() orelse return "";
+    return list.completion(self.listRow());
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1142,7 +1162,9 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
 fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
-        .page_up, .page_down, .scroll_up, .scroll_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
+        // A shown list takes the arrows, as the overview's model list does.
+        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !screen.listed or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
+        .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
@@ -1523,21 +1545,38 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
             screen.releaseAction();
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
-        .command => {
+        // Enter in a shown list takes its highlighted entry: it runs the
+        // command that entry completes, or adds the word another follows.
+        // Only a list the latest frame drew: a screen too short for one
+        // shows none, and Enter there runs the line as typed.
+        .command => if (if (screen.listed) self.commandList() else null) |list| {
+            const taken = list.enter(self.listRow());
+            switch (self.input.append(taken.rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => if (taken.runs) {
+                    self.slashCommand(self.input.composition().bytes);
+                    self.input.clear();
+                },
+            }
+        } else {
             self.slashCommand(self.input.composition().bytes);
             self.input.clear();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
-            .refused => |why| self.notice = switch (why) {
-                .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-                .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
-                .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
-            },
+            .refused => |why| self.notice = refusedNotice(why),
             .none, .append, .redraw, .submit => {},
         },
     }
+}
+
+fn refusedNotice(why: keymap.Refusal) []const u8 {
+    return switch (why) {
+        .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
+        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+    };
 }
 
 /// Joins a completed Admission, or launches a requested retry, and follows
@@ -2839,6 +2878,26 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     // Ctrl-G stands for Esc and Alt-Esc.
     try sendKeys(self, "\x07");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
+}
+
+test "Up, Down and Enter take a row only from a list the latest frame drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Typed since the latest frame, so never seen: Down scrolls rather
+    // than moving a hidden highlight, and Enter runs the line as typed.
+    try stepKeys(held, "/\x1b[B");
+    try std.testing.expectEqual(@as(usize, 0), self.listRow());
+    try stepKeys(held, "\x15/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Drawn: Enter takes the highlighted /help.
+    try stepKeys(held, "/he");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {

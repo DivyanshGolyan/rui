@@ -31,6 +31,11 @@ const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const preferences = @import("preferences.zig");
+
+comptime {
+    // The draft holds what a conversation's does.
+    std.debug.assert(view.draft_capacity == SessionInput.capacity);
+}
 const Self = @This();
 
 pub const Options = struct {
@@ -308,7 +313,7 @@ interrupted: *client.Cancellation,
 input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
-draft: [SessionInput.capacity]u8 = undefined,
+draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
@@ -565,6 +570,7 @@ fn drain(fd: c_int) void {
 fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
+    var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
         .list => |since| {
             self.traversal = .init(since);
@@ -578,9 +584,15 @@ fn event(self: *Self, value: view.Event) !?Next {
         .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
+        // A refused addition says so as a refused key does.
+        .append => |text| switch (self.composer.append(text)) {
+            .refused => |why| refused = why,
+            else => {},
+        },
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
+    if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
     self.sendStatuses();
     return next;
 }
@@ -955,10 +967,20 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
-/// An empty draft, whose Tab completes the overview's commands. `edits`
-/// continues the count, so no two drafts share one.
+/// An empty draft, whose Tab puts in the command list's highlighted word.
+/// `edits` continues the count, so no two drafts share one.
 fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
-    return .{ .buffer = &self.draft, .completion = view.commands.complete, .edits = edits };
+    return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
+}
+
+/// Tab: the rest of the highlighted entry's word; null for a draft no list
+/// is for, which takes the tab.
+fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+    const self: *const Self = @ptrCast(@alignCast(context));
+    if (view.commands.suggest(draft, .{}) == null) return null;
+    // Tab still takes a word after Esc closed the list.
+    const list = view.suggestion(&self.state, self.composerDraft()) orelse return "";
+    return list.completion(self.state.list_row);
 }
 
 /// One input through `mode`'s route, with the overview's one key table.

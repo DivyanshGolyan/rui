@@ -16,9 +16,9 @@ partial: [4]u8 = undefined,
 partial_length: u3 = 0,
 partial_need: u3 = 0,
 allow_paste: bool = true,
-/// What a typed Tab adds to the draft at its end in place of a tab, or null
-/// to add the tab. Null by default: a screen with commands sets it.
-completion: ?*const fn (draft: []const u8) ?[]const u8 = null,
+/// What a typed Tab adds to the draft at its end in place of a tab. Null by
+/// default: a screen with commands sets it.
+completion: ?Completion = null,
 /// Why the line is withheld until Enter, which reports it. It withholds
 /// edits, never changes what a key means.
 rejected: ?keymap.Refusal = null,
@@ -709,25 +709,46 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
     }
 }
 
+/// A screen's Tab: the text it adds to `draft`, or null to add the tab.
+pub const Completion = struct {
+    context: *const anyopaque,
+    add: *const fn (context: *const anyopaque, draft: []const u8) ?[]const u8,
+};
+
 /// Completes a clean command word; a partial character or a rejected draft
 /// takes the tab as it always did.
 fn tab(self: *Editor) KeyOutcome {
     const completion = self.completion orelse return self.insert('\t', false);
     if (self.partial_length != 0 or self.rejected != null) return self.insert('\t', false);
-    const added = completion(self.buffer[0..self.length]) orelse return self.insert('\t', false);
-    if (added.len == 0) return .none;
+    const added = completion.add(completion.context, self.buffer[0..self.length]) orelse return self.insert('\t', false);
+    return self.append(added);
+}
+
+/// Adds `text` at the draft's end, the caret after it, as Tab's completion
+/// does.
+pub fn append(self: *Editor, text: []const u8) KeyOutcome {
+    if (text.len == 0) return .none;
     self.cursor = self.length;
-    return switch (self.insertText(added, false)) {
-        .append => .redraw,
-        else => |outcome| outcome,
-    };
+    const outcome = self.insertText(text, false);
+    // A rejected draft, one this text overflowed among them, never runs.
+    if (self.rejected) |why| return .{ .refused = why };
+    return if (outcome == .append) .redraw else outcome;
+}
+
+test "an append that overflows the draft is refused, not cut short" {
+    var storage: [8]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.append("/abc"));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("defgh"));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("x"));
 }
 
 test "Tab over a partial character or a rejected draft does what it did before completion" {
     const Complete = struct {
-        fn status(_: []const u8) ?[]const u8 {
+        fn add(_: *const anyopaque, _: []const u8) ?[]const u8 {
             return "atus";
         }
+        const status: Completion = .{ .context = &{}, .add = add };
     };
     // A lead byte waiting for the rest of its character, or a NUL.
     for ([_][]const u8{ "\xc3", "\x00" }) |state| {
