@@ -101,7 +101,7 @@ pub fn build(b: *std.Build) void {
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
-        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = if (test_filter) |filter| &.{filter} else &.{} });
+        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = test_filters });
         const run_pg_tests = ci.run(pg_tests);
         run_pg_tests.has_side_effects = true;
         pg_test_step.dependOn(&run_pg_tests.step);
