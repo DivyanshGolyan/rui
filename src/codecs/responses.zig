@@ -1732,11 +1732,13 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
         const value = json.valueAt(data, @intCast(member.value));
         offset = value.end;
         const string = value.string orelse continue;
-        switch (json.decodedTag(std.meta.FieldEnum(Strings), slice(data, member.key)) orelse continue) {
-            inline else => |name| if (@field(strings, @tagName(name)) == null) {
-                @field(strings, @tagName(name)) = string;
-            },
-        }
+        const field = switch (json.decodedTag(std.meta.FieldEnum(Strings), slice(data, member.key)) orelse continue) {
+            .type => &strings.type,
+            .query => &strings.query,
+            .url => &strings.url,
+            .pattern => &strings.pattern,
+        };
+        if (field.* == null) field.* = string;
     }
     const kind = strings.type orelse return call;
     switch (json.decodedTag(enum { search, open_page, find_in_page }, slice(data, kind)) orelse return call) {

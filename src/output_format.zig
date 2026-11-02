@@ -470,7 +470,7 @@ test "an action record holds its action and outcome, only on a web search call" 
         if (reader.next()) |record| {
             try std.testing.expect(valid);
             try std.testing.expectEqual(tag == .action and failed == 1, record.?.call_failed);
-            try std.testing.expectEqual(if (tag == .action) @as(HostedAction, @enumFromInt(action)) else .none, record.?.action);
+            try std.testing.expectEqual(if (tag == .action) @as(HostedAction, @fromBackingInt(@intCast(action))) else .none, record.?.action);
         } else |err| {
             try std.testing.expect(!valid);
             try std.testing.expectEqual(error.CorruptOutputMetadata, err);
