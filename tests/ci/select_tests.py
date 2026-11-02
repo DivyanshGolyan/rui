@@ -105,8 +105,6 @@ RULES = (
     (("src/store/wire/mysql.zig", "tests/integration/mysql_wire*", "build.zig"),
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)"),
-    (("src/codec_runtime*",), ("test-codec-runtime",), ("test-codec-runtime",),
-     "The codec sandbox's own tests against tiny modules"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
@@ -198,7 +196,7 @@ RULES = (
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "test-pg", "test-codec-runtime", "admission-integration", "dispatch-integration",
+    "test", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
