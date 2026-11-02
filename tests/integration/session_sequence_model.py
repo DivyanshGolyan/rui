@@ -140,7 +140,7 @@ def execute(command, overlay, log, retention, cache):
         # The queued Message shows collapsed, so the answer alone must outgrow
         # the live view for eviction to cut its echo.
         answer = "\n".join(f"ANSWER-{index:05d} " + "y" * 50 for index in range(4400))
-        response = fixture.ResponseSpec(fixture.sse_answer("held", "reason", "message", answer)[0], {}, gate_timeout=600)
+        response = fixture.ResponseSpec(fixture.sse_answer("held", "reason", "message", answer)[0], {})
         endpoint = fixture.SuccessEndpoint([(response, release), fixture.sse_answer("next", "reason2", "message2", "TD1 DONE")[0]])
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()

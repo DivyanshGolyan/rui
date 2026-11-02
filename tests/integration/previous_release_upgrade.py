@@ -31,7 +31,9 @@ def install(checkout):
 
 
 def supported_format(checkout):
-    source = (checkout / "src/store.zig").read_text()
+    # Releases before the Store's split declare the format in src/store.zig.
+    path = checkout / "src/store/schema.zig"
+    source = (path if path.exists() else checkout / "src/store.zig").read_text()
     return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
 
 

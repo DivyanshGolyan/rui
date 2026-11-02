@@ -328,6 +328,7 @@ test "the boundary check reads names, not comments or strings" {
         .{ "extern fn read() void;", "extern" },
         .{ "export fn f() void {}", "export" },
         .{ "const s = @import(\"store.zig\");", "store.zig" },
+        .{ "const s = @import(\"store/Store.zig\");", "store/Store.zig" },
         .{ "const v = @import(\"vaxis\");", "vaxis" },
         .{ "const p = @import(\"std\").posix;", "std" },
     }) |case| {

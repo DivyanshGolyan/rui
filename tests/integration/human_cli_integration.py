@@ -562,18 +562,19 @@ def forget_terminal(master):
     _captures.pop(master, None)
 
 
-def draining(master, observe):
+def draining(master, observe, feed=None):
     """`observe`, after reading what the terminal holds: a fixture waiting on
     the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
-    a screen that stopped being read blocks mid-frame and runs no new work."""
-    capture = terminal_capture(master)
+    a screen that stopped being read blocks mid-frame and runs no new work.
+    `feed` takes the bytes; by default the master's registered capture."""
+    feed = feed or terminal_capture(master).feed
 
     def drained():
         while select.select([master], [], [], 0)[0]:
             chunk = os.read(master, 65536)
             if not chunk:
                 break
-            capture.feed(chunk)
+            feed(chunk)
         return observe()
     return drained
 
@@ -2266,18 +2267,25 @@ def persistent_opening_case():
 
         proxy = canonical.ReplyProxy(host, "/v1/conversation-content", truncate_second)
         os.write(master, b"/history\n")
-        assert history_held.wait(10), "history did not reach its held content read"
+        fixture.wait_for(draining(master, history_held.is_set), "history did not reach its held content read", timeout=10)
         records = home / ".config/rui/requests"
         before = set(records.glob("*.json"))
         os.write(master, "during history é\nnext café!\x1b[D\x1b[DX".encode())
-        fixture.wait_for(lambda: len(set(records.glob("*.json")) - before) == 1, "independent history Admission capture")
-        record = (set(records.glob("*.json")) - before).pop()
-        fixture.wait_for(lambda: fixture.completed_observation(store, record.stem), "Admission while history preparation is held")
-        assert json.loads(record.read_text())["text"]["value"] == "during history é"
-        # Rows the held page would add must not appear before it is verified.
+        # Rows the held page would add must not appear before it is verified:
+        # not in the frames up to the draft, nor in those drawn while the
+        # Admission lands (read, so the screen never fills).
         staged = ("literal **user**", "Historical item omitted", "saved user 01", "saved user 02")
         composing = read_terminal(master, "› next cafXé!", timeout=5)
-        assert not history_release.is_set() and not any(row in above_line(composing) for row in staged), composing
+        landing = []
+        terminal_capture(master).listener = lambda screen, x, y: landing.append(screen)
+        try:
+            fixture.wait_for(draining(master, lambda: len(set(records.glob("*.json")) - before) == 1), "independent history Admission capture")
+            record = (set(records.glob("*.json")) - before).pop()
+            fixture.wait_for(draining(master, lambda: fixture.completed_observation(store, record.stem)), "Admission while history preparation is held")
+        finally:
+            terminal_capture(master).listener = None
+        assert json.loads(record.read_text())["text"]["value"] == "during history é"
+        assert not history_release.is_set() and not any(row in above_line(frame) for frame in (composing, *landing) for row in staged), (composing, landing)
         history_release.set()
         failed = read_terminal(master, "! Earlier messages unavailable; scroll up to retry. Draft retained.")
         assert not any(row in above_line(failed) for row in staged), "failed history exposed a staged prefix"
@@ -2466,7 +2474,7 @@ def persistent_input_cases():
         proxy = canonical.ReplyProxy(host, "/v1/message", lost_once)
         # An idle recovery key cannot authorize retry of a future submission.
         os.write(master, "\x12original éZ\n".encode())
-        assert received.wait(10), "original Message did not reach Host"
+        fixture.wait_for(draining(master, received.is_set), "original Message did not reach Host", timeout=10)
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         composed = read_terminal(master, "› next cafXé!")
         assert "Sending" in composed and "Original reserved request" not in composed, composed
@@ -2508,7 +2516,7 @@ def persistent_input_cases():
         assert len(endpoint.requests) == 1, "recovery repeated provider work"
         # Cursor still sits before é; insert at that exact logical position.
         os.write(master, b"Y\n")
-        assert next_received.wait(10), "next Message did not reach Host"
+        fixture.wait_for(draining(master, next_received.is_set), "next Message did not reach Host", timeout=10)
         # A retry requested during this Admission belongs only to its ticket.
         os.write(master, b"\x12pending scope")
         read_terminal(master, "› pending scope")
@@ -2852,7 +2860,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 {"role": "user", "content": [{"type": "input_text", "text": reason}]}], continuation
             assert f"• {description} — Denied" in settled and reason in settled, settled
             os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            # Read the screen until exit: restoring the terminal drains it.
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
             completed = True
             return
@@ -2973,7 +2983,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             details += action_ready(ready_read, master)
             assert fixture.command("session", "inspect", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
             os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            # Read the screen until exit: restoring the terminal drains it.
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert len(endpoint.requests) == 1
@@ -3157,7 +3169,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
                 read_terminal(master, "+1 more calls · /status", composer=True)
                 terminal_step(master, "\x01\x0b/exit", "Detached.")
-                assert caller.wait(timeout=5) == 0, caller.stderr.read()
+                # Read the screen until exit: restoring the terminal drains it.
+                _, errors = terminal_exit(caller, master)
+                assert caller.returncode == 0, errors
+                forget_terminal(master)  # The next caller's screen starts at its first byte.
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -3344,7 +3359,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         os.write(master, b"Y")
         read_terminal(master, "› next cafXYé!")
         caller.send_signal(signal.SIGTERM)
-        assert caller.wait(timeout=5) == 0, caller.stderr.read()
+        # Read the screen until exit: restoring the terminal drains it.
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "signal after inspection handoff did not restore terminal"
         # Opening uses certified labels, not undisplayed exact proposal fields.
@@ -4170,6 +4187,10 @@ def renderer_cases():
         def feed(self, data):
             self.capture.feed(data)
 
+        def draining(self, observe):
+            """`observe` after reading this screen, as `draining` does."""
+            return draining(self.master, observe, self.feed)
+
         def wait(self, marker=None, *, predicate=None, after=None, timeout=15):
             deadline = time.monotonic() + timeout
             matched = None
@@ -4229,7 +4250,12 @@ def renderer_cases():
                 raise failure[0]
             return result
 
-        def ready(self, descriptor):
+        def ready(self, descriptor, until=lambda: True):
+            """Return once an offered frame shows what `until` accepts. Rui
+            writes a token after each offered frame, so a token can belong
+            to a frame drawn before the one a case waits for: keys that
+            draw a frame of their own before the last one (Ctrl-R before
+            Enter) offer that frame too."""
             deadline = time.monotonic() + 15
             while True:
                 remaining = deadline - time.monotonic()
@@ -4243,7 +4269,16 @@ def renderer_cases():
                     while select.select([self.master], [], [], 0)[0]:
                         assert time.monotonic() < deadline
                         self.feed(os.read(self.master, 65536))
-                    return
+                    if until():
+                        # Spend the tokens of later offers too, with their
+                        # frames (each token follows its frame), so the next
+                        # ready() waits for an offer made after this one.
+                        while select.select([descriptor], [], [], 0)[0]:
+                            assert os.read(descriptor, 1) == b"x"
+                            while select.select([self.master], [], [], 0)[0]:
+                                assert time.monotonic() < deadline
+                                self.feed(os.read(self.master, 65536))
+                        return
 
         def finish(self, expected=0):
             # Own BOTH streams through actual exit, rather than communicate
@@ -4585,8 +4620,7 @@ def renderer_cases():
                     tty.send("\x12", "! Action needs a decision; nothing to retry.")
                     tty.ready(ready_read)
                     os.write(tty.master, (recover + "\n").encode())
-                    tty.ready(ready_read)
-                    assert "! Not ready; nothing authorized." in tty.capture.completed, tty.capture.completed
+                    tty.ready(ready_read, lambda: "! Not ready; nothing authorized." in tty.capture.completed)
                     assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
                     assert not (workspace / "renderer-effect").exists(), "Ctrl-R at the choice authorized an Action"
                 # Enter confirms the highlighted Allow once.
@@ -4722,12 +4756,12 @@ def renderer_cases():
                 tty.ready(ready_read)
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two_reads)
-                assert held[0].wait(5), "first held Activity page"
+                fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=5)
                 # The held read predates /status, so the next one opens it.
                 os.write(tty.master, b"/status\r")
                 time.sleep(0.1)
                 released[0].set()
-                assert held[1].wait(5), "/status Activity page"
+                fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=5)
                 os.write(tty.master, b"\xc3")
                 time.sleep(0.1)
                 released[1].set()
@@ -4886,7 +4920,7 @@ def renderer_cases():
         proxy = canonical.ReplyProxy(host, "/v1/activity-content", hold_content)
         with terminal(session) as tty:
             os.write(tty.master, b"AAA\n")
-            assert holding[b"AAA"].wait(10), tty.capture.completed
+            fixture.wait_for(tty.draining(holding[b"AAA"].is_set), "the AAA content read was never held", timeout=10)
             frames = tty.every_frame()
             sent = len(proxy.mutations)
             def accepted():
@@ -4985,7 +5019,7 @@ def renderer_cases():
             # could fill a small terminal buffer before the line is read.
             frames = tty.every_frame()
             os.write(tty.master, b"/result " + missing + b"\n")
-            assert reading.wait(10), tty.capture.completed
+            fixture.wait_for(tty.draining(reading.is_set), "the /result read was never held", timeout=10)
             tty.send("\x07", "Command running…")
             tty.send("/requests\n", "! Command still running.")
             partial = [frame for frame in frames if any("/result" in row for row in frame.rstrip("\n").split("\n")[-2:])]
@@ -5105,12 +5139,12 @@ def renderer_cases():
             tty.send("status yields\n", marker)
             frames = tty.every_frame()
             holding.set()
-            assert held[0].wait(10)
+            fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
             os.write(tty.master, b"/status\n")
             time.sleep(0.3)
             released[0].set()
             # The next read carries the /status request.
-            assert held[1].wait(10)
+            fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
             os.write(tty.master, b"/details\n")
             time.sleep(0.3)
             released[1].set()
@@ -5336,10 +5370,10 @@ def renderer_cases():
             with terminal(session) as tty:
                 holding.set()
                 if route == "/v1/activity-page":
-                    assert held.wait(5), "no scan reached the held page"
+                    fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
                 tty.send(command, predicate=lambda: tty.capture.draft(command, 2 + len(command)))
                 tty.send("\r", predicate=lambda: tty.capture.draft("", 2))
-                assert held.wait(5), (command, route, "the page was not held")
+                fixture.wait_for(tty.draining(held.is_set), (command, route, "the page was not held"), timeout=5)
                 marker = answer(f"stale {command} {route}")
                 tty.send("after page\n", predicate=lambda: "Sending…" in tty.capture.completed or "Sent" in tty.capture.completed)
                 release.set()
@@ -5405,7 +5439,7 @@ def renderer_cases():
                     provider_release.set()
                 else:
                     holding.set()
-                    assert held.wait(5), "no scan reached the held page"
+                    fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
                     first_release.set()
                     fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "evicted Message answered", timeout=20)
                     release.set()
@@ -5468,7 +5502,7 @@ def renderer_cases():
             proxy = canonical.ReplyProxy(host, "/v1/activity-content", lambda response: response, before_forward=hold_content)
             try:
                 tty.send("\x0f", "Opening message…")
-                assert held.wait(10), "the Message's content read was never held"
+                fixture.wait_for(tty.draining(held.is_set), "the Message's content read was never held", timeout=10)
                 endpoint.responses.append(fixture.sse_answer("expand-filler", "reason", "message", "\n".join(f"FILLER-{index:02d}" for index in range(60)))[0])
                 requests = len(endpoint.requests)
                 # Its row waits for a scan, which waits for the held read.
@@ -5508,7 +5542,7 @@ def renderer_cases():
             proxy = canonical.ReplyProxy(host, "/v1/activity-content", lambda response: response, before_forward=hold_content)
             try:
                 tty.send("\x0f", "Opening message…")
-                assert held.wait(10), "the second content read was never held"
+                fixture.wait_for(tty.draining(held.is_set), "the second content read was never held", timeout=10)
                 for _ in range(20):
                     if "┄ 299 more lines" not in tty.capture.completed:
                         break
@@ -5608,7 +5642,7 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
             tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
             holding.set()
-            assert held.wait(5), "no scan reached the held page"
+            fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
             first_release.set()
             fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
@@ -5647,7 +5681,7 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
             tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
             holding.set()
-            assert held.wait(5), "no scan reached the held page"
+            fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
             first_release.set()
             fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
@@ -5682,7 +5716,7 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
             tty.send("QUEUED-M\n", predicate=lambda: "› QUEUED-M" in tty.capture.completed)
             holding.set()
-            assert held.wait(5), "no scan reached the held page"
+            fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
             first_release.set()
             fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "both answers", timeout=8)
             holding.clear()
@@ -5808,7 +5842,7 @@ def renderer_cases():
         first_release = threading.Event()
         held = {"X-Request-Id": "listed-held", "OpenAI-Model": "model-a-served"}
         endpoint.responses.append((fixture.ResponseSpec(text_and_call("listed-first", long_reply, "listed-call", json.dumps({
-            "cmd": "while [ ! -e listed-release ]; do sleep 0.05; done; printf CALL-DONE", "description": "Held call", "timeout_ms": None})), held, gate_timeout=60), first_release))
+            "cmd": "while [ ! -e listed-release ]; do sleep 0.05; done; printf CALL-DONE", "description": "Held call", "timeout_ms": None})), held), first_release))
         endpoint.responses.append(fixture.sse_answer("listed-final", "reason", "message", "LISTED-DONE")[0])
         try:
             with terminal(session, rows=200) as tty:
@@ -5845,7 +5879,7 @@ def renderer_cases():
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(text_and_call("dropped-first", long_reply, "dropped-call", json.dumps({
-            "cmd": "while [ ! -e dropped-release ]; do sleep 0.05; done; printf CALL-DONE", "description": "Held call", "timeout_ms": None})), held, gate_timeout=60), first_release))
+            "cmd": "while [ ! -e dropped-release ]; do sleep 0.05; done; printf CALL-DONE", "description": "Held call", "timeout_ms": None})), held), first_release))
         endpoint.responses.append(fixture.sse_answer("dropped-final", "reason", "message", "DROPPED-DONE")[0])
         try:
             # Tall enough to show every listed Message at once.
@@ -5881,7 +5915,7 @@ def renderer_cases():
         # a transcript lists each once, at its seam.
         session = configure()
         first_release = threading.Event()
-        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("stopped-first", "reason", "message", "NEVER-SHOWN")[0], held), first_release))
         endpoint.responses.append(fixture.sse_answer("stopped-after", "reason", "message", long_reply)[0])
         try:
             with terminal(session, rows=200) as tty:
@@ -5917,7 +5951,7 @@ def renderer_cases():
         # last.
         session = configure()
         first_release = threading.Event()
-        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held), first_release))
         try:
             with terminal(session, rows=200) as tty:
                 tty.capture.resize(80, 200)
@@ -5958,7 +5992,7 @@ def renderer_cases():
             payloads += [{"type": "response.output_item.added", "output_index": index, "item": {"type": item["type"], "id": item["id"]}},
                 {"type": "response.output_item.done", "output_index": index, "item": item}]
         payloads.append({"type": "response.completed", "response": {"id": "opening-applied-first", "status": "completed", "model": "model-a-served", "output": [commentary, *calls]}})
-        endpoint.responses.append((fixture.ResponseSpec(fixture.encode_sse(payloads), held, gate_timeout=60), first_release))
+        endpoint.responses.append((fixture.ResponseSpec(fixture.encode_sse(payloads), held), first_release))
         endpoint.responses.append(fixture.sse_answer("opening-applied-final", "reason", "message", "OPENING-APPLIED-DONE")[0])
 
         def hold_once(_):
@@ -5979,7 +6013,7 @@ def renderer_cases():
                 assert opened.count("HIDDEN-QUEUED-UNIQUE") == 1 and waiting(tty, "HIDDEN-QUEUED-UNIQUE") and "OPENING-LONG-04499" in opened, opened
                 # One read returns the calls' results and the Message's row.
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_once)
-                assert page_held.wait(5), "no scan reached the held page"
+                fixture.wait_for(tty.draining(page_held.is_set), "no scan reached the held page", timeout=5)
                 (workspace / "opening-release").touch()
                 fixture.wait_for(lambda: len(endpoint.requests) > requests + 1, "continuation", timeout=20)
                 assert any(item.get("role") == "user" and item["content"][0]["text"] == "HIDDEN-QUEUED-UNIQUE" for item in json.loads(endpoint.requests[-1])["input"])
@@ -6002,7 +6036,7 @@ def renderer_cases():
         # is its row, once, in order.
         session = configure()
         first_release = threading.Event()
-        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("opening-first", "reason", "message", "OPENING-DONE")[0], held, gate_timeout=60), first_release))
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("opening-first", "reason", "message", "OPENING-DONE")[0], held), first_release))
         endpoint.responses.append(fixture.sse_answer("opening-second", "reason", "message", "OPENING-QUEUED-DONE")[0])
         try:
             requests = len(endpoint.requests)
@@ -7519,7 +7553,10 @@ def main(selected="all"):
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
             lost, errors = terminal_exit(entered, master)
-            assert entered.returncode != 0 and b"TruncatedResponse" in errors, errors
+            assert entered.returncode != 0, errors
+            stopped = b"rui: The Host stopped. Run rui host start --store $'" + bytes(store) + b"', then resume this Session.\n"
+            assert stopped in errors, errors
+            assert b"TruncatedResponse" not in errors and b"syntax and recovery" not in errors, errors
             assert b"Message accepted; do not resubmit it" in errors, errors
             assert f"rui request read-result {saved_key}".encode() in errors, errors
             assert b"Detached." not in lost and b"Not confirmed" not in lost, lost

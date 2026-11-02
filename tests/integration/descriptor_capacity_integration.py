@@ -20,7 +20,7 @@ import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
 import host_process
-from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
+from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, hold, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
 
@@ -101,7 +101,7 @@ int accept(int fd, struct sockaddr *address, socklen_t *length) { return probe_a
 """
 
 
-class HeldEndpoint(TestHTTPServer):
+class HeldEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self):
@@ -129,7 +129,7 @@ class HeldHandler(http.server.BaseHTTPRequestHandler):
         with self.server.condition:
             self.server.requests += 1
             self.server.condition.notify_all()
-        assert self.server.release.wait(10), "provider fixture was never released"
+        hold(self.server, self.server.release, "provider fixture")
         body = b'{"error":"descriptor capacity fixture"}'
         self.send_response(422)
         self.send_header("Content-Length", str(len(body)))
