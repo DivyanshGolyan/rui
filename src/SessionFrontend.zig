@@ -3176,3 +3176,32 @@ test "a newer transcript counts as seen only once frames drew every row, whateve
         try std.testing.expectEqual(@as(?u64, 60), self.takeSeen());
     }
 }
+
+test "a frame counts the rows it drew as seen, not those a key read during its write scrolled to" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    var line: [16]u8 = undefined;
+    for (0..200) |row| try page.writePositionalAll(std.testing.io, try std.fmt.bufPrint(&line, "row {d:0>3}\n", .{row}), row * 8);
+    // Rows after position 20 run through 60, every one unseen.
+    self.seen = .open(20, 60, .older, try held.screen.liveEnd());
+    held.screen.beginNewer();
+    try std.testing.expect(try held.screen.appendFile(std.testing.io, page));
+    self.transcript.newer = .{ .next = null, .through = 60 };
+    self.dirty = true;
+    try held.settle();
+    // Each frame draws one screen while Page Down, read during its write,
+    // moves to the next: the last screen is reached before any frame drew it.
+    while (!held.screen.transcriptAtBottom()) {
+        try held.hold("\x1b[6~");
+        self.dirty = true;
+        _ = try self.draw();
+        try std.testing.expect(held.pumps != 0);
+    }
+    try std.testing.expectEqual(@as(?u64, null), self.takeSeen());
+    try held.settle();
+    try std.testing.expectEqual(@as(?u64, 60), self.takeSeen());
+}
