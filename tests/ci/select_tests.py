@@ -46,7 +46,7 @@ RULES = (
      ("test-logic", "test", "codex-h2-integration"), "Provider model lists; the Host's fetch and the wire reply follow"),
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
-      "src/session_reads.zig", "src/unseen.zig", "src/text_position.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig"),
+      "src/session_reads.zig", "src/unseen.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      "Frontend value decisions and native terminal/borrower handoffs"),

@@ -1,9 +1,9 @@
 //! "New since you looked": where a conversation opens, and what one visit
 //! has seen of it, in Session positions. The Store keeps each Session's
-//! read-through position. The opening places the rule after it, and a row
-//! counts as seen only once a frame drew it.
+//! read-through position. The opening places the rule after it, and text
+//! counts as seen only once a frame drew it. Drawn text is kept as byte
+//! offsets, which name the same text in every layout.
 const std = @import("std");
-const Position = @import("text_position.zig").Position;
 
 /// The rule, dim, on a line of its own above the first unseen item.
 pub const rule = "── new since you looked ──\n";
@@ -30,12 +30,13 @@ pub fn place(read_through: ?u64, oldest: ?u64, earlier_unseen: bool) Place {
     return if (earlier_unseen and first > read) .older else .here;
 }
 
-/// Joins rows a frame drew, from `first` up to `next`, to the run `drawn`
-/// ends: `drawn` is the first row the run left undrawn. Returns false when
-/// the frame starts below it, so rows between never drew and nothing joins.
-pub fn join(drawn: *Position, first: Position, next: Position) bool {
-    if (first.order(drawn.*) == .gt) return false;
-    if (next.order(drawn.*) == .gt) drawn.* = next;
+/// Joins the bytes a frame drew, from `first` up to `next`, to the run
+/// `drawn` ends: `drawn` is the first byte the run left undrawn. Returns
+/// false when the frame starts past it, so text between never drew and
+/// nothing joins.
+pub fn join(drawn: *u64, first: u64, next: u64) bool {
+    if (first > drawn.*) return false;
+    drawn.* = @max(drawn.*, next);
     return true;
 }
 
@@ -56,17 +57,17 @@ pub const Seen = struct {
     recorded: ?u64 = null,
     /// Every row through this position has shown.
     through: ?u64 = null,
-    /// A caught-up latest frame that shows this live row shows every row
-    /// after `through`. Null while rows between them never showed.
-    live_from: ?Position = null,
+    /// A caught-up latest frame that shows this live byte shows every row
+    /// after `through`. Null while text between them never showed.
+    live_from: ?u64 = null,
     /// The opening's end, and the live offset its rows end at.
     end: u64 = 0,
     end_offset: u64 = 0,
 
     pub fn open(read_through: ?u64, end: u64, placed: Rule, end_offset: u64) Seen {
         return .{ .recorded = read_through, .through = read_through, .end = end, .end_offset = end_offset, .live_from = switch (placed) {
-            .none => .{ .offset = end_offset },
-            .at => |at| .{ .offset = at },
+            .none => end_offset,
+            .at => |at| at,
             .older => null,
         } };
     }
@@ -83,14 +84,14 @@ pub const Seen = struct {
     pub fn live(self: *Seen, shown: bool, end: u64, live_end: u64) void {
         if (self.live_from == null or !shown) return;
         self.advance(end);
-        self.live_from = .{ .offset = live_end };
+        self.live_from = live_end;
     }
 
-    /// A transcript frame over a copy of live output drew live rows `first`
-    /// up to `next`. Rows it drew after `live_from` join the rows already
-    /// seen, so a later caught-up frame that shows `next` shows every row
-    /// after `through`. Rows no frame drew never join.
-    pub fn drew(self: *Seen, first: Position, next: Position) void {
+    /// A transcript frame over a copy of live output drew live bytes
+    /// `first` up to `next`. Text it drew after `live_from` joins the text
+    /// already seen, so a later caught-up frame that shows `next` shows
+    /// every row after `through`. Text no frame drew never joins.
+    pub fn drew(self: *Seen, first: u64, next: u64) void {
         if (self.live_from) |*from| _ = join(from, first, next);
     }
 
@@ -105,10 +106,7 @@ pub const Seen = struct {
     pub fn transcript(self: *Seen, through: u64) void {
         self.advance(through);
         // Its rows reached the opening's end, where live output continues.
-        if (through >= self.end) {
-            const end: Position = .{ .offset = self.end_offset };
-            self.live_from = if (self.live_from) |from| (if (from.order(end) == .lt) end else from) else end;
-        }
+        if (through >= self.end) self.live_from = @max(self.live_from orelse 0, self.end_offset);
     }
 
     fn advance(self: *Seen, to: u64) void {
@@ -187,11 +185,11 @@ test "only rows a frame drew count as seen, and leaving takes each advance once"
     try std.testing.expectEqual(@as(?u64, 12), older.take());
     // Each later frame continues from where the last one ended.
     older.live(true, 15, 500);
-    try std.testing.expectEqual(@as(?Position, .{ .offset = 500 }), older.live_from);
+    try std.testing.expectEqual(@as(?u64, 500), older.live_from);
     try std.testing.expectEqual(@as(?u64, 15), older.take());
     // A transcript reaching the end again never moves the live offset back.
     older.transcript(9);
-    try std.testing.expectEqual(@as(?Position, .{ .offset = 500 }), older.live_from);
+    try std.testing.expectEqual(@as(?u64, 500), older.live_from);
 }
 
 test "rows a poll brought past the view count once a transcript frame drew them, and only then" {
@@ -204,12 +202,12 @@ test "rows a poll brought past the view count once a transcript frame drew them,
     seen.live(false, 31, 950);
     try std.testing.expectEqual(@as(?u64, null), seen.take());
     // A transcript frame that starts below them draws none of them.
-    seen.drew(.{ .offset = 400 }, .{ .offset = 700 });
+    seen.drew(400, 700);
     seen.live(false, 31, 950);
     try std.testing.expectEqual(@as(?u64, null), seen.take());
     // Scrolling up draws them; the latest view then shows where they end.
-    seen.drew(.{ .offset = 250 }, .{ .offset = 600 });
-    seen.drew(.{ .offset = 550 }, .{ .offset = 800 });
+    seen.drew(250, 600);
+    seen.drew(550, 800);
     seen.live(true, 31, 950);
     try std.testing.expectEqual(@as(?u64, 31), seen.take());
     // Later polls continue from there.
@@ -225,17 +223,17 @@ test "a position an earlier visit saw is recorded with this visit's" {
     try std.testing.expectEqual(@as(?u64, null), seen.take());
 }
 
-test "a line taller than a frame joins the rows seen once frames drew its every row" {
-    var seen = Seen.open(4, 9, .{ .at = 250 }, 300);
-    // The latest view starts at live offset 300, past the line.
-    const latest: Position = .{ .offset = 300 };
-    seen.drew(.{ .offset = 200 }, .{ .offset = 250, .row = 20 });
-    seen.drew(.{ .offset = 250, .row = 18 }, .{ .offset = 250, .row = 38 });
-    // A frame that skipped rows of the line joins none of them.
-    seen.drew(.{ .offset = 250, .row = 40 }, .{ .offset = 300 });
-    seen.live(latest.order(seen.live_from.?) != .gt, 9, 300);
+test "frames that end and start inside a line join once together they drew all of it" {
+    var seen = Seen.open(4, 9, .{ .at = 250 }, 3000);
+    // The latest view starts at live offset 3000, past the line at 250.
+    const latest = 3000;
+    seen.drew(200, 1100);
+    seen.drew(1000, 1900);
+    // A frame that skipped text of the line joins none of it.
+    seen.drew(2000, 3000);
+    seen.live(latest <= seen.live_from.?, 9, 3000);
     try std.testing.expectEqual(@as(?u64, null), seen.take());
-    seen.drew(.{ .offset = 250, .row = 38 }, .{ .offset = 300 });
-    seen.live(latest.order(seen.live_from.?) != .gt, 9, 300);
+    seen.drew(1900, 3000);
+    seen.live(latest <= seen.live_from.?, 9, 3000);
     try std.testing.expectEqual(@as(?u64, 9), seen.take());
 }

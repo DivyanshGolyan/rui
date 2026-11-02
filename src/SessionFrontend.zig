@@ -925,10 +925,10 @@ fn drawFrame(self: *Self) !void {
     const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     switch (change.shown) {
         .none => {},
-        .live => |rows| if (caught_up) self.seen.live(if (self.seen.live_from) |at| rows.first.order(at) != .gt else false, position, rows.next.offset),
+        .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| span.first <= at else false, position, span.next),
         // A copy of live output can show rows no live frame did: more than
         // a screen arrived between frames, or one line fills more than one.
-        .copy => |rows| self.seen.drew(rows.first, rows.next),
+        .copy => |span| self.seen.drew(span.first, span.next),
         .newer_end => if (through) |newer| self.seen.transcript(newer),
     }
 }
