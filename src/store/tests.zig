@@ -91,6 +91,7 @@ const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
     _ = @import("rsql.zig");
+    _ = @import("access.zig");
 }
 
 /// Tests read a view's settings by value; the Host fills them in place.
@@ -11034,6 +11035,8 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        // The history rows bypass the Host's ids.
+        try store_core.reloadIdentitiesForTesting(&storage);
         const tail = (try turn_domain.sessionNextPosition(&storage, session.slice())).?;
         try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

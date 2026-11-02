@@ -723,8 +723,8 @@ test "typed statements are held to the dialect rules" {
 }
 
 test "the tables that carry Sessions are the ones the touch oracle watches" {
-    inline for (.{ "session", "session_revision", "message_admission", "sent_rejection", "turn", "session_stop", "model_operation", "action_operation", "conversation_entry", "model_output_item" }) |table| {
+    inline for (.{ "session", "session_revision", "message_admission", "sent_rejection", "turn", "session_stop", "model_operation", "action_operation", "conversation_entry", "model_output_item", "model_tool_call" }) |table| {
         try std.testing.expect(comptime schema.carriesSessions(table));
     }
-    inline for (.{ "content", "core_command", "model_tool_call" }) |table| try std.testing.expect(!comptime schema.carriesSessions(table));
+    inline for (.{ "content", "core_command" }) |table| try std.testing.expect(!comptime schema.carriesSessions(table));
 }

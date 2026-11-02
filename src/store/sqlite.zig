@@ -202,6 +202,7 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
         .{ "action_operation", .{"session_ref"}, .{"session_ref"} },
         .{ "conversation_entry", .{"session_ref"}, .{"session_ref"} },
         .{ "model_output_item", .{"session_ref"}, .{"session_ref"} },
+        .{ "model_tool_call", .{"session_ref"}, .{"session_ref"} },
     };
     inline for (owners) |owner| {
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {

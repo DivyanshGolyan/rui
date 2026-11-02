@@ -448,9 +448,9 @@ pub const Store = struct {
     /// it touches nothing in the change ring: a list watching the Session
     /// does not read it again.
     pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
@@ -1207,6 +1207,12 @@ pub fn takeIdentity(self: *Store, comptime column: Identity) error{IdentityExhau
 /// Reads `columns`' next values from the committed rows: at open, and after
 /// a rollback, which gives back every value its transaction took. Committed
 /// values always have their rows, so none is handed out twice.
+/// Re-reads every id after a test wrote rows past the Host, as reopening
+/// would.
+pub fn reloadIdentitiesForTesting(self: *Store) !void {
+    try loadIdentities(self, .full);
+}
+
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
     inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
         const table = switch (column) {
