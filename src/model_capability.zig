@@ -95,6 +95,14 @@ pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool 
     };
 }
 
+/// The effort a new Session on `model` starts at from the saved one: the
+/// saved one when the model offers it, else none, so the model's own
+/// default applies.
+pub fn startEffort(saved: ?ReasoningEffort, model: []const u8) ?ReasoningEffort {
+    const effort = saved orelse return null;
+    return if (supportsReasoningEffort(model, effort)) effort else null;
+}
+
 /// A model's context window: its row's, else the product's unlisted default.
 fn contextWindow(model: []const u8) u64 {
     return if (find(model)) |row| row.context_window else product_defaults.unlisted_context_window;
@@ -174,6 +182,13 @@ test "reasoning effort uses exact catalog defaults and model support without exp
     try std.testing.expect(std.meta.stringToEnum(ReasoningEffort, "ultra") == null);
     try std.testing.expectEqualStrings("gpt-5.5", ids_without_max_effort);
     try std.testing.expectEqualStrings("Supported model IDs: gpt-6-luna, gpt-6.1-sol, gpt-6-sol, gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5\n", model_help);
+}
+
+test "a new Session starts at the saved effort only when its model offers it" {
+    try std.testing.expectEqual(@as(?ReasoningEffort, .max), startEffort(.max, "gpt-6-luna"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(.max, "gpt-5.5"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(.max, "unlisted-model"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(null, "gpt-6-luna"));
 }
 
 test "selection admits any ID with valid syntax, listed or not" {

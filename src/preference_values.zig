@@ -12,13 +12,6 @@ pub const Values = struct {
     /// The effort new Sessions start at when their model offers it; null
     /// leaves each model at its own default.
     reasoning_effort: ?model_capability.ReasoningEffort = null,
-
-    /// The effort a new Session on `model` starts at: the saved one when
-    /// the model offers it, else none, so the model's own default applies.
-    pub fn startEffort(self: *const Values, model: []const u8) ?model_capability.ReasoningEffort {
-        const effort = self.reasoning_effort orelse return null;
-        return if (model_capability.supportsReasoningEffort(model, effort)) effort else null;
-    }
 };
 
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {
