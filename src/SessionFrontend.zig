@@ -59,6 +59,9 @@ colour: bool,
 tmux: bool = false,
 input: Input = undefined,
 submission: Submission = undefined,
+/// What the latest /requests page offers to act on, which its list shows
+/// while the page does.
+saved_requests: slash_commands_shared.Requests = .{},
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
@@ -967,7 +970,16 @@ fn drawFrame(self: *Self) !void {
 fn nextCommands(self: *const Self, previous: ?slash_commands_shared.Shown) ?slash_commands_shared.Shown {
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
-    return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(self.input.composition().bytes, context));
+    const draft = self.input.composition().bytes;
+    return slash_commands_shared.Shown.next(previous, self.input.revision, if (draft.len == 0) self.requestList() else slash_commands.suggest(draft, context));
+}
+
+/// The rows of the /requests page on screen, which an empty draft lists:
+/// each runs the command that recovers its request or reads its answer.
+fn requestList(self: *const Self) ?slash_commands_shared.List {
+    if (self.terminal.screen.view != .inspection or self.inspection.kind != .requests or self.inspection.status_page) return null;
+    const original: ?[]const u8 = if (self.submission.view()) |submission| (if (submission.state == .rejected) null else &self.submission.key) else null;
+    return self.saved_requests.list(original);
 }
 
 /// The draft's list, which Enter, Esc and the arrows act on when the latest
@@ -1531,29 +1543,38 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
             screen.releaseAction();
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
-        // Enter in a shown list takes its highlighted entry: it runs the
-        // command that entry completes, or adds the word another follows.
-        // Only a list the latest frame drew for this draft: a screen too
-        // short for one shows none, and Enter there runs the line as typed.
-        .command => if (self.shownCommands()) |shown| {
-            const taken = shown.list.enter(shown.highlight);
-            switch (self.input.append(taken.rest)) {
-                .refused => |why| self.notice = refusedNotice(why),
-                else => if (taken.runs) {
-                    self.slashCommand(self.input.composition().bytes);
-                    self.input.clear();
-                },
-            }
-        } else {
-            self.slashCommand(self.input.composition().bytes);
-            self.input.clear();
-        },
+        .command => self.commandLine(),
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
-            .none, .append, .redraw, .submit => {},
+            // Enter on an empty draft takes a /requests row the frame drew.
+            .submit => if (self.shownCommands() != null) {
+                if (self.input.queuedCommand() != null) self.notice = "! Command still running." else self.commandLine();
+            },
+            .none, .append, .redraw => {},
         },
+    }
+}
+
+/// Enter on a command line, or in a shown list, which takes its highlighted
+/// entry: it runs the command that entry completes, or adds the word
+/// another follows. Only a list the latest frame drew for this draft: a
+/// screen too short for one shows none, and Enter there runs the line as
+/// typed.
+fn commandLine(self: *Self) void {
+    if (self.shownCommands()) |shown| {
+        const taken = shown.list.enter(shown.highlight);
+        switch (self.input.append(taken.rest)) {
+            .refused => |why| self.notice = refusedNotice(why),
+            else => if (taken.runs) {
+                self.slashCommand(self.input.composition().bytes);
+                self.input.clear();
+            },
+        }
+    } else {
+        self.slashCommand(self.input.composition().bytes);
+        self.input.clear();
     }
 }
 
@@ -2050,6 +2071,7 @@ fn showInspection(self: *Self) !void {
         return;
     }
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
+    if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
     self.notice = null;
 }
@@ -2974,6 +2996,72 @@ test "Esc closes the command list first only when the latest frame drew it" {
     try stepKeys(held, "\x07");
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+}
+
+test "the /requests page lists its rows over an empty draft, and Enter runs the row's command as typed" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const original = "01234567-89ab-4cde-8012-0123456789ab";
+    const older = "22222222-89ab-4cde-8012-0123456789ab";
+    const newer = "33333333-89ab-4cde-8012-0123456789ab";
+    self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
+    self.submission.state = .unconfirmed;
+    self.submission.key = original.*;
+    self.saved_requests.recover(original);
+    self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", older);
+    self.saved_requests.offer(.{ .nanoseconds = 2 }, "09:05", newer);
+    try held.settle();
+    // No rows until the page shows.
+    try std.testing.expect(held.screen.commands == null);
+    const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    self.inspection.kind = .requests;
+    self.dirty = true;
+    try held.settle();
+    const drawn = held.screen.commands.?;
+    try std.testing.expectEqual(.drawn, drawn.seen);
+    try std.testing.expectEqual(@as(usize, 3), drawn.list.count);
+    try std.testing.expectEqualStrings("/recover " ++ original, drawn.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/result " ++ newer, drawn.list.entries[1].shown);
+    try std.testing.expectEqualStrings("09:05 · read this Message's saved answer", drawn.list.entries[1].description);
+    // Enter on the original's row retries it, as Ctrl-R does.
+    try stepKeys(held, "\r");
+    try std.testing.expectEqualSlices(u8, original, &(self.submission.retry orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    // Down twice reaches the older Message, and Enter queues its /result.
+    try held.settle();
+    try stepKeys(held, "\x1b[B\x1b[B");
+    try std.testing.expectEqual(@as(usize, 2), held.screen.commands.?.highlight);
+    try stepKeys(held, "\r");
+    try std.testing.expectEqualStrings("/result " ++ older, self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    // Once the original resolves its row goes, and typing gives the rows'
+    // place to the draft.
+    self.submission.intent = null;
+    self.dirty = true;
+    try held.settle();
+    try std.testing.expectEqualStrings("/result " ++ newer, held.screen.commands.?.list.entries[0].word);
+    try stepKeys(held, "x");
+    try held.settle();
+    try std.testing.expect(held.screen.commands == null);
+    // Esc closes the rows first, then leaves the page, which takes them.
+    try stepKeys(held, "\x7f");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expectEqual(Screen.ViewKind.inspection, held.screen.view);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expect(held.screen.view != .inspection);
+    try std.testing.expect(held.screen.commands == null);
+    // Enter on an empty draft with no rows does nothing.
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.input.queuedCommand() == null);
 }
 
 test "End on an empty draft goes to the latest view and never leaves the conversation" {

@@ -2272,6 +2272,16 @@ def persistent_opening_case():
             details += read_terminal(master, "Browsing · Esc returns")
         assert "literal **user** é" not in above_line(details), details
         return_to_live(master)
+        # /requests lists the saved Messages above the input, newest first,
+        # and Enter on the empty draft reads the highlighted one's answer: no
+        # key is typed.
+        os.write(master, b"/requests\n")
+        read_terminal(master, "/result " + message["request"])
+        os.write(master, b"\r")
+        read_terminal(master, "result: completed")
+        picked = current_screen(master)
+        assert picked.startswith("Browsing · Esc returns") and "late beyond captured end" in picked, picked
+        return_to_live(master)
 
         history_held = threading.Event()
 

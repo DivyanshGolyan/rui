@@ -135,7 +135,7 @@ pub const conversation = Commands(ConversationName, .{
     .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request", .listed = false },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
-    .requests = .{ .description = "recovery handles", .listed = false },
+    .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
     .status = .{ .description = "settings and work" },
@@ -515,6 +515,156 @@ pub const Shown = struct {
         self.highlight = if (down) @min(self.highlight + 1, self.list.count - 1) else self.highlight -| 1;
     }
 };
+
+/// The saved requests a conversation's /requests page offers to act on, as
+/// list entries whose words are the command lines they run, so a pick does
+/// what typing it does: first the original this conversation has not
+/// confirmed, which /recover retries, then the newest saved Messages, which
+/// /result reads. A row offers only what applies to it.
+pub const Requests = struct {
+    rows: [capacity]Row = undefined,
+    count: usize = 0,
+    /// The first row is the original's /recover.
+    original: bool = false,
+
+    pub const capacity = List.capacity;
+    /// The longest key a row takes: the Store's own bound.
+    pub const max_key_bytes = 128;
+    const line_bytes = "/recover ".len + max_key_bytes;
+    const recover_description = "retry this unconfirmed original, as Ctrl-R does";
+    const result_description = "read this Message's saved answer";
+    const description_bytes = @max(recover_description.len, "00:00 · ".len + result_description.len);
+
+    const Row = struct {
+        line: [line_bytes]u8,
+        line_length: u8,
+        description: [description_bytes]u8,
+        description_length: u8,
+        /// When the request was saved; newer rows come first.
+        saved: std.Io.Timestamp,
+
+        fn key(self: *const Row) []const u8 {
+            const line = self.line[0..self.line_length];
+            return line[std.mem.indexOfScalar(u8, line, ' ').? + 1 ..];
+        }
+    };
+
+    /// A key the parser reads back as the one word it is: printable ASCII
+    /// with no space, quote or backslash, within the Store's bound.
+    fn admits(key: []const u8) bool {
+        if (key.len == 0 or key.len > max_key_bytes) return false;
+        for (key) |byte| if (byte <= ' ' or byte >= 0x7f or byte == '"' or byte == '\'' or byte == '\\') return false;
+        return true;
+    }
+
+    fn fill(row: *Row, command: []const u8, key: []const u8, clock: ?[]const u8, description: []const u8) void {
+        row.line_length = @intCast((std.fmt.bufPrint(&row.line, "{s} {s}", .{ command, key }) catch unreachable).len);
+        const said = if (clock) |time| std.fmt.bufPrint(&row.description, "{s} · {s}", .{ time, description }) else std.fmt.bufPrint(&row.description, "{s}", .{description});
+        row.description_length = @intCast((said catch unreachable).len);
+    }
+
+    /// The original this conversation has not confirmed, by its key; its
+    /// row comes first. Set before any Message is offered.
+    pub fn recover(self: *Requests, key: []const u8) void {
+        std.debug.assert(self.count == 0);
+        if (!admits(key)) return;
+        fill(&self.rows[0], "/recover", key, null, recover_description);
+        self.rows[0].saved = .zero;
+        self.count = 1;
+        self.original = true;
+    }
+
+    /// A saved Message, saved at `saved` and shown at `clock` (local
+    /// `HH:MM`, when known). Only the newest fit; the original's own key
+    /// is its /recover row's.
+    pub fn offer(self: *Requests, saved: std.Io.Timestamp, clock: ?[]const u8, key: []const u8) void {
+        if (!admits(key)) return;
+        if (self.original and std.mem.eql(u8, self.rows[0].key(), key)) return;
+        if (clock) |time| std.debug.assert(time.len == "00:00".len);
+        const first: usize = @intFromBool(self.original);
+        var at = self.count;
+        while (at > first and newer(saved, key, &self.rows[at - 1])) at -= 1;
+        if (at == capacity) return;
+        const kept = @min(self.count, capacity - 1);
+        std.mem.copyBackwards(Row, self.rows[at + 1 .. kept + 1], self.rows[at..kept]);
+        fill(&self.rows[at], "/result", key, clock, result_description);
+        self.rows[at].saved = saved;
+        self.count = kept + 1;
+    }
+
+    /// Newest first; the key orders saves of the same moment.
+    fn newer(saved: std.Io.Timestamp, key: []const u8, row: *const Row) bool {
+        if (saved.nanoseconds != row.saved.nanoseconds) return saved.nanoseconds > row.saved.nanoseconds;
+        return std.mem.order(u8, key, row.key()) == .lt;
+    }
+
+    /// The rows as the list an empty draft shows. The /recover row shows
+    /// only while `original` is still the original this conversation can
+    /// retry, so a pick never sends one that resolved since the page was
+    /// read. Null when no row is left.
+    pub fn list(self: *const Requests, original: ?[]const u8) ?List {
+        var shown: List = .{ .typed = "" };
+        for (self.rows[0..self.count], 0..) |*row, index| {
+            if (index == 0 and self.original) {
+                const live = original orelse continue;
+                if (!std.mem.eql(u8, live, row.key())) continue;
+            }
+            shown.add(.{ .word = row.line[0..row.line_length], .shown = row.line[0..row.line_length], .description = row.description[0..row.description_length] });
+        }
+        return if (shown.count == 0) null else shown;
+    }
+};
+
+test "a /requests list keeps the newest saved Messages, after the original it may retry" {
+    const key = "01234567-89ab-4cde-8012-0123456789ab";
+    var requests: Requests = .{};
+    requests.recover(key);
+    // More Messages than fit, offered out of order, then the original again.
+    const total = Requests.capacity + 5;
+    var keys: [total][36]u8 = undefined;
+    for (0..total) |index| {
+        const order = (index * 7) % total;
+        _ = std.fmt.bufPrint(&keys[order], "{x:0>8}-89ab-4cde-8012-0123456789ab", .{order}) catch unreachable;
+        requests.offer(.{ .nanoseconds = @as(i96, @intCast(order)) * 60_000_000_000 }, "12:34", &keys[order]);
+    }
+    requests.offer(.{ .nanoseconds = 1 << 60 }, null, key);
+    const shown = requests.list(key).?;
+    try std.testing.expectEqual(Requests.capacity, shown.count);
+    try std.testing.expectEqualStrings("/recover " ++ key, shown.entries[0].word);
+    try std.testing.expectEqualStrings("retry this unconfirmed original, as Ctrl-R does", shown.entries[0].description);
+    try std.testing.expectEqualStrings(key, conversation.parse(shown.entries[0].word).command.argument);
+    for (shown.shown()[1..], 1..) |entry, index| {
+        const newest = &keys[total - index];
+        var expected: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/result {s}", .{newest}), entry.word);
+        try std.testing.expectEqualStrings(entry.word, entry.shown);
+        try std.testing.expectEqualStrings("12:34 · read this Message's saved answer", entry.description);
+        // Enter runs the whole line, which parses back to the key.
+        try std.testing.expectEqualStrings(entry.word, shown.enter(index).rest);
+        try std.testing.expect(shown.enter(index).runs);
+        try std.testing.expectEqualStrings(newest, conversation.parse(entry.word).command.argument);
+    }
+    // Once the original resolves, or another takes its place, its row goes.
+    for ([_]?[]const u8{ null, "11111111-89ab-4cde-8012-0123456789ab" }) |live| {
+        const without = requests.list(live).?;
+        try std.testing.expectEqual(Requests.capacity - 1, without.count);
+        try std.testing.expect(std.mem.startsWith(u8, without.entries[0].word, "/result "));
+    }
+}
+
+test "a /requests list takes only keys that parse back whole, and no row is no list" {
+    var requests: Requests = .{};
+    try std.testing.expect(requests.list(null) == null);
+    const long: [Requests.max_key_bytes + 1]u8 = @splat('k');
+    for ([_][]const u8{ "", "a b", "a\"b", "a'b", "a\\b", "a\x1bb", "caf\xc3\xa9", &long }) |key| requests.offer(.zero, null, key);
+    requests.recover("bad key");
+    try std.testing.expect(requests.list("bad key") == null);
+    requests.offer(.zero, null, long[0..Requests.max_key_bytes]);
+    const shown = requests.list(null).?;
+    try std.testing.expectEqual(@as(usize, 1), shown.count);
+    try std.testing.expectEqualStrings("read this Message's saved answer", shown.entries[0].description);
+    try std.testing.expectEqualStrings(long[0..Requests.max_key_bytes], conversation.parse(shown.entries[0].word).command.argument);
+}
 
 test "a command admits exactly the arguments its shape names" {
     const cases = .{
