@@ -18,8 +18,10 @@ const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 48;
 /// `digest()` of each schema_version, oldest first. A change to what
-/// `bootstrap` executes needs a new row, and so a new schema_version.
-/// Review rule: a row, once merged, is never edited.
+/// `bootstrap` executes changes the last row's digest: in place while that
+/// version is unreleased, so concurrent PRs share it, and as a new row and
+/// schema_version once it has shipped. tests/ci/test_store_schema_version.py
+/// refuses an edited released row and a second unreleased number.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
@@ -36,7 +38,7 @@ comptime {
         .{ schema_version, digest() },
     ));
     if (current.digest != digest()) @compileError(std.fmt.comptimePrint(
-        "the Store's bootstrap changed: bump schema_version and append its digest 0x{x:0>16}",
+        "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
         .{digest()},
     ));
 }

@@ -6,14 +6,16 @@ concurrent PRs share main's unreleased number instead of racing to bump it.
 """
 from pathlib import Path
 import re
-import subprocess
 import sys
 import unittest
+
+from release_numbers import bump_error, git, main_base, released_tag
 
 ROOT = Path(__file__).resolve().parents[2]
 OWNER = re.compile(r'^pub const wire_version = "(\d+)";$', re.MULTILINE)
 GO_OWNER = re.compile(r'^const WireVersion = "(\d+)"$', re.MULTILINE)
 GO_OWNER_FILE = "tests/qualification/measurement/measurement.go"
+NAME = "wire_version"
 HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
 # Literal version digits, per language, in the forms the wire takes in source.
 LITERALS = (
@@ -42,35 +44,6 @@ def literal_findings(root):
                 if pattern.search(line):
                     findings.append(f"{path.relative_to(root)}:{number}: {line.strip()[:120]}")
     return findings
-
-
-def bump_error(candidate, base, released):
-    """Why candidate is not an allowed wire version, or None.
-
-    A PR may raise the version to one past the last release. Once main holds
-    an unreleased number, every PR shares it: nothing may go above main's.
-    """
-    if candidate < base:
-        return f"wire_version {candidate} goes back below main's {base}"
-    allowed = base if base > released else released + 1
-    if candidate <= allowed:
-        return None
-    if base > released:
-        return (f"wire_version {candidate} goes past main's unreleased {base}; "
-                f"the last release speaks {released}, so reuse {base}")
-    return f"wire_version {candidate} skips past {allowed}, one past the last release's {released}"
-
-
-def git(root, *args):
-    result = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True)
-    if result.returncode:
-        raise AssertionError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
-    return result.stdout
-
-
-def released_tag(root):
-    tags = git(root, "tag", "--list", "v*", "--sort=-v:refname").split()
-    return tags[0] if tags else None
 
 
 class WireVersionTest(unittest.TestCase):
@@ -113,27 +86,26 @@ class WireVersionTest(unittest.TestCase):
         self.assertEqual(host_process.WIRE_VERSION, str(owner))
 
     def test_bump_rule(self):
-        self.assertIsNone(bump_error(4, 4, 4))
-        self.assertIsNone(bump_error(5, 4, 4), "one past the release is a fresh bump")
-        self.assertIsNone(bump_error(5, 5, 4), "a PR shares main's unreleased number")
-        self.assertIsNotNone(bump_error(6, 5, 4), "a second bump before a release")
-        self.assertIsNotNone(bump_error(6, 4, 4), "a skipped number")
-        self.assertIsNone(bump_error(4, 4, 2), "main already past the release is not the PR's bump")
-        self.assertIsNotNone(bump_error(5, 4, 2))
-        self.assertIsNotNone(bump_error(3, 4, 2), "a downgrade below main")
+        self.assertIsNone(bump_error(NAME, 4, 4, 4))
+        self.assertIsNone(bump_error(NAME, 5, 4, 4), "one past the release is a fresh bump")
+        self.assertIsNone(bump_error(NAME, 5, 5, 4), "a PR shares main's unreleased number")
+        self.assertIsNotNone(bump_error(NAME, 6, 5, 4), "a second bump before a release")
+        self.assertIsNotNone(bump_error(NAME, 6, 4, 4), "a skipped number")
+        self.assertIsNone(bump_error(NAME, 4, 4, 2), "main already past the release is not the PR's bump")
+        self.assertIsNotNone(bump_error(NAME, 5, 4, 2))
+        self.assertIsNotNone(bump_error(NAME, 3, 4, 2), "a downgrade below main")
 
     def test_wire_version_moves_once_per_release(self):
         tag = released_tag(ROOT)
         if tag is None:
             self.skipTest("no v* release tags in this checkout; the policy job checks out with fetch-depth 0")
-        if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "-q", "origin/main"],
-                          capture_output=True).returncode:
+        base_commit = main_base(ROOT)
+        if base_commit is None:
             self.skipTest("no origin/main in this checkout to take the merge base from")
         released = wire_version(git(ROOT, "show", f"{tag}:src/protocol.zig"))
-        base_commit = git(ROOT, "merge-base", "HEAD", "origin/main").strip()
         base = wire_version(git(ROOT, "show", f"{base_commit}:src/protocol.zig"))
         candidate = wire_version((ROOT / "src/protocol.zig").read_text())
-        error = bump_error(candidate, base, released)
+        error = bump_error(NAME, candidate, base, released)
         if error:
             self.fail(f"{error} (release {tag}, main at {base_commit[:12]})")
 
