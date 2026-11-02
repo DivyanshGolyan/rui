@@ -21,6 +21,7 @@ MIRROR = re.compile(r"(?:pr-gates|nonroot-check)\.sh\b")
 
 def refusal(command):
     """Why the command is a full local run, or None."""
+    command = re.sub(r"\\\n", " ", command)
     for match in BUILD.finditer(command):
         start = max(command.rfind(c, 0, match.start() + 1) for c in ";&|\n") + 1
         if NAMED_RED.search(command[start:match.start() + 1] + " "):

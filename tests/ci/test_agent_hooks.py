@@ -20,7 +20,7 @@ class BlockFullRunsTest(unittest.TestCase):
                         "sh /mnt/project-files/rui-dev/nonroot-check.sh", "time zig build test 2>&1 | tail",
                         "bash -c 'zig build test'", "(zig build check)", "timeout 600 zig build -j4 check",
                         "echo RUI_CI_RED=1 zig build test", "zig build test --foo RUI_CI_RED=x",
-                        "RUI_CI_RED=#1 true; zig build check"):
+                        "RUI_CI_RED=#1 true; zig build check", "zig build \\\ncheck --summary all"):
             with self.subTest(command=command):
                 result = run(command)
                 self.assertEqual(result.returncode, 2)
@@ -31,7 +31,7 @@ class BlockFullRunsTest(unittest.TestCase):
                         "zig build typecheck-macos", "zig fmt --check src", "zig build",
                         "python3 tests/ci/prepush.py", "RUI_CI_RED=#755 zig build check",
                         "cd rui && RUI_CI_RED=https://x/runs/1 timeout 900 zig build test",
-                        "RUI_CI_RED=#755 bash pr-gates.sh HEAD", "zig build test --summary all -Dtest-filter=x",
+                        "RUI_CI_RED=#755 bash pr-gates.sh HEAD", "zig build test --summary all -Dtest-filter=x", "zig build test \\\n  -Dtest-filter=Store",
                         "git log --grep 'build check'", "echo test"):
             with self.subTest(command=command):
                 self.assertEqual(run(command).returncode, 0, command)
