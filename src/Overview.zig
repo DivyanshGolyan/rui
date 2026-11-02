@@ -23,7 +23,6 @@ const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
-const slash_commands = @import("slash_commands.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
@@ -1058,13 +1057,14 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
     return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
 
-/// Tab: the rest of the highlighted entry's word in the latest frame's
-/// list, also after Esc closed it; null for a draft no list is for, which
-/// takes the tab.
+/// Tab: the rest of the highlighted entry's word in the draft's list,
+/// shown, hidden or closed; null for a draft no list is for, which takes
+/// the tab.
 fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (view.commands.suggest(draft, .{}) == null) return null;
-    return slash_commands.Shown.completion(&self.state.commands, self.composer.edits) orelse "";
+    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
+    return shown.completion();
 }
 
 /// One input through `mode`'s route, with the overview's one key table.
@@ -3272,6 +3272,18 @@ fn openListed() !*Rig {
 fn shownRow(rig: *const Rig, at: usize) view.Reference {
     const state = &rig.overview.state;
     return state.rows.items[state.order.items[at]].reference;
+}
+
+test "Tab completes from the draft's own list, however many keys arrive before a frame" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/he\t") == null);
+    try std.testing.expectEqualStrings("/help", rig.overview.composerDraft().bytes);
+    // Two Tabs in one batch: the second completes from the list the first
+    // one's word calls for.
+    rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
+    try std.testing.expect(try rig.press("/conf\t\t") == null);
+    try std.testing.expectEqualStrings("/configure --permission-mode ", rig.overview.composerDraft().bytes);
 }
 
 test "Shift-Up and Shift-Down select the row above and below, whatever the draft holds" {

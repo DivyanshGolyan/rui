@@ -452,12 +452,13 @@ pub const List = struct {
     }
 };
 
-/// The list a frame built for one draft revision, and what the frame did
-/// with it: the one value Enter, Esc, the arrows and Tab act on, so a key
-/// never meets a list the person did not see. Enter, Esc and the arrows act
-/// only on a list the frame drew; Tab completes from it also after Esc
-/// closed it or when the screen had no rows for it. A key for a draft that
-/// changed since the frame finds no list.
+/// The list built for one draft revision, and what the latest frame did
+/// with a list: the one value Enter, Esc, the arrows and Tab act on. A key
+/// on a draft changed since the frame first brings it to that draft through
+/// `next`, as the next frame would, so its rows are always the draft's.
+/// Enter, Esc and the arrows act on it only when the latest frame drew a
+/// list; Tab completes from it also after Esc closed it or when the screen
+/// had no rows for it.
 pub const Shown = struct {
     list: List,
     /// The draft revision the list was built for.
@@ -467,16 +468,26 @@ pub const Shown = struct {
     highlight: usize = 0,
     seen: enum { drawn, hidden, closed } = .hidden,
 
-    /// The next frame's list, `list`, for the draft at `revision`: while the
-    /// draft is the one `previous` was built for, it keeps its highlight and
-    /// stays closed once Esc closed it; any edit starts a list at its first
-    /// row. Null when nothing matches.
+    /// The list, `list`, for the draft at `revision`, after `previous`:
+    /// while the draft is the one `previous` was built for, it keeps its
+    /// highlight and stays closed once Esc closed it; any edit starts a list
+    /// at its first row. It counts as drawn while the latest frame drew a
+    /// list, until a frame records its own. Null when nothing matches.
     pub fn next(previous: ?Shown, revision: u64, list: ?List) ?Shown {
         const built = list orelse return null;
         if (built.count == 0) return null;
         const kept = previous orelse return .{ .list = built, .revision = revision };
-        if (kept.revision != revision) return .{ .list = built, .revision = revision };
-        return .{ .list = built, .revision = revision, .highlight = @min(kept.highlight, built.count - 1), .seen = if (kept.seen == .closed) .closed else .hidden };
+        if (kept.revision != revision) return .{ .list = built, .revision = revision, .seen = if (kept.seen == .drawn) .drawn else .hidden };
+        return .{ .list = built, .revision = revision, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
+    }
+
+    /// The list Enter, Esc and the arrows act on: `stored`, the latest
+    /// frame's, becomes `current`, its `next` for the draft as it is now,
+    /// when the latest frame drew a list.
+    pub fn drawnNow(stored: *?Shown, current: ?Shown) ?*Shown {
+        stored.* = current orelse return null;
+        const kept = &stored.*.?;
+        return if (kept.seen == .drawn) kept else null;
     }
 
     /// The rows the list asks of the frame: none once Esc closed it.
@@ -489,18 +500,14 @@ pub const Shown = struct {
         if (self.seen != .closed) self.seen = if (drawn) .drawn else .hidden;
     }
 
-    /// Tab's word for a key on the draft at `revision`: the rest of the
-    /// highlighted entry's; null once the draft changed.
-    pub fn completion(shown: *const ?Shown, revision: u64) ?[]const u8 {
-        const kept = if (shown.*) |*value| value else return null;
-        return if (kept.revision == revision) kept.list.completion(kept.highlight) else null;
+    /// Esc: the list stays closed until the draft changes.
+    pub fn close(self: *Shown) void {
+        self.seen = .closed;
     }
 
-    /// The list a key on the draft at `revision` acts on: one the frame
-    /// drew for it.
-    pub fn drawnAt(shown: *?Shown, revision: u64) ?*Shown {
-        const kept = if (shown.*) |*value| value else return null;
-        return if (kept.revision == revision and kept.seen == .drawn) kept else null;
+    /// What Tab adds to the draft: the rest of the highlighted entry's word.
+    pub fn completion(self: *const Shown) []const u8 {
+        return self.list.completion(self.highlight);
     }
 
     /// Up or Down: the highlight moves, stopping at the list's ends.
@@ -651,26 +658,36 @@ test "/configure lists its options, then an option's fixed values" {
     try std.testing.expectEqualStrings("--permission-mode ", overview.suggest("/configure ", .{}).?.shown()[0].word);
 }
 
-test "a frame's list keeps its highlight and closing for its draft, and keys on a changed draft find none" {
-    const list = conversation.suggest("/c", .{}).?;
-    var shown: ?Shown = Shown.next(null, 1, list);
-    shown.?.drew(true);
-    Shown.drawnAt(&shown, 1).?.move(true);
-    try std.testing.expect(Shown.drawnAt(&shown, 2) == null);
-    try std.testing.expect(Shown.completion(&shown, 2) == null);
-    try std.testing.expectEqualStrings(list.completion(1), Shown.completion(&shown, 1).?);
+test "a key's list is the draft's own, and counts as drawn when the latest frame drew a list" {
+    const c = conversation.suggest("/c", .{}).?;
+    const co = conversation.suggest("/co", .{}).?;
+    var stored: ?Shown = Shown.next(null, 1, c);
+    stored.?.drew(true);
+    Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
+    try std.testing.expectEqualStrings(c.completion(1), Shown.next(stored, 1, c).?.completion());
+    // A key on a draft changed since the frame takes that draft's list,
+    // from its first row, still drawn.
+    const changed = Shown.drawnNow(&stored, Shown.next(stored, 2, co)).?;
+    try std.testing.expectEqual(@as(usize, 0), changed.highlight);
+    try std.testing.expectEqualStrings(co.completion(0), changed.completion());
     // Esc closes it for this draft: Tab still completes, nothing else acts.
-    Shown.drawnAt(&shown, 1).?.seen = .closed;
-    shown = Shown.next(shown, 1, list);
-    shown.?.drew(true);
-    try std.testing.expectEqual(@as(usize, 0), shown.?.rows());
-    try std.testing.expect(Shown.drawnAt(&shown, 1) == null);
-    try std.testing.expectEqualStrings(list.completion(1), Shown.completion(&shown, 1).?);
-    // An edit opens a new list at its first row.
-    shown = Shown.next(shown, 2, list);
-    shown.?.drew(true);
-    try std.testing.expectEqual(@as(usize, 0), Shown.drawnAt(&shown, 2).?.highlight);
-    try std.testing.expect(Shown.next(shown, 3, null) == null);
+    changed.close();
+    stored = Shown.next(stored, 2, co);
+    stored.?.drew(true);
+    try std.testing.expectEqual(@as(usize, 0), stored.?.rows());
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 2, co)) == null);
+    try std.testing.expectEqualStrings(co.completion(0), Shown.next(stored, 2, co).?.completion());
+    // The frame drew no list, so a key on the next draft finds none drawn
+    // until a frame draws it.
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 3, c)) == null);
+    stored = Shown.next(stored, 3, c);
+    stored.?.drew(false);
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) == null);
+    stored.?.drew(true);
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 4, c)) != null);
+    // A draft no list is for leaves the frame's value as it was.
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.next(stored, 5, null)) == null);
+    try std.testing.expectEqual(@as(u64, 4), stored.?.revision);
 }
 
 test "the list order is the names' order and every listed usage fits before the descriptions" {
