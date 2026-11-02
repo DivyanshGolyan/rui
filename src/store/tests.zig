@@ -84,7 +84,6 @@ const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testing_absent_model_evidence = store_testing.testing_absent_model_evidence;
 const tool_continuation_selection_sql = model_admission_domain.tool_continuation_selection_sql;
-const workspace_key_sql = sqlite.workspace_key_sql;
 
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
@@ -909,6 +908,37 @@ const TestingSteps = struct {
     }
 };
 
+test "creating a Session takes the same work however many Sessions exist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Creation = struct {
+        fn steps(store: *Store, key: []const u8) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            _ = try configureTestSession(store, key);
+            return counter.steps;
+        }
+    };
+    _ = try configureTestSession(&storage, "creation-steps-prepare");
+    const few = try Creation.steps(&storage, "creation-steps-few");
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(
+        storage.database,
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+            "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+2,zeroblob(32),value+2 FROM sequence",
+    );
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    // Changing foreign_keys expires prepared statements: prepare them again.
+    _ = try configureTestSession(&storage, "creation-steps-prepare-again");
+    try std.testing.expectEqual(few, try Creation.steps(&storage, "creation-steps-many"));
+}
+
 test "a Workspace's changed page reads only its own Sessions, however many others changed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -997,7 +1027,7 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        var fault: TestingStatementFault = .{ .sql = workspace_key_sql };
+        var fault: TestingStatementFault = .{ .sql = store_core.session_workspace_key_sql };
         switch (route) {
             .configure => {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -2568,8 +2598,8 @@ fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
         "UNION ALL SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind!=3), " ++
         "model(position) AS (SELECT admission_position FROM model_operation WHERE session_ref=?1 " ++
         "UNION ALL SELECT session_position FROM model_output_item WHERE session_ref=?1 " ++
-        "UNION ALL SELECT call.acceptance_position FROM model_tool_call call JOIN model_operation op ON op.operation_id=call.operation_id " ++
-        "WHERE op.session_ref=?1 AND call.acceptance_position IS NOT NULL), " ++
+        "UNION ALL SELECT tool_call.acceptance_position FROM model_tool_call tool_call JOIN model_operation op ON op.operation_id=tool_call.operation_id " ++
+        "WHERE op.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL), " ++
         "settled(position) AS (SELECT acceptance_position FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NOT NULL " ++
         "UNION ALL SELECT outcome_position FROM turn WHERE session_ref=?1 AND outcome_position IS NOT NULL " ++
         "UNION ALL SELECT position FROM session_stop WHERE session_ref=?1), " ++
@@ -2613,7 +2643,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=4 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal WHERE call.rejection_code IS NOT NULL"));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal WHERE tool_call.rejection_code IS NOT NULL"));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
         const rejected_action = try sqlite.prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
@@ -4529,8 +4559,8 @@ test "Full Message projection work does not multiply Messages by stops" {
             }
             for (1..stop_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
-                        "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
+                    "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+                        "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command));" ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
                         "VALUES('stop-{0}','{2s}',NULL,{1},{0},1)",
                     .{ index, message_count, session.slice() },
@@ -7464,6 +7494,161 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
+test "existing Store rejects a format that store_meta does not hold" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try std.testing.expectEqual(@as(u64, schema_version), try queryU64(storage.database, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+    try storage.close();
+    const Case = struct { sql: [:0]const u8, refusal: anyerror };
+    const cases = [_]Case{
+        .{ .sql = std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema_version - 1}), .refusal = error.WrongStoreVersion },
+        .{ .sql = "DELETE FROM store_meta WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
+    };
+    for (cases) |case| {
+        var raw: ?*c.sqlite3 = null;
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
+        try sqlite.exec(raw.?, case.sql);
+        _ = c.sqlite3_close(raw);
+        const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(before);
+        var refused: Store = undefined;
+        try std.testing.expectError(case.refusal, refused.open(std.testing.io, database, root));
+        const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
+        try sqlite.exec(raw.?, "DELETE FROM store_meta WHERE meta_key='format'");
+        try sqlite.exec(raw.?, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}')", .{schema_version}));
+        _ = c.sqlite3_close(raw);
+    }
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+}
+
+test "existing Store rejects a table rebuilt without one of its CHECKs, and stays unmodified" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    const original = comptime for (store_schema.objects(.sqlite)) |object| {
+        if (std.mem.eql(u8, object.name, "content")) break object.sql;
+    } else unreachable;
+    // The same text without its first CHECK clause.
+    const unchecked = comptime blk: {
+        const start = std.mem.indexOf(u8, original, " CHECK(").?;
+        var depth: usize = 0;
+        var end = start + " CHECK".len;
+        while (true) : (end += 1) {
+            if (original[end] == '(') depth += 1;
+            if (original[end] == ')') depth -= 1;
+            if (depth == 0) break;
+        }
+        break :blk original[0..start] ++ original[end + 1 ..];
+    };
+    const Rebuild = struct {
+        fn run(path: []const u8, comptime create: []const u8) !void {
+            var raw: ?*c.sqlite3 = null;
+            var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{path}, 0), &raw));
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw.?, "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(raw.?, "BEGIN; CREATE TEMP TABLE kept AS SELECT * FROM content; DROP TABLE content; " ++
+                create ++ "; INSERT INTO content SELECT * FROM kept; DROP TABLE kept; COMMIT");
+        }
+    };
+    // Rebuilt from its own text, the Store still opens.
+    try Rebuild.run(database, original);
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    try Rebuild.run(database, unchecked);
+    const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(before);
+    var refused: Store = undefined;
+    try std.testing.expectError(error.WrongStoreSchema, refused.open(std.testing.io, database, root));
+    const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+test "a Workspace is matched by its digest and then its text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const first_workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var nested = try tmp.dir.createDirPathOpen(std.testing.io, "other", .{});
+    defer nested.close(std.testing.io);
+    var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const other_workspace = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+
+    var first_command = try completeConfiguration("digest-first", "", first_workspace, "model");
+    const first = storage.configure(&first_command, .{}).accepted.session;
+    var sibling_command = try completeConfiguration("digest-sibling", "", first_workspace, "model");
+    const sibling = storage.configure(&sibling_command, .{}).accepted.session;
+    // A digest collision: the first Workspace's Sessions carry the other's digest.
+    {
+        var sql: [160]u8 = undefined;
+        const forged = std.fmt.bytesToHex(store_core.workspaceDigest(other_workspace), .lower);
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET workspace_digest=x'{s}'", .{&forged}, 0));
+    }
+    var other_command = try completeConfiguration("digest-other", "", other_workspace, "model");
+    const other = storage.configure(&other_command, .{}).accepted.session;
+
+    var sql: [128]u8 = undefined;
+    const first_key = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{first.slice()}, 0));
+    try std.testing.expectEqual(first_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{sibling.slice()}, 0)));
+    try std.testing.expectEqual(first_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT created_seq FROM session WHERE session_ref='{s}'", .{first.slice()}, 0)));
+    const other_key = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{other.slice()}, 0));
+    try std.testing.expectEqual(other_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT created_seq FROM session WHERE session_ref='{s}'", .{other.slice()}, 0)));
+    try std.testing.expect(other_key != first_key);
+
+    var scope: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try scope.set(other_workspace);
+    const listed = try TestingListing.read(&storage, &tmp, .{ .workspace = scope });
+    try listed.expectReferences(&.{other.slice()[0..protocol.session_id_bytes].*});
+}
+
+test "a reference is checked when its row is written, not at commit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "immediate-config");
+    try sqlite.exec(storage.database, "BEGIN");
+    defer sqlite.exec(storage.database, "ROLLBACK") catch unreachable;
+    const Admission = struct {
+        fn insert(database: *c.sqlite3, session_ref: []const u8, command_key: []const u8) !void {
+            var sql: [320]u8 = undefined;
+            try sqlite.exec(database, try std.fmt.bufPrintSentinel(
+                &sql,
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) " ++
+                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1 FROM session WHERE session_ref='{s}'",
+                .{ command_key, session_ref },
+                0,
+            ));
+        }
+    };
+    try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.database, session.slice(), "later-command"));
+    try sqlite.exec(storage.database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+        "VALUES('later-command',2,'',zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command))");
+    try Admission.insert(storage.database, session.slice(), "later-command");
+}
+
 test "existing Store rejects noncanonical durable authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9532,7 +9717,8 @@ test "runnable discovery measures eligible ineligible and history populations in
                 try sqlite.exec(
                     database,
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position,created_at) VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1)",
+                        "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -9549,8 +9735,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                    "output_schema_content_id,revision,next_position,created_at) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1 FROM sequence; " ++
+                    "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -9702,8 +9888,9 @@ fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
         "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
-            "permission_mode,revision,next_position,created_at) " ++
-            "SELECT DISTINCT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1 FROM model_operation",
+            "permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
+            "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
 }
 
@@ -10633,6 +10820,8 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "cost-config");
+        // Foreign keys are off: each history Message names its Turn before
+        // the Turn row exists, which an immediate key would refuse.
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++

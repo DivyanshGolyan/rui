@@ -521,9 +521,9 @@ def startup_limits(root, env):
     for wire in (None, "future"):
         with sqlite3.connect(database) as connection:
             connection.execute(f"PRAGMA user_version={SCHEMA}")
-            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
             if wire is not None:
-                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
         original = hashlib.sha256(database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(store, env)
@@ -555,9 +555,9 @@ def startup_limits(root, env):
     for schema, wire in ((21, "1"), (SCHEMA, None), (SCHEMA, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
-            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
             if wire is not None:
-                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
         original = hashlib.sha256(hostile_database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(hostile, env)

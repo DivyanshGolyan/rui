@@ -987,7 +987,7 @@ require_test 'wire-version Host crash leaves its Unix socket' -S "$wire_socket"
 python3 - "$wire_store/rui.sqlite3" <<'PY'
 import sqlite3, sys
 database = sqlite3.connect(sys.argv[1])
-database.execute("UPDATE store_meta SET value='future' WHERE key='wire_version'")
+database.execute("UPDATE store_meta SET meta_value='future' WHERE meta_key='wire_version'")
 database.commit()
 database.close()
 PY

@@ -181,10 +181,14 @@ pub fn submitMessageLocked(
         .model_capability_unavailable
     else
         null;
+    var configured: ?configuration_domain.Applied = null;
     if (code == null) if (command.configuration) |*configuration| {
-        switch (try configuration_domain.applyConfiguration(self, command.key.slice(), "", configuration, faults)) {
+        switch (try configuration_domain.applyConfiguration(self, "", configuration, faults)) {
             .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
-            .accepted => |value| session = value.session,
+            .accepted => |value| {
+                session = value.session;
+                configured = value;
+            },
         }
     };
     if (code) |rejection| {
@@ -214,16 +218,11 @@ pub fn submitMessageLocked(
     }
     const text_id = try content_domain.importContent(self, &command.text, faults);
     const metadata = try content_domain.readContentMetadata(self, text_id);
-    try insertCommand(
-        self,
-        command.key.slice(),
-        .message,
-        session.slice(),
-        &digest,
-        text_id,
-        null,
-        .{ .accepted = true },
-    );
+    if (configured) |*applied| {
+        try configuration_domain.insertConfiguredCommand(self, applied, command.key.slice(), .message, &digest, text_id, null, .{ .accepted = true });
+    } else {
+        try insertCommand(self, command.key.slice(), .message, session.slice(), &digest, text_id, null, .{ .accepted = true });
+    }
     const admission_id = try insertMessageAdmission(
         self,
         session.slice(),
@@ -733,7 +732,7 @@ fn readMessageQueue(
             "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
             "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
             "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
-            "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.rowid LIMIT 1) END " ++
+            "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END " ++
             "FROM message_admission m " ++
             "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
             "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
@@ -1053,7 +1052,8 @@ pub fn insertCommand(
     secondary_content_id: ?i64,
     answer: StoredAnswer,
 ) !void {
-    const statement = try store_core.cached(self, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
+    const statement = try store_core.cached(self, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,coalesce(max(command_seq),0)+1 FROM core_command");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, key);
     const kind_value: i64 = switch (kind) {
