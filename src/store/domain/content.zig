@@ -130,18 +130,22 @@ pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bo
         return .{ .id = id, .existing = true };
     }
     if (result != c.SQLITE_DONE) return error.ContentReadFailed;
+    const id = try store_core.takeIdentity(self, .content_id);
     const insert = try store_core.cached(
         self,
-        "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),?3)",
+        "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?4,?1,?2,zeroblob(?2),?3)",
     );
     defer sqlite.resetCached(insert);
     try sqlite.bindBlob(insert, 1, digest);
     try sqlite.bindU64(insert, 2, length);
     try sqlite.bindI64(insert, 3, @as(i64, if (private) 1 else 0));
-    try sqlite.expectDone(insert);
-    const id = c.sqlite3_last_insert_rowid(self.database);
-    if (id <= 0) return error.ContentWriteFailed;
-    return .{ .id = id, .existing = false };
+    try sqlite.bindU64(insert, 4, id);
+    switch (c.sqlite3_step(insert)) {
+        c.SQLITE_DONE => {},
+        c.SQLITE_FULL => return error.CanonicalStorageFull,
+        else => return error.StatementFailed,
+    }
+    return .{ .id = @intCast(id), .existing = false };
 }
 
 pub fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
@@ -257,30 +261,14 @@ pub fn importContent(self: *Store, content: *const protocol.ContentField, faults
     {
         return error.MissingContentCustody;
     }
-    const find = try store_core.cached(self, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
-    defer sqlite.resetCached(find);
-    try sqlite.bindBlob(find, 1, &content.digest);
-    try sqlite.bindU64(find, 2, content.length);
-    const find_result = c.sqlite3_step(find);
-    if (find_result == c.SQLITE_ROW) {
-        const content_id = c.sqlite3_column_int64(find, 0);
-        if (content_id <= 0) return error.CorruptStore;
+    const slot = try contentSlot(self, &content.digest, content.length, false);
+    if (slot.existing) {
         if (content.file) |source| {
             try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
         }
-        return content_id;
+        return slot.id;
     }
-    if (find_result != c.SQLITE_DONE) return error.ContentReadFailed;
-
-    const insert = try store_core.cached(self, "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),0)");
-    defer sqlite.resetCached(insert);
-    try sqlite.bindBlob(insert, 1, &content.digest);
-    try sqlite.bindU64(insert, 2, content.length);
-    const insert_result = c.sqlite3_step(insert);
-    if (insert_result == c.SQLITE_FULL) return error.CanonicalStorageFull;
-    if (insert_result != c.SQLITE_DONE) return error.StatementFailed;
-    const content_id = c.sqlite3_last_insert_rowid(self.database);
-    if (content_id <= 0) return error.ContentWriteFailed;
+    const content_id = slot.id;
 
     if (content.length == 0) {
         if (content.file) |source| {

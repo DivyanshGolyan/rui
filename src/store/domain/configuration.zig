@@ -239,7 +239,7 @@ pub fn configureLocked(
     request: *const protocol.ConfigureCommand,
     faults: Faults,
 ) !ConfigureReply {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
 
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
@@ -277,7 +277,7 @@ pub fn configureLocked(
     );
     try insertRevision(self, applied.session.slice(), command.key.slice(), applied.instructions_updated);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
 }
 
@@ -381,6 +381,7 @@ pub fn applyConfiguration(
     }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
     if (created) {
+        const created_seq = try store_core.takeIdentity(self, .created_seq);
         while (true) {
             var random: [protocol.session_id_bytes]u8 = undefined;
             try std.Io.randomSecure(self.io, &random);
@@ -388,7 +389,7 @@ pub fn applyConfiguration(
             // draws give 30 bits, without modulo bias or a weak PRNG.
             for (&random) |*byte| byte.* = protocol.session_alphabet[byte.* & 31];
             try target.set(&random);
-            if (try insertSession(self, target.slice(), &next)) break;
+            if (try insertSession(self, target.slice(), &next, created_seq)) break;
         }
     } else {
         try target.set(session);
@@ -423,7 +424,7 @@ fn saveConfigurationRejection(
         answer,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
@@ -501,15 +502,16 @@ pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*prot
     return facts;
 }
 
-pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-    // created_seq is max+1 inside the creating transaction; a Workspace's
-    // key is the created_seq of its first Session.
+/// A new Session starts at position 1. A Workspace's key is the
+/// `created_seq` of its first Session. A taken reference inserts nothing
+/// and returns false, so the caller retries with the same `created_seq`.
+pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration, created_seq: u64) !bool {
     const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
-        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,unixepoch(),allocated.seq,coalesce((SELECT workspace_key FROM session WHERE workspace_digest=?16 AND workspace=?2 LIMIT 1),allocated.seq) " ++
-        "FROM (SELECT coalesce(max(created_seq),0)+1 AS seq FROM session) allocated WHERE true ON CONFLICT(session_ref) DO NOTHING");
+        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,1,?10,?11,?12,?13,?14,?15,?16,unixepoch(),?9,coalesce((SELECT workspace_key FROM session WHERE workspace_digest=?16 AND workspace=?2 LIMIT 1),?9) " ++
+        "WHERE true ON CONFLICT(session_ref) DO NOTHING");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
-    try sqlite.bindU64(statement, 9, current.next_position);
+    try sqlite.bindU64(statement, 9, created_seq);
     try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
     const digest = store_core.workspaceDigest(current.workspace.slice());
     try sqlite.bindBlob(statement, 16, &digest);

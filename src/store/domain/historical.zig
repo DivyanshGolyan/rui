@@ -503,7 +503,7 @@ fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSe
 }
 
 fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     try model_settlement_domain.validateCurrentAttempt(self, binding);
     const update = try store_core.cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
     defer sqlite.resetCached(update);
@@ -512,7 +512,7 @@ fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const Pr
     try sqlite.bindBlob(update, 2, &bytes);
     try sqlite.expectDone(update);
     if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
 }
 
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {

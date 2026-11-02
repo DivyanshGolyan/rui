@@ -139,7 +139,7 @@ pub fn admitNextActionAttemptLocked(
     // The held Store mutex excludes every other writer, so the candidate
     // read outside the transaction is still current inside it.
     _ = c.sqlite3_reset(select);
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     var random: [16]u8 = undefined;
     try std.Io.randomSecure(self.io, &random);
     const sender_handle = std.fmt.bytesToHex(random, .lower);
@@ -154,7 +154,7 @@ pub fn admitNextActionAttemptLocked(
     try sqlite.bindText(update, 3, &sender_handle);
     if (try store_core.stepTouching(self, update) != 1) return error.ActionSelectionChanged;
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return .{ .permit = .{ .binding = .{
         .turn_id = @intCast(turn_id),
         .parent_operation_id = @intCast(parent_operation_id),
@@ -241,7 +241,7 @@ pub fn settleActionAttemptLocked(
     result: []const u8,
     faults: Faults,
 ) !ActionSettlement {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const statement = try store_core.cached(
         self,
         "SELECT action.session_ref,operation.turn_id," ++
@@ -282,7 +282,7 @@ pub fn settleActionAttemptLocked(
     try turn_domain.completeStoppedTurnIfReady(self, binding.turn_id);
     try turn_domain.recordContinuation(self, binding.turn_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return if (stopped == 1) .session_stop else .effect;
 }
 
@@ -312,7 +312,7 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
         };
     }
     const action_id = selected orelse return false;
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const action = try store_core.cached(self, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1");
     defer sqlite.resetCached(action);
     try sqlite.bindU64(action, 1, action_id);
@@ -349,6 +349,6 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
     if (turn_id <= 0) return error.CorruptStore;
     try turn_domain.completeStoppedTurnIfReady(self, @intCast(turn_id));
     try turn_domain.recordContinuation(self, @intCast(turn_id));
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return true;
 }

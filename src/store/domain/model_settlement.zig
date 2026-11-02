@@ -179,7 +179,7 @@ pub fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding)
 }
 
 pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     try validateCurrentAttempt(self, binding);
     const update = try store_core.cached(
         self,
@@ -195,7 +195,7 @@ pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool 
         try store_core.rollback(self);
         return false;
     }
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return true;
 }
 
@@ -209,7 +209,7 @@ pub fn settleModelAttemptFailureLocked(
     const code = failure.code();
     var retry_random: u64 = 0;
     if (disposition == .retryable) self.io.random(std.mem.asBytes(&retry_random));
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     try validateCurrentAttempt(self, binding);
     switch (disposition) {
         .ordinary, .context_overflow => {
@@ -238,7 +238,7 @@ pub fn settleModelAttemptFailureLocked(
             if (compact) {
                 try turn_domain.recordContinuation(self, binding.turn_id);
                 if (faults.before_commit) return error.InjectedCommitFailure;
-                try store_core.execute(self, "COMMIT");
+                try store_core.commit(self);
                 return;
             }
 
@@ -304,7 +304,7 @@ pub fn settleModelAttemptFailureLocked(
         },
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
 }
 
 /// A failure's report as public content, for its Turn's outcome.
@@ -347,7 +347,7 @@ pub fn recoverOneExhaustedModelAttemptLocked(
     if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetryRecoveryFailed;
     const binding = selected orelse return false;
 
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     {
         const update_operation = try store_core.cached(
             self,
@@ -361,7 +361,7 @@ pub fn recoverOneExhaustedModelAttemptLocked(
         if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
     }
     if (!try turn_domain.closeTurn(self, @intCast(binding.turn_id), @intCast(binding.operation_id), .{ .retry_exhausted = null })) return error.SelectionChanged;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return true;
 }
 
@@ -371,7 +371,7 @@ pub fn settleModelSuccessLocked(
     output: *const ValidatedOutput,
     faults: Faults,
 ) !void {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     if (faults.settlement_trace) |trace| {
         std.debug.assert(c.sqlite3_txn_state(self.database, "main") == c.SQLITE_TXN_WRITE);
         trace.mark(.transaction_active);
@@ -558,7 +558,7 @@ pub fn settleModelSuccessLocked(
         if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, .{ .completed = answer_id.? })) return error.StaleAttemptBinding;
     } else try turn_domain.recordContinuation(self, binding.turn_id);
     if (faults.output_commit) return error.InjectedOutputCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
 }
 
 /// Imports one accepted call: its fields, its classification and, when
@@ -628,7 +628,7 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
     try sqlite.expectDone(insert_call);
 
     if (rejection_code == null) {
-        const action_id = try store_core.nextIdentity(self, "action_operation", "action_id");
+        const action_id = try store_core.takeIdentity(self, .action_id);
         const insert_action = try store_core.cached(
             self,
             "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++

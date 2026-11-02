@@ -190,7 +190,7 @@ pub const tables = [_]Table{
             .{ .name = "created_at", .type = .int, .check = "created_at>0" },
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
             // Creation order: list cursors and the Workspace key, allocated
-            // max+1 in the creating transaction.
+            // by the Host in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
             // SHA-256 of `workspace`. Workspace equality compares it, then the
             // text, so a collision never merges two Workspaces.
@@ -219,7 +219,7 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
-            // Command order, allocated max+1 in the recording transaction.
+            // Command order, allocated by the Host in the recording transaction.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
         .primary_key = &.{"command_key"},

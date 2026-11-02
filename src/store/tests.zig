@@ -152,7 +152,7 @@ test "Store allocates six character IDs atomically retries collisions and replay
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
     const current = (try store_core.readSessionForTesting(&storage, a.session.slice())).?;
     for ([_][]const u8{ "short", "1234567", "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
-        try std.testing.expectError(error.StatementFailed, configuration_domain.insertSession(&storage, invalid, &current));
+        try std.testing.expectError(error.StatementFailed, configuration_domain.insertSession(&storage, invalid, &current, 1_000_000));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, .{}).rejected.code);
@@ -304,6 +304,14 @@ fn busyStatements(database: *c.sqlite3) usize {
         if (c.sqlite3_stmt_busy(current) != 0) count += 1;
     }
     return count;
+}
+
+/// Imports `bytes` as public content in a transaction of its own, as
+/// identities are taken only inside one.
+fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
+    try store_core.begin(storage);
+    _ = try content_domain.importBytesContent(storage, bytes, false, false);
+    try store_core.commit(storage);
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -1038,7 +1046,7 @@ test "a Session creation that rolls back never reaches a since listing" {
         defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
         const current = (try store_core.readSessionForTesting(&storage, session.slice())).?;
-        try std.testing.expect(try configuration_domain.insertSession(&storage, "zzzzzz", &current));
+        try std.testing.expect(try configuration_domain.insertSession(&storage, "zzzzzz", &current, try store_core.takeIdentity(&storage, .created_seq)));
         try store_core.rollbackAfterError(&storage, .{});
     }
     // The rolled-back insert still moved the commit counter. The hint
@@ -1048,6 +1056,51 @@ test "a Session creation that rolls back never reaches a since listing" {
     try std.testing.expectEqual(protocol.ListDelta.full, listed.delta);
     try listed.expectReferences(&.{session.slice()[0..protocol.session_id_bytes].*});
     try std.testing.expect(!storage.isFenced());
+}
+
+test "a rolled-back transaction's identities are handed out again, a committed one's never" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "identity-config");
+    try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", session.slice(), "work");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+
+    const columns = comptime std.enums.values(store_core.Identity);
+    const maxima = [_][:0]const u8{
+        "SELECT max(turn_id) FROM turn",
+        "SELECT max(operation_id) FROM model_operation",
+        "SELECT coalesce(max(action_id),0) FROM action_operation",
+        "SELECT max(content_id) FROM content",
+        "SELECT max(created_seq) FROM session",
+        "SELECT max(command_seq) FROM core_command",
+        "SELECT max(admission_id) FROM message_admission",
+    };
+    var rolled_back: [columns.len]u64 = undefined;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    try store_core.begin(&storage);
+    inline for (columns, maxima, &rolled_back) |column, maximum, *taken| {
+        taken.* = try store_core.takeIdentity(&storage, column);
+        try std.testing.expectEqual(try queryU64(storage.database, maximum) + 1, taken.*);
+    }
+    try store_core.rollbackAfterError(&storage, .{});
+    try store_core.begin(&storage);
+    inline for (columns, rolled_back) |column, taken| try std.testing.expectEqual(taken, try store_core.takeIdentity(&storage, column));
+    try store_core.rollbackAfterError(&storage, .{});
+
+    // A committed content id is never handed out again; a later rolled-back one is.
+    const content = rolled_back[@intFromEnum(store_core.Identity.content_id)];
+    try store_core.begin(&storage);
+    try std.testing.expectEqual(@as(i64, @intCast(content)), try content_domain.importBytesContent(&storage, "identity committed", false, false));
+    try store_core.commit(&storage);
+    for (0..2) |_| {
+        try store_core.begin(&storage);
+        try std.testing.expectEqual(@as(i64, @intCast(content + 1)), try content_domain.importBytesContent(&storage, "identity rolled back", false, false));
+        try store_core.rollbackAfterError(&storage, .{});
+    }
 }
 
 test "the touch oracle names a Session whose rows changed without a touch" {
@@ -5996,8 +6049,8 @@ test "interleaved large content readers bound repeated SQLite page reads" {
         a.* = @intCast(index % 251);
         b.* = @intCast((index * 17 + 37) % 253);
     }
-    _ = try content_domain.importBytesContent(&storage, first, false, false);
-    _ = try content_domain.importBytesContent(&storage, second, false, false);
+    try importCommittedForTesting(&storage, first);
+    try importCommittedForTesting(&storage, second);
     var readers: [2]ContentReader = undefined;
     readers[0].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(first) }));
     readers[1].open(try storage.openContent(.{ .length = length, .digest = protocol.contentDigest(second) }));
@@ -6076,7 +6129,7 @@ test "retained readers allow checkpoints between committed windows" {
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
             break :blk try storage.openPublicConversationContent(&request);
         } else blk: {
-            _ = try content_domain.importBytesContent(&storage, text, false, false);
+            try importCommittedForTesting(&storage, text);
             break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });
         };
         var reader: ContentReader = undefined;

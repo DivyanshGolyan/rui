@@ -78,6 +78,8 @@ pub const Store = struct {
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
+    /// The Host hands out every id and sequence value; see `Identities`.
+    ids: Identities,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
@@ -241,7 +243,7 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
         self.served = options.served;
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
@@ -253,6 +255,7 @@ pub const Store = struct {
         errdefer self.statements.deinit();
         // Error paths then roll back without preparing or allocating.
         _ = try cached(self, "ROLLBACK");
+        try loadIdentities(self, .full);
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
@@ -775,7 +778,7 @@ pub const SqliteDiagnostic = struct {
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
 // buffer belongs in memory of its own, like the change ring's. The production
-// Store is 688 bytes; the margin fits a few more scalars, never a buffer.
+// Store is 744 bytes, 768 in test builds; the margin fits a scalar, never a buffer.
 comptime {
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
@@ -976,11 +979,25 @@ pub fn touch(self: *Store, session_ref: []const u8) !void {
     self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
 }
 
+/// Opens the entry point's write transaction: the only BEGIN of a Store
+/// transaction.
+pub fn begin(self: *Store) !void {
+    std.debug.assert(self.ids.taken.count() == 0);
+    try execute(self, "BEGIN IMMEDIATE");
+}
+
+/// Commits the open transaction; the identities it took stay taken.
+pub fn commit(self: *Store) !void {
+    try execute(self, "COMMIT");
+    self.ids.taken = .empty;
+}
+
 /// Rolls back the open transaction. A Session it created no longer
 /// exists, so the entry point has touched everything.
 pub fn rollback(self: *Store) !void {
     self.touched.everything = true;
     try execute(self, "ROLLBACK");
+    try loadIdentities(self, self.ids.taken);
 }
 
 /// A Workspace's identity in the Store: SHA-256 of its canonical text.
@@ -1133,24 +1150,62 @@ fn executeStatic(self: *Store, sql: [:0]const u8) !void {
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
 }
 
-pub fn nextIdentity(self: *Store, comptime table: []const u8, comptime column: []const u8) !u64 {
-    const statement = try cached(self, "SELECT " ++ column ++ " FROM " ++ table ++ " ORDER BY " ++ column ++ " DESC LIMIT 1");
-    defer sqlite.resetCached(statement);
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return 1;
-    if (result != c.SQLITE_ROW) return error.IdentityReadFailed;
-    const prior = c.sqlite3_column_int64(statement, 0);
-    if (prior <= 0 or prior == std.math.maxInt(i64)) return error.IdentityExhausted;
-    return @intCast(prior + 1);
+/// A column whose values the Host hands out: a row's id, or its place in
+/// a Store-wide order.
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id };
+
+/// The next value of each `Identity`: the Store's maximum plus one, read at
+/// open and again for each column a rolled-back transaction took from.
+/// Correct because one Host owns the Store; the primary or unique key still
+/// refuses a duplicate, and a refused write fences.
+const Identities = struct {
+    next: std.EnumArray(Identity, u64),
+    /// The columns that handed out a value since `begin`.
+    taken: std.EnumSet(Identity) = .empty,
+};
+
+/// The next value of `column`, inside the open transaction. The one place
+/// an identity is allocated, so a per-Host range can replace the counter.
+pub fn takeIdentity(self: *Store, comptime column: Identity) error{IdentityExhausted}!u64 {
+    std.debug.assert(c.sqlite3_get_autocommit(self.database) == 0);
+    const value = self.ids.next.get(column);
+    if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
+    self.ids.next.set(column, value + 1);
+    self.ids.taken.insert(column);
+    return value;
+}
+
+/// Reads `columns`' next values from the committed rows: at open, and after
+/// a rollback, which gives back every value its transaction took. Committed
+/// values always have their rows, so none is handed out twice.
+fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
+    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+        const table = switch (column) {
+            .turn_id => "turn",
+            .operation_id => "model_operation",
+            .action_id => "action_operation",
+            .content_id => "content",
+            .created_seq => "session",
+            .command_seq => "core_command",
+            .admission_id => "message_admission",
+        };
+        const statement = try cached(self, "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) FROM " ++ table);
+        defer sqlite.resetCached(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.IdentityReadFailed;
+        self.ids.next.set(column, try sqlite.readCount(statement, 0) + 1);
+    };
+    self.ids.taken = .empty;
 }
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     // SQLite may already have rolled back what the entry point touched.
     self.touched.everything = true;
-    if (c.sqlite3_get_autocommit(self.database) != 0) return;
-    if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-    execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
-    if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
+    if (c.sqlite3_get_autocommit(self.database) == 0) {
+        if (faults.rollback_failure) return error.CanonicalRollbackFailed;
+        execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
+        if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
+    }
+    loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {
