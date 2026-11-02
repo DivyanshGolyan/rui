@@ -16,7 +16,6 @@ import re
 import subprocess
 import time
 
-from run_selected import RETRIED
 
 LABEL = "ci-red"
 FIXED_BY = re.compile(r"Fixed by ([0-9a-f]{40})\b")
@@ -221,10 +220,9 @@ def contains(repository, sha, ancestor):
     return status in ("ahead", "identical")
 
 
-def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
+def file_cause(repository, issues, cause, workflow, sha, url, labels):
     """Comment on the signature's issue, reopening it after a claimed fix, or open one."""
-    seen = "passed only on its automatic retry after failing" if retried else "failed"
-    note = f"{workflow} {seen} on `{sha}`: {url}"
+    note = f"{workflow} failed on `{sha}`: {url}"
     # Prefer the open issue, then the newest closed one.
     matches = sorted((row for row in issues if row[2]["signature"] == cause.signature),
                      key=lambda row: (row[1] == "OPEN", row[0]))
@@ -237,8 +235,8 @@ def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
                "--body", f"{note}. This predates its fix `{fix}`, so the issue stays closed.")
             return number
         recorded.update(last_sha=sha, workflows=sorted({*recorded["workflows"], workflow}))
-        # A signature Daily Mac or a landing retry filed first still gains this
-        # run's labels, such as stable-red.
+        # A signature Daily Mac filed first still gains this run's labels,
+        # such as stable-red.
         gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail),
            *(arg for label in labels for arg in ("--add-label", label)))
         if state != "OPEN":
@@ -289,15 +287,11 @@ def aggregate_only(job):
     return bool(failed) and all(name.startswith(AGGREGATE_STEP) for name in failed)
 
 
-def job_causes(log, cases, workflow, job, failed):
-    """A failed job's causes, or a passing job's retried failures; a failure always has one."""
+def job_causes(log, cases, workflow, job):
+    """A failed job's causes; a failure always has one."""
     if log is None:
-        return [Cause(f"{workflow}: job '{job['name']}' log unavailable")] if failed else []
-    if not failed and RETRIED not in log:
-        return []
-    # A passing job's failure records all come from first attempts it retried.
-    outcome = "failed" if failed else "passed on retry"
-    return failure_causes(log, cases) or [Cause(f"{workflow}: job '{job['name']}' {outcome}; cause not parsed")]
+        return [Cause(f"{workflow}: job '{job['name']}' log unavailable")]
+    return failure_causes(log, cases) or [Cause(f"{workflow}: job '{job['name']}' failed; cause not parsed")]
 
 
 def main():
@@ -305,8 +299,6 @@ def main():
     parser.add_argument("--workflow", required=True, help="name recorded on each issue")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--retried-only", action="store_true",
-                        help="file the failures that passing jobs retried, not failed jobs (landing tips)")
     parser.add_argument("--label", action="append", default=[])
     args = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -315,12 +307,11 @@ def main():
         gh("label", "create", label, "--repo", repository, "--force", "--color", color)
     issues, cases = known_issues(repository), fixtures()
     for job in run_jobs(repository, args.run_id):
-        failed = job["conclusion"] in ("failure", "timed_out")
-        if job["conclusion"] != "success" if args.retried_only else not failed or aggregate_only(job):
+        if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
-        for cause in job_causes(log, cases, args.workflow, job, failed):
-            print(file_cause(repository, issues, cause, args.workflow, args.sha, url, not failed, args.label))
+        for cause in job_causes(log, cases, args.workflow, job):
+            print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
 
 
 if __name__ == "__main__":
