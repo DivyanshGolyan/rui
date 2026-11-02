@@ -75,14 +75,11 @@ Validate findings against the contract and owner. For each actionable finding, g
 
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`. Before every push, including review-fix rounds and after merging main, run only these checks:
 
-- the `select_tests.py --phase development` targets
+- `python3 tests/ci/prepush.py`, which runs `zig fmt --check`, `python3 -B -m unittest discover -s tests/ci`, `ruff check --select F821 tests`, the `select_tests.py --phase development` targets and, when Zig changed, `zig build typecheck-macos`
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
-- `zig fmt --check`
-- `python3 -B -m unittest discover -s tests/ci`
-- `zig build typecheck-macos` when Zig changed
 
-The PR's Selected run executes the review-phase set on the pushed head. Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red. Live provider checks remain opt-in.
+The PR's Selected run executes the review-phase set on the pushed head. Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red. In Claude Code, `.claude/hooks/block_full_runs.py` refuses those commands unless prefixed with `RUI_CI_RED=<run or issue>`. Live provider checks remain opt-in.
 
 Test meaningful failures and recovery against independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. A concurrent test peer records what it observed before it replies or exits, so cancelling or joining it once the code under test returns cannot change the result; check this by temporarily delaying each peer read, reply and exit. Order test actors with a gate or event, never a sleep. Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
