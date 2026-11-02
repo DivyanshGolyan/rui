@@ -2465,6 +2465,7 @@ test "Store entry points lock and fence only through canonical access" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
