@@ -4,17 +4,22 @@ import fnmatch
 import sys
 
 STRICT = (
-    "src/store*", "src/store/*", "src/store/*/*", "src/*schema*", "src/server*", "src/execution*", "src/*recovery*",
+    "src/store*", "src/store/", "src/*schema*", "src/server*", "src/execution*", "src/*recovery*",
     "tests/integration/*recovery*", "tests/integration/bash*",
     "build.zig", "build.zig.zon", "install.sh",
 )
 
 
+def matches(path, pattern):
+    # A pattern ending in `/` covers its whole tree. GitHub path filters do
+    # not let `*` cross `/`; fnmatch does, so check the directory depth as well.
+    if pattern.endswith("/"):
+        return path.startswith(pattern)
+    return fnmatch.fnmatchcase(path, pattern) and path.count("/") == pattern.count("/")
+
+
 def strict(paths):
-    # GitHub path filters do not let `*` cross `/`; fnmatch does, so check
-    # the directory depth as well.
-    return sorted({path for path in paths for pattern in STRICT
-                   if fnmatch.fnmatchcase(path, pattern) and path.count("/") == pattern.count("/")})
+    return sorted({path for path in paths for pattern in STRICT if matches(path, pattern)})
 
 
 if __name__ == "__main__":
