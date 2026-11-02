@@ -1856,7 +1856,11 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             var line: [512]u8 = undefined;
             switch (shown.enter(value.draft.bytes, state.list_row, &line)) {
                 .run => |text| enter(state, text, effects),
-                .add => |rest| effects.add(.{ .append = rest }),
+                .add => |rest| {
+                    // The draft grows, so the next list starts at its top.
+                    state.list_row = 0;
+                    effects.add(.{ .append = rest });
+                },
             }
         } else enter(state, value.draft.bytes, effects),
         .refused => |why| {
@@ -2616,7 +2620,7 @@ fn commandLines(painter: *Painter, listed: *const slash_commands.List, highlight
     const room = painter.width -| 2;
     const column = listed.descriptionColumn();
     for (lines[0..shown], listed.shown()[first..][0..shown], first..) |*line, entry, index| {
-        painter.begin(index == highlight);
+        painter.begin(index == listed.row(highlight));
         _ = try painter.put(1, entry.shown, room, .{ .colour = .strong });
         if (entry.description.len != 0 and room > column) _ = try painter.put(1 + column, entry.description, room - column, .{ .colour = .quiet });
         line.* = try painter.finish();
@@ -4307,6 +4311,12 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     // space, for an option.
     state.list_row = 0;
     try expectEffects(&.{.{ .append = "configure " }}, try submit(&state, draft));
+    // An option that takes a value is added for it, and the next list
+    // starts at its top, however far down the highlight was.
+    draft = try typeText(&state, "/configure ");
+    state.list_row = 3;
+    try expectEffects(&.{.{ .append = "--label " }}, try submit(&state, draft));
+    try std.testing.expectEqual(@as(usize, 0), state.list_row);
     draft = try typeText(&state, "/configure --permission-mode ");
     const modes = commandList(&state, draft).?;
     try std.testing.expectEqualStrings("bypass", modes.shown()[0].word);

@@ -560,6 +560,7 @@ fn drain(fd: c_int) void {
 fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
+    var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
         .list => |since| {
             self.traversal = .init(since);
@@ -573,10 +574,15 @@ fn event(self: *Self, value: view.Event) !?Next {
         .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(),
-        .append => |text| _ = self.composer.append(text),
+        // A refused addition says so as a refused key does.
+        .append => |text| switch (self.composer.append(text)) {
+            .refused => |why| refused = why,
+            else => {},
+        },
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
+    if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
     self.sendStatuses();
     return next;
 }

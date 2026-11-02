@@ -967,6 +967,11 @@ fn drawFrame(self: *Self) !void {
 /// the list on this draft. Null when nothing matches.
 fn commandList(self: *const Self) ?slash_commands_shared.List {
     if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
+    return self.suggestion();
+}
+
+/// The list the draft calls for, shown or closed.
+fn suggestion(self: *const Self) ?slash_commands_shared.List {
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const list = slash_commands.suggest(self.input.composition().bytes, context) orelse return null;
@@ -994,7 +999,8 @@ fn moveListRow(self: *Self, down: bool) bool {
 fn tabCompletion(context: *const anyopaque, _: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (slash_commands.suggest(self.input.composition().bytes, .{}) == null) return null;
-    const list = self.commandList() orelse return "";
+    // Tab completes after Esc closed the list too, from its first row.
+    const list = self.suggestion() orelse return "";
     return list.completion(self.listRow());
 }
 
@@ -1548,7 +1554,10 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
                     self.slashCommand(text);
                     self.input.clear();
                 },
-                .add => |rest| self.input.append(rest),
+                .add => |rest| switch (self.input.append(rest)) {
+                    .refused => |why| self.notice = refusedNotice(why),
+                    else => {},
+                },
             }
         } else {
             self.slashCommand(self.input.composition().bytes);
@@ -1557,14 +1566,18 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
-            .refused => |why| self.notice = switch (why) {
-                .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-                .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
-                .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
-            },
+            .refused => |why| self.notice = refusedNotice(why),
             .none, .append, .redraw, .submit => {},
         },
     }
+}
+
+fn refusedNotice(why: keymap.Refusal) []const u8 {
+    return switch (why) {
+        .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
+        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+    };
 }
 
 /// Joins a completed Admission, or launches a requested retry, and follows
