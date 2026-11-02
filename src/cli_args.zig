@@ -25,7 +25,7 @@ pub const Command = enum {
     action_read_call_id,
     action_read_arguments,
     host_start,
-    host_stop,
+    host_pause,
     host_status,
     host_serve,
     defaults_inspect,
@@ -60,11 +60,11 @@ pub const Command = enum {
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
-            .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
+            .host_pause => .{ .resource = .host, .name = "pause", .description = "Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -201,7 +201,7 @@ pub const fresh_session: Definition = .{ .resource = .session, .name = "", .desc
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications }, .conflicts = &.{.{ "model", "clear-model" }} };
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }} };
 
 pub const Definition = struct {
     resource: Resource,
@@ -268,6 +268,14 @@ pub const Definition = struct {
     /// Values are consumed before interpreting help; `--model --help` is data.
     /// Hex spellings decode into their named option, through `allocator`,
     /// unless help is requested. Semantic decoding stays with each handler.
+    /// The most tokens an invocation can spell: every option once, with its
+    /// value when it takes one.
+    pub fn tokenCapacity(comptime self: Definition) usize {
+        var count: usize = 0;
+        for (self.options) |option| count += if (option.argument == null) 1 else 2;
+        return count;
+    }
+
     pub fn parse(self: Definition, args: []const []const u8, allocator: std.mem.Allocator) Error!Parsed {
         var parsed: Parsed = .{ .definition = self };
         var hexed: u64 = 0;
@@ -425,8 +433,9 @@ pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
     try writer.print("Use rui {s} COMMAND --help for options.\n", .{@tagName(resource)});
 }
 
-/// Former top-level commands and their resource-first replacements. They are
-/// refused rather than read as a fresh conversation's prompt.
+/// Former commands and their replacements: top-level names, refused rather
+/// than read as a fresh conversation's prompt, and `RESOURCE OPERATION` pairs.
+/// `host stop` became `host pause` because the next Host resumes its work.
 const retired_names = [_][2][]const u8{
     .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
     .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
@@ -436,7 +445,7 @@ const retired_names = [_][2][]const u8{
     .{ "observe-command", "request inspect" },             .{ "recover", "request recover" },                     .{ "retry", "request recover" },
     .{ "read-result", "request read-result" },             .{ "requests", "request list" },                       .{ "inspect-action", "action inspect" },
     .{ "allow-action", "action allow" },                   .{ "deny-action", "action deny" },                     .{ "read-action-call-id", "action read-call-id" },
-    .{ "read-action-arguments", "action read-arguments" },
+    .{ "read-action-arguments", "action read-arguments" }, .{ "host stop", "host pause" },
 };
 
 pub fn retired(name: []const u8) ?[]const u8 {
@@ -606,6 +615,8 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expect(try expectMissing(.session_configure, &.{}) == null);
     try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
     try std.testing.expect(retired("session") == null and retired("fix the build") == null);
+    try std.testing.expectEqualStrings("host pause", retired("host stop").?);
+    try std.testing.expect(retired("session stop") == null and find(.host, "stop") == null);
 }
 
 test "Host start help states the product default capacity and existing-Host precedence" {

@@ -77,6 +77,11 @@ fn run(init: std.process.Init) !void {
         return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
+        var operation: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
+            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
+            return error.InvalidArguments;
+        };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
         return error.InvalidArguments;
     };
@@ -172,8 +177,8 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
 /// this frame is as large as the largest client command's buffers.
 noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     switch (command) {
-        .session_start => try configure(init, .{ .io = init.io }, parsed, null, true),
-        .session_configure => try configure(init, .{ .io = init.io }, parsed, null, false),
+        .session_start => _ = try configure(init, .{ .io = init.io }, parsed, null, true),
+        .session_configure => _ = try configure(init, .{ .io = init.io }, parsed, null, false),
         .session_send => try message(init, parsed, null),
         .session_inspect => try inspect(init, parsed),
         .session_list => try sessions(init, parsed),
@@ -190,7 +195,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
-        .host_start, .host_stop, .host_status => try host(init, command, parsed),
+        .host_start, .host_pause, .host_status => try host(init, command, parsed),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
@@ -255,8 +260,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
+    if (parsed.get("reasoning-effort")) |text| edit.reasoning_effort = try effortEdit(text);
     const readiness = localReadiness(init);
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
         const said = preferences.failure(err);
         if (said.reason) |reason| {
@@ -284,6 +290,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .provider = if (values.provider.len != 0) values.provider.slice() else null,
         .model = if (values.model.len != 0) values.model.slice() else null,
         .notifications = values.notifications,
+        .reasoning_effort = values.reasoning_effort,
         .readiness = &readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
@@ -295,6 +302,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
+    try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
@@ -351,8 +359,19 @@ const DefaultsFacts = struct {
     provider: ?[]const u8,
     model: ?[]const u8,
     notifications: bool,
+    reasoning_effort: ?model_capability.ReasoningEffort,
     readiness: *const provider_selection.Readinesses,
 };
+
+/// A saved effort edit as `--reasoning-effort` and `/effort` spell it:
+/// `default` clears it.
+fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort") {
+    if (std.mem.eql(u8, text, "default")) return .clear;
+    return .{ .set = std.meta.stringToEnum(model_capability.ReasoningEffort, text) orelse {
+        stderr.diagnostic("rui: --reasoning-effort is none, low, medium, high, xhigh, max or default; no preferences saved.\n", .{});
+        return error.InvalidArguments;
+    } };
+}
 
 // One complete JSON value: saved preferences, the prospective new-Session
 // binding and separately observed Host capabilities. No field is a Session fact.
@@ -366,6 +385,8 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"notifications\":{}", .{facts.notifications});
+    try writer.writeAll(",\"reasoning_effort\":");
+    try std.json.Stringify.value(if (facts.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
@@ -433,7 +454,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"), null);
-    if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
+    if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
     switch (status) {
@@ -467,11 +488,11 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     try output.finish();
 }
 
-fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
+fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
     const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
         .ready => |ready| ready.instance,
         .unavailable, .owned_unavailable => {
-            stderr.diagnostic("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
+            stderr.diagnostic("rui: no ready Host identity to pause. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
             return error.HostStopUnconfirmed;
         },
         .incompatible => return error.IncompatibleHost,
@@ -481,30 +502,30 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
-    try notice.writeAll("rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store ");
+    try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
     try TerminalText.writeShellWord(&notice, paths.store.slice());
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        stderr.diagnostic("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
         return err;
     };
     switch (outcome) {
         .acknowledged => {
             var output: JsonOutput = undefined;
             const writer = output.init(io, .stdout);
-            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_stop\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
+            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
             try output.finish();
         },
         .instance_changed => {
-            stderr.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
+            stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
             return error.HostInstanceChanged;
         },
         .unavailable => {
-            stderr.diagnostic("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
+            stderr.diagnostic("rui: Host pause unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
             return error.HostStopUnconfirmed;
         },
     }
@@ -517,7 +538,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     switch (client.hostStatus(io, selected)) {
         .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => {
-            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host stop, then run this rui again; saved work is unchanged.\n", .{});
+            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
         },
         .access_failure => return error.StoreAccessFailed,
@@ -634,7 +655,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
     if (capacity) |requested| if (requested != ready.active_capacity) notice: {
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
-        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means pausing this Host and all its work: rui host pause --store ", .{ ready.active_capacity, requested }) catch break :notice;
         TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
@@ -1167,6 +1188,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .provider = entry.binding.provider.slice(),
         .model = entry.binding.model.slice(),
         .login_at = entry.login_at,
+        .explicit = !(new_session_selection.Intent{ .store = options.store, .provider = options.provider, .model = options.model }).needsPreferences(),
     });
 }
 
@@ -1255,7 +1277,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
     };
     const provider = std.meta.stringToEnum(protocol.Provider, selected.provider.slice()).?;
     if (protocol.routeOf(ready.capabilities.providers, provider) == .unserved) {
-        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Stop it with rui host stop, then run rui again.\n", .{@tagName(provider)});
+        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Pause it with rui host pause, then run rui again.\n", .{@tagName(provider)});
         return error.HostModelUnavailable;
     }
     entry.binding = selected;
@@ -1584,7 +1606,9 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
     return error.InvalidModel;
 }
 
-fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !void {
+/// True when the Host accepted the configuration; a start reports through
+/// its message instead and is never true.
+fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
     const interactive = live != null;
     const named = if (live) |address| address.session else parsed.get("session");
@@ -1618,6 +1642,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
+        // The saved effort comes with the saved defaults: a configuration
+        // naming both provider and model reads none, so a script that
+        // spells them never depends on the preferences file.
         const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
             break :blk try preferences.load(home);
@@ -1625,6 +1652,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
+        if (!input.reasoning_effort.present) if (snapshot.defaults.startEffort(binding.model.slice())) |effort| {
+            input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
+        };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1634,7 +1664,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (input.tools == null) input.tools = product_defaults.tools;
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
-    if (start) return message(init, parsed, input);
+    if (start) {
+        try message(init, parsed, input);
+        return false;
+    }
     var step: ?client.Step = .store;
     errdefer reportFailureStep(step);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1666,6 +1699,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
         stderr.diagnostic("rui: Configuration {s}; use rui request inspect {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
     };
+    return reply.isAccepted();
 }
 
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
@@ -1945,8 +1979,8 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
         },
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
-            var setup_args: [8][]const u8 = undefined;
+            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
+            var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
@@ -1971,10 +2005,13 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
-            var arguments: [20][]const u8 = undefined;
+            var arguments: [live_capacity][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-            return liveConfigure(init, requests_context, live, spelled, typed_usage);
+            const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
+            // The effort a person chooses for this Session is also the one
+            // they want next time; /configure stays this Session's alone.
+            if (accepted and command.name == .effort and spelled.len == 2) try saveEffortDefault(init, spelled[1]);
         },
         // The Session frontend runs every other command itself.
         else => return error.UnknownArgument,
@@ -1984,7 +2021,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
 /// The /configure arguments a command spells. /effort LEVEL is
 /// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
 /// name as one value, decoded as /configure decodes a quoted one.
-fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[20][]const u8) ![]const []const u8 {
+fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_capacity][]const u8) ![]const []const u8 {
     switch (name) {
         .configure => return arguments[0..try interactiveTokens(argument, arguments)],
         .effort => {
@@ -2021,7 +2058,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
-        var storage: [2][20][]const u8 = undefined;
+        var storage: [2][live_capacity][]const u8 = undefined;
         for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
             @memcpy(line[0..text.len], text);
             const command = slash_commands.parse(line[0..text.len]).command;
@@ -2037,7 +2074,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         var line: [64]u8 = undefined;
         @memcpy(line[0..text.len], text);
         const command = slash_commands.parse(line[0..text.len]).command;
-        var arguments: [20][]const u8 = undefined;
+        var arguments: [live_capacity][]const u8 = undefined;
         try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
         try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
     }
@@ -2052,24 +2089,76 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
 }
 
 /// The live /configure: its checks and its messages, whichever command
-/// spelled the arguments, and the usage of the one typed.
-fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !void {
+/// spelled the arguments, and the usage of the one typed. True when the
+/// Host accepted it.
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch
-        return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
-        return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
-    configure(init, requests_context, &parsed, live, false) catch |err| {
-        if (err == error.InvalidModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch {
+        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+        return false;
+    };
+    if (parsed.help or parsed.seen == 0) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+        return false;
+    }
+    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
+        return false;
+    };
+    return configure(init, requests_context, &parsed, live, false) catch |err| {
+        if (err == error.InvalidModel or err == error.InvalidLabel) return false; // The pre-capture diagnostic already gives the repair.
         stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
         if (err == error.CanonicalStoreFailure) return err;
+        return false;
     };
+}
+
+/// After this Session took `/effort LEVEL`, saves LEVEL as the effort new
+/// Sessions start at, as `rui defaults configure --reasoning-effort` does.
+fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
+    const edit: preferences.Edit = .{ .reasoning_effort = if (std.mem.eql(u8, level, "default")) .clear else .{
+        .set = std.meta.stringToEnum(model_capability.ReasoningEffort, level) orelse return,
+    } };
+    const home = init.environ_map.get("HOME") orelse {
+        stderr.diagnostic("rui: /effort changed this Session only; saving it for new Sessions needs an absolute HOME.\n", .{});
+        return;
+    };
+    // An effort names no sign-in, so no readiness decides anything.
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = preferences.update(home, edit, &readiness) catch |err| {
+        const said = preferences.failure(err);
+        if (said.saved) {
+            stderr.diagnostic("rui: /effort saved for new Sessions; {s}.\n", .{said.reason.?});
+        } else stderr.diagnostic("rui: /effort changed this Session only; not saved for new Sessions ({s}).\n", .{said.reason orelse @errorName(err)});
+        return;
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (edit.reasoning_effort == .clear)
+        "Rui: New Sessions start at their model's default effort.\n"
+    else
+        "Rui: New Sessions start at this effort when their model offers it.\n");
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
+/// Room for every /setup option at once, so a valid line never reads as
+/// too long.
+const setup_capacity = cli_args.live_setup.tokenCapacity();
+/// Room for every /configure option at once, plus the option /effort and
+/// /rename spell in front of their value.
+const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
+
+test "/setup takes every option in one line" {
+    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
+    var tokens: [setup_capacity][]const u8 = undefined;
+    const count = try interactiveTokens(&line, &tokens);
+    try std.testing.expectEqual(@as(usize, 10), count);
+    var nothing = std.heap.FixedBufferAllocator.init(&.{});
+    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator());
+    try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
+    try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
+}
+
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     return decodeInteractive(input, tokens, true);
 }

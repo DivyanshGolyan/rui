@@ -2247,6 +2247,11 @@ Captured requests retain their recorded Store across preference edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
+`--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
+A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
+A start naming both `--provider` and `--model` reads no saved defaults, the effort included, so a script that spells them never depends on the preferences file; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
+`rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
+`/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; `/configure --reasoning-effort` changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.
 An unchanged saved Store retains syntax validation but its availability is checked only when selected for work.
@@ -2256,9 +2261,10 @@ HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
 `/setup` and `/configure` accept double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
-The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values and the notification choice, not credentials, Session lists or work status.
+The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice and the new-Session effort, not credentials, Session lists or work status.
 A version 1 file reads as notifications on, and Rui writes version 1 while they are on.
 Turning them off writes version 2 with a `notifications=off` line, which an older Rui refuses to read; turning them on again, or removing the file, lets it read preferences again.
+A saved effort writes version 3, which adds a `notifications=on|off` line and a `reasoning_effort=LEVEL` line; clearing it writes version 1 or 2 again.
 Only `codex` is selectable as a provider in this slice.
 The CLI owns the bounded file of at most 1,024 bytes, validates private ownership/access and format on read, and serializes updates under a private lock.
 Publication writes/syncs a same-directory temporary file before atomic rename and directory sync, including HOME and `.config` parent entries on first creation.
@@ -2820,6 +2826,7 @@ The overview lists, completes and closes its own commands, `/configure`, `/exit`
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
+Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
 
 `/copy` sends the last answer, as its Markdown, to the terminal's clipboard through OSC 52 and `/copy code` sends that answer's last complete fenced block without its final line ending, both streamed with no extra memory; `/copy file` is the fallback, and `Sent to clipboard` shows under the input until the next key (Divyansh approved this on 2026-10-31, front-end plan PR 6a).
 Each reads the newest assistant answer after the current read, like `/details`.
@@ -3672,16 +3679,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-`rui host stop [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
+`rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
 A lost reply prints an exact retry command retaining that instance.
 Matching in-flight retries may receive the same acknowledgement; a replacement returns `host_instance_changed` without action.
 
-Stop affects all work in the selected Store.
+Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
 After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
-Host stop adds no PID signal, force escalation, Session stop or separate shutdown authority.
+Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Peer collaboration has no Rui-owned group lifecycle.
 Operators compose ordinary Session stops over known addresses or stop the entire selected Host, including unrelated work there.

@@ -3516,7 +3516,7 @@ def store_selection_cases(state, workspace, valid_store):
         finally:
             def stop_created_host():
                 if case in ("explicit-create", "home-create") and destination.exists():
-                    run(home, "host", "stop", "--store", destination)
+                    run(home, "host", "pause", "--store", destination)
                     fixture.wait_for(lambda: json.loads(run(home, "host", "status", "--store", destination))["status"] == "unavailable", "created Host stopped")
 
             dispose_all(lambda: stop_process(caller, timeout=5),
