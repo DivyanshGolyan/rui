@@ -181,14 +181,13 @@ pub fn submitMessageLocked(
         .model_capability_unavailable
     else
         null;
-    // A created Session's revision, recorded after the command row.
-    var revision: ?bool = null;
+    var configured: ?configuration_domain.Applied = null;
     if (code == null) if (command.configuration) |*configuration| {
         switch (try configuration_domain.applyConfiguration(self, "", configuration, faults)) {
             .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
             .accepted => |value| {
                 session = value.session;
-                revision = value.instructions_updated;
+                configured = value;
             },
         }
     };
@@ -219,17 +218,11 @@ pub fn submitMessageLocked(
     }
     const text_id = try content_domain.importContent(self, &command.text, faults);
     const metadata = try content_domain.readContentMetadata(self, text_id);
-    try insertCommand(
-        self,
-        command.key.slice(),
-        .message,
-        session.slice(),
-        &digest,
-        text_id,
-        null,
-        .{ .accepted = true },
-    );
-    if (revision) |updated| try configuration_domain.insertRevision(self, session.slice(), command.key.slice(), updated);
+    if (configured) |*applied| {
+        try configuration_domain.insertConfiguredCommand(self, applied, command.key.slice(), .message, &digest, text_id, null, .{ .accepted = true });
+    } else {
+        try insertCommand(self, command.key.slice(), .message, session.slice(), &digest, text_id, null, .{ .accepted = true });
+    }
     const admission_id = try insertMessageAdmission(
         self,
         session.slice(),
