@@ -20,13 +20,14 @@ class StableHoldTest(unittest.TestCase):
     def test_status_groups_the_hold_by_fixture(self):
         now = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)
         self.assertEqual(status(ISSUES, "2026-10-31T12:00:00Z", now), [
-            "Last release 48 h ago.",
+            "Last stable promotion 48 h ago.",
             "Stable is held by 3 open stable-red issue(s):",
             "  (no fixture recorded)", "    #759 CI red: unparsed",
             "  src/cli.zig", "    #712 CI red: human_cli b",
             "  tests/integration/human_cli_integration.py",
             "    #711 CI red: human_cli a", "    #712 CI red: human_cli b"])
-        self.assertEqual(status([], None, now), ["Stable is not held: no open stable-red issues."])
+        self.assertEqual(status([], None, now), ["No stable promotion found.",
+                                                 "Stable is not held: no open stable-red issues."])
 
 
 if __name__ == "__main__":
