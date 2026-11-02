@@ -260,7 +260,7 @@ test "every work state has the approved words on both screens, and ended work ha
     try std.testing.expectEqualStrings(stopping.words, host_stopping.words);
     try std.testing.expectEqual(stopping.tone, host_stopping.tone);
     try std.testing.expectEqual(Clock.ellipsis, host_stopping.clock);
-    // A due retry says what it became: eligible work starting again.
+    // A due retry says what it became: eligible work queued again.
     try std.testing.expectEqualStrings("• Queued · 0s", try conversation(retry, retry.retrying.due_at_ms));
     // Its time is from the due second: due 17.2 s ahead, read 23.199 s ahead.
     try std.testing.expectEqualStrings("• Queued · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));

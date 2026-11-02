@@ -132,10 +132,11 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
 /// A pulsing mark steps through its steady mark and these, one per frame.
 pub const pulse_dots = [_][]const u8{ "·", "∙", "•" };
 
-pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool }).init(.{
+/// `under_way`: its rows' work is under way, so the headline says "Running."
+pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool, under_way: bool = false }).init(.{
     .yours = .{ .title = "Yours", .folds = false },
-    .active = .{ .title = "Active", .folds = false },
-    .queued = .{ .title = "Queued", .folds = false },
+    .active = .{ .title = "Active", .folds = false, .under_way = true },
+    .queued = .{ .title = "Queued", .folds = false, .under_way = true },
     .idle = .{ .title = "Idle", .folds = false },
     .finished = .{ .title = "Finished", .folds = true },
     .ended = .{ .title = "Stopped or failed", .folds = true },
@@ -1144,7 +1145,7 @@ pub const State = struct {
 };
 
 pub const Summary = struct {
-    /// A row works: its state is in the working group, whatever its section.
+    /// A row works: its state's group has work under way, whatever its section.
     working: bool = false,
     approvals: usize = 0,
     failed: usize = 0,
@@ -1698,7 +1699,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (state.sort_keys.items, rows, 0..) |*key, *row, at| {
         const rule = rules.get(row.state);
         state.summary.failed += @intFromBool(row.state == .failed);
-        state.summary.working = state.summary.working or rule.group == .active or rule.group == .queued;
+        state.summary.working = state.summary.working or groups.get(rule.group).under_way;
         state.summary.approvals += @intFromBool(row.state == .approval);
         state.summary.latest = @max(state.summary.latest, row.state.since());
         if (row.group() == .yours and row.state != .finished) state.summary.answered = false;
@@ -4734,7 +4735,7 @@ test "a row from another Workspace keeps its title at every width" {
     }
 }
 
-test "the selection stays on its Session when it moves from working to finished" {
+test "the selection stays on its Session when it moves from active to finished" {
     var state = try opened(&mixed);
     defer state.deinit();
     for (0..3) |_| _ = try press(&state, .{}, .next);
@@ -6196,14 +6197,14 @@ test "each skin paints every cell of the screen at each colour depth" {
     for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| try expectPainted(&state, 80, 24, .{ .depth = depth });
 }
 
-test "the top reads as the mock: wordmark, headline, health, and no counts" {
+test "the top reads as the mock: wordmark, headline, health, then the counted groups" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
     try expectScreenLine(&state, 0, " रुई rui  ~/code/rui");
     try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
     try expectScreenLine(&state, 2, " Host up 2h05m   slots 3/100");
-    // The rows show what the counts said, so no line counts them.
+    // The headings count the rows, so no line above them does.
     try expectScreenLine(&state, 3, "");
     try expectScreenLine(&state, 4, " Yours · 3");
     // The wordmark and the headline's opening are the only bold on the top.
