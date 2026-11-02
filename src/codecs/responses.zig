@@ -85,6 +85,7 @@ pub const Encoder = struct {
                 switch (output.kind) {
                     .reasoning => out.literal("{\"type\":\"reasoning\""),
                     .compaction => out.literal("{\"type\":\"compaction\""),
+                    .web_search_call => out.literal("{\"type\":\"web_search_call\""),
                     .message => out.literal(switch (output.phase) {
                         .unphased => "{\"type\":\"message\",\"role\":\"assistant\"",
                         .commentary => "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\"",
@@ -426,6 +427,7 @@ const Word = enum {
     compaction,
     function_call,
     message,
+    web_search_call,
     completed,
     assistant,
     commentary,
@@ -448,6 +450,7 @@ const Word = enum {
             .compaction => .compaction,
             .function_call => .function_call,
             .message => .message,
+            .web_search_call => .web_search_call,
             else => null,
         };
     }
@@ -698,6 +701,7 @@ const Judge = struct {
         return item_fields.join(switch (kind) {
             .reasoning => .{ .plain = &.{ .text, .encrypted_content }, .nested = &.{ .{ .summary, .summary }, .{ .content, .reasoning } } },
             .compaction => .{ .plain = &.{.encrypted_content} },
+            .web_search_call => .{ .plain = &.{.encrypted_content} },
             .function_call => .{ .plain = &.{ .name, .call_id, .arguments, .caller, .async, .namespace, .encrypted_function_args } },
             .message => .{ .plain = &.{ .role, .phase }, .nested = &.{.{ .content, .output }} },
         });
@@ -945,6 +949,20 @@ const Judge = struct {
                         if (self.operation != .compaction) return error.UnsupportedProviderOutput;
                         try rules.completed();
                         try rules.encrypted();
+                    },
+                    // OpenAI runs the search inside the response: the item
+                    // records what it did and is replayed whole. A search
+                    // that failed still leaves a completed response.
+                    .web_search_call => {
+                        const rules = Rules(kindFields(.web_search_call)){ .frame = frame };
+                        if (self.operation == .compaction) return error.UnsupportedProviderOutput;
+                        const status = try rules.get(.status);
+                        if (status.shape != .absent and !(try rules.word(.status)).is(.completed) and !status.is(.failed)) return error.UnsupportedItemStatus;
+                        const encrypted = try rules.get(.encrypted_content);
+                        switch (encrypted.shape) {
+                            .absent, .null_value, .string => {},
+                            else => return error.ExpectedJsonString,
+                        }
                     },
                     .function_call => {
                         const rules = Rules(kindFields(.function_call)){ .frame = frame };
@@ -1668,7 +1686,7 @@ fn itemMember(data: []const u8, cursor: *const codec_abi.Cursor, member: *const 
             .name, .call_id, .arguments => .neutral,
             else => .bag,
         },
-        .compaction => return .bag,
+        .compaction, .web_search_call => return .bag,
     };
     // Only a nonempty array holds parts; any other value stays whole.
     const value: usize = @intCast(member.value);

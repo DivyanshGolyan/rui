@@ -952,7 +952,7 @@ fn partFits(item: OutputItemKind, array: output_format.PartArray, kind: output_f
             .content => kind == .opaque_block or kind == .reasoning_text,
             .none => false,
         },
-        .function_call, .compaction => false,
+        .function_call, .compaction, .web_search_call => false,
     };
 }
 
