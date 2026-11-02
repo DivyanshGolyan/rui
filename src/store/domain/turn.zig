@@ -5,6 +5,9 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const store_access = @import("../access.zig");
+const Access = store_access.Access;
+const rsql = @import("../rsql.zig");
 const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
@@ -68,38 +71,94 @@ pub const TurnOutcome = union(enum) {
     }
 };
 
-pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
-    const ready = try store_core.cached(
-        self,
-        "SELECT 1 FROM turn WHERE turn_id=?1 AND outcome_code IS NULL " ++
-            "AND EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=turn.turn_id) " ++
-            "AND NOT EXISTS(SELECT 1 FROM action_operation action " ++
-            "WHERE action.parent_operation_id=turn.operation_id AND action.resolution_code IS NULL)",
-    );
-    defer sqlite.resetCached(ready);
-    try sqlite.bindU64(ready, 1, turn_id);
-    switch (c.sqlite3_step(ready)) {
-        c.SQLITE_ROW => {},
-        c.SQLITE_DONE => return,
-        else => return error.TurnReadFailed,
-    }
-    sqlite.resetCached(ready);
-    if (!try closeTurn(self, turn_id, null, .cancelled)) return error.CorruptStore;
+/// The open Turn's Session, when `operation_id` (if given) is its Operation.
+const open_turn = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM turn t JOIN session s ON s.session_ref=t.session_ref " ++
+        "WHERE t.turn_id=?1 AND t.outcome_code IS NULL AND (?2 IS NULL OR t.operation_id=?2)",
+    .Args = struct { turn_id: u64, operation_id: ?u64 },
+    .Row = struct { session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+/// A row exactly when a Session stop selected the open Turn and every
+/// Action of its Operation is resolved, except `resolving_action_id`, which
+/// the same transaction resolves.
+pub const stopped_turn = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM turn t JOIN session s ON s.session_ref=t.session_ref " ++
+        "WHERE t.turn_id=?1 AND t.outcome_code IS NULL " ++
+        "AND EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=t.turn_id) " ++
+        "AND NOT EXISTS(SELECT 1 FROM action_operation action " ++
+        "WHERE action.parent_operation_id=t.operation_id AND action.resolution_code IS NULL AND action.action_id<>?2)",
+    .Args = struct { turn_id: u64, resolving_action_id: u64 },
+    .Row = struct { session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+const close_turn = rsql.Write(.{
+    .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
+        "WHERE turn_id=?1 AND session_ref=?5 AND outcome_code IS NULL",
+    .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
+    // Its round read the Turn open, under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const record_continuation = rsql.Write(.{
+    .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=?2 AND outcome_code IS NULL " ++
+        "AND @distinct(continuation_operation_id,operation_id) AND EXISTS(SELECT 1 FROM model_operation current " ++
+        "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
+    .Args = struct { turn_id: u64, session: rsql.SessionHead },
+    .expect = .{ .at_most = 1 },
+});
+
+/// Queues ending the open Turn `turn_id` of `positions`' Session with
+/// `outcome`, at the Session's next position.
+pub fn queueClose(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome) !void {
+    const content_id = outcome.content();
+    // A failure code spelling a fixed outcome would read back as that outcome.
+    std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
+    a.write(close_turn, .{
+        .turn_id = turn_id,
+        .code = outcome.code(),
+        .content_id = if (content_id) |id| @intCast(id) else null,
+        .position = try positions.take(1),
+        .session = positions.head,
+    });
 }
 
-/// Every writer that can let an active Turn continue without input calls
+/// After a `stopped_turn` round: cancels the Turn it found ready.
+pub fn queueStopCompletion(a: anytype, ready: stopped_turn.Result, turn_id: u64) !void {
+    const row = ready orelse return;
+    try queueClose(a, try a.touch(row.session), turn_id, .cancelled);
+}
+
+/// Every writer that can let an active Turn continue without input queues
 /// this in its transaction; tool continuation selection reads only the
 /// stored fact. Admitting the Turn's next Operation retires it.
+pub fn queueContinuation(a: anytype, turn_id: u64, session: rsql.SessionHead) void {
+    a.write(record_continuation, .{ .turn_id = turn_id, .session = session });
+}
+
+/// `queueStopCompletion` for unconverted code, inside its transaction.
+pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var ready: stopped_turn.Result = undefined;
+    a.read(stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = 0 }, &ready);
+    try a.run();
+    try queueStopCompletion(&a, ready, turn_id);
+    try a.apply();
+}
+
+/// `queueContinuation` for unconverted code, inside its transaction.
 pub fn recordContinuation(self: *Store, turn_id: u64) !void {
-    const update = try store_core.cached(
-        self,
-        "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND outcome_code IS NULL " ++
-            "AND continuation_operation_id IS NOT operation_id AND EXISTS(SELECT 1 FROM model_operation current " ++
-            "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, turn_id);
-    try sqlite.expectDone(update);
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var open: open_turn.Result = undefined;
+    a.read(open_turn, .{ .turn_id = turn_id, .operation_id = null }, &open);
+    try a.run();
+    const row = open orelse return;
+    queueContinuation(&a, turn_id, row.session);
+    try a.apply();
 }
 
 pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {
@@ -157,31 +216,16 @@ pub fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
 /// Ends an open Turn, saving its outcome and the position that orders it
 /// in Session activity together. `operation_id` names the Operation the
 /// caller expects the Turn to own. Returns false when the Turn is already
-/// closed or owned by another Operation.
+/// closed or owned by another Operation. `queueClose` for unconverted code,
+/// inside its transaction.
 pub fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOutcome) !bool {
-    const select = try store_core.cached(self, "SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NULL AND (?2 IS NULL OR operation_id=?2)");
-    defer sqlite.resetCached(select);
-    try sqlite.bindU64(select, 1, turn_id);
-    try sqlite.bindNullableU64(select, 2, operation_id);
-    switch (c.sqlite3_step(select)) {
-        c.SQLITE_ROW => {},
-        c.SQLITE_DONE => return false,
-        else => return error.TurnReadFailed,
-    }
-    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(select, 0, &session);
-    sqlite.resetCached(select);
-    const position = try claimSessionPosition(self, session.slice());
-    const content_id = outcome.content();
-    // A failure code spelling a fixed outcome would read back as that outcome.
-    std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
-    const update = try store_core.cached(self, "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=unixepoch() WHERE turn_id=?1 AND outcome_code IS NULL");
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, turn_id);
-    try sqlite.bindText(update, 2, outcome.code());
-    try sqlite.bindNullableI64(update, 3, content_id);
-    try sqlite.bindU64(update, 4, position);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var open: open_turn.Result = undefined;
+    a.read(open_turn, .{ .turn_id = turn_id, .operation_id = operation_id }, &open);
+    try a.run();
+    const row = open orelse return false;
+    try queueClose(&a, try a.touch(row.session), turn_id, outcome);
+    try a.apply();
     return true;
 }

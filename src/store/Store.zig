@@ -18,6 +18,7 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const rsql = @import("rsql.zig");
+const Access = @import("access.zig").Access;
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -592,7 +593,9 @@ pub const Store = struct {
         if (result.len == 0) return error.InvalidActionResult;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttempt(&access, binding, code, result, faults));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {

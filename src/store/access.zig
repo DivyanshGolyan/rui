@@ -77,9 +77,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const max_queued = 8;
 
         store: *Store,
-        /// The Host's Unix second, bound to @now: read once, before the
-        /// first statement.
-        now: i64 = 0,
+        /// The Host's Unix second, bound to @now: read once, by the first
+        /// statement that uses it.
+        now: ?i64 = null,
         opened: bool = false,
         /// The first failure; every later call does nothing and every round
         /// reports it.
@@ -216,21 +216,22 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.claimed = 0;
         }
 
-        /// Opens the transaction of a write Access and reads the Host's
-        /// second, before the first statement. A network engine's ownership
-        /// check (PR 8) joins `store_core.begin`.
+        /// Opens the transaction of a write Access before its first
+        /// statement. A network engine's ownership check (PR 8) joins
+        /// `store_core.begin`.
         fn ensureOpen(a: *Self) void {
             if (a.opened or a.failure != null) return;
             a.opened = true;
             if (mode == .write) store_core.begin(a.store) catch |err| {
                 a.failure = err;
-                return;
             };
-            const milliseconds = store_core.readUnixMilliseconds(a.store.io) catch |err| {
-                a.failure = err;
-                return;
-            };
-            a.now = @divFloor(milliseconds, 1000);
+        }
+
+        fn hostSecond(a: *Self) Error!i64 {
+            if (a.now) |now| return now;
+            const now = @divFloor(try store_core.readUnixMilliseconds(a.store.io), 1000);
+            a.now = now;
+            return now;
         }
 
         fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, destination: ?*anyopaque) void {
@@ -244,7 +245,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = error.StatementQueuedTwice;
                 return;
             };
-            sqlite.bindArgs(statement, S, args, a.now) catch |err| {
+            const now = if (S.uses_now) a.hostSecond() catch |err| {
+                a.failure = err;
+                return;
+            } else 0;
+            sqlite.bindArgs(statement, S, args, now) catch |err| {
                 sqlite.resetCached(statement);
                 a.failure = err;
                 return;

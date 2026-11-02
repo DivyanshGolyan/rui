@@ -417,6 +417,7 @@ fn selectColumns(comptime sql: []const u8) usize {
 }
 
 fn usesNow(comptime sql: []const u8) bool {
+    @setEvalBranchQuota(20 * sql.len + 1000);
     return std.mem.indexOf(u8, sql, "@now") != null;
 }
 

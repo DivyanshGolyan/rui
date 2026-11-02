@@ -3122,6 +3122,69 @@ test "each state-bearing row keeps exactly the time its state owns" {
     try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
 }
 
+test "a stale Action settlement leaves the Store byte-identical" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "stale-config");
+    try submitTestMessage(&storage, &tmp, "stale-message", "stale-message", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "stale-metadata");
+    for ([_][]const u8{ "stale-allow-first", "stale-allow-second" }, [_][]const u8{ "min", "max" }) |key, end| {
+        var sql: [64]u8 = undefined;
+        var allow: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT {s}(action_id) FROM action_operation", .{end}, 0)), .decision = .allow_once };
+        try allow.key.set(key);
+        try allow.session.set(session.slice());
+        try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    }
+    const settled = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const open = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{}));
+
+    const Snapshot = struct {
+        database: []u8,
+        log: []u8,
+        ids: @TypeOf(storage.ids.next),
+        generation: u64,
+
+        fn take(store: *Store, dir: std.Io.Dir) !@This() {
+            return .{
+                .database = try dir.readFileAlloc(std.testing.io, "store.sqlite3", std.testing.allocator, .unlimited),
+                .log = try dir.readFileAlloc(std.testing.io, "store.sqlite3-wal", std.testing.allocator, .unlimited),
+                .ids = store.ids.next,
+                .generation = store.commitGeneration(),
+            };
+        }
+
+        fn deinit(self: @This()) void {
+            std.testing.allocator.free(self.database);
+            std.testing.allocator.free(self.log);
+        }
+    };
+    const before = try Snapshot.take(&storage, tmp.dir);
+    defer before.deinit();
+    // Already settled, and a binding whose Turn is not the Action's.
+    const wrong_turn: ActionAttemptBinding = .{ .turn_id = open.turn_id + 1, .parent_operation_id = open.parent_operation_id, .action_id = open.action_id };
+    for ([_]ActionAttemptBinding{ settled, wrong_turn }) |stale| {
+        try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(stale, .failed, "A stale result is never stored.", .{}));
+    }
+    try std.testing.expect(!storage.isFenced());
+    const after = try Snapshot.take(&storage, tmp.dir);
+    defer after.deinit();
+    try std.testing.expectEqualSlices(u8, before.database, after.database);
+    try std.testing.expectEqualSlices(u8, before.log, after.log);
+    try std.testing.expectEqual(before.ids, after.ids);
+    try std.testing.expectEqual(before.generation, after.generation);
+    // The open Action still settles at the position and content id the stale ones left.
+    const position = try queryU64(storage.database, "SELECT next_position FROM session");
+    const content_id = storage.ids.next.get(.content_id);
+    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
+    try std.testing.expectEqual(position, try queryU64(storage.database, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'"));
+    try std.testing.expectEqual(content_id, try queryU64(storage.database, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'"));
+}
+
 test "every transition dates its fact from the Host clock" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

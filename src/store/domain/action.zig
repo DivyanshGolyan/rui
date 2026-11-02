@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
+const rsql = @import("../rsql.zig");
 const Store = store_core.Store;
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
@@ -234,56 +235,73 @@ pub fn validateActionDispatchLocked(self: *Store, binding: ActionAttemptBinding)
     if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
 }
 
-pub fn settleActionAttemptLocked(
-    self: *Store,
+/// What settling the Attempt `binding` names depends on: its Session, its
+/// Turn, and whether a Session stop selected that Turn.
+const settle_facts = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++
+        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, stopped: bool },
+    .cardinality = .optional,
+});
+
+const resolve_action = rsql.Write(.{
+    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=@now " ++
+        "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=?6 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
+    .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleActionAttemptBinding } },
+});
+
+/// Round 1 reads the binding's facts and looks up the result's content; a
+/// stop that selected the Turn adds a round for the cancellation text and
+/// whether the Turn is ready to close. The write round resolves the Action,
+/// closes a stopped Turn its last Action leaves ready, and records a
+/// continuation, then commits.
+pub fn settleActionAttempt(
+    a: anytype,
     binding: ActionAttemptBinding,
     code: ActionResolutionCode,
     result: []const u8,
     faults: Faults,
 ) !ActionSettlement {
-    try store_core.begin(self);
-    const statement = try store_core.cached(
-        self,
-        "SELECT action.session_ref,operation.turn_id," ++
-            "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
-            "FROM action_operation action JOIN model_operation operation " ++
-            "ON operation.operation_id=action.parent_operation_id " ++
-            "WHERE action.action_id=?1 AND action.parent_operation_id=?2 " ++
-            "AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.action_id);
-    try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
-    if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-    var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 0, &session_ref);
-    if (c.sqlite3_column_int64(statement, 1) != binding.turn_id) return error.StaleActionAttemptBinding;
-    const stopped = c.sqlite3_column_int(statement, 2);
-    if (stopped != 0 and stopped != 1) return error.CorruptStore;
-    const effective_code: ActionResolutionCode = if (stopped == 1) .cancelled else code;
-    const effective_result = if (stopped == 1) "Cancelled by Session stop." else result;
-    const content_id = try content_domain.importBytesContent(self, effective_result, false, faults.content_import);
-    const position = try turn_domain.claimSessionPosition(self, session_ref.slice());
-    const update = try store_core.cached(
-        self,
-        "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=unixepoch() " ++
-            "WHERE action_id=?1 AND parent_operation_id=?5 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, binding.action_id);
-    try sqlite.bindText(update, 2, @tagName(effective_code));
-    try sqlite.bindI64(update, 3, content_id);
-    try sqlite.bindU64(update, 4, position);
-    try sqlite.bindU64(update, 5, binding.parent_operation_id);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
-    try turn_domain.completeStoppedTurnIfReady(self, binding.turn_id);
-    try turn_domain.recordContinuation(self, binding.turn_id);
+    var facts: settle_facts.Result = undefined;
+    var effect: content_domain.Import = .ofBytes(result, false);
+    a.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
+    content_domain.lookup(a, &effect);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
+
+    // A stop that selected the Turn cancels whatever the Action did.
+    var cancellation: content_domain.Import = .ofBytes(content_domain.stop_cancellation_text, false);
+    var completion: turn_domain.stopped_turn.Result = null;
+    if (found.stopped) {
+        content_domain.lookup(a, &cancellation);
+        a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
+        try a.run();
+    }
+    const settled: struct { code: ActionResolutionCode, text: []const u8, content: *const content_domain.Import } =
+        if (found.stopped) .{ .code = .cancelled, .text = content_domain.stop_cancellation_text, .content = &cancellation } else .{ .code = code, .text = result, .content = &effect };
+
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const positions = try a.touch(found.session);
+    const content_id = try content_domain.importBytes(a, settled.content, settled.text);
+    a.write(resolve_action, .{
+        .action_id = binding.action_id,
+        .code = settled.code,
+        .content_id = content_id,
+        .position = try positions.take(1),
+        .parent_operation_id = binding.parent_operation_id,
+        .session = found.session,
+    });
+    try turn_domain.queueStopCompletion(a, completion, binding.turn_id);
+    turn_domain.queueContinuation(a, binding.turn_id, found.session);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
-    return if (stopped == 1) .session_stop else .effect;
+    try a.commit();
+    return if (found.stopped) .session_stop else .effect;
 }
 
 pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {

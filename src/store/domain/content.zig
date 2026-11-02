@@ -5,6 +5,8 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const Access = @import("../access.zig").Access;
+const rsql = @import("../rsql.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
 const Faults = store_core.Faults;
@@ -115,53 +117,83 @@ pub const ContentBlob = struct {
     }
 };
 
+const lookup_content = rsql.Read(.{
+    .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
+    .Args = struct { digest: [32]u8, length: u64, private: bool },
+    .Row = struct { id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+const insert_content = rsql.Write(.{
+    .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
+    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// The result of every Action and Turn a Session stop cancels.
+pub const stop_cancellation_text = "Cancelled by Session stop.";
+
+/// A content identity, and the row a lookup round found for it.
+pub const Import = struct {
+    digest: [32]u8,
+    length: u64,
+    private: bool,
+    found: lookup_content.Result = null,
+
+    pub fn ofBytes(bytes: []const u8, private: bool) Import {
+        return .{ .digest = protocol.contentDigest(bytes), .length = bytes.len, .private = private };
+    }
+};
+
+/// Queues the read that finds `value`'s row; `importSlot` follows its round.
+pub fn lookup(a: anytype, value: *Import) void {
+    a.read(lookup_content, .{ .digest = value.digest, .length = value.length, .private = value.private }, &value.found);
+}
+
 const ContentSlot = struct { id: i64, existing: bool };
 
-pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-    const find = try store_core.cached(self, content_lookup_sql);
-    defer sqlite.resetCached(find);
-    try sqlite.bindBlob(find, 1, digest);
-    try sqlite.bindU64(find, 2, length);
-    try sqlite.bindI64(find, 3, @as(i64, if (private) 1 else 0));
-    const result = c.sqlite3_step(find);
-    if (result == c.SQLITE_ROW) {
-        const id = c.sqlite3_column_int64(find, 0);
-        if (id <= 0) return error.CorruptStore;
-        return .{ .id = id, .existing = true };
-    }
-    if (result != c.SQLITE_DONE) return error.ContentReadFailed;
-    const id = try store_core.takeIdentity(self, .content_id);
-    const insert = try store_core.cached(
-        self,
-        "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?4,?1,?2,zeroblob(?2),?3)",
-    );
-    defer sqlite.resetCached(insert);
-    try sqlite.bindBlob(insert, 1, digest);
-    try sqlite.bindU64(insert, 2, length);
-    try sqlite.bindI64(insert, 3, @as(i64, if (private) 1 else 0));
-    try sqlite.bindU64(insert, 4, id);
-    switch (c.sqlite3_step(insert)) {
-        c.SQLITE_DONE => {},
-        c.SQLITE_FULL => return error.CanonicalStorageFull,
-        else => return error.StatementFailed,
-    }
+/// After `lookup`'s round: the found row, or a new row queued with a Host
+/// identity and a zeroed payload of the right length.
+pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
+    if (value.found) |row| return .{ .id = @intCast(row.id.get()), .existing = true };
+    const id = try a.identity(.content_id);
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
     return .{ .id = @intCast(id), .existing = false };
 }
 
+/// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
+/// queueing the row and its payload when none exists. `bytes` must outlive
+/// the round that writes them.
+pub fn importBytes(a: anytype, value: *const Import, bytes: []const u8) !u64 {
+    std.debug.assert(bytes.len == value.length);
+    const slot = try importSlot(a, value);
+    if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
+    return @intCast(slot.id);
+}
+
+/// `importSlot` for unconverted code, inside its transaction.
+pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value: Import = .{ .digest = digest.*, .length = length, .private = private };
+    lookup(&a, &value);
+    try a.run();
+    const slot = try importSlot(&a, &value);
+    try a.apply();
+    return slot;
+}
+
+/// `importBytes` for unconverted code, inside its transaction.
 pub fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
     if (fail_import) return error.InjectedContentImportFailure;
-    const digest = protocol.contentDigest(bytes);
-    const slot = try contentSlot(self, &digest, bytes.len, private);
-    if (slot.existing or bytes.len == 0) return slot.id;
-    var blob: ?*c.sqlite3_blob = null;
-    if (c.sqlite3_blob_open(self.database, "main", "content", "payload", slot.id, 1, &blob) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    defer _ = c.sqlite3_blob_close(blob);
-    if (c.sqlite3_blob_write(blob, bytes.ptr, @intCast(bytes.len), 0) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    return slot.id;
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value: Import = .ofBytes(bytes, private);
+    lookup(&a, &value);
+    try a.run();
+    const id = try importBytes(&a, &value, bytes);
+    try a.apply();
+    return @intCast(id);
 }
 
 pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8, written: *u64, length: u64) !void {

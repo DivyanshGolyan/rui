@@ -368,7 +368,7 @@ pub fn stopSessionLocked(
         const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
         if (unresolved_count < 0) return error.CorruptStore;
         if (unresolved_count != 0) {
-            const cancellation_content_id = try content_domain.importBytesContent(self, "Cancelled by Session stop.", false, faults.content_import);
+            const cancellation_content_id = try content_domain.importBytesContent(self, content_domain.stop_cancellation_text, false, faults.content_import);
             const first_position = try turn_domain.claimSessionPositions(self, command.session.slice(), @intCast(unresolved_count));
             const cancel_actions = try store_core.cached(
                 self,
