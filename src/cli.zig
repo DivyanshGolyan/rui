@@ -4,6 +4,7 @@ const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
+const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
@@ -2195,10 +2196,11 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
-/// Stops every Session in the Store whose work is under way, a listing page at
+/// Stops every Session in the Store that Ctrl-X could stop, a listing page at
 /// a time. Each stop is its own generated capture, recoverable like a single
-/// `session stop`; one that fails does not keep the rest from stopping, and
-/// the command fails after trying them all.
+/// `session stop`. A failed stop is named on stderr and does not keep the
+/// rest from stopping; the command fails after trying them all, or at a
+/// listing page that fails, saying later pages were not read.
 fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
@@ -2206,25 +2208,27 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     const directory = try requestDirectory(init, &directory_buffer);
     var traversal = protocol_reply.SessionTraversal.init(null);
     var asked: usize = 0;
-    var failure: ?anyerror = null;
+    var failed: usize = 0;
     while (true) {
-        const page = try readSessionPage(init, store, null, traversal.cursor);
+        const page = readSessionPage(init, store, null, traversal.cursor) catch |err| {
+            if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @errorName(err) });
+            return err;
+        };
         for (page.rows[0..page.count]) |*row| {
-            if (!underWay(row.work.state)) continue;
+            if (!overview_view.rules.get(row.work.state).stoppable) continue;
             asked += 1;
             stopListedSession(init, parsed, store, row.reference.slice(), directory) catch |err| {
-                failure = failure orelse err;
+                failed += 1;
+                stderr.diagnostic("rui: {s} not stopped ({s}).\n", .{ row.reference.slice(), @errorName(err) });
             };
         }
         if (!traversal.advance(&page)) break;
     }
-    if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work under way.\n", .{});
-    if (failure) |err| return err;
-}
-
-/// Work a stop would end: anything under way except a stop already settling.
-fn underWay(state: protocol.WorkState) bool {
-    return state != .stopping and state.progress() != null;
+    if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work to stop.\n", .{});
+    if (failed != 0) {
+        stderr.diagnostic("rui: {d} of {d} stops failed.\n", .{ failed, asked });
+        return error.MutationNotAccepted;
+    }
 }
 
 fn stopListedSession(init: std.process.Init, parsed: *const cli_args.Parsed, store: []const u8, session: []const u8, directory: []const u8) !void {

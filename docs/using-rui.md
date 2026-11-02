@@ -84,7 +84,7 @@ While a start waits for its answer, its text stays in the composer and typing do
 A key not in this table does nothing in the overview.
 
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
-To stop every Session that is working, waiting or needs approval at once, run `rui session stop --all`.
+To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
 The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.

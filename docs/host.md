@@ -48,7 +48,7 @@ Paused work is not cancelled.
 When a Host starts again, including the one the next `rui` starts, each Session picks up where its saved work left off.
 A Bash command cut off by the pause is never run again automatically.
 To end work for good, stop its Session with `rui session stop --session ID` or Ctrl-X in the overview.
-To stop every Session whose work is under way, run `rui session stop --all`.
+To stop every Session that Ctrl-X could stop, run `rui session stop --all`.
 It needs a running Host, so to cancel the work of a paused Host, start it with `rui host start` and run `rui session stop --all` right away; work resumes in between.
 Each stop is its own saved request with its own reply line, so a lost reply is recovered with `rui request recover`, as for a single stop.
 

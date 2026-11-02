@@ -1470,8 +1470,11 @@ def main():
             fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
             waiting.append(waiter)
         idle = configure(state, store, "stop-all-idle-config")
+        # Generated captures go under this HOME, not the runner's.
+        stop_all_env = {**os.environ, "HOME": str(state / "stop-all-home")}
+        (state / "stop-all-home").mkdir()
         stopped_all = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
-                                     text=True, capture_output=True, timeout=15)
+                                     env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert stopped_all.returncode == 0, stopped_all
         replies = [json.loads(line) for line in stopped_all.stdout.splitlines()]
         assert sorted(reply["context"]["session"] for reply in replies) == sorted(waiting), replies
@@ -1479,11 +1482,11 @@ def main():
         for waiter in waiting:
             assert resolution(store, waiter) == "cancelled"
         assert not stop_all_marker.exists()
-        assert idle not in stopped_all.stdout
+        assert idle not in [reply["context"]["session"] for reply in replies]
         nothing = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
-                                 text=True, capture_output=True, timeout=15)
+                                 env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
-        assert nothing.stderr == "rui: no Session in this Store has work under way.\n", nothing
+        assert nothing.stderr == "rui: no Session in this Store has work to stop.\n", nothing
 
         session = configure(state, store, "prelaunch-stop-config")
         fixture.message(state, store, "prelaunch-stop-message", session, "execute")
