@@ -165,6 +165,13 @@ pub const Encoder = struct {
                 out.content(2, .verbatim);
                 out.literal("}");
             },
+            // OpenAI runs the search and may open live pages; its results
+            // come back as web_search_call items.
+            .web_search => {
+                if (self.tool_comma) out.literal(",");
+                self.tool_comma = true;
+                out.literal("{\"type\":\"web_search\",\"external_web_access\":true}");
+            },
             // The tools array closes here, after its last tool.
             .text_format => if (header.has(0)) {
                 out.literal("],\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":");

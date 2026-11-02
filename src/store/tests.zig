@@ -5543,7 +5543,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     try std.testing.expectEqual(revision_count, try queryU64(storage.database, "SELECT count(*) FROM session_revision"));
     const current = try storage.inspectSessionForTesting(created_session_0.slice());
     try std.testing.expectEqual(@as(u64, 1), current.revision);
-    try std.testing.expectEqual(@as(u8, 1), current.tools_mask);
+    try std.testing.expectEqual(configuration_domain.default_tools_mask, current.tools_mask);
     try std.testing.expectEqualStrings("bypass", current.permission_mode.slice());
     const replay = storage.configure(&update, .{});
     try std.testing.expect(replay == .rejected and replay.rejected.replayed);
@@ -5685,7 +5685,8 @@ test "created Session tools and permission resolve to product defaults" {
     var tools: [16]u8 = undefined;
     var writer = std.Io.Writer.fixed(&tools);
     if (created.tools_mask & 1 != 0) try writer.writeAll("bash");
-    try std.testing.expect(created.tools_mask & ~@as(u8, 1) == 0);
+    if (created.tools_mask & 2 != 0) try writer.writeAll(if (created.tools_mask & 1 != 0) ",web_search" else "web_search");
+    try std.testing.expect(created.tools_mask & ~@as(u8, 3) == 0);
     try std.testing.expectEqualStrings(product_defaults.tools, writer.buffered());
     try std.testing.expectEqualStrings(product_defaults.permission_mode, switch (created.permission_mode) {
         0 => "ask",
@@ -5726,7 +5727,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .workspace = .same,
             .model = "model-a",
             .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
-            .expected_tools = 1,
+            .expected_tools = configuration_domain.default_tools_mask,
             .expected_permission = 1,
             .expected_revision = 1,
         },
@@ -6800,7 +6801,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     var tools: protocol.ConfigureCommand = .{};
     try tools.key.set("sender-tools");
     try tools.session.set(sender);
-    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{.bash} };
+    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
     tools.configuration.permission_mode.state = .value;
     try tools.configuration.permission_mode.value.set("bypass");
     try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
@@ -8866,7 +8867,7 @@ test "one committed selection freezes its settings and input prefix" {
     try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    try std.testing.expectEqual(@as(u8, 1), settings.tools_mask);
+    try std.testing.expectEqual(configuration_domain.default_tools_mask, settings.tools_mask);
     const first_input = (try view.nextEntry(0)).?;
     const second_input = (try view.nextEntry(first_input.position)).?;
     const instruction = (try view.nextEntry(second_input.position)).?;
