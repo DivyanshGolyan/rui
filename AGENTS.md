@@ -1,21 +1,26 @@
 # Working on Rui
 
-Build the simplest complete runtime users can explain through ordinary work, failure and recovery. Prefer a coherent final design over the smallest diff; justify machinery by required behavior or demonstrated cost.
+Build the simplest complete runtime users can explain through ordinary work, failure and recovery.
+Prefer a coherent final design over the smallest diff; justify machinery by required behavior or demonstrated cost.
 
 ## Before work
 
-Inspect the working-tree diff; preserve concurrent work. Read [README.md](README.md) for scope/status and affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for accepted behavior.
+Inspect the working-tree diff; preserve concurrent work.
+Read [README.md](README.md) for scope/status and affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for accepted behavior.
 
 Load applicable guidance before acting; routes combine:
 
 - **Implement, design, debug, change builds, or review engineering:** [Engineering](CODING_STANDARDS.md#engineering).
-- **Review, including documentation, or implement review findings:** [Review](CODING_STANDARDS.md#review). Reviews are read-only unless fixes are requested.
+- **Review, including documentation, or implement review findings:** [Review](CODING_STANDARDS.md#review).
+  Reviews are read-only unless fixes are requested.
 - **Implement or review performance changes:** [Performance](CODING_STANDARDS.md#performance), including build-latency exceptions.
 - **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance).
 - **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
-- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). `select_tests.py` decides; no reviewer acceptance.
+- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates).
+  `select_tests.py` decides; no reviewer acceptance.
 - **Diagnose red CI:** use [`rui-ci-triage`](.claude/skills/rui-ci-triage/SKILL.md).
-- **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
+- **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md).
+  Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
 ## Code Review Rules
@@ -37,36 +42,93 @@ PR reviewers, including Codex, apply [Review](CODING_STANDARDS.md#review); its *
 
 ## Authority
 
-User instructions outrank skill guidelines; Rui's owning documentation governs repository policy over generic skills. Skills supply techniques, not authorization or contract homes. Resolve conflicts on that basis before asking; cite the exact skill instruction if it would pause or divert work.
+User instructions outrank skill guidelines; Rui's owning documentation governs repository policy over generic skills.
+Skills supply techniques, not authorization or contract homes.
+Resolve conflicts on that basis before asking; cite the exact skill instruction if it would pause or divert work.
 
-Resolve reversible choices within the accepted contract. For unresolved consequential behavior, architecture or scope, missing access or authorization, complete independent authorized work first; present bounded options, a recommendation and machinery/failure consequences.
+Resolve reversible choices within the accepted contract.
+For unresolved consequential behavior, architecture or scope, missing access or authorization, complete independent authorized work first; present bounded options, a recommendation and machinery/failure consequences.
 
-Own one implementation outcome through its applicable checks and authorized publication. Advance without routine grants, candidate ledgers, evidence-adoption ceremonies, or frozen fixture policies. Serialize actual shared-file, target-branch, or interfering native operations; independent work continues. Historical failed attempts remain failures.
+Own one implementation outcome through its applicable checks and authorized publication.
+Advance without routine grants, candidate ledgers, evidence-adoption ceremonies, or frozen fixture policies.
+Serialize actual shared-file, target-branch, or interfering native operations; independent work continues.
+Historical failed attempts remain failures.
 
-Outside the standing [Landing](#landing) grant, implementation approval alone does not authorize publication. A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures. Carry that authorization across agent handoffs without asking again for each commit or correction.
+Outside the standing [Landing](#landing) grant, implementation approval alone does not authorize publication.
+A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures.
+Carry that authorization across agent handoffs without asking again for each commit or correction.
 
-Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome. Deploying and closing issues still require explicit authorization. Honor narrower user limits.
+Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome.
+Deploying and closing issues still require explicit authorization.
+Honor narrower user limits.
 
 ## Landing
 
-Standing grant: land each small, coherent green change without further stage approval or waiting for lane completion. Proof gates landing, not review signoff. Known failed counterexamples require fixes and passing proof before the affected change joins the stack. Existing one-way-door approvals still apply.
+Standing grant: land each small, coherent green change without further stage approval or waiting for lane completion.
+Proof gates landing, not review signoff.
+Known failed counterexamples require fixes and passing proof before the affected change joins the stack.
+Existing one-way-door approvals still apply.
 
-- Append each coherent green change immediately to the single open `wip/land-N` and gate only the current tip. If no stack is open, start the next number. Serialize shared-ref writes. Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists. Retire an abandoned stack (back it up, then delete it) before starting another. Selected's plan job repeats the check.
-- Before exact-tip qualification, every introduced landing commit must state its actual test commands and results, plus applicable performance A/B numbers. TUI changes also include a real-screen tmux capture. Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer; inspect Amp's generated trailers and avoid duplicates. Preserve published source refs rather than rewriting them. Changing a commit message changes its SHA and invalidates its exact-tip receipts.
-- Before landing on `main`, the exact tip must pass the Linux Selected aggregate, including mapped recovery checks. Strict paths add no Mac or upgrade gate to main. Missing, pending or red Mac checks delay only `stable`.
-- [Auto-land](.github/workflows/auto-land.yml) fast-forwards `main` non-force. Its always-run promotion phase first dispatches any genuinely missing Mac or upgrade qualification for current main, including after an interrupted landing. Existing pending, offline, failed or cancelled runs are not absence and are never automatically retried. Agents assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so those tips require an explicitly authorized agent or user bootstrap after exact-tip Linux CI passes.
-- Separately, Auto-land fast-forwards `stable` to the newest main commit whose Mac Selected and Linux/macOS upgrade workflows passed on that exact SHA. Every stable candidate runs real Mac checks, full Debug admission recovery and upgrades even when its changed paths would select none. Missing or failed checks never qualify descendants; older completions never rewind stable. An open `stable-red` issue holds every promotion ([Landing cadence](VERIFICATION.md#landing-cadence)). Both writers share one serialized job.
+- Append each coherent green change immediately to the single open `wip/land-N` and gate only the current tip.
+  If no stack is open, start the next number.
+  Serialize shared-ref writes.
+  Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists.
+  Retire an abandoned stack (back it up, then delete it) before starting another.
+  Selected's plan job repeats the check.
+- Before exact-tip qualification, every introduced landing commit must state its actual test commands and results, plus applicable performance A/B numbers.
+  TUI changes also include a real-screen tmux capture.
+  Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer; inspect Amp's generated trailers and avoid duplicates.
+  Preserve published source refs rather than rewriting them.
+  Changing a commit message changes its SHA and invalidates its exact-tip receipts.
+- Before landing on `main`, the exact tip must pass the Linux Selected aggregate, including mapped recovery checks.
+  Strict paths add no Mac or upgrade gate to main.
+  Missing, pending or red Mac checks delay only `stable`.
+- [Auto-land](.github/workflows/auto-land.yml) fast-forwards `main` non-force.
+  Its always-run promotion phase first dispatches any genuinely missing Mac or upgrade qualification for current main, including after an interrupted landing.
+  Existing pending, offline, failed or cancelled runs are not absence and are never automatically retried.
+  Agents assemble and push `wip/land-N`.
+  GITHUB_TOKEN cannot push workflow-file changes, so those tips require an explicitly authorized agent or user bootstrap after exact-tip Linux CI passes.
+- Separately, Auto-land fast-forwards `stable` to the newest main commit whose Mac Selected and Linux/macOS upgrade workflows passed on that exact SHA.
+  Every stable candidate runs real Mac checks, full Debug admission recovery and upgrades even when its changed paths would select none.
+  Missing or failed checks never qualify descendants; older completions never rewind stable.
+  An open `stable-red` issue holds every promotion ([Landing cadence](VERIFICATION.md#landing-cadence)).
+  Both writers share one serialized job.
 - Run the independent review when [Review](CODING_STANDARDS.md#review) says; its signoff does not block green changes.
-- A PR whose CI is green and whose Codex review is clean merges now. Do not hold it for a local run of tests CI repeats (full `zig build test`, `check`, or a local mirror of Selected); [Evidence](CODING_STANDARDS.md#evidence) sets the focused pre-push checks. Ship post-merge fixes as follow-up PRs.
-- Never sit idle on CI or Codex, however long they take. Once a PR is pushed, start the next piece at once: independent work on a fresh branch from `origin/main`, dependent work on a branch stacked on the open one. Return to merge when the checks finish.
-- For work published as PRs, open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`. Changes that join `wip/land-N` stack as above.
-- Mac and upgrade qualification run after main advances; daily full runs remain backstops. Fix Mac reds forward on main; revert only if the fix is slow. Keep the previous stable until a newer main SHA qualifies.
-- A red is fixed only when a commit between it and a later green changed its failing fixture or owner; a green without one leaves it open. A fixture-and-assertion signature that recurs on SHAs that did not touch its code has no culprit to revert: the agent that finds it updates or files one issue keyed by that signature and owns the race fix without weakening the assertion. Later green candidates do not close that issue; the fixing commit says `Fixes #N`, and a recurrence reopens it. When the bot files the issue, no agent finds it, so the coordinating agent hands it at once to the thread that owns its fixture. Every status names the stable hold, meaning the open `stable-red` issues and the hours since the last promotion, until it clears; `python3 tests/ci/stable_hold.py status` prints both, grouped by fixture. Before opening a fix, search the open `stable-red` issues for the touched fixture and write `Fixes #N` for each one it fixes; the policy job warns on a PR that touches a held fixture without `Fixes #N` or `Refs #N`.
-- After ready, at most one rerun per item. New coherent green items may join the open stack; fixes for red CI retain the failure evidence.
-- Install from `stable`, the last exact-SHA Mac-and-upgrade-qualified main commit. After each promotion, Auto-land dispatches [Release](.github/workflows/release.yml), which publishes the promoted SHA as version `0.S.N` with prebuilt archives.
+- A PR whose CI is green and whose Codex review is clean merges now.
+  Do not hold it for a local run of tests CI repeats (full `zig build test`, `check`, or a local mirror of Selected); [Evidence](CODING_STANDARDS.md#evidence) sets the focused pre-push checks.
+  Ship post-merge fixes as follow-up PRs.
+- Never sit idle on CI or Codex, however long they take.
+  Once a PR is pushed, start the next piece at once: independent work on a fresh branch from `origin/main`, dependent work on a branch stacked on the open one.
+  Return to merge when the checks finish.
+- For work published as PRs, open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
+  Changes that join `wip/land-N` stack as above.
+- Mac and upgrade qualification run after main advances; daily full runs remain backstops.
+  Fix Mac reds forward on main; revert only if the fix is slow.
+  Keep the previous stable until a newer main SHA qualifies.
+- A red is fixed only when a commit between it and a later green changed its failing fixture or owner; a green without one leaves it open.
+  A fixture-and-assertion signature that recurs on SHAs that did not touch its code has no culprit to revert: the agent that finds it updates or files one issue keyed by that signature and owns the race fix without weakening the assertion.
+  Later green candidates do not close that issue; the fixing commit says `Fixes #N`, and a recurrence reopens it.
+  When the bot files the issue, no agent finds it, so the coordinating agent hands it at once to the thread that owns its fixture.
+  Every status names the stable hold, meaning the open `stable-red` issues and the hours since the last promotion, until it clears; `python3 tests/ci/stable_hold.py status` prints both, grouped by fixture.
+  Before opening a fix, search the open `stable-red` issues for the touched fixture and write `Fixes #N` for each one it fixes; the policy job warns on a PR that touches a held fixture without `Fixes #N` or `Refs #N`.
+- After ready, at most one rerun per item.
+  New coherent green items may join the open stack; fixes for red CI retain the failure evidence.
+- Install from `stable`, the last exact-SHA Mac-and-upgrade-qualified main commit.
+  After each promotion, Auto-land dispatches [Release](.github/workflows/release.yml), which publishes the promoted SHA as version `0.S.N` with prebuilt archives.
 
-After an authorized workflow-file bootstrap, or a diagnosed interruption that left current main's qualification absent, the shared-ref owner runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`. It fills only absent runs; repeated calls preserve existing attempts and do nothing when main already equals stable. Keep this direct recovery serialized with shared-ref writes. A later Auto-land completion performs the same recovery in its serialized writer job; after a runner failure, rerun that diagnosed Auto-land job, not the native qualification workflows.
+After an authorized workflow-file bootstrap, or a diagnosed interruption that left current main's qualification absent, the shared-ref owner runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`.
+It fills only absent runs; repeated calls preserve existing attempts and do nothing when main already equals stable.
+Keep this direct recovery serialized with shared-ref writes.
+A later Auto-land completion performs the same recovery in its serialized writer job; after a runner failure, rerun that diagnosed Auto-land job, not the native qualification workflows.
 
-Each main qualification explicitly dispatches Auto-land with its parent run ID because GITHUB_TOKEN suppresses downstream `workflow_run` events. Auto-land validates the parent repository, main branch and qualification workflow, then uses `gh run watch` with a 120-second timeout and five-second kill grace outside the writer lock. The parent ID only selects the wait; unchanged completed-workflow, exact-SHA and coverage checks decide promotion. Wait failure or timeout skips that callback's writer. The next normal landing/promotion pass can pick up completed evidence. There are no timers or automatic native-test retries. To recover a lost completion without rerunning tests, use `gh workflow run auto-land.yml --ref main -f completed_run=<main-qualification-run-ID>`.
+Each main qualification explicitly dispatches Auto-land with its parent run ID because GITHUB_TOKEN suppresses downstream `workflow_run` events.
+Auto-land validates the parent repository, main branch and qualification workflow, then uses `gh run watch` with a 120-second timeout and five-second kill grace outside the writer lock.
+The parent ID only selects the wait; unchanged completed-workflow, exact-SHA and coverage checks decide promotion.
+Wait failure or timeout skips that callback's writer.
+The next normal landing/promotion pass can pick up completed evidence.
+There are no timers or automatic native-test retries.
+To recover a lost completion without rerunning tests, use `gh workflow run auto-land.yml --ref main -f completed_run=<main-qualification-run-ID>`.
 
-The strict paths are `src/store*`, every path under `src/store/`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list for fail-without-retry handling. A PR or `wip/land-N` push runs Linux [Selected checks](.github/workflows/check.yml), and a ready PR that changes a [Mac-specific path](tests/ci/platform_boundary.py) also runs Mac Selected; every main-tip stable qualification runs Mac Selected and the [upgrade check](.github/workflows/previous-release-upgrade.yml), regardless of strict paths.
+The strict paths are `src/store*`, every path under `src/store/`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`.
+[strict_paths.py](tests/ci/strict_paths.py) owns this list for fail-without-retry handling.
+A PR or `wip/land-N` push runs Linux [Selected checks](.github/workflows/check.yml), and a ready PR that changes a [Mac-specific path](tests/ci/platform_boundary.py) also runs Mac Selected; every main-tip stable qualification runs Mac Selected and the [upgrade check](.github/workflows/previous-release-upgrade.yml), regardless of strict paths.
