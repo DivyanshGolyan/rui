@@ -223,6 +223,16 @@ def review_base_ceiling(root=ROOT):
     return ceiling
 
 
+def moved_ceiling(offenses, trusted):
+    """The review-base ceiling, with each test that moved to another file keeping its count there."""
+    ceiling = Counter(trusted)
+    for (path, name), count in trusted.items():
+        moved = [key for key in offenses if key[1] == name and key not in trusted]
+        if (path, name) not in offenses and len(moved) == 1:
+            ceiling[moved[0]] = max(ceiling[moved[0]], count)
+    return ceiling
+
+
 def sleep_allowlist_problems(offenses, allowed, trusted):
     problems = []
     for key in sorted(set(offenses) | set(allowed)):
@@ -261,7 +271,7 @@ SLEEP_ORDERED = {
         (1, "pump: the peer thread services its sockets every 1 ms until the test stops it"),
     ("src/server.zig", "reply delivery interrupted poll consumes the existing inactivity budget"):
         (1, "pump: the interrupter signals the blocked writer every 5 ms until the test stops it"),
-    ("src/store.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
+    ("src/store/tests.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
         (2, "sleeps out a 5 ms retry wait on the real clock"),
     ("tests/ci/test_selection.py", "FullCheckPartitionTest.run_part"):
         (1, "samples for 0.1 s that held authority starts no isolated work"),
@@ -302,8 +312,16 @@ class SleepOrderingTest(unittest.TestCase):
     """CODING_STANDARDS.md#evidence: tests order actors with gates, not sleeps."""
 
     def test_tree_matches_the_shrink_only_allowlist(self):
-        self.assertEqual(sleep_allowlist_problems(sleep_ordering(tree_sources()), SLEEP_ORDERED,
-                                                  review_base_ceiling()), [])
+        offenses = sleep_ordering(tree_sources())
+        self.assertEqual(sleep_allowlist_problems(offenses, SLEEP_ORDERED,
+                                                  moved_ceiling(offenses, review_base_ceiling())), [])
+
+    def test_a_moved_test_keeps_only_its_own_allowance(self):
+        base = Counter({("a.zig", "t"): 2, ("a.zig", "u"): 1})
+        moved = Counter({("b.zig", "t"): 2, ("a.zig", "u"): 1})
+        self.assertEqual(moved_ceiling(moved, base)[("b.zig", "t")], 2)
+        self.assertEqual(moved_ceiling(base + Counter({("b.zig", "t"): 1}), base)[("b.zig", "t")], 0)
+        self.assertEqual(moved_ceiling(Counter({("b.zig", "v"): 1}), base)[("b.zig", "v")], 0)
 
     def test_zig_sleeps_count_in_tests_and_test_only_files(self):
         source = r'''

@@ -4,7 +4,7 @@ import fnmatch
 import sys
 
 STRICT = (
-    "src/store*", "src/*schema*", "src/server*", "src/execution*", "src/*recovery*",
+    "src/store*", "src/store/*", "src/store/*/*", "src/*schema*", "src/server*", "src/execution*", "src/*recovery*",
     "tests/integration/*recovery*", "tests/integration/bash*",
     "build.zig", "build.zig.zon", "install.sh",
 )

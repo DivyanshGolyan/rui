@@ -15,6 +15,9 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
 BASELINE = Path(__file__).with_name("import_cycles.json")
+STORE_DIRECTORY = "src/store/"
+STORE_FACADE = "src/store.zig"
+STORE_FORMAT_READER = "src/store/schema.zig"
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
@@ -79,6 +82,30 @@ def graph(root, roots=ROOTS, read_source=None):
     return result
 
 
+def store_unit(dependencies):
+    """Collapse src/store/ into its facade, after checking the facade boundary.
+
+    The Store's files call one another as freely as one file's declarations
+    did, so cycles among them are not counted. Code outside src/store/ reaches
+    them only through src/store.zig, and only schema.zig, which reads the
+    format constants install and release tooling parse there, imports it back.
+    """
+    def unit(name):
+        return STORE_FACADE if name.startswith(STORE_DIRECTORY) else name
+
+    for source, targets in dependencies.items():
+        for target in targets:
+            if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
+                raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")
+            if target == STORE_FACADE and source.startswith(STORE_DIRECTORY) and source != STORE_FORMAT_READER:
+                raise ValueError(f"{source} imports {STORE_FACADE}; Store files import each other directly")
+    collapsed = {}
+    for source, targets in dependencies.items():
+        collapsed.setdefault(unit(source), set()).update(unit(target) for target in targets)
+    collapsed.get(STORE_FACADE, set()).discard(STORE_FACADE)
+    return collapsed
+
+
 def cyclic_edges(dependencies):
     """Every edge with a return path, including self edges (no SCC exemptions)."""
     def reaches(start, goal):
@@ -116,7 +143,7 @@ def trusted_allowance(root, baseline, roots):
 
 
 def check(root=ROOT, baseline=BASELINE, roots=ROOTS):
-    dependencies = graph(root, roots)
+    dependencies = store_unit(graph(root, roots))
     actual = cyclic_edges(dependencies)
     allowed = json.loads(baseline.read_text())["cyclic_edges"]
     added = [edge for edge in actual if edge not in allowed]

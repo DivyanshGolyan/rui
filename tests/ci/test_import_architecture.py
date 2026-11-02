@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from import_architecture import check, cyclic_edges, production_imports
+from import_architecture import check, cyclic_edges, production_imports, store_unit
 
 
 class ImportArchitectureTest(unittest.TestCase):
@@ -131,4 +131,15 @@ const y = @import("after.zig");
 
     def test_store_test_adapter_is_not_a_production_dependency(self):
         root = Path(__file__).resolve().parents[2]
-        self.assertNotIn("model_adapter.zig", production_imports((root / "src/store.zig").read_text()))
+        self.assertNotIn("../model_adapter.zig", production_imports((root / "src/store/tests.zig").read_text()))
+
+    def test_store_files_form_one_unit_behind_the_facade(self):
+        inside = {"src/store.zig": {"src/store/Store.zig"}, "src/store/Store.zig": {"src/store/domain/a.zig"},
+                  "src/store/domain/a.zig": {"src/store/Store.zig", "src/protocol.zig"}, "src/protocol.zig": set()}
+        self.assertEqual(cyclic_edges(store_unit(inside)), [])
+        self.assertEqual(store_unit(inside)["src/store.zig"], {"src/protocol.zig"})
+        with self.assertRaisesRegex(ValueError, "import src/store.zig instead"):
+            store_unit({**inside, "src/server.zig": {"src/store/domain/a.zig"}})
+        with self.assertRaisesRegex(ValueError, "Store files import each other directly"):
+            store_unit({**inside, "src/store/domain/a.zig": {"src/store.zig"}})
+        store_unit({**inside, "src/store/schema.zig": {"src/store.zig"}})

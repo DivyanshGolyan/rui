@@ -47,6 +47,8 @@ class SelectionTest(unittest.TestCase):
         store = select(["src/store.zig"], "review", AVAILABLE)["targets"]
         self.assertIn("check", store)
         self.assertNotIn("stack-frames", store)
+        for path in ("src/store/Store.zig", "src/store/domain/turn.zig"):
+            self.assertEqual(select([path], "review", AVAILABLE), select(["src/store.zig"], "review", AVAILABLE))
         self.assertNotIn("stack-frames", select(["src/SessionFrontend.zig"], "review", AVAILABLE)["targets"])
 
     def test_logic_root_selects_its_executable_root(self):
