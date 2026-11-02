@@ -1038,7 +1038,7 @@ fn approvalContext(out: *std.Io.Writer, top_hidden: bool, summary: View.ActionSu
     try out.writeAll("?");
     if (summary.description.slice().len != 0) {
         try out.writeAll(" ");
-        var label: TerminalText = .{ .mode = .line };
+        var label: TerminalText = .{ .mode = .label };
         try label.feed(out, summary.description.slice());
         try label.finish(out);
     }

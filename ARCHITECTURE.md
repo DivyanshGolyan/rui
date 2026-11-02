@@ -3196,6 +3196,7 @@ One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its des
 The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
 Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
 Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
+Every screen draws a description as one line of prose: controls, bidi controls and `\` escape as on any terminal line, while `"` shows as written, since no escape contains one; an exact command or field still escapes `"` too.
 
 Lightweight Current, Activity, Conversation and idle-classification reads validate call/Operation/Turn/Action linkage, complete sibling groups and public field metadata against the admission certificate without reopening command or private provider payloads.
 Presentation read work is independent of command byte length, not call count or history size.
