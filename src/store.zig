@@ -14,6 +14,8 @@ const store_tests = @import("store/tests.zig");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 45;
+/// FNV-1a of the SQLite DDL for schema_version; the build fails when they disagree.
+pub const sqlite_schema_digest: u64 = 0x720709f73b39654e;
 
 pub const Store = @import("store/Store.zig");
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
