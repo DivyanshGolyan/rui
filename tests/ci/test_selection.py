@@ -689,6 +689,18 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "execution")
 
+    def test_a_dispatch_selects_from_its_explicit_base(self):
+        # A stable qualification's base decides what it covers; nothing replaces it.
+        workflow = Path('.github/workflows/check.yml').read_text()
+        prefix = dedent(re.search(
+            r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
+            r'          python3 tests/ci/select_tests.py', workflow)[1])
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch'):
+            result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
+                                    cwd=directory, capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout, '1' * 40)
+
 
 class FullCheckPartitionTest(unittest.TestCase):
     @staticmethod

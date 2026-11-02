@@ -127,7 +127,7 @@ Ordinary diagnostic Selected dispatches do not hide a stable qualification.
 Each main qualification explicitly dispatches a completion callback.
 Its bounded CLI wait runs outside the ref-writer lock and supplies no acceptance evidence.
 Failed or timed-out waits skip that callback's writer; incomplete workflows remain ineligible, and the next normal promotion pass rechecks completed evidence.
-[Landing](AGENTS.md#landing) documents bootstrap, lost-completion and diagnosed Auto-land-job recovery.
+[Landing](AGENTS.md#landing) documents lost-completion and diagnosed Auto-land-job recovery.
 No timer or automatic native-test retry is part of this recovery.
 Control-plane calls whose repetition creates no test evidence make up to three attempts: Auto-land's qualification and release dispatches, the completion wake and the release artifact download annotate each retry as a warning, and toolchain and dependency downloads use curl's own retry.
 Before resubmitting a qualification dispatch, Auto-land checks whether the failed submission created the run; a repeated wake or release dispatch is harmless because the writer and release are serialized and release skips a released SHA.

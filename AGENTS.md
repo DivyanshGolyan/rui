@@ -72,7 +72,9 @@ Existing one-way-door approvals still apply.
 - Changes reach `main` only by merging their PR; there is no other landing path.
 - Every PR commit states its actual test commands and results, plus applicable performance A/B numbers.
   TUI changes also include a real-screen tmux capture.
-  Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer when an Amp lane wrote it; inspect Amp's generated trailers and avoid duplicates.
+  Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer; inspect Amp's generated trailers and avoid duplicates.
+  Preserve published source refs rather than rewriting them.
+  Changing a commit message changes its SHA and invalidates its exact-head receipts.
 - Before merging, the PR head must pass the Linux Selected aggregate, including mapped recovery checks.
   Strict paths add no Mac or upgrade gate to main.
   Missing, pending or red Mac checks delay only `stable`.
@@ -94,7 +96,7 @@ Existing one-way-door approvals still apply.
 - Run PRs in parallel only when they touch different files.
   Work that shares a file with an open PR, in this lane or another, is dependent: stack it on that PR and land the stack in order.
   Before splitting work across lanes, check the open PRs for files the new work would touch.
-- Open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
+- For work published as PRs, open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
 - Mac and upgrade qualification run after main advances; daily full runs remain backstops.
   Fix Mac reds forward on main; revert only if the fix is slow.
   Keep the previous stable until a newer main SHA qualifies.
@@ -105,20 +107,20 @@ Existing one-way-door approvals still apply.
   Every status names the stable hold, meaning the open `stable-red` issues and the hours since the last promotion, until it clears; `python3 tests/ci/stable_hold.py status` prints both, grouped by fixture.
   Before opening a fix, search the open `stable-red` issues for the touched fixture and write `Fixes #N` for each one it fixes; the policy job warns on a PR that touches a held fixture without `Fixes #N` or `Refs #N`.
 - After ready, at most one rerun per item.
-  New coherent green items may join the open stack; fixes for red CI retain the failure evidence.
+  Fixes for red CI retain the failure evidence.
 - Install from `stable`, the last exact-SHA Mac-and-upgrade-qualified main commit.
   After each promotion, Auto-land dispatches [Release](.github/workflows/release.yml), which publishes the promoted SHA as version `0.S.N` with prebuilt archives.
 
-After an authorized workflow-file bootstrap, or a diagnosed interruption that left current main's qualification absent, the shared-ref owner runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`.
+After a diagnosed interruption that left current main's qualification absent, the agent that diagnosed it runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`.
 It fills only absent runs; repeated calls preserve existing attempts and do nothing when main already equals stable.
-Keep this direct recovery serialized with shared-ref writes.
-A later Auto-land completion performs the same recovery in its serialized writer job; after a runner failure, rerun that diagnosed Auto-land job, not the native qualification workflows.
+Never run it while an Auto-land promotion job is running.
+A later Auto-land run performs the same recovery in its serialized promotion job; after a runner failure, rerun that diagnosed Auto-land job, not the native qualification workflows.
 
 Each main qualification explicitly dispatches Auto-land with its parent run ID because GITHUB_TOKEN suppresses downstream `workflow_run` events.
 Auto-land validates the parent repository, main branch and qualification workflow, then uses `gh run watch` with a 120-second timeout and five-second kill grace outside the writer lock.
 The parent ID only selects the wait; unchanged completed-workflow, exact-SHA and coverage checks decide promotion.
 Wait failure or timeout skips that callback's writer.
-The next normal landing/promotion pass can pick up completed evidence.
+The next promotion pass can pick up completed evidence.
 There are no timers or automatic native-test retries.
 To recover a lost completion without rerunning tests, use `gh workflow run auto-land.yml --ref main -f completed_run=<main-qualification-run-ID>`.
 

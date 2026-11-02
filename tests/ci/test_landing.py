@@ -236,7 +236,7 @@ class LandingTest(unittest.TestCase):
                     mock.patch.object(auto_land, 'gh', dispatch), \
                     mock.patch.object(auto_land, 'open_stable_reds', lambda: list(reds)), \
                     mock.patch.object(auto_land, 'DISPATCH_RETRY_DELAYS', (0, 0)), \
-                    mock.patch.object(sys, 'argv', ['auto_land.py']), contextlib.redirect_stdout(io.StringIO()):
+                    contextlib.redirect_stdout(io.StringIO()):
                 auto_land.promote_stable()
                 self.assertEqual({(sha, args[2]) for sha, args in dispatches},
                                  {(tip, 'check.yml'), (tip, auto_land.UPGRADE)})

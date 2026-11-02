@@ -348,12 +348,12 @@ class ReportTest(unittest.TestCase):
             self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
     def test_only_failed_jobs_are_read(self):
-        retried = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
+        passing = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
                           'is a flake to fix, not a clean pass.') + BASH)
         jobs = [dict(id=1, name='linux suites (check)', conclusion='success'),
                 dict(id=2, name='linux suites (logic)', conclusion='failure'),
                 dict(id=3, name='plan', conclusion='success')]
-        fake = FakeGitHub(jobs, {1: retried, 2: GATE, 3: logged('planned')})
+        fake = FakeGitHub(jobs, {1: passing, 2: GATE, 3: logged('planned')})
         self.run_main(fake)
         self.assertEqual([call[-1] for call in fake.calls if call[0] == 'api' and call[-1].endswith('/logs')],
                          ['repos/o/r/actions/jobs/2/logs'])
