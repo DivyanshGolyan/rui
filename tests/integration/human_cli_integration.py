@@ -562,18 +562,19 @@ def forget_terminal(master):
     _captures.pop(master, None)
 
 
-def draining(master, observe):
+def draining(master, observe, feed=None):
     """`observe`, after reading what the terminal holds: a fixture waiting on
     the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
-    a screen that stopped being read blocks mid-frame and runs no new work."""
-    capture = terminal_capture(master)
+    a screen that stopped being read blocks mid-frame and runs no new work.
+    `feed` takes the bytes; by default the master's registered capture."""
+    feed = feed or terminal_capture(master).feed
 
     def drained():
         while select.select([master], [], [], 0)[0]:
             chunk = os.read(master, 65536)
             if not chunk:
                 break
-            capture.feed(chunk)
+            feed(chunk)
         return observe()
     return drained
 
@@ -2158,16 +2159,21 @@ def persistent_opening_case():
         records = home / ".config/rui/requests"
         before = set(records.glob("*.json"))
         os.write(master, "during history é\nnext café!\x1b[D\x1b[DX".encode())
-        # The draft typed after Enter is drawn only once Enter was read, so
-        # the capture below needs no terminal reads.
-        # Rows the held page would add must not appear before it is verified.
+        # Rows the held page would add must not appear before it is verified:
+        # not in the frames up to the draft, nor in those drawn while the
+        # Admission lands (read, so the screen never fills).
         staged = ("literal **user**", "Historical item omitted", "saved user 01", "saved user 02")
         composing = read_terminal(master, "› next cafXé!", timeout=5)
-        fixture.wait_for(lambda: len(set(records.glob("*.json")) - before) == 1, "independent history Admission capture")
-        record = (set(records.glob("*.json")) - before).pop()
-        fixture.wait_for(lambda: fixture.completed_observation(store, record.stem), "Admission while history preparation is held")
+        landing = []
+        terminal_capture(master).listener = lambda screen, x, y: landing.append(screen)
+        try:
+            fixture.wait_for(draining(master, lambda: len(set(records.glob("*.json")) - before) == 1), "independent history Admission capture")
+            record = (set(records.glob("*.json")) - before).pop()
+            fixture.wait_for(draining(master, lambda: fixture.completed_observation(store, record.stem)), "Admission while history preparation is held")
+        finally:
+            terminal_capture(master).listener = None
         assert json.loads(record.read_text())["text"]["value"] == "during history é"
-        assert not history_release.is_set() and not any(row in above_line(composing) for row in staged), composing
+        assert not history_release.is_set() and not any(row in above_line(frame) for frame in (composing, *landing) for row in staged), (composing, landing)
         history_release.set()
         failed = read_terminal(master, "! Earlier messages unavailable; scroll up to retry. Draft retained.")
         assert not any(row in above_line(failed) for row in staged), "failed history exposed a staged prefix"
@@ -4061,17 +4067,8 @@ def renderer_cases():
             self.capture.feed(data)
 
         def draining(self, observe):
-            """`observe` after reading what the terminal holds, as the
-            module's `draining` does for a bare master: a case waiting on
-            the Host keeps reading its screen."""
-            def drained():
-                while select.select([self.master], [], [], 0)[0]:
-                    chunk = os.read(self.master, 65536)
-                    if not chunk:
-                        break
-                    self.feed(chunk)
-                return observe()
-            return drained
+            """`observe` after reading this screen, as `draining` does."""
+            return draining(self.master, observe, self.feed)
 
         def wait(self, marker=None, *, predicate=None, after=None, timeout=15):
             deadline = time.monotonic() + timeout
@@ -4152,6 +4149,14 @@ def renderer_cases():
                         assert time.monotonic() < deadline
                         self.feed(os.read(self.master, 65536))
                     if until():
+                        # Spend the tokens of later offers too, with their
+                        # frames (each token follows its frame), so the next
+                        # ready() waits for an offer made after this one.
+                        while select.select([descriptor], [], [], 0)[0]:
+                            assert os.read(descriptor, 1) == b"x"
+                            while select.select([self.master], [], [], 0)[0]:
+                                assert time.monotonic() < deadline
+                                self.feed(os.read(self.master, 65536))
                         return
 
         def finish(self, expected=0):
@@ -4794,7 +4799,7 @@ def renderer_cases():
         proxy = canonical.ReplyProxy(host, "/v1/activity-content", hold_content)
         with terminal(session) as tty:
             os.write(tty.master, b"AAA\n")
-            assert holding[b"AAA"].wait(10), tty.capture.completed
+            fixture.wait_for(tty.draining(holding[b"AAA"].is_set), "the AAA content read was never held", timeout=10)
             frames = tty.every_frame()
             sent = len(proxy.mutations)
             def accepted():

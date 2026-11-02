@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from host_process import TestHTTPServer, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, TestHTTPServer, hold, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -39,32 +39,6 @@ def instructions_workspace(instructions):
     """The decoded Workspace slot, located by the prompt file's own parts."""
     quoted = instructions.split(MODEL_CONTEXT_PARTS[0], 1)[1].split(MODEL_CONTEXT_PARTS[1], 1)[0]
     return json.loads('"' + quoted + '"')
-
-
-def hold(server, release, what):
-    """Wait for a held reply's release. The case releases it by its own
-    deadlines, so the hold keeps no clock of its own (a 10 s one let the
-    reply fail first and Rui retry, on a slow Mac). Closing the endpoint
-    ends it."""
-    while not release.wait(0.1):
-        if server.closing.is_set():
-            raise RuntimeError(f"{what} was never released")
-
-
-class HeldReplies:
-    """An endpoint whose closing ends every held reply."""
-
-    def __init__(self, *args, **kwargs):
-        self.closing = threading.Event()
-        super().__init__(*args, **kwargs)
-
-    def shutdown(self):
-        self.closing.set()
-        super().shutdown()
-
-    def server_close(self):
-        self.closing.set()
-        super().server_close()
 
 
 class FailureEndpoint(HeldReplies, TestHTTPServer):
