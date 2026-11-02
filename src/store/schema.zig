@@ -1,6 +1,6 @@
 //! The Store schema as one value: its tables and indexes, from which each
-//! engine's DDL and the open-time allow-list derive. A new database gets the
-//! DDL; an existing one is checked against the allow-list when it opens.
+//! engine's DDL derives. A new database gets the DDL; an existing one's
+//! stored DDL is compared with it when it opens.
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x375b4aacaf22074a },
+    .{ .schema_version = 46, .digest = 0xfbc864a83e006ac3 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -621,25 +621,25 @@ pub const indexes = [_]Index{
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        // Today's 46 tables and indexes take about 68,000 branches (measured).
         @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
         var text: []const u8 = "";
-        for (tables) |table| text = text ++ createTable(dialect, table) ++ ";\n";
-        for (indexes) |index| text = text ++ createIndex(dialect, index) ++ ";\n";
+        for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
 }
 
-pub const ObjectName = struct { kind: enum { table, index }, name: []const u8 };
+pub const Object = struct { kind: enum { table, index }, name: []const u8, sql: []const u8 };
 
-/// Every table and named index an existing Store may hold.
-pub fn objectNames() []const ObjectName {
+/// Every table and named index, each with the statement that creates it.
+pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
-        var names: []const ObjectName = &.{};
-        for (tables) |table| names = names ++ .{ObjectName{ .kind = .table, .name = table.name }};
-        for (indexes) |index| names = names ++ .{ObjectName{ .kind = .index, .name = index.name }};
-        break :blk names;
+        // Today's 46 tables and indexes take about 68,000 branches (measured).
+        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        var result: []const Object = &.{};
+        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(dialect, table) }};
+        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(dialect, index) }};
+        break :blk result;
     };
 }
 
@@ -658,16 +658,11 @@ pub fn digest() u64 {
 
 const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id});
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
+/// `schema_version` as store_meta's `format` row holds it.
+const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
-/// a wire bump is no schema change. The format and the schema digest are
-/// checked on open before any write; the digest is bound too, since it
-/// covers this text.
-const store_meta_sql = std.fmt.comptimePrint(
-    "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','{d}'),('schema_digest',?3)",
-    .{schema_version},
-);
-/// `digest()` as store_meta holds it.
-pub const digest_text = std.fmt.comptimePrint("{x:0>16}", .{digest()});
+/// a wire bump is no schema change.
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++ format_text ++ "')";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
@@ -771,39 +766,51 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindText(statement, 1, protocol.wire_version);
     try sqlite.bindText(statement, 2, selector);
-    try sqlite.bindText(statement, 3, digest_text);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
 }
 
-/// Counts every object that is not one of the schema's tables, their
-/// automatic indexes, or its named indexes.
-const unexpected_objects_sql = blk: {
-    var table_names: []const u8 = "";
-    var index_names: []const u8 = "";
-    for (objectNames()) |object| switch (object.kind) {
-        .table => table_names = table_names ++ (if (table_names.len == 0) "'" else ",'") ++ object.name ++ "'",
-        .index => index_names = index_names ++ (if (index_names.len == 0) "'" else ",'") ++ object.name ++ "'",
-    };
-    break :blk "SELECT count(*) FROM sqlite_schema WHERE " ++
-        "(type='table' AND name NOT IN (" ++ table_names ++ ")) OR " ++
-        "(type='index' AND ((sql IS NULL AND tbl_name NOT IN (" ++ table_names ++ ")) OR " ++
-        "(sql IS NOT NULL AND name NOT IN (" ++ index_names ++ ")))) OR " ++
-        "type NOT IN ('table','index')";
-};
-
+/// Refuses a Store unless its tables and indexes are exactly the ones
+/// bootstrap creates, each with the same CREATE text. SQLite keeps that text
+/// as run and bootstrap is its only writer, so a dropped CHECK, a changed
+/// column or a missing or extra index or trigger is a WrongStoreSchema. A
+/// network engine keeps no such text: PR 8/9 compare its catalog's tables,
+/// columns and indexes by name and type instead, which cannot see a CHECK.
 pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     if (try sqlite.pragmaInt(database, "PRAGMA user_version") != schema_version) return error.WrongStoreVersion;
     {
-        const statement = try sqlite.prepare(database, unexpected_objects_sql);
+        const expected = comptime objects(.sqlite);
+        const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
         defer _ = c.sqlite3_finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW or c.sqlite3_column_int64(statement, 0) != 0) {
+        var matched: usize = 0;
+        rows: while (true) {
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {},
+                else => return error.StatementFailed,
+            }
+            const kind = try columnText(statement, 0);
+            if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
+                // An automatic index of a key: its table's text covers it.
+                if (!std.mem.eql(u8, kind, "index")) return error.WrongStoreSchema;
+                for (expected) |object| {
+                    if (object.kind == .table and std.mem.eql(u8, object.name, try columnText(statement, 2))) continue :rows;
+                }
+                return error.WrongStoreSchema;
+            }
+            const name = try columnText(statement, 1);
+            for (expected) |object| {
+                if (!std.mem.eql(u8, object.name, name)) continue;
+                if (!std.mem.eql(u8, @tagName(object.kind), kind) or !std.mem.eql(u8, object.sql, try columnText(statement, 3))) return error.WrongStoreSchema;
+                matched += 1;
+                continue :rows;
+            }
             return error.WrongStoreSchema;
         }
+        if (matched != expected.len) return error.WrongStoreSchema;
     }
-    if (!try metaEquals(database, "format", std.fmt.comptimePrint("{d}", .{schema_version}))) return error.WrongStoreVersion;
-    if (!try metaEquals(database, "schema_digest", digest_text)) return error.WrongStoreSchema;
+    if (!try metaEquals(database, "format", format_text)) return error.WrongStoreVersion;
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
@@ -820,6 +827,12 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
     }
+}
+
+/// Column `column` of the current row, which is not NULL, as text.
+fn columnText(statement: *c.sqlite3_stmt, column: c_int) ![]const u8 {
+    const text = c.sqlite3_column_text(statement, column) orelse return error.OutOfMemory;
+    return text[0..@intCast(c.sqlite3_column_bytes(statement, column))];
 }
 
 /// Whether store_meta holds exactly `expected` under `key`.
