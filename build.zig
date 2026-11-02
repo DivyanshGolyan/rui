@@ -349,6 +349,14 @@ pub fn build(b: *std.Build) void {
     );
     bash_walkthrough_step.dependOn(&bash_walkthrough.step);
 
+    const bash_environment_integration = b.addSystemCommand(&.{"python3"});
+    bash_environment_integration.addFileArg(b.path("tests/integration/bash_environment_integration.py"));
+    bash_environment_integration.addFileArg(ci.path(release_safe));
+    b.step(
+        "bash-environment-integration",
+        "Run Bash in the sending terminal's environment across terminals, peers and recovery",
+    ).dependOn(&bash_environment_integration.step);
+
     const bash_owner_integration = b.addSystemCommand(&.{"python3"});
     bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
     bash_owner_integration.addFileArg(ci.path(release_safe));

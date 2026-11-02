@@ -24,6 +24,8 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const slash_commands = @import("slash_commands.zig");
+const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 pub const Command = reads.Command;
@@ -54,6 +56,8 @@ colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
 input: Input = undefined,
+/// The draft revision Esc closed the command list on; any edit reopens it.
+commands_closed: ?u64 = null,
 submission: Submission = undefined,
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
@@ -116,8 +120,9 @@ live: struct {
     messages: reads.Messages = .{},
     // The Messages live output shows since its newest mark.
     echoes: reads.Record = .{},
-    // The lowest position of a Message seen unapplied, where a transcript's
-    // search for them may stop; a stale value only costs reads.
+    // Where a transcript's search for the Messages a seam lists may stop
+    // (see reads.listed): at most the lowest position of one seen or not yet
+    // searched for; a stale value only costs reads.
     lowest: ?u64 = null,
     // The Messages a person or script sent that wait behind the work, as
     // the Host reported them at the cursor; the first line the queued row
@@ -125,7 +130,7 @@ live: struct {
     // it waited (see View.Taking).
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
-    drawn_waiting: u64 = 0,
+    drawn: queued_line.Drawn = .{},
 } = .{},
 // The transcript above live output.
 transcript: struct {
@@ -174,14 +179,22 @@ shown: session_line.Shown = .{},
 /// A short command result shows as a notice up to this size.
 const short_result_bytes = 256;
 const rejection_suffix = " · /discard clears it";
+/// This process's environment cannot change, so the original goes from a
+/// shell with a smaller one.
+const too_large_advice = " Unset or shorten them in another shell, then run rui request recover there.";
 /// The longest built notice: a rejection with its code escaped (four bytes
-/// per byte at most), or a short result with a failure mark on each line.
-const notice_capacity = @max("! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len, short_result_bytes + 2 * "! ".len);
+/// per byte at most), a refused environment, or a short result with a
+/// failure mark on each line.
+const notice_capacity = @max(
+    "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
+    "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
+    short_result_bytes + 2 * "! ".len,
+);
 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .drawn_waiting = self.live.drawn_waiting, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .listing = if (phase == .history) self.transcript.plan.next() else null, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -248,7 +261,7 @@ pub const Outcome = enum { detached, interrupted, returned };
 pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
     self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     self.input.init();
-    self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
+    self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
     defer terminal.pump = null;
     defer self.stop();
@@ -441,7 +454,7 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
     inline for (cases) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.input.init();
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .accepted = .{ .kind = case[0], .key = key.* } };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
         self.submission.close(); // Releasing capture custody cannot erase acceptance.
         var bytes: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
@@ -457,43 +470,44 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 const History = enum { older, latest };
 
-/// Every slash command the draft accepts.
+/// What each slash command does here.
 const Slash = union(enum) {
     exit,
     history: History,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
+    /// /effort alone: this model's efforts, from the Session line's facts.
+    efforts,
     discard,
     recover: []const u8,
     wait,
     login,
+    misused: slash_commands.Name,
     unknown,
 };
 
 fn parse(text: []const u8) Slash {
-    const exact = [_]struct { []const u8, Slash }{
-        .{ "/exit", .exit },
-        .{ "/history", .{ .history = .older } },
-        .{ "/details", .{ .history = .latest } },
-        .{ "/status", .{ .inspection = .status } },
-        .{ "/requests", .{ .inspection = .requests } },
-        .{ "/help", .{ .inspection = .help } },
-        .{ "/inspect-action", .{ .inspection = .command } },
-        .{ "/setup", .{ .inspection = .command } },
-        .{ "/configure", .{ .inspection = .command } },
-        .{ "/copy", .{ .inspection = .{ .copy = .answer } } },
-        .{ "/copy code", .{ .inspection = .{ .copy = .code } } },
-        .{ "/copy file", .{ .inspection = .{ .copy = .file } } },
-        .{ "/discard", .discard },
-        .{ "/wait", .wait },
-        .{ "/login", .login },
+    const command = switch (slash_commands.parse(text)) {
+        .unknown => return .unknown,
+        .misused => |name| return .{ .misused = name },
+        .command => |command| command,
     };
-    for (exact) |entry| if (std.mem.eql(u8, text, entry[0])) return entry[1];
-    for ([_][]const u8{ "/setup ", "/configure ", "/result " }) |prefix| {
-        if (std.mem.startsWith(u8, text, prefix)) return .{ .inspection = .command };
-    }
-    if (std.mem.startsWith(u8, text, "/recover ")) return .{ .recover = text["/recover ".len..] };
-    return .unknown;
+    return switch (command.name) {
+        .exit => .exit,
+        .history => .{ .history = .older },
+        .details => .{ .history = .latest },
+        .status => .{ .inspection = .status },
+        .requests => .{ .inspection = .requests },
+        .help => .{ .inspection = .help },
+        // The table's /copy words are `reads.Copy`'s own names.
+        .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
+        .effort => if (command.argument.len == 0) .efforts else .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename => .{ .inspection = .command },
+        .recover => .{ .recover = command.argument },
+        .discard => .discard,
+        .wait => .wait,
+        .login => .login,
+    };
 }
 
 /// The page asked for last is the one shown: a /status not yet rendered
@@ -523,8 +537,30 @@ fn slashCommand(self: *Self, text: []const u8) void {
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
         .login => self.notice = "Login uses rui auth login codex in your shell.",
+        .efforts => self.notice = self.efforts(),
+        .misused => |name| {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            writer.print("! Usage: {s}", .{slash_commands.usage.get(name)}) catch unreachable;
+            self.notice = writer.buffered();
+        },
         .unknown => self.unknownCommand(text),
     }
+}
+
+/// The efforts the Session's model supports, the effective one marked.
+fn efforts(self: *Self) []const u8 {
+    if (self.line.read == null) return "Efforts show once the Session is read.";
+    const model = self.line.model.slice();
+    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+    var listed = false;
+    for (std.enums.values(model_capability.ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+        const current = self.line.effort == effort;
+        writer.print("{s}{s}{s}{s}", .{ if (listed) " · " else "Efforts: ", if (current) "[" else "", @tagName(effort), if (current) "]" else "" }) catch unreachable;
+        listed = true;
+    };
+    if (!listed) return "Rui lists no efforts for this model.";
+    writer.writeAll(" · /effort LEVEL switches") catch unreachable;
+    return writer.buffered();
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
@@ -540,11 +576,15 @@ fn unknownCommand(self: *Self, text: []const u8) void {
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
         .{ "/\x1b[2J", "! Unknown command · /help" },
-        .{ "/result", "! Unknown command /result · /help" },
+        .{ "/result", "! Usage: /result KEY" },
+        .{ "/rename", "! Usage: /rename NAME" },
+        .{ "/rename lane four", "" },
+        .{ "/effort", "Efforts show once the Session is read." },
+        .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
         .{ "/configure --permission-mode ask", "" },
@@ -554,7 +594,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/copy", "" },
         .{ "/copy code", "" },
         .{ "/copy file", "" },
-        .{ "/copy all", "! Unknown command /copy · /help" },
+        .{ "/copy all", "! Usage: /copy [code|file]" },
     };
     inline for (cases) |case| {
         self.notice = null;
@@ -569,6 +609,24 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     }
 }
 
+test "frontend /effort alone lists the efforts the Session's model supports and marks the one in force" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.input.init();
+    const cases = .{
+        .{ "gpt-5.5", @as(?model_capability.ReasoningEffort, .medium), "Efforts: low · [medium] · high · xhigh · /effort LEVEL switches" },
+        .{ "gpt-6-luna", @as(?model_capability.ReasoningEffort, .max), "Efforts: low · medium · high · xhigh · [max] · /effort LEVEL switches" },
+        .{ "unlisted-model", @as(?model_capability.ReasoningEffort, null), "Rui lists no efforts for this model." },
+    };
+    inline for (cases) |case| {
+        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = case[1] };
+        try self.line.model.set(case[0]);
+        self.notice = null;
+        self.slashCommand("/effort");
+        try std.testing.expectEqualStrings(case[2], self.notice.?);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
 test "frontend consumed canonical reader and admission failures survive external interruption" {
     const Worker = struct {
         fn fail(_: *anyopaque, _: *Task) !void {
@@ -579,7 +637,7 @@ test "frontend consumed canonical reader and admission failures survive external
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.init.io = std.testing.io;
         self.input.init();
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const failure: anyerror = blk: {
             if (admission) {
                 self.submission.intent = .{ .message = self.input.submitText("original B") };
@@ -609,7 +667,7 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
         self.init.io = std.testing.io;
         self.input.init();
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
         self.stop();
@@ -632,7 +690,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
         self.input.init();
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .intent = .{ .message = self.input.submitText("current original B") } };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
         self.stop();
@@ -840,7 +898,15 @@ fn drawFrame(self: *Self) !void {
     if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+}
+
+/// The commands the draft's command word starts, unless Esc closed the
+/// list on this draft.
+fn commandList(self: *const Self) ?slash_commands.Matches {
+    if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
+    const matches = slash_commands.Matches.of(self.input.composition().bytes) orelse return null;
+    return if (matches.count != 0) matches else null;
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1008,6 +1074,12 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .latest, .back, .close => {
             // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
             if (action == .close and self.overviewSays().asking) return;
+            // Esc closes only a list the person saw.
+            if (action == .close and screen.listed and screen.inputRow() == .draft and self.commandList() != null) {
+                self.commands_closed = self.input.revision;
+                self.dirty = true;
+                return;
+            }
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
             self.dropMessageRequest();
@@ -1374,7 +1446,14 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
             try writer.writeAll(rejection_suffix);
             self.notice = writer.buffered();
         },
-        .absent, .failed => {},
+        .failed => |failed| if (failed.err == error.EnvironmentTooLarge) {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            try writer.writeAll("! ");
+            try self.submission.environment.describeTooLarge(&writer);
+            try writer.writeAll(too_large_advice);
+            self.notice = writer.buffered();
+        },
+        .absent => {},
     }
 }
 
@@ -1390,6 +1469,10 @@ fn settleReader(self: *Self) !void {
         self.inspection.command_running = false;
     }
     if (end == .complete and self.reading.phase == .history) {
+        // What a seam's search found holds whatever the view now shows.
+        if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
+            self.live.lowest = @max(known, floor);
+        };
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
         if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
@@ -1433,14 +1516,16 @@ fn settleReader(self: *Self) !void {
     try self.applyReader(end);
 }
 
-/// What the queued row shows, if it shows (see `queued_line.shows`): the
-/// newest waiting Message, by the line read from it, and how many wait.
-fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
+/// What the queued row shows, if it shows (see `queued_line.unshown`): the
+/// newest waiting Message, by the line read from it, and how many wait
+/// that live output has not shown.
+pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    if (!queued_line.shows(queued.count, queued.newest_admission, self.live.drawn_waiting)) return null;
+    const count = queued_line.unshown(queued.count, queued.oldest_position, self.live.drawn);
+    if (count == 0) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
-    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = queued.count } };
+    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -1625,7 +1710,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.reader.start(std.testing.io, &self, Worker.idle);
             try self.reader.join();
             self.input.init();
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
             self.stop();
             const settled = self.settle({});
             for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
@@ -1677,7 +1762,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
         if (result.queued_line) |shown| self.live.queued_line = shown;
-        self.live.drawn_waiting = self.job.drawn_waiting;
+        self.live.drawn = self.job.drawn;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
@@ -1734,7 +1819,7 @@ test "frontend commits spacing only for completed visible reads" {
 
 test "the queued row shows what waits until it is taken, whatever the work is doing" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
-    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn_waiting: u64 = 0, line: ?u64 = 9, shown: bool };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn: queued_line.Drawn = .{}, line: ?u64 = 9, count: u64 = 2, shown: bool };
     var line: queued_line.Line = .{ .len = 0 };
     try line.set("check the cache");
     for ([_]Case{
@@ -1744,9 +1829,12 @@ test "the queued row shows what waits until it is taken, whatever the work is do
         // shows only once taken: the row shows it meanwhile.
         .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
         .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
-        // Nothing waits, or the newest showed while it waited.
+        // Sent while the Session stayed pending: the first showed at its
+        // Admission and still waits, so the row counts only the second.
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 7, .position = 30 }, .count = 1, .shown = true },
+        // Nothing waits, or the one waiting showed while it waited.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .drawn_waiting = 9, .shown = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 9, .position = 34 }, .shown = false },
         // The line held is another Message's, or none was read.
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
@@ -1760,7 +1848,7 @@ test "the queued row shows what waits until it is taken, whatever the work is do
             .command = undefined,
             .terminal = undefined,
             .colour = false,
-            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn_waiting = case.drawn_waiting, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn = case.drawn, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
         const row = self.queuedRow() orelse {
             try std.testing.expect(!case.shown);
@@ -1768,7 +1856,7 @@ test "the queued row shows what waits until it is taken, whatever the work is do
         };
         try std.testing.expect(case.shown);
         try std.testing.expectEqual(@as(u64, 9), row.newest);
-        try std.testing.expectEqual(@as(u64, 2), row.waiting.count);
+        try std.testing.expectEqual(case.count, row.waiting.count);
         try std.testing.expectEqualStrings("check the cache", row.waiting.line);
     }
 }
@@ -1869,7 +1957,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
         self.live.work.first_action = 7;
@@ -1984,7 +2072,7 @@ const HeldFrontend = struct {
         held.self.init.io = std.testing.io;
         held.self.live.work = .{};
         held.self.input.init();
-        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input };
+        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
         held.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1], .pump = .{ .context = held, .step = pumpHeld } };
         return held;
     }
@@ -2606,6 +2694,44 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
+test "Esc closes the command list first only when the latest frame drew it" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Drawn: the first Esc closes only the list, the next one acts as Esc.
+    try stepKeys(held, "/st");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\x07");
+    try std.testing.expect(self.notice == null);
+    try held.settle();
+    try std.testing.expect(!held.screen.listed);
+    try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    // Typed since the latest frame, so never seen: Esc acts at once.
+    try stepKeys(held, "\x15/st\x07");
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
+    // Over a waiting Action: a shown list closes first, then Esc returns to
+    // the choice; an unseen one never holds the choice back.
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+    try stepKeys(held, "x\x7f");
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());
+    try std.testing.expectEqualStrings("/st", self.input.composition().bytes);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+}
+
 test "End on an empty draft goes to the latest view and never leaves the conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -2696,7 +2822,7 @@ test "a details page read before a Message was sent never covers it" {
             self.submission.cancel();
             _ = self.submission.join();
             self.submission.close();
-            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input };
+            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
             self.input.init();
         }
         Worker.release.store(true, .release);

@@ -553,6 +553,87 @@ class HeldPopulationCleanupTests(unittest.TestCase):
                 self.assertEqual(json.loads(output.getvalue())["requests"], 16)
 
 
+class OpenAiBaseUrlCleanupTests(unittest.TestCase):
+    def test_body_failure_stays_primary_and_every_disposal_runs(self):
+        self.run_case(fail_body=True, fail_shutdown=True)
+
+    def test_successful_body_reports_cleanup_failure_after_every_disposal(self):
+        self.run_case(fail_body=False, fail_shutdown=True)
+
+    def test_startup_failure_still_disposes_endpoint(self):
+        self.run_case(fail_body=False, fail_shutdown=False, fail_start=True)
+
+    def test_clean_run_removes_its_root(self):
+        self.run_case(fail_body=False, fail_shutdown=False)
+
+    def run_case(self, *, fail_body, fail_shutdown, fail_start=False):
+        calls = []
+        primary = AssertionError("original OpenAI base URL body failure")
+        secondary = RuntimeError("endpoint shutdown failure")
+        headers = {b":path": b"/custom/v1/responses", b":authority": b"localhost:1",
+                   b"authorization": ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()}
+
+        def shutdown():
+            calls.append("shutdown")
+            if fail_shutdown:
+                raise secondary
+
+        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=[headers],
+                                   serve_forever=lambda: None, shutdown=shutdown,
+                                   server_close=lambda: calls.append("close"))
+        thread = SimpleNamespace(start=lambda: None, is_alive=lambda: False,
+                                 join=lambda *, timeout: calls.append("join"))
+
+        def start(*args, **kwargs):
+            if fail_start:
+                raise primary
+            return SimpleNamespace(pid=1), {}
+
+        def message(*args):
+            if fail_body:
+                raise primary
+
+        with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
+            # Resolved as the fixture resolves it: Darwin's temp root is a link.
+            root = pathlib.Path(parent) / "root"
+            root.mkdir()
+            root = root.resolve()
+            retained = []
+            removed = []
+            for owner, name, value in (
+                    (codex_h2.tempfile, "mkdtemp", lambda **kwargs: str(root)),
+                    (codex_h2.subprocess, "run", lambda *a, **k: None),
+                    (codex_h2.ssl, "SSLContext", lambda *a: SimpleNamespace(
+                        load_cert_chain=lambda *a: None, set_alpn_protocols=lambda *a: None)),
+                    (codex_h2.h2_fixture, "Endpoint", lambda *a, **k: endpoint),
+                    (codex_h2.threading, "Thread", lambda **kwargs: thread),
+                    (codex_h2, "start_ready_process", start),
+                    (codex_h2.fixture, "command", lambda *a: {"answer": {"status": "accepted", "session": "s"}}),
+                    (codex_h2.fixture, "message", message),
+                    (codex_h2.fixture, "wait_for_result_release", lambda *a: (
+                        {"result": {"status": "completed"}}, b"answer-custom-base", None)),
+                    (codex_h2.fixture, "stop_host", lambda host: calls.append("stop_host")),
+                    (codex_h2, "retain_failure_state", lambda label, state: retained.append(state)),
+                    (codex_h2.shutil, "rmtree", lambda path: removed.append(path))):
+                stack.enter_context(patch.object(owner, name, value))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            expected = primary if fail_body or fail_start else secondary if fail_shutdown else None
+            if expected is None:
+                codex_h2.openai_base_url_run()
+            else:
+                with self.assertRaises(type(expected)) as raised:
+                    codex_h2.openai_base_url_run()
+                self.assertIs(raised.exception, expected)
+            disposals = ["shutdown", "close", "join"]
+            self.assertEqual(calls, disposals if fail_start else ["stop_host", *disposals])
+            if expected is None:
+                self.assertEqual((retained, removed), ([], [root]))
+            else:
+                self.assertEqual((retained, removed), ([root], []))
+            if fail_shutdown and expected is primary:
+                self.assertTrue(any("Fixture disposal 2 failed" in note for note in primary.__notes__))
+
+
 class ObservationDeadlineTests(unittest.TestCase):
     def test_caller_populations_and_final_release_keep_original_budget(self):
         class Released(Exception):

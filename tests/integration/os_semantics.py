@@ -65,6 +65,11 @@ def semantics(platform_name):
     # Darwin's /usr/bin/footprint reports a process's physical footprint peak.
     FOOTPRINT = DARWIN
 
+    # A Host's system trust is OpenSSL's on Linux, which SSL_CERT_FILE extends,
+    # and Apple SecTrust on Darwin, which ignores it (src/h2/tests.zig). So
+    # only Linux can trust a self-signed fixture without --provider-ca-file.
+    SSL_CERT_FILE_TRUST = not DARWIN
+
     # GNU time (`/usr/bin/time -f`) measures a caller's peak RSS on Linux.
     GNU_TIME = not DARWIN and pathlib.Path("/usr/bin/time").exists()
     return {name: value for name, value in locals().items() if name != "platform_name"}

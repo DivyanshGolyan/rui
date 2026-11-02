@@ -16,12 +16,32 @@ pub const Line = Bounded(session_line.max_line_bytes);
 /// A first line and the Message it was read from.
 pub const Shown = struct { admission: u64, line: Line };
 
-/// Whether the row shows: some wait and live output has not shown the
-/// newest while it waited (`View.Taking`). Live output shows such a Message
-/// only once it is taken, so the row shows it until then, whatever the
-/// work is doing.
-pub fn shows(count: u64, newest_admission: u64, drawn_waiting: u64) bool {
-    return count != 0 and newest_admission > drawn_waiting;
+/// The newest Message live output showed while it waited
+/// (`View.showsAtAdmission`), by admission ID and Admission position; zero
+/// before any.
+pub const Drawn = struct { admission: u64 = 0, position: u64 = 0 };
+
+/// How many of the `count` Messages waiting from `oldest_position` the row
+/// counts: those live output has not shown. Live output shows a waiting
+/// Message only when it is the oldest, so at most that one has shown, and it
+/// still waits exactly when no position after `drawn` starts the wait. The
+/// row shows while this is not zero, whatever the work is doing.
+pub fn unshown(count: u64, oldest_position: u64, drawn: Drawn) u64 {
+    // Every Message waiting now was admitted at or after the one shown.
+    std.debug.assert(count == 0 or drawn.position <= oldest_position);
+    return count - @intFromBool(count != 0 and oldest_position == drawn.position);
+}
+
+test "the row counts only the waiting Messages live output has not shown" {
+    // Nothing shown while it waited.
+    try std.testing.expectEqual(@as(u64, 2), unshown(2, 30, .{}));
+    // Sent while the Session stayed pending: the first showed at its
+    // Admission, the second waits behind it.
+    try std.testing.expectEqual(@as(u64, 1), unshown(2, 30, .{ .admission = 12, .position = 30 }));
+    try std.testing.expectEqual(@as(u64, 0), unshown(1, 30, .{ .admission = 12, .position = 30 }));
+    // The one shown was taken; those waiting now came after it.
+    try std.testing.expectEqual(@as(u64, 3), unshown(3, 34, .{ .admission = 12, .position = 30 }));
+    try std.testing.expectEqual(@as(u64, 0), unshown(0, 0, .{ .admission = 12, .position = 30 }));
 }
 
 /// What the row shows: the newest Message's first line, and how many wait.

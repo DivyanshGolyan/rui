@@ -18,6 +18,7 @@ const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const model_capability = @import("model_capability.zig");
+const slash_commands = @import("slash_commands.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -110,6 +111,7 @@ fn run(init: std.process.Init) !void {
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
         if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
+        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
         stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
@@ -126,6 +128,18 @@ noinline fn printHelp(io: std.Io, topic: union(enum) { resource: cli_args.Resour
         .command => |definition| try definition.help(&writer.interface),
     }
     return writer.flush();
+}
+
+/// Names the variables that most likely pushed the environment past what a
+/// Message carries. The captured request stays recoverable.
+noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
+    const advice = " Unset or shorten them, then recover the saved request with rui request recover.\n";
+    var buffer: ["rui: ".len + client.Environment.too_large_bytes + advice.len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.writeAll("rui: ") catch unreachable;
+    environment.describeTooLarge(&writer) catch unreachable;
+    writer.writeAll(advice) catch unreachable;
+    stderr.diagnostic("{s}", .{writer.buffered()});
 }
 
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
@@ -538,7 +552,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     // A saved OpenAI key makes the Host serve openai too. One the Host could
     // not read is left to `rui host serve --provider openai` to report.
     const openai: provider_selection.Readiness = if (readiness) |known| known.get(.openai) else providerReadiness(init, .openai) catch .credential_error;
-    if (openai.usable()) {
+    if (openai.usable() and openAiBaseUrlUsable(init)) {
         argv[argc] = "--provider";
         argv[argc + 1] = "openai";
         argc += 2;
@@ -1268,6 +1282,19 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     }
 }
 
+const invalid_base_url = "rui: " ++ providers.openai_base_url_variable ++ " must be an https:// URL with a host and no credentials, query or fragment";
+
+/// Whether an auto-started Host can serve OpenAI at its base URL. A bad one
+/// is OpenAI's alone to fail, so the Host still starts and serves Codex.
+fn openAiBaseUrlUsable(init: std.process.Init) bool {
+    _ = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
+        if (err != error.InvalidBaseUrl) return true; // `host serve` reports it.
+        stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{});
+        return false;
+    };
+    return true;
+}
+
 /// The OpenAI key a served `openai` presents; a Host never starts serving
 /// it without one.
 noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
@@ -1462,10 +1489,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             return error.UnsupportedProvider;
         };
         if (served.serves(named)) return error.DuplicateArgument;
-        served.table.set(named, .{ .endpoint = providers.endpoint(named), .credential = switch (named) {
-            .codex => .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } },
-            .openai => .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } },
-        } });
+        served.table.set(named, switch (named) {
+            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } } },
+            .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
+                if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
+                return err;
+            }, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } } },
+        });
     }
     if (openai_fixture) |endpoint| {
         if (served.serves(.openai)) return error.ConflictingArguments;
@@ -1620,7 +1650,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+        break :blk takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1686,11 +1716,11 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(&step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, &step);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+    const reply = try takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -1771,11 +1801,16 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         else => |mode| @tagName(mode),
     });
     {
-        const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
+        const origin = if (work.settings.compaction_trigger_override != null)
+            "Session override"
+        else if (model_capability.supportsModel(work.settings.model.slice()))
+            "model default"
+        else
+            "assumed for a model Rui does not list";
         var buffer: [160]u8 = undefined;
         const policy = policy: {
-            const tokens = work.settings.compaction_trigger orelse
-                break :policy try std.fmt.bufPrint(&buffer, "no automatic threshold ({s})", .{origin});
+            // Only a Host from before unlisted models had a window sends none.
+            const tokens = work.settings.compaction_trigger orelse break :policy "no automatic threshold";
             const estimate = (work.settings.context_estimate.value orelse null) orelse
                 break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s})", .{ tokens.value, origin });
             break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s}); now {d}", .{ tokens.value, origin, estimate.value });
@@ -1877,75 +1912,175 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 }
 
 fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
-    const text = input_buffer;
-    if (std.mem.eql(u8, text, "/inspect-action")) {
-        const report = try inspectWork(init, requests_context, destination, reference);
-        defer report.file.close(init.io);
-        if (report.current.first_action) |action| {
-            var buffer: [20]u8 = undefined;
-            const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
-            try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
-            try inspectAction(init, requests_context, destination, reference, action, true);
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
-            inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
-                try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
-                try writeShellWord(init.io, destination);
-                var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
-                var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
-                try TerminalText.writeShellSession(&session_writer.interface, reference, false);
-                try session_writer.flush();
-                try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
-                try std.Io.File.stdout().writeStreamingAll(init.io, id);
-                try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-            }
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
-        return;
+    const command = switch (slash_commands.parse(input_buffer)) {
+        .command => |command| command,
+        // The Session frontend queues only commands the table admits.
+        .unknown, .misused => return error.UnknownArgument,
+    };
+    // Decoding rewrites the argument's own bytes in the editor's line.
+    const argument = input_buffer[@intFromPtr(command.argument.ptr) - @intFromPtr(input_buffer.ptr) ..][0..command.argument.len];
+    const live: LiveAddress = .{ .store = destination, .session = reference };
+    switch (command.name) {
+        .@"inspect-action" => {
+            const report = try inspectWork(init, requests_context, destination, reference);
+            defer report.file.close(init.io);
+            if (report.current.first_action) |action| {
+                var buffer: [20]u8 = undefined;
+                const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
+                try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
+                try inspectAction(init, requests_context, destination, reference, action, true);
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
+                inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
+                    try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
+                    try writeShellWord(init.io, destination);
+                    var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
+                    var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
+                    try TerminalText.writeShellSession(&session_writer.interface, reference, false);
+                    try session_writer.flush();
+                    try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
+                    try std.Io.File.stdout().writeStreamingAll(init.io, id);
+                    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+                }
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
+        },
+        .setup => {
+            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
+            var setup_args: [8][]const u8 = undefined;
+            const count = interactiveTokens(argument, &setup_args) catch
+                return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+            var nothing = std.heap.FixedBufferAllocator.init(&.{});
+            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
+                stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+                return;
+            };
+            if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+            setup(init, &parsed, true) catch |err| {
+                if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            };
+        },
+        .result => {
+            const saved = protocol_reply.MessageAddress.init(destination, reference, command.argument) catch |err| {
+                stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
+                return;
+            };
+            showResult(init, requests_context, &saved) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
+            };
+        },
+        .configure, .effort, .rename => {
+            const typed_usage = liveUsage(command.name);
+            var arguments: [20][]const u8 = undefined;
+            const spelled = liveArguments(command.name, argument, &arguments) catch
+                return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+            return liveConfigure(init, requests_context, live, spelled, typed_usage);
+        },
+        // The Session frontend runs every other command itself.
+        else => return error.UnknownArgument,
     }
-    if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
-        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
-        var setup_args: [8][]const u8 = undefined;
-        const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-        var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-            stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-            return;
-        };
-        if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-        setup(init, &parsed, true) catch |err| {
-            if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-        };
-    } else if (std.mem.startsWith(u8, text, "/result ")) {
-        const saved = protocol_reply.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
-            stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
-            return;
-        };
-        showResult(init, requests_context, &saved) catch |err| {
-            if (err == error.CanonicalStoreFailure) return err;
-            stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
-        };
-    } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) {
+}
+
+/// The /configure arguments a command spells. /effort LEVEL is
+/// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
+/// name as one value, decoded as /configure decodes a quoted one.
+fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[20][]const u8) ![]const []const u8 {
+    switch (name) {
+        .configure => return arguments[0..try interactiveTokens(argument, arguments)],
+        .effort => {
+            arguments[0] = "--reasoning-effort";
+            return arguments[0 .. 1 + try interactiveTokens(argument, arguments[1..])];
+        },
+        .rename => {
+            arguments[0..2].* = .{ "--label", try interactiveText(argument) };
+            return arguments[0..2];
+        },
+        else => unreachable,
+    }
+}
+
+/// What a live /configure spelling prints when its arguments do not parse:
+/// the usage of the command typed.
+fn liveUsage(name: slash_commands.Name) []const u8 {
+    return switch (name) {
+        .configure => interactive_configure_usage,
+        inline .effort, .rename => |short| "Rui: Usage: " ++ comptime slash_commands.usage.get(short) ++ "\n",
+        else => unreachable,
+    };
+}
+
+test "/effort and /rename give what their /configure spelling gives" {
+    const cases = [_]struct { short: []const u8, spelled: []const u8, option: []const u8 }{
+        .{ .short = "/rename \"lane four\"", .spelled = "/configure --label \"lane four\"", .option = "label" },
+        .{ .short = "/rename lane four", .spelled = "/configure --label \"lane four\"", .option = "label" },
+        .{ .short = "/rename a\\\"b", .spelled = "/configure --label a\\\"b", .option = "label" },
+        .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
+        .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("short={s}\n", .{case.short});
+        var values: [2][]const u8 = undefined;
+        var lines: [2][64]u8 = undefined;
+        var storage: [2][20][]const u8 = undefined;
+        for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
+            @memcpy(line[0..text.len], text);
+            const command = slash_commands.parse(line[0..text.len]).command;
+            const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
+            var nothing = std.heap.FixedBufferAllocator.init(&.{});
+            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator());
+            value.* = parsed.get(case.option).?;
+        }
+        try std.testing.expectEqualStrings(values[1], values[0]);
+    }
+    // A line that does not decode names the command typed.
+    for ([_][]const u8{ "/effort \"high", "/rename \"lane" }) |text| {
+        var line: [64]u8 = undefined;
+        @memcpy(line[0..text.len], text);
+        const command = slash_commands.parse(line[0..text.len]).command;
         var arguments: [20][]const u8 = undefined;
-        const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.live_configure.parse(arguments[0..argument_count], nothing.allocator()) catch
-            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-        for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
-            return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
-        configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
-            if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
-            stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
-            if (err == error.CanonicalStoreFailure) return err;
-        };
-    } else return error.UnknownArgument; // The Session frontend admits only the commands above.
+        try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
+        try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
+    }
+}
+
+test "the CLI refuses a line the table does not admit, which the frontend never queues" {
+    for ([_][]const u8{ "/nope", "/status now", "/rename", "/copy all" }) |text| {
+        var line: [16]u8 = undefined;
+        @memcpy(line[0..text.len], text);
+        try std.testing.expectError(error.UnknownArgument, sessionCommand(undefined, undefined, "", "", line[0..text.len]));
+    }
+}
+
+/// The live /configure: its checks and its messages, whichever command
+/// spelled the arguments, and the usage of the one typed.
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !void {
+    var nothing = std.heap.FixedBufferAllocator.init(&.{});
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch
+        return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
+        return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
+    configure(init, requests_context, &parsed, live, false) catch |err| {
+        if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
+        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+        if (err == error.CanonicalStoreFailure) return err;
+    };
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
+    return decodeInteractive(input, tokens, true);
+}
+
+/// The whole line as one value: a space outside quotes stays, as inside them.
+fn interactiveText(input: []u8) ![]const u8 {
+    var text: [1][]const u8 = .{""};
+    _ = try decodeInteractive(input, &text, false);
+    return text[0];
+}
+
+fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
     var read: usize = 0;
     var write: usize = 0;
     var count: usize = 0;
@@ -1957,7 +2092,7 @@ fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
         var quoted = false;
         while (read < input.len) {
             const byte = input[read];
-            if (!quoted and byte == ' ') break;
+            if (split and !quoted and byte == ' ') break;
             if (byte == '"') {
                 quoted = !quoted;
                 read += 1;
@@ -2050,7 +2185,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2062,12 +2197,12 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, environment: client.Environment, reported: ?*?client.Step) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
@@ -2076,7 +2211,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer));
     };
     try writeMutationReply(io, reply, .json, replay);
 }
@@ -2095,7 +2230,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2507,7 +2642,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
-    const wire = "{\"version\":\"3\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
+    const wire = "{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
     var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
@@ -2524,8 +2659,8 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"3\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
-    const failed_wire = "{\"version\":\"3\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"4\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const failed_wire = "{\"version\":\"4\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
     const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
@@ -2568,7 +2703,7 @@ test "mutation presentation complete modes preserve escaped original context" {
 }
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
-    const wire = "{\"version\":\"3\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
+    const wire = "{\"version\":\"4\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
     var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
@@ -2743,7 +2878,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }

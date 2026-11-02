@@ -22,7 +22,7 @@ def exchange(socket_path, route, request):
         client.connect(socket_path)
         client.sendall(
             f"POST /v1/{route} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n"
-            f"Content-Length: {len(body)}\r\nConnection: close\r\nX-Rui-Wire-Version: 3\r\n\r\n".encode()
+            f"Content-Length: {len(body)}\r\nConnection: close\r\nX-Rui-Wire-Version: 4\r\n\r\n".encode()
             + body
         )
         chunks = []
@@ -36,7 +36,7 @@ def exchange(socket_path, route, request):
 def assert_empty_full(page):
     """A first listing of a Store with no Sessions: everything, which is nothing."""
     assert {key: value for key, value in page.items() if key != "since"} == {
-        "version": "3", "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
+        "version": "4", "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
     assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", page["since"]), page
 
 
@@ -148,7 +148,7 @@ def main():
             address = fields["socket"]
             latest_invocation = None
             def base(kind):
-                return {"version": "3", "kind": kind, "store": str(store)}
+                return {"version": "4", "kind": kind, "store": str(store)}
 
             def listing(workspace=None, cursor=None):
                 nonlocal latest_invocation
@@ -218,7 +218,7 @@ def main():
             assert current.returncode == 0, current.stderr
             # Every page streams into exactly one JSON value.
             current_list = json.loads(current.stdout)
-            assert current_list["version"] == "3" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
+            assert current_list["version"] == "4" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
             assert [row["reference"] for row in current_list["sessions"]] == [
                 names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later]
             all_workspaces = subprocess.run([binary, "session", "list", "--store", store, "--all"],
@@ -237,7 +237,7 @@ def main():
                 assert result.returncode == 0, result.stderr
                 return json.loads(result.stdout)
             token = all_list["since"]
-            assert since_listing(token) == {"version": "3", "type": "session_list", "sessions": [],
+            assert since_listing(token) == {"version": "4", "type": "session_list", "sessions": [],
                 "delta": "not_modified", "since": token, "next": None}
             assert configure("since-label", later, str(root), label="Watched")[1]["answer"]["status"] == "accepted"
             changed = since_listing(token)

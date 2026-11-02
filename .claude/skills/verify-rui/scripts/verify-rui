@@ -220,6 +220,9 @@ def fixture_main(args):
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long bash": one Bash command that sleeps 8 s
+      * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
+      * text containing "start a child": one Bash call that starts Session "child" with "show environment"
+      * text containing "relay to ID": one Bash call that sends "show environment" to Session ID as a peer
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
@@ -289,8 +292,12 @@ def fixture_main(args):
                 return
             if tool_results:
                 kind = "tool-summary"
-                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
-                    f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}.")[0]
+                summary = f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}."
+                if user_text and ("show environment" in user_text or "start a child" in user_text):
+                    # Say what Bash printed, so the conversation shows it.
+                    printed = [r.get("output", "").partition("stdout tail:\n")[2].rstrip("\n") for r in tool_results]
+                    summary += "\n\nBash printed:\n" + "\n".join(printed)
+                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}", summary)[0]
             elif user_text and "tool demonstration" in user_text:
                 kind = "tool-calls"
                 payload = fixture.sse_tool_calls(f"r{n}", [
@@ -302,6 +309,19 @@ def fixture_main(args):
                 payload = fixture.sse_tool_calls(f"r{n}", [
                     bash(f"c{n}a", "sleep 12; echo built", "Build the docs"),
                     bash(f"c{n}b", "sleep 20; echo tested", "Run the slow tests")])
+            elif user_text and "show environment" in user_text:
+                kind = "show-environment"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    "printf 'CLIENT_MARK=%s\\n' \"${CLIENT_MARK-unset}\"; printf 'HOST_SECRET=%s\\n' \"${HOST_SECRET-unset}\"; command -v brew || echo 'brew: not found'; "
+                    "printf 'PATH=%s\\n' \"$PATH\"", "Show the environment")])
+            elif user_text and (relay := re.search(r"relay to ([0-9a-z]{6})", user_text)):
+                kind = "relay"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    f"printf 'show environment' | rui session send --to {relay.group(1)}", "Relay to a peer")])
+            elif user_text and "start a child" in user_text:
+                kind = "start-child"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
+                    "printf 'show environment' | rui session start --label child --permission-mode bypass", "Start a child Session")])
             elif user_text and "long bash" in user_text:
                 kind = "long-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", "sleep 8; echo slept", "Sleep eight seconds")])
@@ -574,6 +594,47 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
+def launch_host(run):
+    """Start this run's Host from the options saved at `new`; return its ready status."""
+    options = run.meta["host_options"]
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(options["active_capacity"]),
+                 "--provider-endpoint", run.meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
+    host_env = run.env()
+    for assignment in options["host_setenv"]:
+        key, _, value = assignment.partition("=")
+        host_env[key] = value
+    host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
+                            stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
+                            start_new_session=True)
+    run.own("host", host.pid, argv=host_argv)
+    deadline = time.monotonic() + 30
+    while True:
+        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
+        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
+            return status
+        if host.poll() is not None or time.monotonic() > deadline:
+            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
+        time.sleep(0.1)
+
+
+def cmd_restart_host(args):
+    """Stop the run's Host and start a fresh one on the same Store, fixture and options."""
+    run = Run(args.run)
+    old = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
+           and process_start(r["pid"])[0] == r["lstart"]]
+    # A Host that is already stopped is simply started again.
+    stop = run.rui_cmd("host", "stop", "--store", run.store) if old else None
+    if stop and stop.returncode != 0:
+        die(f"host stop failed: {stop.stderr}")
+    deadline = time.monotonic() + 15
+    while any(process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"] for r in old):
+        if time.monotonic() > deadline:
+            die("old Host did not exit after host stop")
+        time.sleep(0.1)
+    status = launch_host(run)
+    print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
+
+
 def cmd_new(args):
     build = load_build(args.sha)
     run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
@@ -613,20 +674,10 @@ def cmd_new(args):
     meta["fixture_url"] = f"http://127.0.0.1:{port}/responses"
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
-    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(args.active_capacity),
-                 "--provider-endpoint", meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
-    host = subprocess.Popen(host_argv, env=run.env(), cwd=run.project, stdin=subprocess.DEVNULL,
-                            stdout=open(run.evidence / "host.stdout.log", "w"), stderr=open(run.evidence / "host.log", "w"),
-                            start_new_session=True)
-    run.own("host", host.pid, argv=host_argv)
-    deadline = time.monotonic() + 30
-    while True:
-        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
-        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
-            break
-        if host.poll() is not None or time.monotonic() > deadline:
-            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
-        time.sleep(0.1)
+    meta["host_options"] = {"active_capacity": args.active_capacity, "host_setenv": args.host_setenv}
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    run = Run(root)
+    status = launch_host(run)
     meta["host_instance"] = json.loads(status.stdout).get("instance")
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     # Sessions have Host-allocated IDs: start each one labelled with its name
@@ -766,10 +817,13 @@ def cmd_term(args):
     columns, rows = (int(v) for v in args.size.split("x"))
     python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
     child_env = run.env(COLORTERM="truecolor")
+    for assignment in args.setenv:
+        key, _, value = assignment.partition("=")
+        child_env[key] = value.replace("{PATH}", child_env["PATH"]) if key == "PATH" else value
     tap = [python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
            "--env", json.dumps(child_env), "--size", args.size]
     record = {"name": name, "surface": args.surface, "session": args.session, "argv": argv, "size": args.size,
-              "tapped": not args.no_tap, "t_ns": now_ns(), "wall": wall()}
+              "tapped": not args.no_tap, "setenv": args.setenv, "t_ns": now_ns(), "wall": wall()}
     if args.surface == "pty":
         if args.no_tap:
             die("--no-tap applies to tmux surfaces")
@@ -1654,8 +1708,14 @@ def main():
     p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")
     p.add_argument("--no-sessions", action="store_true", help="an empty Store: start neither demo nor approve")
     p.add_argument("--active-capacity", type=int, default=2, help="the Host's Active Capacity")
+    p.add_argument("--host-setenv", action="append", default=[], metavar="NAME=VALUE",
+                   help="add one variable to the Host's own environment (e.g. a Host-only secret)")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_new)
+    p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
+    p.add_argument("run")
+    p.set_defaults(func=cmd_restart_host)
+
     p = sub.add_parser("doctor", help="read-only: right binary/SHA, owned Host ready, owned fixture, private tmux")
     p.add_argument("run"); p.add_argument("--expect-sha")
     p.set_defaults(func=cmd_doctor)
@@ -1665,6 +1725,8 @@ def main():
     p.add_argument("--session", default="demo", help="demo | approve | overview (bare rui) | a Session ID")
     p.add_argument("--size", default="80x24")
     p.add_argument("--no-tap", action="store_true", help="tmux only: run Rui directly in the pane (control; no byte log)")
+    p.add_argument("--setenv", action="append", default=[], metavar="NAME=VALUE",
+                   help="add or replace one variable in this terminal's environment; PATH's value may hold {PATH} for the run's PATH")
     p.add_argument("argv", nargs="*", help="override argv (must still pass --store)")
     p.set_defaults(func=cmd_term)
     p = sub.add_parser("send", help="inject input: --text, --hex or --keys; logged with monotonic time")

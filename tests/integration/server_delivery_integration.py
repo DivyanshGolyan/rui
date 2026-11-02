@@ -23,18 +23,18 @@ from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, di
 
 
 def exchange(sock, store, route, kind, **fields):
-    body = json.dumps({"version": "3", "kind": kind, "store": str(store), **fields}).encode()
+    body = json.dumps({"version": "4", "kind": kind, "store": str(store), **fields}).encode()
     return control.raw_request(sock, route, body)
 
 
 def hold_reply(sock, store, route, kind, **fields):
-    body = json.dumps({"version": "3", "kind": kind, "store": str(store), **fields}).encode()
+    body = json.dumps({"version": "4", "kind": kind, "store": str(store), **fields}).encode()
     peer = socket.socket(socket.AF_UNIX)
     try:
         peer.settimeout(5)
         peer.connect(sock)
         peer.sendall(f"POST {route} HTTP/1.1\r\nContent-Type: application/json\r\n"
-                     f"X-Rui-Wire-Version: 3\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+                     f"X-Rui-Wire-Version: 4\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
         header = bytearray()
         while not header.endswith(b"\r\n\r\n"):
             byte = peer.recv(1)  # Do not drain any body or unblock its writer.

@@ -683,6 +683,11 @@ def openai_journey():
                                  capture_output=True, text=True, timeout=15)
         assert refused.returncode != 0, refused
         key_file.chmod(0o600)
+        # A base URL must be https, and names the only place the key goes.
+        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai"],
+                                 capture_output=True, text=True, timeout=15,
+                                 env={**os.environ, "RUI_OPENAI_BASE_URL": "http://api.openai.com/v1"})
+        assert refused.returncode != 0 and "RUI_OPENAI_BASE_URL must be an https:// URL" in refused.stderr, refused
 
         host = start(store, url, "--test-openai-fixture-endpoint", url)
         status = fixture.command("host", "status", "--store", store)
