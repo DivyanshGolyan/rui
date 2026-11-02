@@ -3,6 +3,7 @@ const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const keymap = @import("keymap.zig");
+const slash_commands = @import("slash_commands.zig");
 const Self = @This();
 
 pub const capacity = 65_536;
@@ -55,7 +56,12 @@ revision: u64 = 0,
 
 pub fn init(self: *Self) void {
     self.* = .{};
-    for (&self.editors, &self.banks) |*editor, *bank| editor.* = .{ .buffer = bank };
+    for (&self.editors, 0..) |*editor, bank| editor.* = self.empty(@intCast(bank));
+}
+
+/// A bank's empty draft, whose Tab completes a slash command.
+fn empty(self: *Self, bank: u1) Editor {
+    return .{ .buffer = &self.banks[bank], .completion = slash_commands.complete };
 }
 
 pub fn composition(self: *const Self) View {
@@ -135,7 +141,7 @@ fn seal(self: *Self, literal: bool) Ticket {
 }
 
 pub fn clear(self: *Self) void {
-    self.editors[self.active] = .{ .buffer = &self.banks[self.active] };
+    self.editors[self.active] = self.empty(self.active);
     self.changed();
 }
 
@@ -199,7 +205,7 @@ pub fn land(self: *Self, step: Step, found: ?Found) Landing {
 /// would, so Enter sends it rather than running a command.
 pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
     const editor = &self.editors[self.active];
-    editor.* = .{ .buffer = &self.banks[self.active] };
+    editor.* = self.empty(self.active);
     const start = @intFromBool(found.slash);
     if (found.slash) editor.buffer[0] = '/';
     if (try file.readPositionalAll(io, editor.buffer[start..][0..found.length], 0) != found.length) return error.TruncatedDisplayScratch;
@@ -220,7 +226,7 @@ pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
 /// The loan owner decides when borrowers have retired and release is allowed.
 pub fn release(self: *Self, ticket: Ticket) !void {
     const submitted = try self.checked(ticket);
-    self.editors[submitted.bank] = .{ .buffer = &self.banks[submitted.bank] };
+    self.editors[submitted.bank] = self.empty(submitted.bank);
     self.submitted = null;
 }
 
@@ -402,4 +408,26 @@ test "a recall step lands only on the draft it began from, one at a time" {
     input.dropPresses();
     try std.testing.expectEqual(Landing{ .show = newest }, input.land(step, newest));
     try std.testing.expect(input.nextStep() == null);
+}
+
+test "Tab completes a command word at the draft's end and adds a tab anywhere else" {
+    const cases = [_]struct { typed: []const u8, shown: []const u8 }{
+        .{ .typed = "/st\t", .shown = "/status" },
+        .{ .typed = "/st\x1b[D\x1b[D\t", .shown = "/status" },
+        .{ .typed = "/cop\t", .shown = "/copy " },
+        .{ .typed = "/c\t", .shown = "/co" },
+        .{ .typed = "/c\t\t", .shown = "/co" },
+        .{ .typed = "/zz\t", .shown = "/zz" },
+        .{ .typed = "/copy \t", .shown = "/copy \t" },
+        .{ .typed = "//c\t", .shown = "//c\t" },
+        .{ .typed = "hi\t", .shown = "hi\t" },
+        .{ .typed = "\t", .shown = "\t" },
+    };
+    for (cases) |case| {
+        var input: Self = undefined;
+        input.init();
+        for (case.typed) |byte| _ = input.feed(byte);
+        try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
+        try std.testing.expectEqual(case.shown.len, input.composition().cursor);
+    }
 }

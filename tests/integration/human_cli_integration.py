@@ -418,6 +418,37 @@ def compaction_settings_case(home, store, workspace, socket_path):
             assert "Reasoning effort: " + effort in status, status
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
+        # /effort and /rename are /configure's flags, with its checks and messages.
+        efforts = terminal_step(master, "/effort", "/effort LEVEL switches", composer=True)
+        assert "Efforts: low · [medium] · high · xhigh · max · /effort LEVEL switches" in efforts, efforts
+        configured_frame(master, "/effort high")
+        configured_frame(master, "/rename lane five")
+        status = flat(status_frame(master, session))
+        assert "Reasoning effort: high (Session override)" in status and "Label: lane five" in status, status
+        configured_frame(master, "/effort default")
+        assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
+        configured_frame(master, '/rename "lane four"')
+        assert "Label: lane four" in flat(status_frame(master, session))
+        terminal_step(master, '/effort "high', "Usage: /effort [LEVEL]", composer=True)
+        told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
+        for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
+                                       ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
+            assert told(short, marker) == told(spelled, marker), short
+        terminal_step(master, "/rename", "! Usage: /rename NAME", composer=True)
+        # Typing "/" lists the commands the word starts above the input; Tab
+        # completes, a space or Esc closes the list, and the input stays put.
+        listed = command_frame(master, "/c", lambda frame: "\n› /c" in frame, end="")
+        rows = listed.split("\n")
+        draft = rows.index("› /c")
+        assert rows[draft - 2].startswith("/configure [OPTIONS]") and rows[draft - 1].startswith("/copy [code|file]"), listed
+        assert "change this Session's settings" in rows[draft - 2], listed
+        bare = command_frame(master, "op", lambda frame: "\n› /cop\n" in frame or frame.endswith("\n› /cop"), end="")
+        assert "/configure [OPTIONS]" not in bare and "/copy [code|file]" in bare and bare.split("\n").index("› /cop") == draft, bare
+        completed = command_frame(master, "\t", lambda frame: "› /copy" in frame and "/copy [code|file]" not in frame, end="")
+        assert completed.split("\n").index("› /copy") == draft, completed
+        closed = command_frame(master, "\x15/ef\x1b", lambda frame: "› /ef" in frame and "/effort [LEVEL]" not in frame, end="")
+        assert "Esc returns to the overview" not in closed, closed
+        command_frame(master, "\x15", lambda frame: frame.split("\n")[draft] == "›", end="")
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     records = set((home / ".config/rui/requests").glob("*.json"))
@@ -564,9 +595,9 @@ def shown(text, screen):
     return wrapped(text, screen)
 
 
-def command_frame(master, command, accept, timeout=15):
-    """Send `command`; return the first committed frame after it that
-    `accept`s with the composer ready in that same frame. Page identity,
+def command_frame(master, command, accept, timeout=15, *, end="\n"):
+    """Send `command` and `end`; return the first committed frame after it
+    that `accept`s with the composer ready in that same frame. Page identity,
     readiness and any absence check then describe one shown frame."""
     capture = terminal_capture(master)
     found = []
@@ -577,7 +608,7 @@ def command_frame(master, command, accept, timeout=15):
 
     capture.listener = observe
     try:
-        os.write(master, (command + "\n").encode())
+        os.write(master, (command + end).encode())
         deadline = time.monotonic() + timeout
         while not found:
             remaining = deadline - time.monotonic()
@@ -2165,7 +2196,7 @@ def persistent_opening_case():
 
 
 def persistent_pending_case():
-    """Opening counts the frozen queue beyond its newest Activity page."""
+    """Opening shows the queue beyond its newest Activity page as one row."""
     import canonical_failure_integration as canonical
     state = screen_fixture_root("rui-persistent-pending.")
     home = state / "home"
@@ -2195,7 +2226,7 @@ def persistent_pending_case():
             return response
 
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
-        # Tall enough that the queue summary and every row are one frame.
+        # Tall enough that the queued row and every row are one frame.
         master, slave = open_pty(rows=160)
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
@@ -2203,20 +2234,20 @@ def persistent_pending_case():
         startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
         admit(home, "session", "send", "--to", session, input="late queued beyond snapshot")
         opening_release.set()
-        read_terminal(master, "› ")
+        # Every waiting Message, the one admitted after the opening's page
+        # included, is counted in the row above the input, and none shows
+        # in the conversation until it is taken.
+        frames = read_terminal(master, "25 queued")
         output = current_screen(master)
-        assert "24 messages are queued behind the current work." in output, ("opening counted only its newest page or fresh Current", output)
-        # The newest page shows its queued Messages whole and labelled; older
-        # ones are listed where a transcript reaches them, never previewed.
-        assert "Queued: " not in output and output.count("Queued") == 16, output
-        assert all(f"queued-{i:02d} é" in output for i in range(9, 25)) and not any(f"queued-{i:02d} é" in output for i in range(1, 9)), output
+        assert any(row.startswith("› late queued beyond snapshot") and row.endswith(" 25 queued") for row in output.split("\n")), output
+        assert "queued behind" not in frames and "Queued" not in frames and "queued-" not in output, frames
         assert len(endpoint.requests) == 1, "opening dispatched queued work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
-        print("persistent pending: exact frozen 24 beyond newest 16, newest page labelled, late admission excluded passed", flush=True)
+        print("persistent pending: 24 waiting beyond the newest 16 and one admitted later are one counted row passed", flush=True)
     finally:
         dispose_all(
             opening_release.set,
@@ -5754,9 +5785,9 @@ def renderer_cases():
         print("renderer: a stop that excluded more Messages than a page holds labels each once, before its line", flush=True)
 
         # A queued Message older than the opening's page, which holds only
-        # its turn's commentary and held calls, is applied in the same read
-        # as their results. Its row shows nothing live, and the opening's
-        # mark left the view, so older pages must reach it.
+        # its turn's commentary and held calls, waits above the input and is
+        # applied in the same read as their results; its row then shows live,
+        # once, though the opening's mark left the view.
         session = configure()
         first_release, page_release, page_held = threading.Event(), threading.Event(), threading.Event()
         commentary = {"type": "message", "id": "opening-applied-message", "status": "completed", "role": "assistant", "phase": "commentary",
@@ -5787,7 +5818,7 @@ def renderer_cases():
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
                 opened = tty.wait(predicate=lambda: tty.capture.draft("", 2), timeout=30)
-                assert "HIDDEN-QUEUED-UNIQUE" not in opened and "OPENING-LONG-04499" in opened, opened
+                assert opened.count("HIDDEN-QUEUED-UNIQUE") == 1 and waiting(tty, "HIDDEN-QUEUED-UNIQUE") and "OPENING-LONG-04499" in opened, opened
                 # One read returns the calls' results and the Message's row.
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_once)
                 assert page_held.wait(5), "no scan reached the held page"
@@ -5806,14 +5837,15 @@ def renderer_cases():
             page_release.set()
             first_release.set()
             (workspace / "opening-release").touch()
-        print("renderer: a queued Message the opening left out stays reachable once applied unseen", flush=True)
+        print("renderer: a queued Message older than the opening's page waits above the input, then is its row once", flush=True)
 
-        # An opening whose newest page holds only some queued Messages: the
-        # page shows those, and its seam lists the eight older ones, each
-        # once (more than any fixed preview count).
+        # More Messages wait at the opening than its page holds: they wait
+        # as one counted row, no transcript lists them, and once taken each
+        # is its row, once, in order.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("opening-first", "reason", "message", "OPENING-DONE")[0], held, gate_timeout=60), first_release))
+        endpoint.responses.append(fixture.sse_answer("opening-second", "reason", "message", "OPENING-QUEUED-DONE")[0])
         try:
             requests = len(endpoint.requests)
             run(home, "session", "send", "--to", session, input="ACTIVE-ORIGINAL")
@@ -5822,18 +5854,25 @@ def renderer_cases():
                 run(home, "session", "send", "--to", session, input=f"OPENING-QUEUED-{index:02d}")
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
-                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2))
+                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "OPENING-QUEUED-23", "24 queued"))
+                assert "queued behind" not in opened and "Queued" not in opened, opened
+                assert not any(f"OPENING-QUEUED-{index:02d}" in opened for index in range(23)), opened
                 shown = traverse(tty)
-                assert all(shown.count(f"OPENING-QUEUED-{index:02d}") == 1 for index in range(24)), shown
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count("Queued") == 24 and shown.count("ACTIVE-ORIGINAL") == 1, shown
-                assert "24 messages are queued behind the current work." in opened and "Queued: " not in opened, opened
-                assert opened.count("Queued") == 16 and "OPENING-QUEUED-07" not in opened and "OPENING-QUEUED-08" in opened, opened
+                assert "OPENING-QUEUED-" not in shown and "Queued" not in shown and shown.count("ACTIVE-ORIGINAL") == 1, shown
+                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                first_release.set()
+                tty.wait("OPENING-QUEUED-DONE", timeout=30)
+                assert "queued" not in tty.capture.completed, tty.capture.completed
+                shown = traverse(tty)
+                assert all(shown.count(f"OPENING-QUEUED-{index:02d}") == 1 for index in range(24)) and "Queued" not in shown, shown
+                order = [shown.index(f"OPENING-QUEUED-{index:02d}") for index in range(24)]
+                assert order == sorted(order) and shown.index("OPENING-DONE") < order[0], shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
-        print("renderer: an opening lists the queued Messages its page left out once, at its seam", flush=True)
+        print("renderer: Messages waiting at the opening beyond its page are one counted row, then their rows once, in order", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,

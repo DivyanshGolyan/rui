@@ -712,6 +712,23 @@ def main():
             assert providers == {"codex": "chatgpt_device", "openai": "unserved"}, providers
         finally:
             forced_crash_cleanup(invalid_store)
+        # A saved OpenAI key adds openai to an auto-started Host. A bad base
+        # URL is OpenAI's alone to fail: the Host starts and serves Codex.
+        key_file.write_text("sk-host-launch\n")
+        for base, served, message in (("https://proxy.example/v1", "key_file", None),
+                                      ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
+            openai_store = root / f"openai-{served}"
+            openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file), "RUI_OPENAI_BASE_URL": base}
+            try:
+                started = run_start(openai_store, openai_env)
+                assert started.returncode == 0, started.stderr
+                assert (message is None) == ("RUI_OPENAI_BASE_URL" not in started.stderr), started.stderr
+                if message:
+                    assert message in started.stderr, started.stderr
+                providers = status(openai_store, openai_env)["capabilities"]["providers"]
+                assert providers == {"codex": "chatgpt_device", "openai": served}, providers
+            finally:
+                forced_crash_cleanup(openai_store)
 
         # Concurrent spelling aliases may launch candidates, but exactly one
         # default-capacity owner becomes ready and all callers converge on it.
