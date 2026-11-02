@@ -17,6 +17,7 @@ const api_key = @import("api_key.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
+const status_page = @import("status_page.zig");
 const model_capability = @import("model_capability.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const provider_selection = @import("provider_selection.zig");
@@ -290,6 +291,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     });
     // Preferences are local hints, not Session settings or Host facts.
     try std.Io.File.stdout().writeStreamingAll(init.io, if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
+    // The /status page shows the defaults: after a change, the report
+    // follows only when the next Session cannot start as saved.
+    if (changed and available_store != null and nextSessionReady(&values, &readiness)) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
     try writeSafeText(init.io, prospective_store orelse "unavailable");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
@@ -344,6 +348,13 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .access_failure => "Host: access failure; inspect Store permissions.\n",
     } else "Host: unavailable; selected Store unavailable.\n";
     try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+}
+
+/// The saved defaults select a provider and model whose sign-in is usable.
+fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
+    const selectable = model_capability.capabilities(readiness);
+    const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
+    return selection == .selected and selection.selected.readiness.usable();
 }
 
 const DefaultsFacts = struct {
@@ -1192,7 +1203,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = writeSessionStatus, .captured = captureGate });
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
 }
 
 fn captureGate(io: std.Io) !void {
@@ -1807,74 +1818,100 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
     try writer.flush();
 }
 
-/// Everything /status reports, from one Current capture; `file` holds the
-/// capture's attention rows.
-pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
-    try writeSafeFieldTo(out, "Session: ", session_ref);
-    try writeSafeFieldTo(out, "Label: ", if (work.settings.label) |label| label.slice() else "not set");
-    try writeSafeFieldTo(out, "Store: ", store);
-    try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
-    try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));
-    try writeSafeFieldTo(out, "Model: ", work.settings.model.slice());
-    {
-        var buffer: [80]u8 = undefined;
-        const effort = if (work.settings.reasoning_effort) |value|
-            try std.fmt.bufPrint(&buffer, "{s} ({s})", .{ @tagName(value.value), if (work.settings.reasoning_effort_override != null) "Session override" else "catalog default" })
-        else
-            "unknown (no catalog value; reasoning omitted)";
-        try writeSafeFieldTo(out, "Reasoning effort: ", effort);
-    }
-    // The bypass default is stated where it is inspected, without alert weight.
-    try writeSafeFieldTo(out, "Permission: ", switch (work.settings.permission_mode.value) {
-        .bypass => "bypass (Bash runs without asking)",
-        else => |mode| @tagName(mode),
-    });
-    {
-        const origin = if (work.settings.compaction_trigger_override != null)
-            "Session override"
-        else if (model_capability.supportsModel(work.settings.model.slice()))
-            "model default"
-        else
-            "assumed for a model Rui does not list";
-        var buffer: [160]u8 = undefined;
-        const policy = policy: {
-            // Only a Host from before unlisted models had a window sends none.
-            const tokens = work.settings.compaction_trigger orelse break :policy "no automatic threshold";
-            const estimate = (work.settings.context_estimate.value orelse null) orelse
-                break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s})", .{ tokens.value, origin });
-            break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s}); now {d}", .{ tokens.value, origin, estimate.value });
-        };
-        try writeSafeFieldTo(out, "Automatic compaction: ", policy);
-        if (work.settings.compaction_trigger == null)
-            try out.writeAll("Use /configure --compaction-trigger TOKENS to enable a threshold. Provider context-overflow recovery still applies.\n");
-    }
-    {
-        const origin = if (work.settings.output_reservation_override != null) "Session override" else "model default";
-        var buffer: [160]u8 = undefined;
-        try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{d} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.value, origin }));
-    }
-    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.state.value));
-    if (work.selected_message) |selected|
-        try writeSafeFieldTo(out, "Current message: ", selected.slice());
-    if (work.actionable_count != 0) try renderActionable(io, work, file, out);
-    if (work.first_indeterminate) |action| {
-        var buffer: [20]u8 = undefined;
-        try writeSafeFieldTo(out, "Indeterminate Action: ", try std.fmt.bufPrint(&buffer, "{d}", .{action}));
-        if (work.indeterminate_count > 1) {
-            var line: [160]u8 = undefined;
-            try out.writeAll(try std.fmt.bufPrint(&line, "Rui: {d} indeterminate Actions in this Turn; session inspect --profile current lists all IDs.\n", .{work.indeterminate_count}));
+/// Everything /status reports, from one Current capture whose attention
+/// rows are in `file`, and the saved defaults, null when unreadable.
+pub fn sessionStatus(io: std.Io, home: []const u8, defaults: ?*const preferences.Values, current: *const protocol_reply.Current, file: std.Io.File, facts: *status_page.Facts) anyerror!void {
+    try takeStatusFacts(facts, home, defaults, &current.settings);
+    facts.work = .{ .state = std.meta.activeTag(current.work.state.value), .approvals = current.actionable_count, .actions = undefined, .indeterminate = current.first_indeterminate, .indeterminate_count = current.indeterminate_count };
+    if (current.actionable_count == 0) return;
+    const Sink = struct {
+        work: *status_page.Work,
+        listed: usize = 0,
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
+            if (row != .actionable or self.listed == status_page.max_listed_actions) return;
+            self.work.actions[self.listed] = row.actionable.action.value;
+            self.listed += 1;
         }
-        try out.writeAll("Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
+    };
+    var sink: Sink = .{ .work = &facts.work };
+    try current.traverse(io, file, &sink);
+    if (sink.listed != facts.work.listed().len) return error.InvalidObservation;
+}
+
+comptime {
+    std.debug.assert(status_page.max_session_bytes == protocol.max_session_bytes);
+    std.debug.assert(status_page.max_label_bytes == protocol.max_label_bytes);
+    std.debug.assert(status_page.max_path_bytes >= protocol.max_workspace_bytes and status_page.max_path_bytes >= std.Io.Dir.max_path_bytes);
+    std.debug.assert(status_page.max_model_bytes == protocol.max_model_bytes);
+}
+
+test "/status takes its facts from Current and the saved defaults, leaving recent messages to /requests" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    try file.writePositionalAll(io, report, 0);
+    const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
+    var saved: preferences.Values = .{};
+    saved.notifications = false;
+    const facts = try std.testing.allocator.create(status_page.Facts);
+    defer std.testing.allocator.destroy(facts);
+    var bytes: [4096]u8 = undefined;
+    for ([_]?*const preferences.Values{ &saved, null }) |defaults| {
+        try sessionStatus(io, "/home/d", defaults, &reply.current, file, facts);
+        var out = std.Io.Writer.fixed(&bytes);
+        try status_page.render(facts, null, &out);
+        const page = out.buffered();
+        // Recent messages are /requests'; nothing follows the work's state.
+        try std.testing.expect(std.mem.endsWith(u8, page, " Work\n   Finished\n"));
+        try std.testing.expect(std.mem.startsWith(u8, page, " Status · lane four · k7m2qx\n"));
+        try std.testing.expect(std.mem.indexOf(u8, page, "Folder          ~/w\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, page, "Tools           bash\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, page, "Permissions     ask · Bash asks first\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, page, "Effort          high  \x1b[90mSession override") != null);
+        try std.testing.expect(std.mem.indexOf(u8, page, "Compact at      1,000 tokens · now 310") != null);
+        try std.testing.expect(std.mem.indexOf(u8, page, "Model           gpt-6.1-sol · API key  \x1b[90mfixed") != null);
+        if (defaults != null) {
+            try std.testing.expect(std.mem.indexOf(u8, page, "Notifications   off\n") != null);
+            // No saved Store: the one commands fall back to.
+            try std.testing.expect(std.mem.indexOf(u8, page, "Store           ~/.local/share/rui/store\n") != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, page, "Notifications   unavailable\n") != null);
     }
-    if (work.recent_count != 0) {
-        try out.writeAll("Recent messages (use /result KEY for an answer):\n");
-        for (work.recent[0..work.recent_count]) |recent| {
-            try out.writeAll("  ");
-            try writeSafeTextTo(out, recent.message.slice());
-            try out.writeAll(": ");
-            try writeSafeFieldTo(out, "", recent.outcome.slice());
-        }
-    }
+}
+
+/// The facts the settings rows show, from the Session's settings and the
+/// saved defaults.
+fn takeStatusFacts(facts: *status_page.Facts, home: []const u8, defaults: ?*const preferences.Values, settings: *const protocol_reply.Current.Settings) !void {
+    facts.home = home;
+    try facts.session.set(settings.reference.slice());
+    facts.label.len = 0;
+    if (settings.label) |label| try facts.label.set(label.slice());
+    try facts.workspace.set(settings.workspace.slice());
+    facts.provider = settings.provider.value;
+    try facts.model.set(settings.model.slice());
+    facts.effort = if (settings.reasoning_effort) |effort| effort.value else null;
+    facts.effort_override = settings.reasoning_effort_override != null;
+    facts.permission = switch (settings.permission_mode.value) {
+        .ask => .ask,
+        .bypass => .bypass,
+    };
+    facts.bash = settings.tools.bash;
+    facts.web_search = settings.tools.web_search;
+    facts.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
+    facts.compaction_override = settings.compaction_trigger_override != null;
+    facts.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
+    facts.output_reservation = settings.output_reservation.value;
+    facts.reservation_override = settings.output_reservation_override != null;
+    facts.defaults_read = defaults != null;
+    const saved = defaults orelse return;
+    facts.defaults.provider = if (saved.provider.len != 0) std.meta.stringToEnum(protocol.Provider, saved.provider.slice()) else null;
+    try facts.defaults.model.set(saved.model.slice());
+    facts.defaults.effort = saved.reasoning_effort;
+    facts.defaults.notifications = saved.notifications;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try facts.defaults.store.set(if (saved.store.len != 0) saved.store.slice() else preferences.defaultStore(home, &fallback) catch "");
 }
 
 fn writeSafeFieldTo(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -3057,20 +3094,6 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             return failure.err();
         },
     }
-}
-
-fn renderActionable(io: std.Io, current: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) !void {
-    const Sink = struct {
-        out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
-            if (row == .actionable) {
-                var buffer: [20]u8 = undefined;
-                try writeSafeFieldTo(self.out, "Action requiring attention: ", try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value}));
-            }
-        }
-    };
-    var sink: Sink = .{ .out = out };
-    try current.traverse(io, file, &sink);
 }
 
 fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]const u8, reference: []const u8, target: u64, interactive: bool) !void {

@@ -9,6 +9,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
+const status_page = @import("status_page.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
@@ -439,6 +440,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                     if (event == .status) {
                         front.inspection.status_requested = true;
                         front.job.open_status = true;
+                        front.job.status_facts = status_page.sample();
                         front.job.result = .{ .status = true };
                     }
                 },

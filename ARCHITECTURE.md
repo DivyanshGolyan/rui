@@ -2796,6 +2796,12 @@ Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
 A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/history`, `/details` or inspection request replaces it.
+`/status` is also where settings change: a row for each of this Session's settings, then a row for each default new Sessions start from (model, effort, notifications, Store), then the work's state, its Actions awaiting approval and any indeterminate Action.
+Each row is one line, its value followed by a quiet note on where the value comes from.
+The read takes plain facts (the Session's settings from its Current capture, the saved defaults and the work) and the page is text rendered from those facts and the selected row, so moving `›` renders the page again from the facts it already holds, with no read; the comparison that decides whether a read replaces the page covers the defaults too.
+Up and Down move `›` over the rows that can change from the page (the Session's model and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
+Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice, or with the current value to edit.
+The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
 Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
 A tall Action pages from its top and shows `Action continues · PgDn`, and the input row reads `PgDn reads the rest` in place of the choice, until that condition holds.
@@ -3476,7 +3482,7 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash` only in `ask` mode.
-`/status` states the mode with the exact binding as `Permission: bypass (Bash runs without asking)`, `session list` JSON shows it, and `/help` describes the Session line.
+`/status` states the mode with the exact binding as `bypass · Bash runs without asking`, `session list` JSON shows it, and `/help` describes the Session line.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).

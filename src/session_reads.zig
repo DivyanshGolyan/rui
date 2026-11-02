@@ -22,12 +22,15 @@ const Bounded = @import("bounded.zig").Bounded;
 const unseen = @import("unseen.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Terminal = @import("SessionTerminal.zig");
+const preferences = @import("preferences.zig");
+const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
-/// Writes /status from one Current capture whose attention rows are in the file.
-pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
+/// Takes what /status reports from one Current capture whose attention rows
+/// are in the file, with HOME and the saved defaults (null when unreadable).
+pub const Status = *const fn (std.Io, []const u8, ?*const preferences.Values, *const protocol_reply.Current, std.Io.File, *status_page.Facts) anyerror!void;
 pub const Inspection = union(enum) { status, requests, help, command, copy: Copy };
 
 /// What a /copy sends: the last answer or its last code block to the
@@ -202,6 +205,8 @@ pub const Newer = struct {
 
 pub const Job = struct {
     init: std.process.Init = undefined,
+    /// The process's HOME, empty without one.
+    home: []const u8 = "",
     store: []const u8 = "",
     session: []const u8 = "",
     files: Files = undefined,
@@ -243,6 +248,9 @@ pub const Job = struct {
     open_status: bool = false,
     watch_status: bool = false,
     status_shown: u64 = 0,
+    /// What /status reports, when `result.status` says this read took it.
+    /// Left unwritten by each launch.
+    status_facts: status_page.Facts = undefined,
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
@@ -443,16 +451,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
         // Before anything else reuses scratch, which holds this capture's rows.
         if (job.open_status or job.watch_status) {
-            job.result.status_digest = try statusDigest(job, task.io, &current);
-            if (job.open_status or job.result.status_digest != job.status_shown) {
-                try job.files.status.setLength(task.io, 0);
-                try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
-                var buffer: [4096]u8 = undefined;
-                var output = job.files.status.writerStreaming(task.io, &buffer);
-                try writeStatus(job, task.io, &current, &output.interface);
-                try output.flush();
-                job.result.status = true;
-            }
+            // New Sessions' rows show the saved defaults, read once per page.
+            const saved: ?preferences.Values = if (job.home.len != 0) preferences.load(job.home) catch null else null;
+            const defaults: ?*const preferences.Values = if (saved) |*values| values else null;
+            try job.status(task.io, job.home, defaults, &current, job.files.scratch, &job.status_facts);
+            job.result.status_digest = try statusDigest(&job.status_facts, job.inspection_submission);
+            job.result.status = job.open_status or job.result.status_digest != job.status_shown;
         }
     }
     if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
@@ -524,23 +528,24 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// The /status page for the Current capture whose rows are in scratch.
-fn writeStatus(job: *const Job, io: std.Io, current: *const protocol_reply.Current, out: *std.Io.Writer) !void {
-    try job.status(io, job.store, job.session, current, job.files.scratch, out);
-    try writeSubmission(job, out);
+/// The /status page: its facts with `›` on `selected`, then the submission
+/// the UI shows with it.
+pub fn writeStatus(facts: *const status_page.Facts, selected: ?status_page.Setting, submission: ?Submission.View, out: *std.Io.Writer) !void {
+    try status_page.render(facts, selected, out);
+    try writeSubmission(submission, out);
 }
 
-fn statusDigest(job: *const Job, io: std.Io, current: *const protocol_reply.Current) !u64 {
+/// Whatever the selection, the page changes exactly when this does.
+fn statusDigest(facts: *const status_page.Facts, submission: ?Submission.View) !u64 {
     var buffer: [256]u8 = undefined;
     var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
-    try writeStatus(job, io, current, &hashing.writer);
+    try writeStatus(facts, null, submission, &hashing.writer);
     try hashing.writer.flush();
     return hashing.hasher.final();
 }
 
-/// Snapshot before launch: this read cannot race Admission settlement.
-fn writeSubmission(job: *const Job, out: *std.Io.Writer) !void {
-    const submission = job.inspection_submission orelse return;
+fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
+    const submission = view orelse return;
     try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
 }
@@ -1667,11 +1672,11 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
-        try writeSubmission(job, &output.interface);
+        try writeSubmission(job.inspection_submission, &output.interface);
     }
     try output.flush();
 }

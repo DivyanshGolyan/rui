@@ -115,7 +115,7 @@ def retained(state, binary, label):
                     prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
                 assert "01234567-89ab-4cde-8012-" not in listing
                 cli.terminal_step(master, "/status",
-                    prompt if label == "baseline" else "Session: ", composer=label != "baseline")
+                    prompt if label == "baseline" else " Status · ", composer=label != "baseline")
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0
