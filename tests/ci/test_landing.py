@@ -271,7 +271,7 @@ class LandingTest(unittest.TestCase):
                 self.assertEqual(refs(), (tip, base))
                 auto_land.promote_stable()
                 self.assertEqual({(sha, args[2]) for sha, args in dispatches},
-                                 {(tip, 'check.yml'), (tip, auto_land.UPGRADE)})
+                                 {(tip, 'conflict-alert.yml'), (tip, 'check.yml'), (tip, auto_land.UPGRADE)})
                 self.assertTrue(all('--ref' in args and 'main' in args for _, args in dispatches))
                 # A landed tip is skipped, not pushed again.
                 auto_land.main()
@@ -526,7 +526,8 @@ class LandingTest(unittest.TestCase):
 
             def gh(*args):
                 if args[0] == 'workflow':
-                    releases.append(args)
+                    if args[2] != 'conflict-alert.yml':  # Every landing tells open PRs main moved.
+                        releases.append(args)
                     return ''
                 if args[:2] == ('issue', 'list'):
                     return json.dumps([dict(number=number, title='CI red: x')
