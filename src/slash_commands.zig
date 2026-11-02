@@ -384,18 +384,13 @@ pub const List = struct {
         return self.entries[self.row(highlight)].word[self.typed.len..];
     }
 
-    /// What Enter does with the entry at `index` in `draft`: the command it
-    /// completes, written into `buffer`, to run; or only the rest of its
-    /// word, to add, when another word must follow or the line would not fit.
-    pub fn enter(self: *const List, draft: []const u8, highlight: usize, buffer: []u8) union(enum) { run: []const u8, add: []const u8 } {
+    /// What Enter does with the highlighted entry: adds the rest of its
+    /// word to the draft, and then, when `runs`, runs the line that makes,
+    /// without the space `rest` ends with when another word may follow.
+    pub fn enter(self: *const List, highlight: usize) struct { rest: []const u8, runs: bool } {
         const entry = self.entries[self.row(highlight)];
-        const rest = self.completion(highlight);
-        const line = std.mem.trimEnd(u8, entry.word, " ");
-        const length = draft.len + line.len - self.typed.len;
-        if (!entry.runs or length > buffer.len) return .{ .add = rest };
-        @memcpy(buffer[0..draft.len], draft);
-        @memcpy(buffer[draft.len..length], line[self.typed.len..]);
-        return .{ .run = buffer[0..length] };
+        if (!entry.runs) return .{ .rest = self.completion(highlight), .runs = false };
+        return .{ .rest = std.mem.trimEnd(u8, entry.word, " ")[self.typed.len..], .runs = true };
     }
 
     /// The first of `rows` rows that keep the highlighted entry in view.

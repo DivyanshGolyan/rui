@@ -231,13 +231,13 @@ def main():
             started = time.monotonic()
             stop_deadline = started + 5
             stop_requests = [peers.expect("host_info"), peers.expect("host_stop")]
-            stopped = subprocess.run([control.RUI, "host", "stop", "--store", store],
+            stopped = subprocess.run([control.RUI, "host", "pause", "--store", store],
                                      capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0, stopped
             identity = json.loads(discovery_body)["instance"]
             reported = json.loads(stopped.stdout)
             assert {name: reported[name] for name in ("type", "status", "instance", "retirement")} == {
-                "type": "host_stop", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
+                "type": "host_pause", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
             }, stopped
             assert stopped.stderr.endswith(f" --instance {identity}\n"), stopped
             for request in stop_requests:

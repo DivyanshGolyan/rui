@@ -1547,16 +1547,15 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         } else try self.beginMessage(.{ .message = ticket }),
         // Enter in a shown list takes its highlighted entry: it runs the
         // command that entry completes, or adds the word another follows.
-        .command => if (self.commandList()) |list| {
-            var line: [512]u8 = undefined;
-            switch (list.enter(self.input.composition().bytes, self.listRow(), &line)) {
-                .run => |text| {
-                    self.slashCommand(text);
+        // Only a list the latest frame drew: a screen too short for one
+        // shows none, and Enter there runs the line as typed.
+        .command => if (if (screen.listed) self.commandList() else null) |list| {
+            const taken = list.enter(self.listRow());
+            switch (self.input.append(taken.rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => if (taken.runs) {
+                    self.slashCommand(self.input.composition().bytes);
                     self.input.clear();
-                },
-                .add => |rest| switch (self.input.append(rest)) {
-                    .refused => |why| self.notice = refusedNotice(why),
-                    else => {},
                 },
             }
         } else {
@@ -2879,6 +2878,23 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     // Ctrl-G stands for Esc and Alt-Esc.
     try sendKeys(self, "\x07");
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
+}
+
+test "Enter takes a row only from a list the latest frame drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Typed since the latest frame, so never seen: Enter runs it as typed.
+    try stepKeys(held, "/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Drawn: Enter takes the highlighted /help.
+    try stepKeys(held, "/he");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
